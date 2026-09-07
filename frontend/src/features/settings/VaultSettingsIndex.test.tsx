@@ -36,6 +36,9 @@ const json = (body: unknown) =>
   });
 
 function baseVault(source: unknown, overrides: Record<string, unknown> = {}) {
+  // Mirrors `collection_capabilities` in `src/vault_runtime.rs`: both flags
+  // come from the Vault's Git mode, not from its current status.
+  const mode = (source as { mode?: string } | undefined)?.mode;
   return {
     vault_id: VAULT_ID,
     name: "Field notes",
@@ -56,6 +59,8 @@ function baseVault(source: unknown, overrides: Record<string, unknown> = {}) {
       pull: false,
       push: false,
       retry: false,
+      commit: mode === "local_history" || mode === "two_way",
+      sync: mode === "pull_only" || mode === "two_way",
     },
     ...overrides,
   };
@@ -772,6 +777,41 @@ describe("VaultSettingsDetail — sync console", () => {
     await screen.findByRole("heading", { name: "Field notes" });
     expect(screen.getByText("Healthy")).toBeVisible();
     expect(screen.getByRole("button", { name: "Sync now" })).toBeVisible();
+  });
+
+  it("offers Commit now, and no talk of a remote, for a Local history Vault", async () => {
+    // The console used to render for any Git-backed Vault as though every one
+    // of them synced, so a Vault with no remote was told its "Git sync is
+    // healthy" and offered a Sync now the backend could only refuse (#267).
+    mockDetail(
+      baseVault(
+        {
+          type: "existing_git",
+          repository_path: "/vaults/field-notes",
+          mode: "local_history",
+          poll_interval_secs: 3600,
+        },
+        { git: "ready" },
+      ),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(screen.getByRole("button", { name: "Commit now" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Sync now" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("This Vault's Git history is up to date."),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("This Vault's Git sync is healthy."),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the matching sentence, file list and Try again button for a failing Vault", async () => {

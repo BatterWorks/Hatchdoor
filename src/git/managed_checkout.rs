@@ -161,6 +161,39 @@ pub fn acquire_or_reuse(
     }
 }
 
+/// Resolve the managed checkout this Vault already has, without ever creating
+/// one. `Ok(None)` means there is nothing on disk yet, which for a commit turn
+/// is not a failure: a Vault whose first clone has not landed has no Vault
+/// subtree to have changed.
+///
+/// This is [`acquire_or_reuse`] with the acquisition half removed, and that
+/// removal is the point. Cloning talks to the remote; a commit turn must not
+/// (issue #267). Everything it does keep, the ownership check, the receipt
+/// comparison and `validate_checkout`, is local filesystem work.
+pub fn reuse_existing_checkout(
+    lease: &ManagedCheckoutLease,
+    request: &ManagedCheckoutRequest,
+) -> Result<Option<ManagedCheckout>, ManagedCheckoutError> {
+    if !is_safe_managed_repository_url(&request.repository_url) {
+        return Err(ManagedCheckoutError::UnsafeRepositoryUrl);
+    }
+    let expected_vault_directory =
+        prepare_vault_directory(&request.state_directory, request.vault_id)?;
+    if expected_vault_directory != lease.vault_directory {
+        return Err(ManagedCheckoutError::OwnershipUnavailable);
+    }
+
+    let destination = lease.vault_directory.join("repository");
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(ManagedCheckoutError::DestinationInvalid)
+        }
+        Ok(_) => reuse_checkout(&destination, &lease.vault_directory, request).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(ManagedCheckoutError::DestinationInvalid),
+    }
+}
+
 fn acquire_new_checkout(
     destination: &Path,
     vault_directory: &Path,

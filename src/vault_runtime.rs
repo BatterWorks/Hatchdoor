@@ -75,6 +75,17 @@ pub struct VaultCapabilities {
     pub pull: bool,
     pub push: bool,
     pub retry: bool,
+    /// Whether this Vault makes local Git commits of its own: Local history,
+    /// or Two-way, whose commit is the half of its sync that needs no remote
+    /// (#267). Derived from the definition alone, deliberately unlike `pull`
+    /// and `push`: a console that labels its action from this must keep
+    /// labelling it the same way while the Vault is failing, which is exactly
+    /// when the operator reads it.
+    pub commit: bool,
+    /// Whether this Vault has a remote to synchronise with. What separates a
+    /// console offering **Sync now** from one that can only offer **Commit
+    /// now**, and definition-derived for the same reason as `commit`.
+    pub sync: bool,
 }
 
 impl VaultCapabilities {
@@ -90,6 +101,8 @@ impl VaultCapabilities {
             pull: false,
             push: false,
             retry: false,
+            commit: false,
+            sync: false,
         }
     }
 
@@ -113,6 +126,8 @@ impl VaultCapabilities {
             pull: false,
             push: false,
             retry: false,
+            commit: false,
+            sync: false,
             ..self
         }
     }
@@ -1458,10 +1473,12 @@ impl VaultCollectionRuntime {
             //
             // A Git-capable source the scheduler does *not* track — an
             // `ExistingGit` Vault in `LocalHistory` mode, which has no remote
-            // to poll — still needs its activation turn from here, because
-            // nothing else will ever request one for it.
+            // to poll, needs its activation turn from here: nothing else
+            // publishes a first Git status for it. A commit turn, because a
+            // commit is the whole of what such a Vault's Git does; the
+            // watcher and a manual control ask for the same kind (#267).
             if snapshot.git == VaultGitStatus::Pending && scheduled.is_none() {
-                coordinator.request(*vault_id, VaultWorkKind::Git);
+                coordinator.request(*vault_id, VaultWorkKind::Commit);
             }
         }
     }
@@ -1833,6 +1850,7 @@ fn collection_capabilities(
         | RegistryVaultSource::ManagedGit { mode, .. } => Some(*mode),
     };
     let pull_only = git_mode == Some(VaultGitMode::PullOnly);
+    let source = definition.source();
     VaultCapabilities {
         browse,
         search: matches!(
@@ -1855,6 +1873,8 @@ fn collection_capabilities(
         .into_iter()
         .flatten()
         .any(|error| error.retryable),
+        commit: crate::git::source_commits(source),
+        sync: crate::git::source_syncs_remote(source),
     }
 }
 

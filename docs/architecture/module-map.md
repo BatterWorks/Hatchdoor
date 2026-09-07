@@ -276,8 +276,13 @@ specific field, route, startup phase, or integration being changed. Adding an
 FIFO. `VaultWorkKind`, `VaultWorkRequest`, `ScheduleResult`, `VaultWorkOutcome`,
 and `VaultWorkError` expose deterministic one-operation turns, request
 coalescing, lifecycle rejection, and Vault-qualified returned outcomes. Index
-work includes local embedding work; Git and repair remain distinct operation
-kinds. A stopped worker returns `None` rather than waiting for discarded work.
+work includes local embedding work; Git, commit, and repair remain distinct
+operation kinds. `VaultWorkKind::Commit` is separate from `Git` rather than a
+flavour of it (#267) precisely so the two coalesce independently: a purely
+local commit costs nothing and can run on every change, while talking to a
+remote costs a round trip and stays on the Vault's schedule, and folding them
+together would let a due sync swallow a pending commit or the reverse.
+A stopped worker returns `None` rather than waiting for discarded work.
 `VaultWorkCoordinator::request_if_idle` is `request` for an automatic,
 unattended producer: it admits a turn only when that kind is neither active
 nor already pending for the Vault, and never adds the one guaranteed rerun
@@ -391,10 +396,11 @@ small public surface — no trait, no framework, no second execution lane.
     apply to an already-existing, operator-owned checkout — but under the same
     `acquire_mutation` hold as the managed-Git path, so a foreground Markdown
     write can never race either kind of turn's working-tree phases.
-  - `ExistingGit` in `LocalHistory`: runs `git::run_local_history_git_turn`,
-    which commits already-settled Vault-subtree drift and never checks out,
-    resets, or merges, so it deliberately takes neither the lease nor the
-    mutation lock.
+  - `ExistingGit` in `LocalHistory`: delegates to `plan_commit_turn`, because
+    for a Vault with no remote the Git turn always was a commit and nothing
+    else. Since #267 nothing production requests `VaultWorkKind::Git` for such
+    a Vault, because activation, the watcher and manual control all ask for
+    `Commit`, so this arm is a defensive alias rather than a live path.
   - `Local`: no Git turn at all; returns without publishing anything.
 
   Every branch that can commit is handed the Vault's `write_ledger()` so the
@@ -406,6 +412,31 @@ small public surface — no trait, no framework, no second execution lane.
   working-tree-mutating phases; splitting `synchronize_managed_checkout` into
   independently lockable phases to match that finer discipline was judged a
   materially larger change than issue #96's reopening warranted.
+- `dispatch_commit_turn` executes a `VaultWorkKind::Commit` turn: the local
+  half of Git, on its own (#267). `plan_commit_turn` resolves the Vault's
+  source and mode to `git::run_local_history_git_turn` (Local history, no
+  mutation lock), `git::run_existing_git_commit_turn` (`ExistingGit` Two-way,
+  mutation lock held because `prepare_two_way_worktree` stages from the whole
+  checkout's status), or `git::run_managed_git_commit_turn` (`ManagedGit`
+  Two-way, lease *and* mutation lock). Pull-only and `Local` plan nothing and
+  return `Ok(())`: the first refuses writes and must leave its operator's own
+  drift alone, the second has no Git. The turn itself runs through
+  `run_planned_turn`, the same lease/mutation-lock/`spawn_blocking` shell a
+  Git turn uses, extracted so neither kind has its own copy.
+- `finish_commit_turn` publishes a commit turn's outcome, and is deliberately
+  not `finish_git_turn` on three counts. It does not feed
+  `ManagedGitScheduler`, because a commit is not a check of the remote and
+  must not move the schedule that governs one. It does not request an Index
+  turn, because the watcher change that asked for this commit already
+  requested one, which is also what keeps a Vault whose Git is broken
+  indexing normally. And a failure arms that Vault's `git::CommitCooldown`,
+  so a standing failure costs one turn per cooldown window rather than one per
+  save; a success clears it. Status publication is otherwise identical to a
+  sync turn's: `Ready`, or `Unavailable` with the structured error and its
+  affected paths. A commit that succeeds on a Vault whose *remote* sync is
+  failing does clear that failure's status until the next scheduled sync
+  republishes it. The alternative, a commit that can never clear a status it
+  can set, was judged the worse lie.
 - `publish_managed_git_turn_outcome` is the single publication path every Git
   turn exit reaches: Git status always, plus authoritative local-content
   availability on success (`activation_snapshot` only stats `vault_path` once,
@@ -1227,7 +1258,15 @@ snapshot so the reported `collection_revision` and the returned Vault's status
 can never disagree — plus `list` (with its authenticated and demo
 projections), `create`, `edit`, `set_enabled`, `disconnect`, the manual
 `sync`/`retry`/`refresh` controls, and the confirmed `start_with_no_vaults`
-recovery. `VaultSummary` carries two optional RFC 3339 UTC timestamps
+recovery. Since #267 `sync`/`retry` choose the operation from what the Vault
+actually has: a remote sync through `ManagedGitScheduler` for a Vault with a
+remote, and a `VaultWorkKind::Commit` request (plus a clear of that Vault's
+`git::CommitCooldown`, because an operator asking explicitly is exactly the
+case suppression must not swallow) for one that keeps history but has no
+remote. `capability_unavailable` narrowed with it: it now names only a Vault
+with no Git at all, not every Vault with no remote.
+
+`VaultSummary` carries two optional RFC 3339 UTC timestamps
 alongside the status fields — `last_checked_at` and `next_attempt_at`, read
 from `git::ManagedGitScheduler::polling_clock` — so a caller can tell a Vault
 that polled and found nothing from one that is not polling at all, which the
@@ -1300,8 +1339,9 @@ from the same structures the core returns.
 - Demo mode lists only enabled Vaults and withholds `source`, exclusion
   patterns, archive folder, commit identity, and runtime error details (#109),
   and reports per-Vault `capabilities` as what an unauthenticated visitor may
-  do rather than as derived: `mutate`, `pull`, `push`, and `retry` are false,
-  because the demo guard refuses every route behind them (#243). `browse` and
+  do rather than as derived: `mutate`, `pull`, `push`, `retry`, `commit`, and
+  `sync` are false, because the demo guard refuses every route behind them
+  (#243, extended by #267's two new capability flags). `browse` and
   `search` stay derived, and the four status fields, `local_content` included,
   keep describing the Vault.
 - An instance-side failure is logged with its detail and reported with a
@@ -1566,6 +1606,7 @@ superseding ADR-05.
 **Owned paths:**
 
 - `src/git/mod.rs`
+- `src/git/commit_cooldown.rs`
 - `src/git/config.rs`
 - `src/git/managed_checkout.rs`
 - `src/git/managed_sync.rs`
@@ -1625,6 +1666,10 @@ Reuse accepts only a receipt-backed matching checkout; unknown, interrupted,
 damaged, mismatched, credential-bearing, or out-of-containment destinations
 remain untouched and are rejected. This boundary neither fetches nor resets,
 checks out, polls, pushes, or attempts automatic reacquisition/recovery.
+`reuse_existing_checkout` is `acquire_or_reuse` with the acquisition half
+removed and `Ok(None)` in its place (#267): a commit turn must open no network
+connection, and cloning is one, so it reuses the checkout a Vault already has
+and reports "nothing here yet" rather than creating one.
 
 `ManagedSyncConfig`, `ManagedSyncMode`, `ManagedSyncOutcome`,
 `ManagedSyncError`, and `synchronize_managed_checkout` form the next shared-core
@@ -1642,7 +1687,16 @@ and never pushes after conflict. It uses safe checkout transitions and rejects
 outside-Vault dirt rather than overwriting it; the narrowly scoped conflict
 abort is the only hard reset. A non-fast-forward push retries only through one
 bounded fetch-integrate-push graph replay before returning a redacted push-race
-error. The uniquely selected managed remote and its push URL must remain the
+error. `commit_managed_checkout` is the Two-way commit without the graph
+(#267): the same `prepare_two_way_worktree` step, and then it stops, with no
+fetch, merge or push. It validates through `open_commit_repository`, which
+proves the repository shape and Vault containment and nothing else;
+`open_validated_repository` is that plus the checked-out branch and the
+uniquely selected remote, which only an operation that talks to that remote
+needs. Pull-only is refused outright, because such a Vault refuses writes and
+must leave a folder its operator dirtied alone.
+
+The uniquely selected managed remote and its push URL must remain the
 configured credential-free HTTPS repository identity; unrelated remotes in an
 operator-owned `ExistingGit` checkout are outside this boundary and untouched.
 Public HTTPS makes no credential callback; supplied credentials are callback
@@ -1771,9 +1825,49 @@ in and never contacting a remote. It classifies every `GitError` into a
 redacted `VaultWorkError`, mirroring the legacy single-Vault task's transient
 split (`Remote`/`Other` retry; validation, conflict, and dirty-tree do not).
 Unlike managed-Git Vaults, an `ExistingGit` Local-history Vault is never
-registered with `ManagedGitScheduler`: it receives only the one `Pending`-
-triggered Git turn `reconcile_and_reconstruct` already requests at activation,
-with no ongoing re-commit-on-later-drift schedule.
+registered with `ManagedGitScheduler`. Before #267 that left it with exactly
+one turn per process, the `Pending`-triggered one at activation, so every
+note written afterwards sat uncommitted until a restart. It now receives a
+`VaultWorkKind::Commit` turn from the watcher on every change (and that
+activation turn is a `Commit` too), which is the whole of its Git behaviour;
+it still has no remote and still never polls one.
+
+`run_managed_git_commit_turn` and `run_existing_git_commit_turn` are the
+commit-only counterparts of the two remote-sync turns above, and what
+`VaultWorkKind::Commit` executes (#267). Both refuse any mode but `TwoWay`
+with the non-retryable `vault_commit_mode_does_not_commit`; Local history's
+commit turn is `run_local_history_git_turn`, unchanged. The managed one takes
+the same `&ManagedCheckoutLease` a sync turn takes but reaches the checkout
+through `reuse_existing_checkout`, so a Vault whose first clone has not landed
+reports `UpToDate` instead of cloning; it carries no credentials, because
+there is nothing to authenticate against. The existing-checkout one takes
+neither a `repository_url` nor a `branch` and leaves both blank in its
+`ManagedSyncConfig`, because `commit_managed_checkout` reads neither. That is
+what lets an `ExistingGit` Vault with no configured branch commit without
+resolving one. Neither reaches `ManagedGitScheduler`: a commit is not a check
+of the remote and must not move the schedule that governs one.
+
+`CommitCooldown`, `DEFAULT_COMMIT_COOLDOWN` (5 minutes),
+`COMMIT_COOLDOWN_TICK_INTERVAL`, and `spawn_commit_cooldown_tick`
+(`commit_cooldown.rs`) are what stops a standing commit failure becoming one
+failed turn per save. Every way a commit can fail is non-retryable and needs a
+human, so a failed commit turn `arm`s the Vault's window and the
+watcher-forwarding path stops being `admit`ted for its duration; a successful
+commit or a manual one `clear`s it. Changes arriving while suppressed are not
+dropped. They coalesce into one deferred request the tick issues once the
+window elapses, which is what lets a Vault resume committing on its own after
+the operator fixes the cause. State is process-local and disposable: nothing
+about a suppression window is worth surviving a restart.
+
+`source_commits` and `source_syncs_remote` (`mod.rs`) answer "does this Vault
+make local commits" and "does it have a remote to sync with" from a
+`VaultSource` alone. Deliberately separate from
+`VaultSource::managed_git_poll_interval`, whose meaning ("does this Vault poll
+a remote") is unchanged: the watcher uses the first to decide whether a change
+is worth a commit turn, `vault_management` uses it to decide which manual
+operation to admit, and `collection_capabilities` publishes both as the
+`commit`/`sync` Vault capabilities the settings Git console labels its action
+from.
 
 `run_existing_git_remote_turn` is an `ExistingGit` + `VaultGitMode::PullOnly`/
 `TwoWay` Vault's counterpart to `run_managed_git_turn` (issue #96's reopening
@@ -1836,6 +1930,18 @@ way by `plan_git_turn`'s `ExistingGit` + `VaultGitMode::PullOnly`/`TwoWay` arm
 `VaultControlBlock::acquire_mutation` hold across `spawn_blocking` that the
 `ManagedGit` arm also takes (defect 2), and publication through the same
 `publish_managed_git_turn_outcome`.
+`VaultWorkKind::Commit` is consumed by the Vault work executor's
+`dispatch_commit_turn`/`plan_commit_turn`, which resolve the Vault's source
+and mode to one of the three commit operations, run it through the same
+lease/mutation-lock/`spawn_blocking` shell (`run_planned_turn`) a Git turn
+uses, and publish through `finish_commit_turn`, which unlike
+`finish_git_turn` feeds no scheduler and queues no Index turn, because the
+watcher change that asked for the commit already asked for the reindex. It is
+requested by `src/server.rs`'s watcher forwarding (commit first, index second,
+so a commit never waits out a multi-minute rebuild), by
+`reconcile_and_reconstruct`'s activation gate for a Git-capable source the
+scheduler does not track, by `vault_management`'s manual sync/retry on a Vault
+with no remote, and by `spawn_commit_cooldown_tick`.
 `VaultWorkKind::Index` is consumed by the Vault work executor's
 `dispatch_vault_index_turn`, which publishes only that Vault's disposable
 snapshot and reports its per-Vault search outcome; `Repair` remains an explicit
@@ -1852,9 +1958,11 @@ renders `polling_clock` as a Vault summary's `last_checked_at`/
 adapters, configuration, frontend settings UI, and vault watcher Git
 exclusions.
 
-**Invariants:** optional and debounced; writes do not block on sync, except
-while a managed-Git or `ExistingGit` remote-sync turn is in flight for that
-Vault, see below; task replacement drains before another task can start;
+**Invariants:** optional and debounced; a commit turn never opens a network
+connection, whatever the Vault's mode; writes do not block on sync, except
+while a managed-Git or `ExistingGit` remote-sync turn, or a Two-way commit
+turn, is in flight for that Vault, see below; task replacement drains
+before another task can start;
 local mode never contacts a remote; remote mode never force-checks out over
 uncommitted manual vault edits (ADR-10). Managed acquisition never writes
 credentials to URLs, Git configuration, reads, logs, errors, or status; it
@@ -2172,9 +2280,11 @@ management tool: a write-gated mapping onto the collection management core's
 `refresh`, which admits one Vault's next Index turn and returns its
 `VaultScheduleResponse` (`queued`, or `coalesced` when a turn for that Vault is
 already pending). It exists so a client reading a collection read's `partial:
-true` with a `stale` participant can act on it — `sync_vault` and `retry_vault`
-cannot, because both resolve a managed-Git poll interval first and refuse
-`capability_unavailable` on any Vault with no remote. It is rejected inside
+true` with a `stale` participant can act on it, which `sync_vault` and
+`retry_vault` cannot: both are Git controls, and since #267 they refuse
+`capability_unavailable` only on a Vault with no Git at all (a `Local`
+source), admitting a commit turn on a Vault that has no remote but does keep
+history. It is rejected inside
 `batch` like every other management tool, and is deliberately *not* in
 `is_collection_management_tool`: that exemption keeps discovery and Vault
 control reachable while model setup is pending, and an Index turn cannot run
@@ -3175,15 +3285,18 @@ its state reads `saved`, `none`, or (the instant an identity field changes)
 `will be cleared`. The sync schedule is a 1–1440-minute field (client-side
 bounded; the registry enforces only a 60s floor) defaulting to 1440,
 shown whenever the drafted behaviour is remote-backed — this resolves #148's
-outstanding AC4: the legacy `HATCHDOOR_GIT_DEBOUNCE_SECONDS`
-local-edit-to-commit debounce has no per-Vault successor (the multi-Vault
-pipeline already coalesces writes through `vault_watcher.rs`'s fixed,
-non-configurable watcher debounce), so that concept is retired rather than
-folded into this field; the schedule field answers a different question —
-how often to poll a remote for incoming changes — which is the only new
-per-Vault timing control this page adds. A live sync console
+outstanding AC4: the local-edit-to-commit trigger is not a configurable
+debounce and does not belong to this field, which answers a different
+question, how often to poll a remote for incoming changes. #267 gave that
+trigger its successor without a setting: `vault_watcher.rs`'s fixed
+non-configurable debounce now asks for a commit turn as well as an index
+turn, so a Vault commits shortly after the writing stops. A live Git console
 (shown whenever the Vault's own `git` status is not `"disabled"`) carries a
-`Sync now`/`Try again` button calling `POST .../sync` or `.../retry`, and
+`Sync now`/`Commit now`/`Try again` button calling `POST .../sync` or
+`.../retry`. Which of the first two it offers, and whether the healthy
+sentence names a remote at all, comes from the Vault's `capabilities.sync`
+flag rather than from its Git mode string. That flag is definition-derived,
+so a failing Vault keeps its own label (#267). It
 renders one of nine failure sentences off `git_error.code` (plus an
 unrecognised-code fallback) — the two carrying an affected-file list
 (`managed_git_dirty_working_copy`, `managed_git_conflict`) render it from

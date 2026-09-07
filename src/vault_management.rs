@@ -772,8 +772,9 @@ impl<'a> VaultCollectionManagement<'a> {
         Ok(self.mutation_response(&snapshot, None))
     }
 
-    /// Request an immediate managed-Git turn for one Vault, bypassing its
-    /// daily schedule.
+    /// Request an immediate Git turn for one Vault, bypassing its schedule: a
+    /// remote sync for a Vault that has a remote, and a local commit for one
+    /// that does not.
     pub fn sync(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
         self.managed_git_control(vault_id, false)
     }
@@ -784,6 +785,20 @@ impl<'a> VaultCollectionManagement<'a> {
         self.managed_git_control(vault_id, true)
     }
 
+    /// Admit one manual Git operation, choosing it from what this Vault
+    /// actually has (#267).
+    ///
+    /// A Vault with a remote gets its remote sync, unchanged. A Vault with no
+    /// remote, which means Local history, gets a commit turn, which is the
+    /// whole of its Git behaviour. Only a Vault with neither is refused, so the old blanket
+    /// refusal narrows from "this Vault has no remote" to "this Vault has no
+    /// Git at all": remote *synchronisation* is still never attempted for
+    /// Local history, because a commit turn opens no connection.
+    ///
+    /// A manual commit also clears any cooldown a previous failure armed. The
+    /// operator asking for one is the case that suppression must not swallow,
+    /// exactly as `VaultWorkCoordinator::request_if_idle`'s own doc comment
+    /// reserves the guaranteed rerun for a user-driven request.
     fn managed_git_control(
         &self,
         vault_id: VaultId,
@@ -791,12 +806,21 @@ impl<'a> VaultCollectionManagement<'a> {
     ) -> Result<VaultScheduleResponse, VaultOperationError> {
         let definition = self.enabled_definition(vault_id)?;
         let Some(poll_interval) = definition.source().managed_git_poll_interval() else {
-            return Err(VaultOperationError::new(
-                "capability_unavailable",
-                "Manual Git sync is only available for a Vault with a configured remote",
-                Some(vault_id),
-                false,
-            ));
+            if !crate::git::source_commits(definition.source()) {
+                return Err(VaultOperationError::new(
+                    "capability_unavailable",
+                    "Manual Git sync is only available for a Vault that keeps Git history",
+                    Some(vault_id),
+                    false,
+                ));
+            }
+            self.state.commit_cooldown.clear(vault_id);
+            return schedule_response(
+                vault_id,
+                self.state
+                    .vault_work
+                    .request(vault_id, VaultWorkKind::Commit),
+            );
         };
 
         let schedule = if retry {
@@ -1097,6 +1121,7 @@ pub(crate) mod test_support {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
+            commit_cooldown: std::sync::Arc::new(crate::git::CommitCooldown::new()),
             legacy_migration_recovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: std::sync::Arc::new(
                 SqliteCache::in_memory(384).expect("in-memory cache"),
@@ -1361,6 +1386,8 @@ mod tests {
                 pull: false,
                 push: false,
                 retry: true,
+                commit: false,
+                sync: false,
             },
             "the authenticated projection keeps reporting the derived capabilities"
         );
@@ -1373,6 +1400,8 @@ mod tests {
                 pull: false,
                 push: false,
                 retry: true,
+                commit: false,
+                sync: false,
             },
             "an unavailable Vault browses nowhere but is worth retrying"
         );
@@ -1385,6 +1414,8 @@ mod tests {
                 pull: false,
                 push: false,
                 retry: false,
+                commit: false,
+                sync: false,
             },
             "a Vault mid-index browses but does not search"
         );
@@ -1426,6 +1457,8 @@ mod tests {
                 pull: false,
                 push: false,
                 retry: false,
+                commit: false,
+                sync: false,
             },
             "a demo reports what an unauthenticated visitor may do"
         );
@@ -1446,6 +1479,8 @@ mod tests {
                 pull: false,
                 push: false,
                 retry: false,
+                commit: false,
+                sync: false,
             },
             "a demo passes browse and search through untouched"
         );
@@ -1902,12 +1937,15 @@ mod tests {
     }
 
     /// Companion to `sync_and_retry_admit_an_existing_git_pull_only_vault_and_track_its_schedule`:
-    /// the other half of the acceptance criterion "An `ExistingGit` Vault in
-    /// `LocalHistory` ... still refuse[s] both and carr[ies] no schedule" —
-    /// `LocalHistory` has no remote to poll and must keep refusing both
-    /// controls exactly as before.
+    /// the other half of "an `ExistingGit` Vault in `LocalHistory` carries no
+    /// schedule". It still carries none, because nothing here polls a
+    /// remote, but the refusal it used to get has narrowed (#267). A manual control on a
+    /// Vault with no remote now admits the one Git operation it does have, a
+    /// commit turn, and admits it through the work coordinator rather than
+    /// the managed-Git scheduler, which is what keeps "Local history never
+    /// contacts a remote" true.
     #[tokio::test]
-    async fn sync_and_retry_still_refuse_an_existing_git_local_history_vault() {
+    async fn sync_and_retry_admit_a_commit_turn_for_an_existing_git_local_history_vault() {
         let (state, _worker, directory) = test_state();
         let repository_path = directory.path().join("local-history-repo");
         std::fs::create_dir_all(&repository_path).expect("create repo directory");
@@ -1939,6 +1977,45 @@ mod tests {
         );
 
         let core = VaultCollectionManagement::new(&state);
+        core.sync(vault_id)
+            .expect("manual sync admits a commit turn for a Vault with no remote");
+        assert!(
+            state.vault_work.has_work(vault_id, VaultWorkKind::Commit),
+            "the admitted operation is a commit, not a remote sync"
+        );
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "no remote-sync turn is ever requested for a Vault with no remote"
+        );
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            None,
+            "and admitting it still does not put the Vault on a remote schedule"
+        );
+
+        core.retry(vault_id)
+            .expect("manual retry admits the same commit turn");
+    }
+
+    /// A `Local` Vault has no Git at all, so both manual controls still
+    /// refuse it outright. This is what is left of the blanket refusal #267
+    /// narrowed: "no remote" no longer means "nothing to do".
+    #[tokio::test]
+    async fn sync_and_retry_still_refuse_a_local_vault() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("plain-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+
+        VaultCollectionManagement::new(&state)
+            .create(create_request("Plain notes", VaultSource::Local { path }))
+            .await
+            .expect("create the Vault");
+        let vault_id = ready_snapshot(&state)
+            .vault_ids()
+            .next()
+            .expect("one Vault");
+
+        let core = VaultCollectionManagement::new(&state);
         assert_eq!(
             core.sync(vault_id).expect_err("sync refused").code,
             "capability_unavailable"
@@ -1946,6 +2023,10 @@ mod tests {
         assert_eq!(
             core.retry(vault_id).expect_err("retry refused").code,
             "capability_unavailable"
+        );
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Commit),
+            "a refused control queues nothing"
         );
     }
 

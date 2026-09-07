@@ -67,11 +67,11 @@ A softer variant: `local_content` reports `read_only` rather than `unavailable` 
 
 ## Git sync is failing
 
-Check the Vault's Sync console for the specific failure rather than assuming — these need different fixes:
+Check the Vault's Git console for the specific failure rather than assuming. (It is headed **Sync** on a Vault with a remote and **History** on one without, and its button reads **Sync now** or **Commit now** to match.) These need different fixes:
 
 - **Authentication failed** — the stored HTTPS token was rejected by the remote. Re-enter it under **Sign-in** on the Vault's own page; see [[How to set up a Git-backed Vault]].
 - **Clone/fetch failed, or the remote is unreachable** — a network or DNS problem, or the repository URL itself is wrong. Confirm the URL resolves from wherever the container runs, not just from your own machine.
-- **Local commits ahead on a Pull-only Vault** — Hatchdoor made local commits (from note edits) that a Pull-only Vault is configured never to push. This isn't a failure exactly — it's Hatchdoor accurately reporting that local history and the remote have diverged and staying pull-only rather than silently discarding your local commits. Switch the Vault to **Two-way** if you want those commits pushed, or accept that Pull-only Vaults are meant to be read-mostly.
+- **Local commits ahead on a Pull-only Vault** — the checkout has commits the remote doesn't, and a Pull-only Vault never pushes. They aren't Hatchdoor's: such a Vault refuses every write, so anything committed there you committed yourself, by hand or before you switched the Vault to Pull-only. This isn't a failure exactly. Hatchdoor is reporting that local history and the remote have diverged, and staying pull-only rather than silently discarding your commits. Switch the Vault to **Two-way** if you want them pushed, or accept that Pull-only Vaults are meant to be read-mostly.
 
 > [!note]
 > A Vault reporting `git: pending` isn't stuck by default — that's the normal state while a clone or fetch is in flight. Only treat it as a problem if it stays `pending` well past the configured sync interval.

@@ -558,7 +558,7 @@ export function VaultSettingsDetail({
     if (!ok)
       setMessage(
         (payload as { message?: string }).message ??
-          "Could not start a Git sync for this Vault.",
+          "Could not start a Git turn for this Vault.",
       );
     // No re-read here: the refresh publishes the new record and the effect
     // above adopts it, same as any other writer's change.
@@ -571,6 +571,19 @@ export function VaultSettingsDetail({
       ? describeGitFailure(vault.git_error)
       : null;
   const consoleVisible = vault.source !== undefined && vault.git !== "disabled";
+  // A Vault with no remote commits and nothing else, so the console must not
+  // offer it a sync the backend would only refuse, or claim a remote it does
+  // not have (#267). Read off the capability record rather than the Git mode
+  // string, and definition-derived, so a failing Vault keeps its own label.
+  const remoteBacked = vault.capabilities.sync;
+  const actionLabel = gitFailure
+    ? "Try again"
+    : remoteBacked
+      ? "Sync now"
+      : "Commit now";
+  const healthySentence = remoteBacked
+    ? "This Vault's Git sync is healthy."
+    : "This Vault's Git history is up to date.";
 
   return (
     <div className="settings-main settings-vault-detail">
@@ -614,7 +627,9 @@ export function VaultSettingsDetail({
       {consoleVisible ? (
         <div className="settings-console settings-git-console">
           <div className="settings-console-cell">
-            <span className="settings-console-lbl">Sync</span>
+            <span className="settings-console-lbl">
+              {remoteBacked ? "Sync" : "History"}
+            </span>
             <span className="settings-console-val">
               {gitFailure ? gitFailure.label : "Healthy"}
             </span>
@@ -624,9 +639,7 @@ export function VaultSettingsDetail({
             data-tier={gitFailure ? gitFailure.tier : "ok"}
           >
             <p>
-              {gitFailure
-                ? gitFailure.sentence
-                : "This Vault's Git sync is healthy."}
+              {gitFailure ? gitFailure.sentence : healthySentence}
             </p>
             {gitFailure?.files ? (
               <ul className="settings-console-files">
@@ -647,7 +660,7 @@ export function VaultSettingsDetail({
               disabled={!vault.enabled || syncing || vault.git === "pending"}
               onClick={() => void syncOrRetry()}
             >
-              {gitFailure ? "Try again" : "Sync now"}
+              {actionLabel}
             </button>
           </div>
         </div>

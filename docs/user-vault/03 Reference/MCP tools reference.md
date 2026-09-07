@@ -47,8 +47,8 @@ A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps de
 | `enable_vault` | Write mode | Enable a disabled Vault definition. |
 | `disable_vault` | Write mode | Disable a Vault without deleting its files. |
 | `disconnect_vault` | Write mode | Remove a Vault from the registry without deleting local files, checkouts, Git history, or credentials outside the registry record. |
-| `sync_vault` | Write mode | Request immediate managed-Git synchronization for one eligible Vault. |
-| `retry_vault` | Write mode | Retry an admitted managed-Git operation for one eligible Vault. |
+| `sync_vault` | Write mode | Request one Vault's Git work now: a remote sync if it has a remote, a local commit if it only keeps history. |
+| `retry_vault` | Write mode | Retry that same operation for one eligible Vault. |
 | `refresh_vault` | Write mode | Request one Vault's next index turn, so the snapshot the collection reads project from is rebuilt from its Markdown. |
 
 ### `create_vault`
@@ -85,13 +85,13 @@ All three take just `vault_id` and `expected_registry_revision`.
 
 ### `sync_vault` / `retry_vault`
 
-Both take just `vault_id`. `sync_vault` requests an immediate poll for a managed-Git Vault instead of waiting for `poll_interval_secs`. `retry_vault` retries an operation the scheduler admitted but that failed (e.g. a transient network error), rather than waiting for its own backoff.
+Both take just `vault_id`. On a Vault with a remote, `sync_vault` requests an immediate poll instead of waiting for `poll_interval_secs`, and `retry_vault` retries an operation the scheduler admitted but that failed (say a transient network error), rather than waiting for its own backoff.
 
-Neither works on a Vault with no configured remote: both resolve the Vault's Git poll interval first and refuse with `capability_unavailable` when there is none. For rebuilding the search index of any Vault, remote or not, use `refresh_vault`.
+On a Vault with no remote but with Git history (an `existing_git` Vault in `local_history` mode), both request an immediate local commit instead. No remote is contacted, and asking explicitly also lifts the five-minute pause that follows a failed commit. Only a Vault with no Git at all (a plain `local` source) is refused, with `capability_unavailable`. For rebuilding the search index of any Vault, Git-backed or not, use `refresh_vault`.
 
 ### `refresh_vault`
 
-Takes just `vault_id`. It asks Hatchdoor to re-scan that Vault's Markdown and republish the snapshot the collection reads — `get_tree`, `get_graph`, `get_stats`, `recently_modified` and `search_notes` — project from. It contacts no Git remote, so unlike `sync_vault` it works on a plain local Vault.
+Takes just `vault_id`. It asks Hatchdoor to re-scan that Vault's Markdown and republish the snapshot the collection reads: the one `get_tree`, `get_graph`, `get_stats`, `recently_modified` and `search_notes` project from. It contacts no Git remote, and unlike `sync_vault` it works on a Vault with no Git at all.
 
 **Call it when a collection read reports itself stale.** Those reads carry `partial` and a `participants` list (see [[#Read-only content tools]] below). A Vault whose entry reads `stale` is answering from a snapshot known to be behind its files; `refresh_vault` is how an agent asks for that to be fixed instead of waiting and hoping.
 

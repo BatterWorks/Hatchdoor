@@ -2022,6 +2022,7 @@ async fn each_index_turn_binds_the_settings_snapshot_at_its_own_start() {
         registry: registry.clone(),
         work: work.clone(),
         managed_git: managed_git.clone(),
+        commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
         cache: cache.clone(),
         embedder: embedder.clone(),
         runtime_config: runtime_config.clone(),
@@ -2132,6 +2133,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         registry: registry.clone(),
         work: work.clone(),
         managed_git: managed_git.clone(),
+        commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
         cache: cache.clone(),
         embedder,
         runtime_config: RuntimeConfig::for_tests(),
@@ -2320,4 +2322,317 @@ async fn a_managed_git_vault_keeps_polling_on_its_configured_interval() {
     assert_eq!(second.request.kind(), VaultWorkKind::Git);
     assert_eq!(second.request.vault_id(), vault_id);
     second.result.expect("scheduled re-sync succeeds");
+}
+
+/// Run exactly one queued commit turn through the same seam `server.rs`'s
+/// dispatch loop uses, and return its result. Every commit-turn test below
+/// needs this identical eight-line block, and none of them is about the
+/// block.
+async fn run_one_commit_turn(
+    collection: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    managed_git: &ManagedGitScheduler,
+    cooldown: &crate::git::CommitCooldown,
+    worker: &mut crate::vault_work::VaultWorkWorker,
+) -> Result<(), VaultWorkError> {
+    worker
+        .run_next(|request| {
+            dispatch_commit_turn(
+                collection,
+                registry,
+                managed_git,
+                cooldown,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("commit turn dequeued")
+        .result
+}
+
+/// The heart of #267 for a Vault that *does* have a remote: a Two-way Vault
+/// used to commit only inside the turn that also fetched and pushed, and that
+/// turn only ran on the Vault's sync schedule, a day by default. A note
+/// written to such a Vault could sit uncommitted for 24 hours.
+///
+/// Drives a real commit turn through the full async path and asserts both
+/// halves of the split: the local commit happened, and the remote was not
+/// touched. The remote is proved untouched from both directions: a commit
+/// someone else pushed before this turn is still not in the local checkout
+/// afterwards (no fetch), and the remote's own branch has not moved (no push).
+#[tokio::test]
+async fn a_commit_turn_commits_a_two_way_vault_without_touching_its_remote() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+
+    // Someone else pushes to the remote before the turn runs. A sync turn
+    // would integrate this; a commit turn must not even look.
+    let actor_path = directory.path().join("actor");
+    let actor = git2::Repository::clone(remote_path.to_str().expect("remote path"), &actor_path)
+        .expect("actor checkout");
+    commit_file(&actor, "vault/Theirs.md", "# theirs\n", "their commit");
+    actor
+        .find_remote("origin")
+        .expect("origin")
+        .push(&["refs/heads/master:refs/heads/master"], None)
+        .expect("actor push");
+    let remote_head_before = git2::Repository::open(&remote_path)
+        .expect("open remote")
+        .refname_to_id("refs/heads/master")
+        .expect("remote master");
+
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Two way",
+        repository_path.clone(),
+        VaultGitMode::TwoWay,
+    );
+
+    // The write this turn exists to commit, plus the Vault's own local HEAD
+    // before it runs.
+    std::fs::write(repository_path.join("vault/Mine.md"), "# mine\n").expect("write note");
+    let local_head_before = git2::Repository::open(&repository_path)
+        .expect("open checkout")
+        .head()
+        .expect("HEAD")
+        .peel_to_commit()
+        .expect("HEAD commit")
+        .id();
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    let cooldown = crate::git::CommitCooldown::new();
+    coordinator.request(vault_id, VaultWorkKind::Commit);
+    run_one_commit_turn(&collection, &registry, &managed_git, &cooldown, &mut worker)
+        .await
+        .expect("the commit turn succeeds");
+
+    let checkout = git2::Repository::open(&repository_path).expect("reopen checkout");
+    let head = checkout
+        .head()
+        .expect("HEAD")
+        .peel_to_commit()
+        .expect("HEAD commit");
+    assert_ne!(head.id(), local_head_before, "a local commit was made");
+    assert!(
+        head.tree()
+            .expect("HEAD tree")
+            .get_path(Path::new("vault/Mine.md"))
+            .is_ok(),
+        "the write is in the commit this turn made"
+    );
+    assert!(
+        head.tree()
+            .expect("HEAD tree")
+            .get_path(Path::new("vault/Theirs.md"))
+            .is_err(),
+        "the commit turn never fetched, so the remote's newer commit is not here"
+    );
+    assert_eq!(
+        git2::Repository::open(&remote_path)
+            .expect("open remote")
+            .refname_to_id("refs/heads/master")
+            .expect("remote master"),
+        remote_head_before,
+        "the commit turn never pushed, so the remote's branch has not moved"
+    );
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Ready);
+    assert!(after.git_error.is_none());
+
+    // The watcher change that asked for this commit already asked for the
+    // reindex; a commit turn must not queue a second one.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) }),
+        )
+        .await
+        .is_err(),
+        "a commit turn queues no work of its own"
+    );
+}
+
+/// Pull-only is out of scope by design: such a Vault refuses writes, so it
+/// has no changes of its own to commit, and its turn must leave a folder its
+/// operator dirtied by hand exactly as it found it.
+#[tokio::test]
+async fn a_commit_turn_is_a_no_op_for_a_pull_only_vault() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, _remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Pull only",
+        repository_path.clone(),
+        VaultGitMode::PullOnly,
+    );
+    std::fs::write(repository_path.join("vault/Manual.md"), "# by hand\n").expect("write by hand");
+    let head_before = git2::Repository::open(&repository_path)
+        .expect("open checkout")
+        .head()
+        .expect("HEAD")
+        .peel_to_commit()
+        .expect("HEAD commit")
+        .id();
+    let git_before = control_block.snapshot().git;
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    let cooldown = crate::git::CommitCooldown::new();
+    coordinator.request(vault_id, VaultWorkKind::Commit);
+    run_one_commit_turn(&collection, &registry, &managed_git, &cooldown, &mut worker)
+        .await
+        .expect("a Vault that does not commit reports no failure");
+
+    assert_eq!(
+        git2::Repository::open(&repository_path)
+            .expect("reopen checkout")
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("HEAD commit")
+            .id(),
+        head_before,
+        "a Pull-only Vault commits nothing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repository_path.join("vault/Manual.md")).expect("file survives"),
+        "# by hand\n",
+        "and leaves the operator's own file alone"
+    );
+    assert_eq!(
+        control_block.snapshot().git,
+        git_before,
+        "its Git status is untouched"
+    );
+}
+
+/// Committing frequently means failing frequently when the cause of the
+/// failure is standing, as drift outside the Vault's own folder is, and only
+/// the operator can clear it. The cooldown is what stops that becoming one
+/// failed turn per save; a manual commit, and the fix landing, are what stop
+/// the cooldown outliving the condition.
+#[tokio::test]
+async fn a_failed_commit_turn_reports_its_paths_and_suppresses_the_next_automatic_one() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, _remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Two way",
+        repository_path.clone(),
+        VaultGitMode::TwoWay,
+    );
+    std::fs::write(repository_path.join("vault/Mine.md"), "# mine\n").expect("write note");
+    std::fs::write(repository_path.join("outside.md"), "manual outside work")
+        .expect("write outside file");
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    let cooldown = crate::git::CommitCooldown::with_period(std::time::Duration::from_secs(300));
+    coordinator.request(vault_id, VaultWorkKind::Commit);
+    let failure = run_one_commit_turn(&collection, &registry, &managed_git, &cooldown, &mut worker)
+        .await
+        .expect_err("drift outside the Vault fails the commit");
+    assert_eq!(failure.code(), "managed_git_dirty_working_copy");
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Unavailable);
+    let published = after
+        .git_error
+        .expect("the failure reaches the Vault status");
+    assert_eq!(published.code, "managed_git_dirty_working_copy");
+    assert_eq!(
+        published.detail,
+        Some(VaultRuntimeErrorDetail::AffectedPaths {
+            paths: vec!["outside.md".to_string()],
+            total: 1,
+        }),
+        "the console's affected-paths detail names what the operator has to fix"
+    );
+
+    for _ in 0..5 {
+        assert!(
+            !cooldown.try_admit(vault_id),
+            "however many changes arrive, none starts another automatic commit"
+        );
+    }
+
+    // The operator commits the outside drift. Nothing else intervenes: the
+    // next automatic attempt after the cooldown has to succeed on its own.
+    let checkout = git2::Repository::open(&repository_path).expect("reopen checkout");
+    commit_file(&checkout, "outside.md", "manual outside work", "outside");
+    assert_eq!(
+        cooldown.due(std::time::Instant::now() + std::time::Duration::from_secs(301)),
+        vec![vault_id],
+        "the suppressed changes are owed exactly one turn once the window closes"
+    );
+
+    coordinator.request(vault_id, VaultWorkKind::Commit);
+    run_one_commit_turn(&collection, &registry, &managed_git, &cooldown, &mut worker)
+        .await
+        .expect("the Vault resumes committing with no manual action");
+    assert_eq!(control_block.snapshot().git, VaultGitStatus::Ready);
+    assert!(
+        cooldown.try_admit(vault_id),
+        "a successful commit clears the suppression"
+    );
+    assert!(
+        git2::Repository::open(&repository_path)
+            .expect("reopen checkout")
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("HEAD commit")
+            .tree()
+            .expect("HEAD tree")
+            .get_path(Path::new("vault/Mine.md"))
+            .is_ok(),
+        "and the note that was waiting is committed"
+    );
+}
+
+/// A commit is not a check of the remote, so it must not move the schedule
+/// that governs one. Without this a Vault would push a day later than its
+/// interval says every time a note was written just before its turn was due.
+#[tokio::test]
+async fn a_commit_turn_leaves_the_remote_sync_schedule_where_it_was() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, _remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, _control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Two way",
+        repository_path.clone(),
+        VaultGitMode::TwoWay,
+    );
+    std::fs::write(repository_path.join("vault/Mine.md"), "# mine\n").expect("write note");
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    managed_git.activate(vault_id, std::time::Duration::from_secs(3600));
+    // Arm a schedule the way a completed sync turn would, so there is a
+    // deadline for the commit below to be proved not to have moved.
+    managed_git.record_outcome(vault_id, &Ok(crate::git::ManagedGitOutcome::UpToDate));
+    let armed = managed_git
+        .next_attempt_for_test(vault_id)
+        .expect("a tracked Vault has an armed attempt");
+
+    let cooldown = crate::git::CommitCooldown::new();
+    coordinator.request(vault_id, VaultWorkKind::Commit);
+    run_one_commit_turn(&collection, &registry, &managed_git, &cooldown, &mut worker)
+        .await
+        .expect("the commit turn succeeds");
+
+    assert_eq!(
+        managed_git.next_attempt_for_test(vault_id),
+        Some(armed),
+        "a commit turn is not a remote check and never re-arms the sync schedule"
+    );
+    assert_eq!(
+        managed_git.poll_interval_for_test(vault_id),
+        Some(std::time::Duration::from_secs(3600)),
+        "nor does it change the interval"
+    );
 }
