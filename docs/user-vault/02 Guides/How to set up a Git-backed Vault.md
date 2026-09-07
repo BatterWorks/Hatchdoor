@@ -32,8 +32,8 @@ Open **Settings** → **Add a Vault**, then:
 | --- | --- | --- |
 | **No Git** | Nothing — a plain folder, no history, no remote. | A folder on this server |
 | **Local history** | Hatchdoor commits your changes locally, shortly after you stop writing. Never contacts a remote. | A folder on this server |
-| **Pull-only** | Also fetches from the remote on the sync schedule. Content flows in; Hatchdoor's own commits stay local and are never pushed. | Either |
-| **Two-way** | Also pushes Hatchdoor's own commits back to the remote. | Either |
+| **Pull-only** | Fetches from the remote on the sync schedule and sends nothing back. The Vault refuses every write, so Hatchdoor never commits on it. | Either |
+| **Two-way** | Commits your changes locally, and fetches from and pushes to the remote on the sync schedule. | Either |
 
 Hatchdoor commits a few seconds after the writing stops, so one commit usually gathers a burst of changes rather than one save. Sending those commits to a remote is separate and still happens on the sync schedule, so on Two-way your history is current locally long before the remote sees it. The subject names the first few writes it recorded and how many files they touched, and the body carries whatever one-line summary each of those writes supplied. An agent connected over MCP can pass a summary on every write, which is what turns the history into an answer to "why did this note change?". Edits you make in the Vault folder yourself carry no summary, so a commit made up only of those keeps the generic `hatchdoor: vault update`.
 
