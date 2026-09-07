@@ -1148,9 +1148,7 @@ describe("the caret a click enters at in a multi-line block (#284)", () => {
   });
 
   it("lands on the clicked word of a quote spanning two source lines", () => {
-    render(
-      <NoteHarness initialContent={"> first line\n> second line\n"} />,
-    );
+    render(<NoteHarness initialContent={"> first line\n> second line\n"} />);
 
     // Offset 11 across the rendered quote is the s of second.
     clickInto(screen.getByText(/second line/), 11);

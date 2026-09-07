@@ -69,9 +69,10 @@ describe("deriveVaultSlot", () => {
 
   it("counts a browsable Vault as participating — it has published Notes to read", () => {
     const vault = browsableVault("Alpha");
-    expect(
-      deriveVaultAggregate([vault], { [vault.vault_id]: 126 }),
-    ).toEqual({ kind: "count", count: 1 });
+    expect(deriveVaultAggregate([vault], { [vault.vault_id]: 126 })).toEqual({
+      kind: "count",
+      count: 1,
+    });
   });
 
   it("announces a browsable Vault's count and its pending search", () => {

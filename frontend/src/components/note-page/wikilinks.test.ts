@@ -135,7 +135,9 @@ describe("rewriteWikilinks asset resolution", () => {
         new Map(),
         assets,
       ),
-    ).toBe("[Plan\\.pdf](/api/v1/vaults/vault-1/assets/98_Attachments/Plan.pdf)");
+    ).toBe(
+      "[Plan\\.pdf](/api/v1/vaults/vault-1/assets/98_Attachments/Plan.pdf)",
+    );
   });
 
   it("keeps the anchor suffix when the target resolves", () => {
