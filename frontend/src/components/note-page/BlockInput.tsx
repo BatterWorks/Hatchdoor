@@ -11,6 +11,7 @@ import {
   blockMarkdownExtensions,
   markdownHighlighting,
 } from "./blockEditorSetup";
+import { resolveFont } from "./editorFont";
 
 export type UnitType =
   | "paragraph"
@@ -167,7 +168,7 @@ export function BlockInput({
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
               handlers.current.onEdit?.(update.state.doc.toString());
-              hangPrefix(view);
+              hangPrefix(view, unitType);
             }
           }),
           EditorView.domEventHandlers({
@@ -184,7 +185,7 @@ export function BlockInput({
     view.focus();
     // Keeps the active line above the virtual keyboard on a phone.
     view.dom.scrollIntoView?.({ block: "nearest" });
-    hangPrefix(view);
+    hangPrefix(view, unitType);
 
     return () => {
       tearingDown = true;
@@ -392,17 +393,29 @@ function runMove(
 }
 
 /**
- * Hangs the line's markdown prefix into the gutter so the visible text does not
- * move when a block is entered.
+ * Hangs the line's invisible leading source into the gutter so the visible text
+ * does not move when a block is entered.
+ *
+ * That leading run is the line's indentation and any list marker, task box,
+ * heading hashes, or quote arrows behind it - whatever `linePrefix` reads as
+ * having no rendered counterpart.
  *
  * The prefix has to be *measured*: "- " is about 9px while the bullet marker it
  * replaces is inset 22.4px, so a fixed hang leaves the text 13px out. The
  * offset is clamped to the space the scroll pane actually has, which is 56px on
- * desktop but only 16px on a phone, so a long prefix never gets clipped.
+ * desktop but only 16px on a phone, so a long prefix never gets clipped. A deep
+ * indent therefore hangs partway on a narrow viewport rather than not at all,
+ * which moves the text less than leaving it and never pulls it off the edge.
+ *
+ * A code block hangs nothing. Its leading spaces are the only shape where
+ * `linePrefix` and the screen genuinely disagree: CommonMark strips four of
+ * them from an indented code block and renders the rest literally, so hanging
+ * the whole run would pull visible code left.
  */
-function hangPrefix(view: EditorView) {
+function hangPrefix(view: EditorView, unitType: UnitType) {
   const el = view.dom;
-  const prefix = linePrefix(view.state.doc.lineAt(0).text);
+  const prefix =
+    unitType === "code block" ? "" : linePrefix(view.state.doc.lineAt(0).text);
   if (!prefix) {
     el.style.marginLeft = "";
     el.style.width = "";
@@ -411,7 +424,7 @@ function hangPrefix(view: EditorView) {
 
   const content = view.contentDOM;
   const style = getComputedStyle(content);
-  const width = measureText(prefix, style.font);
+  const width = measureText(prefix, resolveFont(style));
   if (width === null) {
     return;
   }
@@ -429,6 +442,17 @@ function hangPrefix(view: EditorView) {
 
 let measureContext: CanvasRenderingContext2D | null | undefined;
 
+const SENTINEL_FONT = "10px sans-serif";
+
+/**
+ * The rendered width of `text` in `font`, or null when it cannot be measured.
+ *
+ * The context is shared, and a canvas *ignores* a font string it cannot parse
+ * rather than throwing, so an unusable one would otherwise measure in whichever
+ * font the last caller left behind. Writing the sentinel first turns that
+ * silent wrong answer into a refusal, and the caller then hangs nothing rather
+ * than hanging the wrong width.
+ */
 function measureText(text: string, font: string): number | null {
   if (measureContext === undefined) {
     measureContext = document.createElement("canvas").getContext("2d");
@@ -436,6 +460,10 @@ function measureText(text: string, font: string): number | null {
   if (!measureContext) {
     return null;
   }
+  measureContext.font = SENTINEL_FONT;
   measureContext.font = font;
+  if (measureContext.font === SENTINEL_FONT && font !== SENTINEL_FONT) {
+    return null;
+  }
   return measureContext.measureText(text).width;
 }

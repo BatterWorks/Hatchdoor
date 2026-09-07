@@ -65,7 +65,7 @@ type LineWalk = {
 
 /** Where `target` rendered characters land within the single line `line`. */
 function walkLine(line: string, target: number): LineWalk {
-  let index = invisiblePrefix(line).length;
+  let index = linePrefix(line).length;
   let rendered = 0;
 
   while (index < line.length) {
@@ -125,29 +125,6 @@ function walkLine(line: string, target: number): LineWalk {
   }
 
   return { hit: null, rendered };
-}
-
-/**
- * The leading source characters on `line` that render as nothing: its
- * indentation, then any list marker, task box, heading hashes, or quote arrows
- * behind it.
- *
- * Indentation counts on any line, not only the first one of a block. A wrapped
- * list item is addressed one source line at a time (D25a), so its continuation
- * line arrives here as a block of its own: indent at the front, no marker to
- * hang it on, and none of it on screen.
- *
- * The indent is measured here rather than folded into `linePrefix`, which
- * matches an indent only ahead of a list marker. `linePrefix` also decides what
- * `BlockInput` hangs into the gutter, and widening it there would move the
- * visible text of every indented line on entry, which is a different question
- * from where a caret goes. The two therefore disagree on an indented heading or
- * quote: this reads `  # h` as three invisible characters, the gutter reads it
- * as none.
- */
-function invisiblePrefix(line: string): string {
-  const indent = indentWidth(line);
-  return line.slice(0, indent) + linePrefix(line.slice(indent));
 }
 
 /**

@@ -35,4 +35,48 @@ describe("linePrefix", () => {
   it("does not treat a hyphen inside text as a marker", () => {
     expect(linePrefix("well-formed prose")).toBe("");
   });
+
+  it("finds a bare indent on a continuation line", () => {
+    expect(linePrefix("  continues here")).toBe("  ");
+  });
+
+  it("finds the wider bare indent of a nested continuation line", () => {
+    expect(linePrefix("      continues deeper")).toBe("      ");
+  });
+
+  it("counts a tab indent", () => {
+    expect(linePrefix("\tcontinues here")).toBe("\t");
+  });
+
+  it("finds an indented heading", () => {
+    expect(linePrefix("  # Heading")).toBe("  # ");
+  });
+
+  it("finds an indented quote", () => {
+    expect(linePrefix("  > quoted")).toBe("  > ");
+  });
+
+  it("finds an indented task box", () => {
+    expect(linePrefix("  - [ ] todo")).toBe("  - [ ] ");
+  });
+
+  it("takes a whitespace-only line as invisible throughout", () => {
+    expect(linePrefix("   ")).toBe("   ");
+  });
+
+  it("stops at the indent when what follows is not a marker", () => {
+    expect(linePrefix("  well-formed prose")).toBe("  ");
+  });
+
+  // Only a space or a tab separates a marker from its content. A no-break
+  // space renders as a visible glyph, so hanging it into the gutter would pull
+  // text that is actually on screen.
+  it("does not count a no-break space as marker separation", () => {
+    expect(linePrefix("-\u00a0tight")).toBe("");
+    expect(linePrefix("#\u00a0tight")).toBe("");
+  });
+
+  it("does not count a no-break space as indentation", () => {
+    expect(linePrefix("\u00a0 leading")).toBe("");
+  });
 });
