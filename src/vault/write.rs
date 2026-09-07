@@ -1,5 +1,6 @@
 mod assets;
 mod attachments;
+mod frontmatter;
 mod fs_ops;
 mod notes;
 mod paths;

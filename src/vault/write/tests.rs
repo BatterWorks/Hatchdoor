@@ -309,10 +309,12 @@ fn update_note_frontmatter_merges_top_level_keys_and_keeps_the_body_byte_for_byt
         .expect("frontmatter update");
 
     let updated = fs::read_to_string(entry.path).expect("read");
-    // serde_json maps serialize deterministically (keys sorted); nested values are replaced wholesale.
+    // ADR-22: only the named keys move. `title` and `tags` keep their place and
+    // their block-list style; `nested` is replaced wholesale in its own; the new
+    // `status` lands after the last existing key.
     assert_eq!(
         updated,
-        "---\nnested:\n  replaced: wholesale\nstatus: active\ntags:\n- alpha\ntitle: Home\n---\n\n# Body\nsecret body text\n"
+        "---\ntitle: Home\ntags:\n  - alpha\nnested:\n  replaced: wholesale\nstatus: active\n---\n\n# Body\nsecret body text\n"
     );
     assert!(updated.ends_with("secret body text\n"), "body is unchanged");
     assert_eq!(
@@ -356,8 +358,8 @@ fn update_note_frontmatter_creates_a_block_on_a_note_without_one() {
 
     let updated = fs::read_to_string(&entry.path).expect("read");
     assert!(
-        updated.starts_with("---\ntags:\n"),
-        "frontmatter block created: {updated}"
+        updated.starts_with("---\ntags: [one, two]\n---\n"),
+        "frontmatter block created, new list on one line: {updated}"
     );
     assert!(
         updated.ends_with("# Body only\nplain body\n"),
@@ -375,12 +377,99 @@ fn update_note_frontmatter_strips_the_block_when_the_last_keys_are_deleted() {
 
     update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
 
-    let updated = fs::read_to_string(&entry.path).expect("read");
-    assert!(
-        !updated.contains("---"),
-        "empty frontmatter block is removed entirely: {updated:?}"
+    // The whole block goes, closing marker and its newline included. Asserting
+    // the exact bytes rather than `ends_with` is what catches the block leaving
+    // a blank first line behind, which is what it used to do.
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
+        "\nremaining body\n"
     );
-    assert!(updated.ends_with("remaining body\n"));
+}
+
+#[test]
+fn update_note_frontmatter_strips_the_block_without_prepending_a_blank_line() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\nonly: key\n---\nbody starts here\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("only".to_string(), serde_json::Value::Null);
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
+        "body starts here\n"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_keeps_a_crlf_note_on_crlf_throughout() {
+    // `update_frontmatter` never runs content through the whole-note line
+    // ending normalisation, so a CRLF note reaches this primitive as it is
+    // written on disk and has to leave as it arrived: creating a block,
+    // editing one, and stripping one.
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "# Body only\r\nplain body\r\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+
+    let mut created = serde_json::Map::new();
+    created.insert("tags".to_string(), serde_json::json!(["one", "two"]));
+    update_note_frontmatter(&entry, created, &content_hash(original)).expect("create");
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    assert_eq!(
+        updated,
+        "---\r\ntags: [one, two]\r\n---\r\n# Body only\r\nplain body\r\n"
+    );
+
+    let mut edited = serde_json::Map::new();
+    edited.insert("status".to_string(), serde_json::json!("active"));
+    update_note_frontmatter(&entry, edited, &content_hash(&updated)).expect("edit");
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    assert_eq!(
+        updated,
+        "---\r\ntags: [one, two]\r\nstatus: active\r\n---\r\n# Body only\r\nplain body\r\n"
+    );
+
+    let mut stripped = serde_json::Map::new();
+    stripped.insert("tags".to_string(), serde_json::Value::Null);
+    stripped.insert("status".to_string(), serde_json::Value::Null);
+    update_note_frontmatter(&entry, stripped, &content_hash(&updated)).expect("strip");
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
+        original,
+        "stripping the block leaves the note exactly as it started"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_strips_a_block_whose_marker_line_has_trailing_spaces() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\nonly: key\n---  \nbody starts here\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("only".to_string(), serde_json::Value::Null);
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
+        "body starts here\n",
+        "the whole marker line goes, trailing spaces included"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_strips_a_block_that_ends_the_file() {
+    let tmp = TempDir::new().expect("tempdir");
+    // No newline after the closing marker, so there is none to drop.
+    let original = "---\nonly: key\n---";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("only".to_string(), serde_json::Value::Null);
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    assert_eq!(fs::read_to_string(&entry.path).expect("read"), "");
 }
 
 #[test]
@@ -429,10 +518,10 @@ fn update_note_frontmatter_warns_when_duplicate_keys_are_collapsed() {
 
 #[test]
 fn update_note_frontmatter_round_trips_edge_case_values_without_changing_their_types() {
-    // A merge re-serializes the whole block, so every untouched value makes a
-    // parse -> serialize -> parse trip. Style may change (that is documented);
-    // the value and its type may not, or a note gains or loses meaning behind
-    // its author's back.
+    // Since ADR-22 an untouched value makes no round trip at all: its bytes are
+    // copied. This test keeps checking the parsed values as well as the bytes,
+    // because both are promises and the byte assertion alone would not say that
+    // the note still means what it did.
     let tmp = TempDir::new().expect("tempdir");
     let original = concat!(
         "---\n",
@@ -488,39 +577,123 @@ fn update_note_frontmatter_round_trips_edge_case_values_without_changing_their_t
         "the merged key is present: {updated}"
     );
 
-    // Reparsing with the same crate would hide an emitter change that is
-    // stable under its own reader, so pin the bytes it writes as well. This
-    // block is what serde_yaml 0.9 emitted for the same input; it is the
-    // assertion that would fail if the swap were not behaviour preserving.
+    // The old canary here pinned the emitter's canonical output, because the
+    // whole block used to be re-emitted. Nothing is re-emitted now, so the
+    // stronger assertion is available: the original bytes, plus the one line
+    // the caller asked for. `float: 1.50` and `quoted_number: "123"` are the
+    // two that a round trip through any YAML emitter would quietly rewrite.
     assert_eq!(
         updated,
+        original.replace("---\n\nbody text\n", "status: active\n---\n\nbody text\n"),
+        "every unnamed key keeps the bytes its author wrote"
+    );
+    assert!(
+        updated.contains("float: 1.50\n") && updated.contains("quoted_number: \"123\"\n"),
+        "value style survives verbatim: {updated}"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_leaves_an_obsidian_style_block_alone_apart_from_the_named_key() {
+    // The reproduction from #257, end to end through the write primitive.
+    let tmp = TempDir::new().expect("tempdir");
+    let original = concat!(
+        "---\n",
+        "tags: [type/project, status/active, domain/plans, topic/kids]\n",
+        "# when this project started\n",
+        "created: 2026-03-18\n",
+        "---\n",
+        "body\n",
+    );
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("status".to_string(), serde_json::json!("active"));
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    assert_eq!(
+        updated,
+        original.replace("---\nbody\n", "status: active\n---\nbody\n"),
+        "the added key is the only difference, comment included: {updated}"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_deletes_only_the_lines_the_key_owned() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = concat!(
+        "---\n",
+        "title: Home\n",
+        "tags:\n",
+        "  - alpha\n",
+        "  - beta\n",
+        "\n",
+        "# survives the delete above it\n",
+        "created: 2026-03-18\n",
+        "---\n",
+        "body\n",
+    );
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("tags".to_string(), serde_json::Value::Null);
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
         concat!(
             "---\n",
-            "aliases:\n",
-            "- Alt Name\n",
-            "bare_number: 123\n",
-            "colon_in_value: 'key: value'\n",
-            "date: 2026-08-29\n",
-            "float: 1.5\n",
-            "multiline: |\n",
-            "  first line\n",
-            "  second line\n",
-            "nested:\n",
-            "  deeper:\n",
-            "    count: 2\n",
-            "    label: '2'\n",
-            "  keep: me\n",
-            "quoted_bool: 'true'\n",
-            "quoted_number: '123'\n",
-            "status: active\n",
-            "tags:\n",
-            "- alpha\n",
-            "unicode: réseau — 日本語 🌱\n",
-            "---\n",
+            "title: Home\n",
             "\n",
-            "body text\n",
-        ),
-        "emitter output is byte-stable across the crate swap"
+            "# survives the delete above it\n",
+            "created: 2026-03-18\n",
+            "---\n",
+            "body\n",
+        )
+    );
+}
+
+#[test]
+fn update_note_frontmatter_refuses_a_named_duplicate_key_by_name_without_touching_the_file() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\nkeep: first\nkeep: second\nother: value\n---\nbody\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("keep".to_string(), serde_json::json!("third"));
+
+    let error = update_note_frontmatter(&entry, updates, &content_hash(original))
+        .expect_err("a duplicated key cannot be edited unambiguously");
+    let WriteError::InvalidInput(message) = error else {
+        panic!("expected an invalid-input refusal, got {error:?}");
+    };
+    assert!(
+        message.contains("'keep'") && message.contains("ambiguous"),
+        "the refusal names the key and says why: {message}"
+    );
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
+        original,
+        "a refused call writes nothing"
+    );
+
+    // The same note still takes an edit to a key that is not ambiguous, and
+    // still reports the duplicate as a quality warning.
+    let mut other = serde_json::Map::new();
+    other.insert("other".to_string(), serde_json::json!("changed"));
+    let outcome =
+        update_note_frontmatter(&entry, other, &content_hash(original)).expect("unambiguous key");
+    assert!(
+        outcome
+            .quality_warnings
+            .iter()
+            .any(|warning| warning.contains("duplicate key")),
+        "the duplicate is still warned about: {:?}",
+        outcome.quality_warnings
+    );
+    assert_eq!(
+        fs::read_to_string(&entry.path).expect("read"),
+        "---\nkeep: first\nkeep: second\nother: changed\n---\nbody\n"
     );
 }
 
