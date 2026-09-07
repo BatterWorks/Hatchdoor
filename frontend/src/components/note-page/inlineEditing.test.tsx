@@ -988,3 +988,105 @@ describe("multi-line list items are addressed per line (D25a)", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 });
+
+describe("the caret a click enters at (#269)", () => {
+  const SPLIT = "See **alias** TAILWORD here.\n";
+  const PLAIN = "See alias TAILWORD here.\n";
+  // Offset 5 in " TAILWORD here." is the W the pointer is over. Across the
+  // whole rendered block that same character is offset 14, and only the
+  // block-wide reading maps onto the W in the source.
+  const OFFSET_IN_NODE = 5;
+
+  /**
+   * Makes the browser report `node`/`offset` for any point, the way it does
+   * over a real glyph. jsdom implements neither caret API, so the click path
+   * cannot otherwise reach the code that reads them.
+   */
+  function stubCaretApi(
+    name: "caretPositionFromPoint" | "caretRangeFromPoint",
+    node: Node,
+    offset: number,
+  ): void {
+    const reported =
+      name === "caretPositionFromPoint"
+        ? { offsetNode: node, offset }
+        : { startContainer: node, startOffset: offset };
+    Object.defineProperty(document, name, {
+      configurable: true,
+      value: () => reported,
+    });
+    stubbed.push(name);
+  }
+
+  const stubbed: string[] = [];
+  afterEach(() => {
+    for (const name of stubbed.splice(0)) {
+      delete (document as unknown as Record<string, unknown>)[name];
+    }
+  });
+
+  /** The ` TAILWORD here.` text node, which is what a click on the W hits. */
+  function tailNode(): Node {
+    const block = screen.getByText(/TAILWORD/);
+    const tail = block.lastChild;
+    if (!tail) {
+      throw new Error("the rendered block has no trailing text node");
+    }
+    return tail;
+  }
+
+  it("measures the reported node across the block, not within it", () => {
+    render(<NoteHarness initialContent={SPLIT} />);
+    const block = screen.getByText(/TAILWORD/);
+    stubCaretApi("caretPositionFromPoint", tailNode(), OFFSET_IN_NODE);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    // 18 is the W of TAILWORD in `See **alias** TAILWORD here.`; the
+    // node-relative 5 would have landed on the first * of the bold markers.
+    expect(caretPos()).toBe(18);
+  });
+
+  it("measures it the same way on the WebKit caret API", () => {
+    render(<NoteHarness initialContent={SPLIT} />);
+    const block = screen.getByText(/TAILWORD/);
+    stubCaretApi("caretRangeFromPoint", tailNode(), OFFSET_IN_NODE);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    expect(caretPos()).toBe(18);
+  });
+
+  it("leaves a single-text-node block where it already landed", () => {
+    render(<NoteHarness initialContent={PLAIN} />);
+    const block = screen.getByText(/TAILWORD/);
+    stubCaretApi("caretPositionFromPoint", tailNode(), 14);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    expect(caretPos()).toBe(14);
+  });
+
+  it("takes no caret preference from a node in another block", () => {
+    render(<NoteHarness initialContent={`Elsewhere.\n\n${SPLIT}`} />);
+    const block = screen.getByText(/TAILWORD/);
+    const elsewhere = screen.getByText("Elsewhere.").firstChild;
+    stubCaretApi("caretPositionFromPoint", elsewhere!, 3);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    // No preference opens the block with the default caret, at the end.
+    expect(caretPos()).toBe("See **alias** TAILWORD here.".length);
+  });
+
+  it("takes no caret preference from an element node", () => {
+    render(<NoteHarness initialContent={SPLIT} />);
+    const block = screen.getByText(/TAILWORD/);
+    // On an element the offset counts children, not characters.
+    stubCaretApi("caretPositionFromPoint", block, 1);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    expect(caretPos()).toBe("See **alias** TAILWORD here.".length);
+  });
+});
