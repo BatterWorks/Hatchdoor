@@ -1,12 +1,13 @@
 import {
   EXPANDED_FOLDERS_KEY,
   EXPLORER_SCROLL_TOP_KEY,
+  LAST_NOTE_BY_VAULT_KEY,
   LAST_NOTE_KEY,
   LEGACY_BROWSER_STATE_CLEARED_KEY,
   RECENT_NOTES_KEY,
   VAULT_SCOPE_KEY,
 } from "../app/constants";
-import type { RecentNote, VaultScope } from "../types";
+import type { RecentNote, VaultId, VaultScope } from "../types";
 
 export function getStoredNumber(
   key: string,
@@ -104,6 +105,68 @@ export function getStoredLastNote(): { vaultId: string; slug: string } | null {
     return { vaultId: last.vaultId, slug: last.slug };
   } catch {
     return null;
+  }
+}
+
+/** Every Vault's last-viewed note, as `vaultId -> slug`, ignoring any entry
+ * whose shape no longer checks out. Kept apart from `getStoredLastNote`'s
+ * single landing note: that one answers "where was I", this one answers
+ * "where was I in *this* Vault", which is what a scope switch needs. */
+export function getStoredLastNotesByVault(): Record<VaultId, string> {
+  const raw = getStoredString(LAST_NOTE_BY_VAULT_KEY);
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: Record<VaultId, string> = {};
+    for (const [vaultId, slug] of Object.entries(parsed)) {
+      if (vaultId.length > 0 && typeof slug === "string" && slug.length > 0) {
+        result[vaultId] = slug;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** The note `vaultId` was last left on, or null when that Vault has not been
+ * read in this browser yet. */
+export function getStoredLastNoteForVault(vaultId: VaultId): string | null {
+  return getStoredLastNotesByVault()[vaultId] ?? null;
+}
+
+/** Record `slug` as the note `vaultId` was last left on. */
+export function rememberLastNoteForVault(vaultId: VaultId, slug: string): void {
+  const current = getStoredLastNotesByVault();
+  if (current[vaultId] === slug) {
+    return;
+  }
+  writeLastNotesByVault({ ...current, [vaultId]: slug });
+}
+
+/** Drop the remembered note of every Vault that is no longer in the
+ * collection. Same reasoning as `clearStoredLastNote`: a disconnected Vault
+ * can only be restored into "Vault definition was not found", and without
+ * this the map keeps one entry per Vault ever connected, forever. */
+export function pruneStoredLastNotesByVault(knownVaultIds: VaultId[]): void {
+  const current = getStoredLastNotesByVault();
+  const known = new Set(knownVaultIds);
+  const kept = Object.fromEntries(
+    Object.entries(current).filter(([vaultId]) => known.has(vaultId)),
+  );
+  if (Object.keys(kept).length === Object.keys(current).length) {
+    return;
+  }
+  writeLastNotesByVault(kept);
+}
+
+function writeLastNotesByVault(notes: Record<VaultId, string>): void {
+  try {
+    window.localStorage.setItem(LAST_NOTE_BY_VAULT_KEY, JSON.stringify(notes));
+  } catch {
+    // Ignore storage failures (private mode, disabled storage).
   }
 }
 

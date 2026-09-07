@@ -12,6 +12,7 @@ import {
   Route,
   Routes,
   useLocation,
+  useMatch,
   useNavigate,
 } from "react-router-dom";
 
@@ -36,8 +37,11 @@ import {
   getStoredRecentNotes,
   clearStoredLastNote,
   getStoredLastNote,
+  getStoredLastNoteForVault,
   getStoredExpandedFolders,
   isEditableTarget,
+  pruneStoredLastNotesByVault,
+  rememberLastNoteForVault,
 } from "./lib/storage";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useTheme } from "./hooks/useTheme";
@@ -98,6 +102,10 @@ function VaultWorkspace({
   const [editRequestId, setEditRequestId] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
+  // The one route that shows a note, and so the one state a scope switch is
+  // allowed to navigate out of. Matched by the router itself rather than by a
+  // second spelling of the path.
+  const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
@@ -383,6 +391,9 @@ function VaultWorkspace({
       LAST_NOTE_KEY,
       JSON.stringify({ vaultId: activeNote.vaultId, slug: activeNote.slug }),
     );
+    // The same note again, filed under its own Vault: the landing redirect
+    // above needs one note, a scope switch needs one per Vault.
+    rememberLastNoteForVault(activeNote.vaultId, activeNote.slug);
   }, [activeNote]);
 
   useEffect(() => {
@@ -415,6 +426,55 @@ function VaultWorkspace({
       { replace: true },
     );
   }, [location.pathname, navigate, vaults, vaultsLoading]);
+
+  useEffect(() => {
+    // A departed Vault's remembered note is unusable for the same reason the
+    // landing restore forgets one: the note route answers "Vault definition
+    // was not found". Dropping it here also keeps the map from holding an
+    // entry per Vault ever connected. An empty browsing list is never
+    // evidence of that — a broken registry and a paused-everything
+    // collection both produce one — so it forgets nothing at all rather than
+    // everything.
+    if (vaultsLoading || hasRegistryRecovery || vaults.length === 0) {
+      return;
+    }
+    pruneStoredLastNotesByVault(vaults.map((vault) => vault.vault_id));
+  }, [hasRegistryRecovery, vaults, vaultsLoading]);
+
+  // Narrowing the browsing scope to one Vault carries the reader with it: the
+  // note that Vault was last left on comes back, the same restore the landing
+  // redirect does on a fresh load, and a Vault with nothing remembered lands
+  // on the empty state rather than leaving the previous Vault's note on
+  // screen. Only from a note page — a scope pick made in Settings, on the
+  // Graph or in Statistics is a filter, not a request to go and read
+  // something. Widening back to `all` moves nobody: it adds Vaults to what is
+  // listed, it does not choose one.
+  const handleScopeChange = useCallback(
+    (next: VaultScope) => {
+      setScope(next);
+      if (
+        next === scope ||
+        next === "all" ||
+        activeNote?.vaultId === next ||
+        !onNoteRoute
+      ) {
+        return;
+      }
+      const slug = getStoredLastNoteForVault(next);
+      if (!slug) {
+        // Nothing is open any more, so nothing should be restored: forgetting
+        // the landing note keeps the empty state on screen both now (the
+        // landing redirect finds nothing to put back) and after a reload,
+        // which would otherwise return the note of the Vault just left while
+        // the selector still reads the new one.
+        clearStoredLastNote();
+        navigate("/");
+        return;
+      }
+      navigate(`/v/${encodeURIComponent(next)}/n/${encodeURIComponent(slug)}`);
+    },
+    [activeNote?.vaultId, navigate, onNoteRoute, scope, setScope],
+  );
 
   const handleScopeZoneCollapsedChange = useCallback((next: boolean) => {
     setScopeZoneCollapsed(next);
@@ -683,7 +743,7 @@ function VaultWorkspace({
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
         onCycleTheme={cycleTheme}
-        onScopeChange={setScope}
+        onScopeChange={handleScopeChange}
         viewingVaultId={activeNote?.vaultId}
         vaultNoteCounts={vaultNoteCounts}
         scopeSheetOpen={scopeSheetOpen}
@@ -759,7 +819,7 @@ function VaultWorkspace({
           }}
           vaults={vaults}
           scope={scope}
-          onScopeChange={setScope}
+          onScopeChange={handleScopeChange}
           viewingVaultId={activeNote?.vaultId}
           vaultNoteCounts={vaultNoteCounts}
           scopeZoneCollapsed={scopeZoneCollapsed}

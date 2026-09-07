@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Switching the Vault selector now takes you to that Vault's own last note. Until now it narrowed the sidebar and left the previous Vault's note sitting on screen, so every switch meant hunting for where you had been. Hatchdoor already remembers the note you were last reading and returns you to it when you reopen the app; it now remembers one per Vault and applies the same rule to a switch. Pick a Vault you have not read anything in yet and you land on the empty start page with that Vault's notes in the explorer, rather than on someone else's note. Choosing **All Vaults** moves you nowhere, and neither does switching while you are in Settings, Statistics or the graph, where the selector is a filter rather than a request to go and read something. A Vault that you remove or pause loses its remembered note, and a note deleted since you last read it shows as missing once, until you open another note in that Vault. [#291]
 - Agents can now tell which build they are talking to. The MCP server instructions end with the running version, and `get_stats` reports it as `hatchdoor_version`. Release builds report the plain version (for example `2.6.1`); images built with the new `GIT_SHA` Docker build arg report it as `2.6.1 (dev abc1234)`, which also appears in the startup log and MCP `serverInfo`.
 
 ### Under the hood
