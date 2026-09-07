@@ -3156,6 +3156,7 @@ escalation), Markdown/heading/search/state tests,
 - `frontend/src/components/note-page/EditableBlock.tsx`
 - `frontend/src/components/note-page/InlineEditorProvider.tsx`
 - `frontend/src/components/note-page/blockEditorSetup.ts`
+- `frontend/src/components/note-page/editorFont.ts`
 - `frontend/src/components/note-page/SaveState.tsx`
 - `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
@@ -3181,6 +3182,20 @@ for drafts that predate Vault qualification, consumed by Settings'
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding
 `resolvePrimaryVaultId`'s inference for that one dialog session.
+
+`lib/linePrefix.ts`'s `linePrefix` (#286) reads a line's whole invisible
+leading run - its indentation, then any list marker, task box, heading hashes,
+or quote arrows behind it - rather than only a marker and the indent ahead of
+one. Indentation counts with no marker required, so a wrapped list item's
+continuation line (addressed alone under D25a) reports the indent that has no
+rendered counterpart. `caretMap.ts` consumes it directly; its former private
+`invisiblePrefix`, which widened the answer for the caret only, is gone, and the
+two no longer disagree on an indented heading or quote. `note-page/editorFont.ts`'s
+`resolveFont` is the other half of making that hang land: `getComputedStyle().font`
+serializes empty whenever a longhand cannot fold back into the shorthand, which
+the heading fonts do through `font-variation-settings`, so the longhands are
+composed instead. `BlockInput.tsx` hangs nothing for a `code block` unit, whose
+leading spaces are partly rendered.
 
 `hooks/useWriteMode.ts` needs no demo-mode branch of its own (#152):
 `GET .../write-capabilities` carries the same `demo_guard` layer every
@@ -3239,7 +3254,8 @@ is still settling behind a wikilink resolve.
 **Validation:** write API (`writeApi.test.ts`, including the demo_read_only
 code-carrying cases), editor, action dialog, upload, draft, path,
 frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
-`caretMap`, `caretPoint`, `editHistory`, `linePrefix`, `useNoteAutosave`,
+`caretMap`, `caretPoint`, `editHistory`, `linePrefix`, `editorFont`,
+`useNoteAutosave`,
 `attachmentDrop`, `inlineEditing`, and `properties` tests;
 `useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
 `App.demo-mode.test.tsx` (#152), and full frontend checks.

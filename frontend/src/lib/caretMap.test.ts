@@ -132,6 +132,29 @@ describe("blocks whose source spans more than one line (#284)", () => {
     ).toBe(18);
   });
 
+  // #286 folded the indent rule into `linePrefix`, so an indented heading or
+  // quote is now read the same way on both sides: the indent and the marker
+  // behind it are one invisible run.
+  it("skips the indent and the hashes of an indented heading", () => {
+    expect(sourceOffsetForRenderedOffset("  # A heading", 2)).toBe(6);
+  });
+
+  it("skips the indent and the arrow of an indented quote", () => {
+    expect(sourceOffsetForRenderedOffset("  > quoted text", 0)).toBe(4);
+  });
+
+  it("skips the indent and the marker of an indented task box", () => {
+    expect(sourceOffsetForRenderedOffset("  - [ ] todo", 0)).toBe(8);
+  });
+
+  // A marker is one only when a space or tab follows it. A no-break space
+  // renders as a visible glyph, so "-\u00a0tight" is a line of text: nothing is
+  // invisible and the caret lands on the hyphen itself.
+  it("reads a hyphen followed by a no-break space as text, not a marker", () => {
+    expect(sourceOffsetForRenderedOffset("-\u00a0tight", 0)).toBe(0);
+    expect(sourceOffsetForRenderedOffset("- loose", 0)).toBe(2);
+  });
+
   it("strips the quote arrow of every line, not only the first", () => {
     // Rendered "first line\nsecond line"; offset 11 is the s of second.
     expect(
