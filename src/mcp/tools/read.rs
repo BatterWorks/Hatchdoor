@@ -26,9 +26,10 @@ use crate::vault_management::{
     CreateVaultRequest, EditVaultRequest, HttpsCredentialsPatch, VaultCollectionManagement,
 };
 use crate::vault_read::{
-    AssetPathError, AssetReadError, OffloadedReadError, ResolvedAsset, TreeScope, VaultReadError,
-    VaultReads, VaultResolveResponse, VaultScope, asset_download_path, clamp_recent_limit,
-    clamp_search_limit, clamp_search_per_note_cap, clamp_tree_max_depth, note_not_found,
+    AssetPathError, AssetReadError, NoteQuery, NoteQueryCondition, OffloadedReadError,
+    ResolvedAsset, TreeScope, VaultReadError, VaultReads, VaultResolveResponse, VaultScope,
+    asset_download_path, clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap,
+    clamp_tree_max_depth, note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -120,6 +121,19 @@ struct SearchArgs {
 #[serde(deny_unknown_fields)]
 struct RecentArgs {
     scope: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `query_notes`' arguments. The conditions are the query; everything else
+/// shapes the answer.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryArgs {
+    scope: String,
+    conditions: Vec<NoteQueryCondition>,
+    #[serde(default)]
+    properties: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -395,6 +409,30 @@ pub(super) async fn recently_modified_tool(
         .await
     {
         Ok(projection) => Ok(tool_result::<results::RecentlyModifiedResult>(&projection)),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn query_notes_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: QueryArgs = parse("query_notes", arguments)?;
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    let request = NoteQuery {
+        conditions: args.conditions,
+        properties: args.properties,
+        // Clamped by the core, so the two adapters cannot bound it differently.
+        limit: args.limit,
+    };
+    match VaultReads::new(&state)
+        .read(move |core| core.query_notes(scope, &request))
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::QueryNotesResult>(&projection)),
         Err(error) => read_failure(error),
     }
 }
@@ -1010,6 +1048,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"list_note_attachments", "description":"List the existing attachments one Note references, without returning the Note's full content. Every non-Markdown file the Note points at counts, not only the types get_attachment can fetch back.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an HTTP download_url resolved against this MCP endpoint's scheme, host, and port; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        query_notes_tool_schema(),
         json!({"name":"recently_modified", "description":"List recently modified Notes for one Vault or all enabled Vaults.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
     ]
 }
@@ -1085,6 +1124,77 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified and search_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
+}
+
+/// `query_notes` gets its own builder rather than a one-line entry: the tool is
+/// only usable if an agent can tell it apart from `search_notes`, and the
+/// operators' exact semantics — which one selects an absent property, what a
+/// list compares equal to — are not guessable from their names.
+fn query_notes_tool_schema() -> Value {
+    json!({
+        "name": "query_notes",
+        "description": "Select the Notes in one Vault, or all enabled Vaults, whose tags, path, or frontmatter properties satisfy stated conditions. This selects rather than searches: a Note either qualifies or it does not, results are unranked and in a stable order, and no embedding is involved, so a Vault that is still being indexed answers in full. Use it when the answer is decided by what a Note is - every note tagged project/active, everything under 40-reference, notes whose review-date is before today. Use search_notes when the answer is decided by what a Note says. Unlike search_notes this reads every layer, so it selects demoted Notes that a default search would not return, and it takes no layers argument.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": scope_schema(),
+                "conditions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": "Every condition must hold for a Note to qualify. At least one is required; there is no whole-Vault query - use get_tree or recently_modified for that.",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"const": "tag"},
+                                    "tag": {"type": "string", "minLength": 1, "description": "A tag, with or without its leading #. Matched case-insensitively and includes nested tags: project selects project and project/active, never projects."}
+                                },
+                                "required": ["type", "tag"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"const": "path_prefix"},
+                                    "prefix": {"type": "string", "minLength": 1, "description": "A Vault-relative folder, such as 40-reference/Parenting. Matched case-insensitively and by whole path segment, so notes never selects notes-archive."}
+                                },
+                                "required": ["type", "prefix"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"const": "property"},
+                                    "name": {"type": "string", "minLength": 1, "description": "A frontmatter property name, matched exactly and case-sensitively. tags and aliases are refused here rather than answering missing for every Note: select by tag with a tag condition, and name either in properties to have it returned."},
+                                    "operator": {
+                                        "type": "string",
+                                        "enum": ["eq", "ne", "lt", "lte", "gt", "gte", "exists", "missing", "empty", "not_empty"],
+                                        "description": "eq/ne/lt/lte/gt/gte each need a value; exists/missing/empty/not_empty must not carry one. Only missing selects a Note that lacks the property - ne does not. eq against a multi-value property matches when any entry equals the value. Ordered comparison works between two numbers, two strings, or two booleans, and selects nothing across types; strings compare byte-wise, which orders ISO-8601 dates correctly. empty means present but null, blank, an empty list, or an empty mapping."
+                                    },
+                                    "value": {"description": "The value to compare against, for the six comparing operators."}
+                                },
+                                "required": ["type", "name", "operator"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                },
+                "properties": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 50,
+                    "default": [],
+                    "description": "Frontmatter property names to return on each row. A name a Note does not carry is omitted from that row rather than returned as null. tags and aliases may be named here and come back as lists.",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "Maximum rows to return. The response reports truncated: true when more Notes qualified."}
+            },
+            "required": ["scope", "conditions"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
 }
 
 fn collection_tool(name: &str, description: &str) -> Value {

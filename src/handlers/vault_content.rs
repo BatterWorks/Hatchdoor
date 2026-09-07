@@ -103,7 +103,7 @@ pub(crate) fn vault_read_error_response(error: VaultReadError) -> Response {
         "vault_not_found" | "note_not_found" => StatusCode::NOT_FOUND,
         "vault_disabled" => StatusCode::CONFLICT,
         "vault_scan_config_invalid" => StatusCode::INTERNAL_SERVER_ERROR,
-        "invalid_scope" | "invalid_search_query" | "invalid_layer_selection" => {
+        "invalid_scope" | "invalid_query" | "invalid_search_query" | "invalid_layer_selection" => {
             StatusCode::BAD_REQUEST
         }
         _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -478,6 +478,14 @@ mod tests {
             retryable: false,
         });
         assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+
+        let malformed_query = vault_read_error_response(VaultReadError {
+            code: "invalid_query".to_string(),
+            message: "a query needs at least one condition".to_string(),
+            vault_id: None,
+            retryable: false,
+        });
+        assert_eq!(malformed_query.status(), StatusCode::BAD_REQUEST);
 
         let invalid_layer = vault_read_error_response(VaultReadError {
             code: "invalid_layer_selection".to_string(),

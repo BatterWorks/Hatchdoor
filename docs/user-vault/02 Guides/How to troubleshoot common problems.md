@@ -84,7 +84,9 @@ If `next_attempt_at` is in the past by more than a minute or so, something is ge
 
 ## Search returns nothing, or not what you expected
 
-Before assuming something's broken: search only considers the **default surface** unless you explicitly ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search — see [[How to organize a Vault with layers]] for how to search across layers deliberately. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
+First, check you want a search at all. `search_notes` finds notes by meaning and ranks them; if what you actually want is every note carrying a tag, sitting in a folder, or holding a frontmatter property, that is `query_notes`, which selects rather than ranks and never comes back empty for want of a good enough match. It also reads every layer, so a demoted note it selects is one an ordinary search would not have shown you.
+
+If a search is what you want: search only considers the **default surface** unless you explicitly ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search — see [[How to organize a Vault with layers]] for how to search across layers deliberately. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
 
 ---
 
