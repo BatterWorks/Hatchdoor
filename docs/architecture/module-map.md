@@ -1428,6 +1428,13 @@ and embedder identity/dimensions.
 - SQLite is rebuildable and never authoritative (ADR-01).
 - Keep embedded SQLite, FTS5, sqlite-vec, WAL, one writer, and pooled
   query-only reads (ADR-06).
+- The reader pool is a ceiling on live SQLite handles, not a load-shedding
+  policy. A caller at `MAX_READ_CONNECTIONS` waits up to `READ_LEASE_WAIT` for
+  a slot and only then reports the pool as exhausted, so no read holds a slot
+  across slow work that does not touch the database. Embedding in particular
+  runs before the search core takes its snapshot: holding a slot across the
+  embedder's inference lock let four concurrent searches starve every other
+  read. Waiters are woken one at a time and not in arrival order.
 - Schema or embedder identity mismatch rebuilds rather than mixing data.
 - A refresh commits a coherent new read snapshot.
 - Shared semantic vectors have one embedder identity and dimension; a mismatch
@@ -1530,6 +1537,12 @@ and future Vault-scoped MCP adapters.
   semantic ranking.
 - Participant metadata, note projections, and KNN/FTS hits for one search
   response come from one pinned SQLite generation.
+- A semantic query is embedded before that generation is pinned, never while
+  holding it. Inference is serialized behind the embedder's own lock, so a
+  reader slot held across it is a slot no other request can use. The order
+  costs an embedding on a query whose Vaults turn out not to participate, and
+  reports an unhealthy embedder ahead of a bad layer name or an unavailable
+  single Vault, both of which need the pinned generation to detect.
 - A structure-only frontend Search pilot must not modify these paths.
 
 **Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
