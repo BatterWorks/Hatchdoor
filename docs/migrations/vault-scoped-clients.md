@@ -111,10 +111,16 @@ remains retired with no Vault-scoped replacement.
 ## MCP before and after
 
 The supported MCP catalogue is deliberately Vault-scoped. Retired scope-less
-tools (`query_notes`, `refresh_index`, `layer_diagnostics`, and
-`get_git_sync_status`) have no compatibility aliases. Surviving collection
-reads gain a required `scope`; exact reads, mutations, write-capability checks,
-and existing-Vault controls gain a required `vault_id`.
+tools (`refresh_index`, `layer_diagnostics`, and `get_git_sync_status`) have no
+compatibility aliases. Surviving collection reads gain a required `scope`;
+exact reads, mutations, write-capability checks, and existing-Vault controls
+gain a required `vault_id`.
+
+`query_notes` was retired alongside them and returned in #274 as a Vault-scoped
+collection read. It is not a compatibility alias: the scope-less arguments the
+pre-multi-Vault tool took are still refused, and its condition vocabulary is
+new. A client that used the old tool rewrites the call rather than adding a
+`scope` to it.
 
 Broad search across every enabled Vault:
 

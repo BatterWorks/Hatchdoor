@@ -927,7 +927,7 @@ the full backend checks.
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, explicit `VaultScope`,
 the common `VaultReadProjection` envelope, participant state/error types, and
@@ -942,7 +942,8 @@ a demo has no operator and no layer toggle, so a demoted Note is withheld from
 exact reads, links, resolve, and download (as an ordinary not-found, so
 withheld is indistinguishable from absent), and `BrowseSurface::restrict` drops
 its rows from a published snapshot before any projection reads it, covering
-tree, graph, recent, statistics, and a surviving search hit's outbound links. A
+tree, graph, recent, statistics, query, and a surviving search hit's outbound
+links. A
 link is dropped when either endpoint is withheld, since a surviving edge would
 name the hidden Note. `BrowseSurface::layer_selection` parses the caller's raw
 comma-separated layer tokens and clamps a restricted surface's selection to the
@@ -986,6 +987,25 @@ and survive `BrowseSurface` layer selection. A demo therefore cannot bypass
 its default-only Note surface by requesting a demoted, noise, or excluded asset
 directly; ordinary `Everything` reads retain the legacy contained-asset
 behavior.
+`query_notes` (#274) selects the Notes whose tags, path, and frontmatter
+properties satisfy every stated condition, restoring the capability the
+multi-Vault rewrite retired. It selects rather than ranks, and nothing in
+`src/vault_read/query.rs` reaches the retrieval path: conditions are tested
+against the published snapshot's structural rows, so a Vault whose generation
+carries no vectors answers in full and there is no score to order by. The
+condition vocabulary is `NoteQueryCondition` — a tag (nested-aware), a
+Vault-relative `path_prefix` (segment-aware and case-insensitive), or a
+property tested by one `PropertyOperator` — and the `NoteQueryResponse` rows are
+Vault-qualified, projected with the properties the caller named, ordered by
+path then Vault then slug, and flagged `truncated` when the clamped `limit`
+held Notes back. `CompiledQuery::compile` validates the whole query before any
+Vault is resolved, so a malformed one is the `invalid_query` refusal at every
+scope; the two shared tag primitives it normalises and matches with,
+`search::normalize_tag_path` and `search::tag_matches`, live in the shared
+search vocabulary so a query and the `#tag` search shorthand cannot disagree
+about what a nested tag is. The `limit` is clamped inside `compile` rather than by each adapter, so a
+caller cannot reach the core with a zero limit and be told its complete answer
+was truncated.
 `exact_note_frontmatter` and `note_attachments` are the surface-gated
 counterparts of the frontmatter and attachment-listing reads the MCP tools used
 to answer from a raw index build of their own (#188); both return `Ok(None)`
@@ -1043,14 +1063,17 @@ control-block-then-index-build sequence between `authoritative_index` and
 conditions.
 
 **Consumed dependencies:** the Vault runtime's authoritative per-Vault index,
-the shared cache's published Vault snapshot seam, and existing Vault note/link
-types.
+the shared cache's published Vault snapshot seam, existing Vault note/link
+types, and Runtime Search's two tag primitives (`normalize_tag_path`,
+`tag_matches`) for a query's tag condition. That last one is a dependency on
+the shared search *vocabulary*, not on retrieval: nothing here calls
+`VaultSearchCore`.
 
 **Consumers:** `handlers/vault_content.rs` (exact note/link/resolve reads,
 `vault_directory`, and the contained-asset route),
 `handlers/vault_collection_reads.rs` (the collection-read projections `trees`,
 `statistics`, `graphs`, `recently_modified`), and — since #188 — `mcp/tools/read.rs`
-for every one of the twelve Vault read tools. All three are thin adapters with
+for every one of the Vault read tools (`mcp::tools::READ_OPS`). All three are thin adapters with
 no read domain logic of their own. The core has no adapter or route ownership.
 
 **Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
@@ -1403,7 +1426,14 @@ commands when retrieval behavior may change.
 - `src/search/vault_scoped.rs`
 
 **Public contract:** the shared search vocabulary `SearchMode`,
-`LayerSelection`, `LayerInfo`, and `OutboundLink`. The Vault-qualified
+`LayerSelection`, `LayerInfo`, `OutboundLink`, and the two crate-internal tag
+primitives `normalize_tag_path` and `tag_matches` (#274). Those two say what a
+tag is and what "nested under it" means, which the Vault-read core's metadata
+query needs to answer a tag condition the way the indexer stored the tag.
+`vault_scoped::tag_results` keeps its own inline copy of the same predicate,
+because rewriting it would touch the retrieval path and cost an eval run
+(ADR-15) for no behaviour change; the two are held in step by review rather
+than by construction, so an edit to either is an edit to both. The Vault-qualified
 shared-core contract is `VaultSearchCore`, `VaultSearchRequest`,
 `VaultSearchResponse`, and `VaultSearchResult`; it uses the explicit
 `VaultScope` and common projection/participant envelope from the Vault-read
@@ -1416,8 +1446,9 @@ query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
 scope/envelope, and vault metadata/types.
 
 **Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
-`VaultSearchCore::search`), MCP search tools, offline evaluation runners, and
-future Vault-scoped MCP adapters.
+`VaultSearchCore::search`), MCP search tools, offline evaluation runners,
+`vault_read/query.rs` (the two tag primitives only, never the retrieval path),
+and future Vault-scoped MCP adapters.
 
 **Coordination paths:** `src/handlers/vault_collection_reads.rs`,
 `src/mcp/tools/read.rs`, cache query methods, and frontend Search contracts.
