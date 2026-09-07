@@ -30,8 +30,9 @@ export function sourceOffsetForCaretPoint(
     return null;
   }
 
-  const walker = root.ownerDocument.createTreeWalker(
-    root,
+  const measured = measuredRoot(root, node);
+  const walker = measured.ownerDocument.createTreeWalker(
+    measured,
     NodeFilter.SHOW_TEXT,
   );
   let before = 0;
@@ -42,4 +43,27 @@ export function sourceOffsetForCaretPoint(
     before += text.textContent?.length ?? 0;
   }
   return null;
+}
+
+/**
+ * The rendered text the offset is counted across, given where the caret landed.
+ *
+ * A fenced code block is the one editable unit the block editor wraps rather
+ * than clones, and the renderer fills that wrapper with a language label and a
+ * Copy button sitting above the code. Neither has a source character behind it,
+ * so counting their text shifted every offset in the block by their combined
+ * width (#284). Inside a `pre`, the `pre` holds all the source there is.
+ *
+ * Narrowed from the caret's node upwards rather than by looking for a `pre`
+ * under the block: a list item that contains a code block still measures across
+ * its own text when the click landed on that text.
+ *
+ * A click on the chrome itself has no `pre` above it and still counts the label
+ * and the button, so it lands somewhere in the code rather than on the language
+ * name it hit. Left alone: the label and the Copy button are deliberately not
+ * text targets, and the answer stays inside the block's own source.
+ */
+function measuredRoot(root: Element, node: Node): Element {
+  const pre = node.parentElement?.closest("pre");
+  return pre && root.contains(pre) ? pre : root;
 }
