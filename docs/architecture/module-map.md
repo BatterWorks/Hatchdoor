@@ -2617,6 +2617,23 @@ per-Vault namespacing of the shared `expandedFolders` record the accordion's
 folder-open memory needs. Unfolding a Vault never calls `setScope`, same
 invariant as the Scope zone's own narrow-scope call being the only one.
 
+Narrowing the scope to one Vault also moves the reader. `App.tsx`'s
+`handleScopeChange` wraps `setScope` at both call sites and, when the reader
+is on a note route, navigates to the note that Vault was last left on, or to
+`"/"` when that Vault has none remembered. `lib/storage.ts` holds that memory
+under `LAST_NOTE_BY_VAULT_KEY` as `vaultId -> slug`, written alongside
+`LAST_NOTE_KEY` whenever the open note changes and pruned to the current
+collection whenever discovery settles, for the reason `clearStoredLastNote`
+exists: a departed Vault's note only resolves to "Vault definition was not
+found". `LAST_NOTE_KEY` stays the single landing note the `"/"` redirect and
+the accordion's landing default read. Four cases move nobody: widening back
+to `all`, picking the Vault whose note is already open, an unchanged pick,
+and a pick made anywhere but a note route (Settings, Graph, Statistics, the
+empty landing), where the scope is a filter rather than a request to go and
+read something. A switch that lands on `"/"` marks the landing redirect's
+one-shot ref as spent, or that redirect would immediately restore the note of
+the Vault just left and undo the switch.
+
 The Scope zone renders at zero enabled Vaults too, not only above one
 (#150): `All Vaults` holds its place with no rows beneath it, in neutral
 ink, rather than disappearing along with the last Vault. It remains absent
