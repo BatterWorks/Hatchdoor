@@ -1,6 +1,8 @@
 import { Children, createElement, isValidElement, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 
 import { slugifyHeading } from "../../lib/noteHeadings";
+import { isNoteRoutePath } from "../../lib/notePath";
 import {
   CalloutOrQuote,
   CodeBlock,
@@ -60,12 +62,12 @@ export function createNoteMarkdownComponents(
       if (typeof href === "string" && href.startsWith("/__archived__/")) {
         const slug = href.slice("/__archived__/".length);
         return (
-          <a
+          <Link
             className="archived-link"
-            href={`/v/${encodeURIComponent(vaultId)}/n/${slug}`}
+            to={`/v/${encodeURIComponent(vaultId)}/n/${slug}`}
           >
             {children}
-          </a>
+          </Link>
         );
       }
       if (isExternalHref(href)) {
@@ -95,6 +97,13 @@ export function createNoteMarkdownComponents(
             </span>
           </a>
         );
+      }
+      // A link to another note is the same navigation the explorer performs,
+      // so it goes through the router. A bare anchor would take the browser
+      // out and back in, remounting the whole app and rebuilding every Vault
+      // tree in the sidebar to land on a note the router already had.
+      if (isNoteRouteHref(href)) {
+        return <Link to={href}>{children}</Link>;
       }
       return <a href={href}>{children}</a>;
     },
@@ -308,6 +317,16 @@ function holdsOnlyPdfEmbed(
   return isPdfHref(
     resolveAssetHref(vaultId, only.properties.src, noteRelativePath),
   );
+}
+
+// Only the note route is the router's to handle. Asset URLs under /api, and
+// in-page fragments, are the browser's, and routing them would either break
+// the download or resolve the fragment as a path.
+function isNoteRouteHref(href: string | undefined): href is string {
+  if (typeof href !== "string") {
+    return false;
+  }
+  return isNoteRoutePath(href.split(/[?#]/, 1)[0]);
 }
 
 function isPdfHref(href: string): boolean {
