@@ -2902,7 +2902,9 @@ resolve a lint rule against non-component exports from a component file) is
 consumed the same way by both: `Explorer.tsx`'s own active-path folder
 highlighting, and the shell's landing-Vault resolution, which needs it
 synchronously off the URL rather than waiting on `activeNote`'s own content
-fetch.
+fetch. Its `isNoteRoutePath` states the same route grammar
+without decoding it, for the note-page renderer deciding whether an href in a
+note body is a route the router should take.
 
 **Consumed dependencies:** shared API/error utilities, shared wire types,
 shared UI components (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`),
@@ -3049,6 +3051,22 @@ note navigation/rendering behavior, the editable-block component map produced by
 `createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one
 source line per rendered line for the two unit types addressed per line.
+A note link in a rendered body is a router navigation, not a browser one:
+`createNoteMarkdownComponents` emits `Link` for any href on the note route
+(`isNoteRoutePath` in `lib/notePath.ts` owns that grammar, shared with the
+explorer's active-path highlighting) and for the archived-note branch, so
+following one repaints the note pane alone instead of remounting the app and
+rebuilding every Vault tree. Every other href keeps a bare anchor on purpose:
+asset and PDF URLs under `/api`, in-page fragments, and external links, where
+handing the click to the browser is what the click means. Following a note
+link therefore no longer lets the browser resolve a `#heading` fragment, so
+`NotePage` makes that jump itself, once per history entry, gated on the body
+having settled onto the note the URL names and on the heading being on screen.
+That last check runs on every commit rather than on a dependency list: the
+order in which the note's fetch, its wikilink resolution and its render land
+differs between a cold visit and a warm one, and a subset of them named as
+deps makes the jump stop happening whenever the order shifts.
+
 A TOC click, mobile heading jump, or search deep link arms `NotePage`'s
 `tailArmed` state, rendered as `data-tail` on the article; `styles/note-content.css`
 reads it to add trailing scroll space only for that jump, so a heading near the
@@ -3126,7 +3144,8 @@ count disagrees with the span it claims is addressed whole rather than written t
 a guessed line.
 
 **Validation:** note-page unit tests, `NotePage.test.tsx` (write/read
-escalation), Markdown/heading/search/state tests,
+escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
+fragment jump), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 

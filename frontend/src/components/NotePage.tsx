@@ -822,6 +822,43 @@ export function NotePage({
     }
   }, [markdown, note?.slug, searchQuery, matchHeading, jumpToHeadingWithTail]);
 
+  // A wikilink carrying a heading arrives as a fragment. The browser used to
+  // resolve it on its own, back when following one meant loading the page
+  // again; routing the link keeps the app mounted, so the jump is ours to
+  // make.
+  //
+  // `settling` is what says the body on screen is still the note that was
+  // linked *from*: the note loads before its wikilinks resolve, and a heading
+  // of the same name in both notes would otherwise scroll the wrong one.
+  //
+  // Deliberately unconditional, rather than listing the states that might have
+  // put the heading on screen. The body appears once the note's fetch, its
+  // wikilink resolution and its render have all landed, in an order that has
+  // already changed once between a cold visit and a warm one; naming a subset
+  // of them means the jump silently stops happening when the order shifts
+  // again. The ref makes this a no-op after the jump, so the cost is one
+  // lookup per commit while a fragment is still waiting for its heading.
+  //
+  // The key is the history entry, not the note, so following the same link a
+  // second time jumps again the way the browser always re-jumped, while a
+  // content change under a reader who has since scrolled away leaves them
+  // where they are.
+  const hashTarget = location.hash
+    ? decodeURIComponent(location.hash.slice(1))
+    : "";
+  const hashJumpKey = `${location.key}:${note?.slug ?? ""}#${hashTarget}`;
+  const lastHashJumpRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (!hashTarget || settling || lastHashJumpRef.current === hashJumpKey) {
+      return;
+    }
+    if (!noteBodyRef.current?.querySelector(`#${CSS.escape(hashTarget)}`)) {
+      return;
+    }
+    lastHashJumpRef.current = hashJumpKey;
+    jumpToHeadingWithTail(hashTarget);
+  });
+
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
       return;
