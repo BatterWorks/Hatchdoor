@@ -30,8 +30,8 @@ use crate::vault_management::{
     VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
 };
 use crate::vault_read::{
-    VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote, VaultResolveResponse,
-    VaultStatistics, VaultTree,
+    NoteQueryResponse, VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote,
+    VaultResolveResponse, VaultStatistics, VaultTree,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,9 +44,20 @@ pub type GetNoteResult = crate::vault_read::VaultQualifiedNote;
 pub type GetNoteLinksResult = VaultQualifiedLinks;
 pub type ResolveWikilinkResult = VaultResolveResponse;
 pub type GetTreeResult = VaultReadProjection<Vec<VaultTree>>;
-pub type GetStatsResult = VaultReadProjection<Vec<VaultStatistics>>;
+pub type GetStatsResult = StampedStatsResult;
+
+/// `get_stats` stamps the running instance's version onto the shared read
+/// envelope so an agent can learn which build it is talking to without
+/// operator access — nightly dev images report `"X.Y.Z (dev <sha>)"`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct StampedStatsResult {
+    pub hatchdoor_version: String,
+    #[serde(flatten)]
+    pub projection: VaultReadProjection<Vec<VaultStatistics>>,
+}
 pub type GetGraphResult = VaultReadProjection<Vec<VaultGraph>>;
 pub type RecentlyModifiedResult = VaultReadProjection<Vec<VaultRecentNote>>;
+pub type QueryNotesResult = VaultReadProjection<NoteQueryResponse>;
 pub type CreateVaultResult = VaultMutationResponse;
 pub type EditVaultResult = VaultMutationResponse;
 pub type EnableVaultResult = VaultMutationResponse;
@@ -299,6 +310,7 @@ output_schemas! {
     "get_stats" => GetStatsResult,
     "get_graph" => GetGraphResult,
     "recently_modified" => RecentlyModifiedResult,
+    "query_notes" => QueryNotesResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
     "get_attachment" => GetAttachmentResult,
@@ -378,12 +390,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 40,
-            "3 setup + 13 read + 1 batch + 8 management + 15 write tools"
+            total, 41,
+            "3 setup + 14 read + 1 batch + 8 management + 15 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 40, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 41, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
@@ -587,7 +599,7 @@ mod schema_tests {
                 "search": "ready",
                 "git": "disabled",
                 "watcher": "running",
-                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false}
+                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false, "commit": false, "sync": false}
             },
             "registry_revision": 3,
             "collection_revision": 9

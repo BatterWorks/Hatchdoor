@@ -25,8 +25,15 @@ Start with `list_vaults` and retain immutable `vault_id` values; there is no
 selected or default Vault. Every collection read uses `scope` (one Vault ID or
 `all`), and every exact read or mutation uses one `vault_id`.
 
-Use `search_notes` for most questions. There is no scope-less metadata-query
-tool.
+Use `search_notes` for most questions.
+
+Use `query_notes` when a note's tags, folder or properties decide the answer on
+their own: every note carrying a
+tag, everything under a folder, notes whose frontmatter property has a given
+value or has passed a date. It selects rather than ranks, so it never comes back
+empty for want of a good enough match, and it needs no vectors, so it answers in
+full on a Vault that is still indexing. `search_notes` is for what a note says;
+`query_notes` is for what a note is. Neither takes the other's arguments.
 
 Use semantic search when the user describes an idea, topic, project, or relationship in natural language. Phrase the query as a sentence that explains what you are trying to find.
 
@@ -49,7 +56,7 @@ Use `get_tree` only when folder structure or broad navigation is the task.
 
 ## Stale collection reads
 
-`search_notes`, `get_tree`, `get_graph`, `get_stats`, and `recently_modified` answer from a published snapshot rather than reading every file, and they report how fresh that snapshot is. A result carrying `partial: true` means not every enabled Vault contributed; the reason sits on that Vault's entry in `participants`, so read it there rather than guessing from `partial` alone.
+`search_notes`, `query_notes`, `get_tree`, `get_graph`, `get_stats`, and `recently_modified` answer from a published snapshot rather than reading every file, and they report how fresh that snapshot is. A result carrying `partial: true` means not every enabled Vault contributed; the reason sits on that Vault's entry in `participants`, so read it there rather than guessing from `partial` alone.
 
 An entry reading `stale` is the case an agent can do something about: the Vault's snapshot is known to be behind its Markdown. Call `refresh_vault` with that `vault_id` to request the index turn that republishes it, then read again.
 

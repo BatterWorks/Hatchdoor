@@ -54,6 +54,35 @@ function setCaret(at: number): void {
   view.dispatch({ selection: { anchor: at } });
 }
 
+/**
+ * Makes the browser report `node`/`offset` for any point, the way it does over
+ * a real glyph. jsdom implements neither caret API, so the click path cannot
+ * otherwise reach the code that reads them.
+ */
+const stubbed: string[] = [];
+
+function stubCaretApi(
+  name: "caretPositionFromPoint" | "caretRangeFromPoint",
+  node: Node,
+  offset: number,
+): void {
+  const reported =
+    name === "caretPositionFromPoint"
+      ? { offsetNode: node, offset }
+      : { startContainer: node, startOffset: offset };
+  Object.defineProperty(document, name, {
+    configurable: true,
+    value: () => reported,
+  });
+  stubbed.push(name);
+}
+
+afterEach(() => {
+  for (const name of stubbed.splice(0)) {
+    delete (document as unknown as Record<string, unknown>)[name];
+  }
+});
+
 /** Replaces the block's whole text, as typing over a selection would. */
 function setEditorValue(text: string): void {
   const view = editorView();
@@ -986,5 +1015,197 @@ describe("multi-line list items are addressed per line (D25a)", () => {
       "- [x] wrapped task\n  second line\n",
     );
     expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});
+
+describe("the caret a click enters at (#269)", () => {
+  const SPLIT = "See **alias** TAILWORD here.\n";
+  const PLAIN = "See alias TAILWORD here.\n";
+  // Offset 5 in " TAILWORD here." is the W the pointer is over. Across the
+  // whole rendered block that same character is offset 14, and only the
+  // block-wide reading maps onto the W in the source.
+  const OFFSET_IN_NODE = 5;
+
+  /** The ` TAILWORD here.` text node, which is what a click on the W hits. */
+  function tailNode(): Node {
+    const block = screen.getByText(/TAILWORD/);
+    const tail = block.lastChild;
+    if (!tail) {
+      throw new Error("the rendered block has no trailing text node");
+    }
+    return tail;
+  }
+
+  it("measures the reported node across the block, not within it", () => {
+    render(<NoteHarness initialContent={SPLIT} />);
+    const block = screen.getByText(/TAILWORD/);
+    stubCaretApi("caretPositionFromPoint", tailNode(), OFFSET_IN_NODE);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    // 18 is the W of TAILWORD in `See **alias** TAILWORD here.`; the
+    // node-relative 5 would have landed on the first * of the bold markers.
+    expect(caretPos()).toBe(18);
+  });
+
+  it("measures it the same way on the WebKit caret API", () => {
+    render(<NoteHarness initialContent={SPLIT} />);
+    const block = screen.getByText(/TAILWORD/);
+    stubCaretApi("caretRangeFromPoint", tailNode(), OFFSET_IN_NODE);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    expect(caretPos()).toBe(18);
+  });
+
+  it("leaves a single-text-node block where it already landed", () => {
+    render(<NoteHarness initialContent={PLAIN} />);
+    const block = screen.getByText(/TAILWORD/);
+    stubCaretApi("caretPositionFromPoint", tailNode(), 14);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    expect(caretPos()).toBe(14);
+  });
+
+  it("takes no caret preference from a node in another block", () => {
+    render(<NoteHarness initialContent={`Elsewhere.\n\n${SPLIT}`} />);
+    const block = screen.getByText(/TAILWORD/);
+    const elsewhere = screen.getByText("Elsewhere.").firstChild;
+    stubCaretApi("caretPositionFromPoint", elsewhere!, 3);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    // No preference opens the block with the default caret, at the end.
+    expect(caretPos()).toBe("See **alias** TAILWORD here.".length);
+  });
+
+  it("takes no caret preference from an element node", () => {
+    render(<NoteHarness initialContent={SPLIT} />);
+    const block = screen.getByText(/TAILWORD/);
+    // On an element the offset counts children, not characters.
+    stubCaretApi("caretPositionFromPoint", block, 1);
+
+    fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+
+    expect(caretPos()).toBe("See **alias** TAILWORD here.".length);
+  });
+});
+
+describe("the caret a click enters at in a multi-line block (#284)", () => {
+  /** The text node a click on a rendered line hits. */
+  function textOf(element: HTMLElement): Node {
+    const text = element.firstChild;
+    if (!text) {
+      throw new Error("the rendered line has no text node");
+    }
+    return text;
+  }
+
+  function clickInto(element: HTMLElement, offsetInNode: number): void {
+    stubCaretApi("caretPositionFromPoint", textOf(element), offsetInNode);
+    fireEvent.click(element, { clientX: 10, clientY: 10, bubbles: true });
+  }
+
+  it("lands on the first word of a wrapped list item's continuation line", () => {
+    render(<NoteHarness initialContent={"- first line\n  continues here\n"} />);
+
+    clickInto(screen.getByText("continues here"), 0);
+
+    // 2 is the c of continues; 0 would sit in the indent, which renders as
+    // nothing at all.
+    expect(editorValue()).toBe("  continues here");
+    expect(caretPos()).toBe(2);
+  });
+
+  it("lands on it just the same when the list is nested and the indent wider", () => {
+    render(
+      <NoteHarness
+        initialContent={"- top\n    - first line\n      continues here\n"}
+      />,
+    );
+
+    clickInto(screen.getByText("continues here"), 0);
+
+    expect(editorValue()).toBe("      continues here");
+    expect(caretPos()).toBe(6);
+  });
+
+  // Correct before the change: a callout body line is addressed on its own and
+  // the old rule already stripped a single `> `. Here to hold that.
+  it("lands on the clicked word of a multi-line callout's body line", () => {
+    render(
+      <NoteHarness
+        initialContent={"> [!note] Title\n> body continues here\n"}
+      />,
+    );
+
+    // Offset 5 in the rendered `body continues here` is the c of continues.
+    clickInto(screen.getByText("body continues here"), 5);
+
+    expect(editorValue()).toBe("> body continues here");
+    expect(caretPos()).toBe(7);
+  });
+
+  it("lands on the clicked word of a quote spanning two source lines", () => {
+    render(<NoteHarness initialContent={"> first line\n> second line\n"} />);
+
+    // Offset 11 across the rendered quote is the s of second.
+    clickInto(screen.getByText(/second line/), 11);
+
+    expect(editorValue()).toBe("> first line\n> second line");
+    expect(caretPos()).toBe(15);
+  });
+
+  // Correct before the change: a newline is one character on both sides and
+  // there is no indent to skip. Here to hold that.
+  it("leaves an unindented wrapped paragraph where it already landed", () => {
+    render(<NoteHarness initialContent={"one two three\nfour five six\n"} />);
+
+    // Offset 14 across the block is the f of four, on the second source line.
+    clickInto(screen.getByText(/four five six/), 14);
+
+    expect(editorValue()).toBe("one two three\nfour five six");
+    expect(caretPos()).toBe(14);
+  });
+
+  it("skips the indent of a wrapped paragraph's continuation line", () => {
+    render(
+      <NoteHarness initialContent={"one two three\n    four five six\n"} />,
+    );
+
+    clickInto(screen.getByText(/four five six/), 14);
+
+    expect(editorValue()).toBe("one two three\n    four five six");
+    expect(caretPos()).toBe(18);
+  });
+
+  it("lands on the clicked character of a fenced code block", () => {
+    render(<NoteHarness initialContent={"```javascript\nlet x = 1;\n```\n"} />);
+
+    // Offset 4 in `let x = 1;` is the x. The language label and the Copy
+    // button sit in the same block wrapper and must add nothing to that.
+    clickInto(screen.getByText(/let x = 1;/), 4);
+
+    expect(editorValue()).toBe("```javascript\nlet x = 1;\n```");
+    expect(caretPos()).toBe(18);
+  });
+
+  it("lands on it just the same behind a shorter language name", () => {
+    render(<NoteHarness initialContent={"```rust\nlet x = 1;\n```\n"} />);
+
+    clickInto(screen.getByText(/let x = 1;/), 4);
+
+    expect(editorValue()).toBe("```rust\nlet x = 1;\n```");
+    expect(caretPos()).toBe(12);
+  });
+
+  it("lands on it in a fenced block that names no language", () => {
+    render(<NoteHarness initialContent={"```\nlet x = 1;\n```\n"} />);
+
+    clickInto(screen.getByText(/let x = 1;/), 4);
+
+    expect(editorValue()).toBe("```\nlet x = 1;\n```");
+    expect(caretPos()).toBe(8);
   });
 });

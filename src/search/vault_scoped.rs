@@ -122,17 +122,36 @@ impl<'a> VaultSearchCore<'a> {
         }
         let collection = self.vaults.snapshot();
         let selected = selected_vaults(&collection, request.scope)?;
+        // Resolved before the read lease because it decides whether this query
+        // needs vectors at all: a tag query is answered from structural rows,
+        // so a Vault without vectors is a full participant in it.
+        let tag_query = tag_prefix_query(&request.query);
+        let needs_vectors = tag_query.is_none() && request.mode == SearchMode::Semantic;
+        // Embed before checking out a read lease, never while holding one.
+        // Inference runs behind the embedder's own Mutex, so concurrent
+        // semantic searches queue on it one at a time. A lease held across
+        // that wait pins one of the cache's few reader slots while doing no
+        // database work at all: four typed-ahead searches were enough to hold
+        // every slot and answer `/tree` and `/recent` with an instant 503.
+        //
+        // Two things move ahead of the snapshot read as a result, both of
+        // them visible only when the embedder itself is unhealthy. A query
+        // whose Vaults turn out to have no participating snapshot is embedded
+        // anyway, and an unhealthy embedder now reports `search_unavailable`
+        // where a bad layer name or an unavailable single Vault would have
+        // been named first. Both need the snapshot to detect, so keeping that
+        // order would mean holding the lease across inference again.
+        let query_vector = if needs_vectors && request.limit > 0 && request.per_note_cap > 0 {
+            Some(embed_query(self.embedder, &request.query)?)
+        } else {
+            None
+        };
         let mut cache_snapshot = self
             .cache
             .read_snapshot()
             .map_err(|message| error(None, "search_unavailable", &message, true))?;
         let mut snapshots = BTreeMap::new();
         let mut participants = Vec::with_capacity(selected.len());
-        // Resolved before the participant loop because it decides whether this
-        // query needs vectors at all: a tag query is answered from structural
-        // rows, so a Vault without vectors is a full participant in it.
-        let tag_query = tag_prefix_query(&request.query);
-        let needs_vectors = tag_query.is_none() && request.mode == SearchMode::Semantic;
         for vault in selected {
             match SqliteCache::read_vault_snapshot_on(&cache_snapshot, vault.vault_id) {
                 Ok(Some(snapshot)) => {
@@ -192,13 +211,17 @@ impl<'a> VaultSearchCore<'a> {
             tag_results(&request, &snapshots, &tag)
         } else {
             match request.mode {
-                SearchMode::Semantic => semantic_results(
-                    &request,
-                    self.cache,
-                    &cache_snapshot,
-                    self.embedder,
-                    &snapshots,
-                )?,
+                SearchMode::Semantic => match &query_vector {
+                    Some(query_vector) => semantic_results(
+                        &request,
+                        self.cache,
+                        &cache_snapshot,
+                        query_vector,
+                        &snapshots,
+                    )?,
+                    // `limit` or `per_note_cap` of zero asks for no results.
+                    None => Vec::new(),
+                },
                 SearchMode::Keyword => {
                     let raw = keyword_hits(&request, self.cache, &cache_snapshot, &snapshots)?;
                     apply_per_note_cap(raw, request.per_note_cap, request.limit)
@@ -245,22 +268,11 @@ impl<'a> VaultSearchCore<'a> {
     }
 }
 
-fn semantic_results(
-    request: &VaultSearchRequest,
-    cache: &SqliteCache,
-    conn: &rusqlite::Connection,
-    embedder: &dyn Embedder,
-    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
-) -> Result<Vec<VaultSearchResult>, VaultReadError> {
-    if request.limit == 0 || request.per_note_cap == 0 {
-        return Ok(Vec::new());
-    }
-
-    if snapshots.is_empty() {
-        return Ok(Vec::new());
-    }
-    let query_vector = embedder
-        .embed(&[format!("{}{}", embedder.query_prefix(), request.query)])
+/// Embeds one search query. Callers run this before checking out a cache read
+/// lease, never while holding one.
+fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<Vec<f32>, VaultReadError> {
+    embedder
+        .embed(&[format!("{}{}", embedder.query_prefix(), query)])
         .map_err(|message| error(None, "search_unavailable", &message, true))?
         .into_iter()
         .next()
@@ -271,10 +283,24 @@ fn semantic_results(
                 "embedder returned no vectors",
                 true,
             )
-        })?;
+        })
+}
+
+fn semantic_results(
+    request: &VaultSearchRequest,
+    cache: &SqliteCache,
+    conn: &rusqlite::Connection,
+    query_vector: &[f32],
+    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+) -> Result<Vec<VaultSearchResult>, VaultReadError> {
+    // `limit` and `per_note_cap` are the caller's to check: it gates the
+    // embedding on them, so a zero never reaches here.
+    if snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
 
     progressively_cap_semantic_results(request.limit, request.per_note_cap, |raw_k| {
-        semantic_hits_with_vector(request, cache, conn, snapshots, &query_vector, raw_k)
+        semantic_hits_with_vector(request, cache, conn, snapshots, query_vector, raw_k)
     })
 }
 
@@ -582,7 +608,8 @@ mod tests {
     use std::path::Path;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Condvar, mpsc};
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
@@ -648,9 +675,25 @@ mod tests {
     }
 
     fn workspace(vaults: &[(&str, &[(&str, &str)])]) -> Workspace {
+        workspace_on(vaults, |_| SqliteCache::in_memory(384).expect("cache"))
+    }
+
+    /// The file-backed twin of [`workspace`]. Production opens the cache from
+    /// a file, and only that source pools and accounts read connections, so an
+    /// in-memory workspace cannot observe the reader ceiling at all.
+    fn file_backed_workspace(vaults: &[(&str, &[(&str, &str)])]) -> Workspace {
+        workspace_on(vaults, |directory| {
+            SqliteCache::open(directory.join("cache.sqlite3"), 384).expect("file cache")
+        })
+    }
+
+    fn workspace_on(
+        vaults: &[(&str, &[(&str, &str)])],
+        open_cache: impl FnOnce(&Path) -> SqliteCache,
+    ) -> Workspace {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
-        let cache = SqliteCache::in_memory(384).expect("cache");
+        let cache = open_cache(directory.path());
         let runtime = VaultCollectionRuntime::new();
         let mut revision = 0;
         let mut registry = None;
@@ -709,6 +752,179 @@ mod tests {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             std::fs::write(path, contents).expect("write note");
+        }
+    }
+
+    /// A browser answers one typed query with several overlapping requests,
+    /// and the sidebar adds its own. More of those than the cache has reader
+    /// slots must queue for a slot, not collect a 503.
+    #[test]
+    fn concurrent_searches_past_the_reader_ceiling_queue_rather_than_fail() {
+        let workspace = file_backed_workspace(&[
+            ("First", &[("Home.md", "# Home\n\nzeno needle")]),
+            ("Second", &[("Home.md", "# Home\n\nzeno needle")]),
+        ]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        // One search at a time. A slot dropped on the floor would push this
+        // above zero and never come back down.
+        for round in 0..10 {
+            core.search(request(VaultScope::All, "zeno"))
+                .expect("sequential search");
+            assert_eq!(
+                workspace.cache.active_read_leases(),
+                0,
+                "a search must return its reader slot; {round} rounds in, it had not"
+            );
+        }
+
+        // Search-as-you-type plus the sidebar's tree and recent calls put
+        // well over four reads in flight at once. Each one must come back with
+        // its results, so a search that failed for some unrelated reason
+        // cannot pass this as though it had been served.
+        for concurrency in [2_usize, 4, 6, 8] {
+            std::thread::scope(|scope| {
+                let searches = (0..concurrency)
+                    .map(|_| scope.spawn(|| core.search(request(VaultScope::All, "zeno"))))
+                    .collect::<Vec<_>>();
+                for search in searches {
+                    let hits = search
+                        .join()
+                        .expect("search thread")
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{concurrency} concurrent searches must all be served: {error:?}"
+                            )
+                        });
+                    assert_eq!(
+                        hits.data.results.len(),
+                        2,
+                        "a served search must still return both Vaults' matches"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Every production embedder runs inference behind its own `Mutex`, so
+    /// concurrent semantic searches queue on it one at a time. A search that
+    /// took its reader slot first would pin that slot for the whole wait while
+    /// touching no database at all, and four typed-ahead searches were enough
+    /// to starve an unrelated `/tree` or `/recent` read.
+    #[test]
+    fn a_search_holds_no_reader_slot_while_the_embedder_serializes() {
+        let workspace =
+            file_backed_workspace(&[("First", &[("Home.md", "# Home\n\nzeno needle")])]);
+        let (arrived_tx, arrived_rx) = mpsc::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), Condvar::new()));
+        let embedder = SerializedSlowEmbedder {
+            inner: StubEmbedder::new(384),
+            model: std::sync::Mutex::new(()),
+            arrived: arrived_tx,
+            release: release.clone(),
+        };
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        std::thread::scope(|scope| {
+            let searches = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut semantic = request(VaultScope::All, "zeno");
+                        semantic.mode = SearchMode::Semantic;
+                        core.search(semantic)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            // Hold every search inside the embedder at once, the state four
+            // typed-ahead queries reach in production. A search that never
+            // arrives fails here rather than hanging the test.
+            for index in 0..4 {
+                arrived_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap_or_else(|_| panic!("search {index} never reached the embedder"));
+            }
+            // The lease count is the assertion that isolates this from the
+            // reader queue: with a slot held across inference the sidebar read
+            // would merely be delayed until one search finished, and a test
+            // that only checked `is_ok` would pass on the queue alone.
+            let held = workspace.cache.active_read_leases();
+            let sidebar = workspace
+                .cache
+                .snapshot_note_content(workspace.vault_ids[0], "home");
+
+            let (released, wake) = &*release;
+            *released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            wake.notify_all();
+
+            for search in searches {
+                search
+                    .join()
+                    .expect("search thread")
+                    .expect("a search held behind the embedder must still complete");
+            }
+            assert_eq!(
+                held, 0,
+                "four searches inside the embedder must hold no reader slot between them"
+            );
+            assert!(
+                sidebar.is_ok(),
+                "an unrelated read was starved by searches waiting on the embedder: {:?}",
+                sidebar.err()
+            );
+        });
+    }
+
+    /// Stands in for the production embedders, which all wrap inference in a
+    /// `Mutex` (see `fastembed_embedder.rs`). Announces each arrival and then
+    /// parks until the test releases it, so every caller can be held inside
+    /// inference at once.
+    struct SerializedSlowEmbedder {
+        inner: StubEmbedder,
+        model: std::sync::Mutex<()>,
+        arrived: mpsc::Sender<()>,
+        release: Arc<(std::sync::Mutex<bool>, Condvar)>,
+    }
+
+    impl Embedder for SerializedSlowEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.arrived.send(()).expect("announce arrival");
+            let (released, wake) = &*self.release;
+            let mut parked = released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Bounded so a failing assertion ends the test rather than
+            // leaving these threads parked for the scope to join forever.
+            while !*parked {
+                let (next, wait) = wake
+                    .wait_timeout(parked, Duration::from_secs(5))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                parked = next;
+                if wait.timed_out() {
+                    break;
+                }
+            }
+            drop(parked);
+            let _inference = self
+                .model
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.inner.embed(texts)
+        }
+
+        fn embedding_dim(&self) -> usize {
+            self.inner.embedding_dim()
+        }
+
+        fn identity(&self) -> String {
+            self.inner.identity()
+        }
+
+        fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add_special_tokens)
         }
     }
 

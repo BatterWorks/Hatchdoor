@@ -77,10 +77,11 @@ Store an image near the note that references it, and use safe filenames — lowe
 
 ## Wikilinks
 
-Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Four forms:
+Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Five forms:
 
 - Plain: `[[Connect your agent]]` → [[Connect your agent]]
 - Aliased: `[[Connect your agent|connect an agent]]` — displays custom text
+- Aliased inside a table cell: `[[Connect your agent\|connect an agent]]`. A bare `|` would end the cell, so the alias pipe is written escaped. Hatchdoor reads that backslash as syntax rather than as part of the note's name, so the link resolves, shows up in backlinks, and is rewritten by a rename like any other.
 - Heading-scoped: `[[Connect your agent#Configure your MCP client]]` — links straight to a heading
 - A wikilink to a note that doesn't exist yet still renders — it just has nowhere to go until that note is created: `[[This Note Does Not Exist Yet]]`
 
@@ -100,6 +101,22 @@ status: current
 ```
 
 Hatchdoor parses frontmatter and can show properties (tags, aliases, and arbitrary key/value pairs) separately from the note body, without them cluttering the rendered text.
+
+## Tags
+
+A note's tags come from two places. Anything listed under `tags:` in frontmatter counts, in whatever shape you write it, including plain words and numbers.
+
+In the body, only a namespaced hashtag counts: `#area/health` and `#type/reference/draft` are tags, a bare `#todo` or `#1177` is not. The namespace requirement is what keeps ordinary prose, issue numbers, and headings out of your tag list.
+
+Hashtags inside code are never tags, so a note that documents a tag convention does not get filed under it. That covers both a fenced block and an inline span written with backticks:
+
+````markdown
+```
+#not/a-tag
+```
+
+Write it as `#not/a-tag` in your note.
+````
 
 ---
 

@@ -17,6 +17,14 @@ use crate::vault_registry::VaultId;
 pub enum VaultWorkKind {
     /// Git lifecycle work such as acquisition or synchronization.
     Git,
+    /// A purely local Git commit of whatever has changed in the Vault's own
+    /// subtree. Never opens a network connection, which is why it is a kind
+    /// of its own rather than a flavour of [`Self::Git`]: committing is free
+    /// and can run on every change, while talking to a remote costs a round
+    /// trip and stays on the Vault's configured schedule. Coalescing the two
+    /// together would let a due sync swallow a pending commit, or the other
+    /// way round.
+    Commit,
     /// Index construction, including embedding work.
     Index,
     /// Explicit repair work.

@@ -66,11 +66,17 @@ impl ServerHandler for HatchdoorMcpHandler {
         // that happens to connect while a Vault is reindexing has a fully
         // set-up instance and needs the real instructions, not the first-run
         // ones (#191).
-        let instructions = if self.state.startup.model_setup_pending() {
-            SETUP_INSTRUCTIONS.to_string()
+        let base = if self.state.startup.model_setup_pending() {
+            SETUP_INSTRUCTIONS
         } else {
-            SERVER_INSTRUCTIONS.to_string()
+            SERVER_INSTRUCTIONS
         };
+        // serverInfo.version is invisible to most agents (their harness eats
+        // the handshake), so the version rides the instructions too.
+        let instructions = format!(
+            "{base} This instance runs Hatchdoor {}.",
+            crate::config::version_string()
+        );
         // The modern wire shape advertises `tools.listChanged: true` and
         // delivers on it via `subscriptions/listen` (#170). The legacy
         // handshake cannot open subscription streams, so `initialize`
@@ -83,7 +89,10 @@ impl ServerHandler for HatchdoorMcpHandler {
             // Preferred revision for clients that request one we no longer
             // serve: the newest legacy revision, not the modern one.
             .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25)
-            .with_server_info(Implementation::new("hatchdoor", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "hatchdoor",
+                crate::config::version_string(),
+            ))
             .with_instructions(instructions)
     }
 

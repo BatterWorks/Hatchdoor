@@ -75,6 +75,17 @@ pub struct VaultCapabilities {
     pub pull: bool,
     pub push: bool,
     pub retry: bool,
+    /// Whether this Vault makes local Git commits of its own: Local history,
+    /// or Two-way, whose commit is the half of its sync that needs no remote
+    /// (#267). Derived from the definition alone, deliberately unlike `pull`
+    /// and `push`: a console that labels its action from this must keep
+    /// labelling it the same way while the Vault is failing, which is exactly
+    /// when the operator reads it.
+    pub commit: bool,
+    /// Whether this Vault has a remote to synchronise with. What separates a
+    /// console offering **Sync now** from one that can only offer **Commit
+    /// now**, and definition-derived for the same reason as `commit`.
+    pub sync: bool,
 }
 
 impl VaultCapabilities {
@@ -90,6 +101,34 @@ impl VaultCapabilities {
             pull: false,
             push: false,
             retry: false,
+            commit: false,
+            sync: false,
+        }
+    }
+
+    /// What an unauthenticated visitor to a public read-only demo may do
+    /// (#243).
+    ///
+    /// Both derivations above answer a question about the Vault: is this
+    /// directory writable, does this source have a remote to pull, is there a
+    /// retryable failure to clear. For an operator that is the right answer,
+    /// because their request is admitted. On a demo it is not: `demo_guard`
+    /// refuses every mutating route and every Vault-control route with `403
+    /// demo_read_only` before the handler runs, so a derived `mutate`, `pull`,
+    /// `push` or `retry` names a request that cannot succeed.
+    ///
+    /// `browse` and `search` survive derived, because those reads do work on a
+    /// demo, and passing them through keeps a Vault that is indexing or
+    /// unavailable as honest here as it is anywhere else.
+    pub(crate) fn for_public_demo(self) -> Self {
+        Self {
+            mutate: false,
+            pull: false,
+            push: false,
+            retry: false,
+            commit: false,
+            sync: false,
+            ..self
         }
     }
 }
@@ -425,6 +464,12 @@ pub struct VaultControlBlock {
     cancellation: tokio::sync::watch::Sender<bool>,
     revisions: CollectionRevisionPublisher,
     watcher: Arc<RwLock<Option<VaultWatcherHandle>>>,
+    /// This Vault's writes waiting to be named by their Git commit. The
+    /// mutation core appends one record per successful write; the Vault's
+    /// next Git turn takes the batch to build its commit message (#249).
+    /// Lives here because those two are the only things that touch it and
+    /// this is the one per-Vault handle both already hold.
+    write_ledger: Arc<crate::git::WriteLedger>,
 }
 
 impl VaultControlBlock {
@@ -435,6 +480,11 @@ impl VaultControlBlock {
         snapshot_cache: Option<&SqliteCache>,
         revisions: CollectionRevisionPublisher,
         prior_git: Option<(VaultGitStatus, Option<VaultRuntimeError>)>,
+        // The retiring block's write ledger when this activation replaces a
+        // live control block, so writes already on disk and still waiting for
+        // a commit keep their summaries across the rotation (#249). `None`
+        // for a genuinely new or re-enabled Vault, which has none.
+        prior_writes: Option<Arc<crate::git::WriteLedger>>,
     ) -> Self {
         let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache, prior_git);
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
@@ -492,6 +542,7 @@ impl VaultControlBlock {
             cancellation,
             revisions,
             watcher: Arc::new(RwLock::new(watcher)),
+            write_ledger: prior_writes.unwrap_or_else(|| Arc::new(crate::git::WriteLedger::new())),
         }
     }
 
@@ -501,6 +552,13 @@ impl VaultControlBlock {
 
     pub fn vault_path(&self) -> &Path {
         &self.vault_path
+    }
+
+    /// This Vault's pending write records. Cloned rather than borrowed so a
+    /// Git turn can carry it into `spawn_blocking` without borrowing the
+    /// control block there.
+    pub fn write_ledger(&self) -> Arc<crate::git::WriteLedger> {
+        Arc::clone(&self.write_ledger)
     }
 
     /// Build an authoritative index for an exact read. Collection projections
@@ -1008,12 +1066,21 @@ impl VaultCollectionRuntime {
                         // transient failure) the retiring control block
                         // actually had. See `activation_snapshot`'s doc
                         // comment.
-                        let prior_git =
+                        //
+                        // The retiring block's pending write records move
+                        // across for the same reason: they describe writes
+                        // already on disk and still uncommitted, so dropping
+                        // them here would lose exactly the commit-message
+                        // lines #249 exists to deliver.
+                        let (prior_git, prior_writes) =
                             if let Some(VaultCollectionEntry::Active(runtime)) = previous_entry {
                                 let prior_snapshot = runtime.snapshot();
-                                Some((prior_snapshot.git, prior_snapshot.git_error.clone()))
+                                (
+                                    Some((prior_snapshot.git, prior_snapshot.git_error.clone())),
+                                    Some(runtime.write_ledger()),
+                                )
                             } else {
-                                None
+                                (None, None)
                             };
                         VaultCollectionEntry::Active(VaultControlBlock::activate(
                             definition,
@@ -1022,6 +1089,7 @@ impl VaultCollectionRuntime {
                             self.snapshot_cache.as_deref(),
                             revision_publisher.clone(),
                             prior_git,
+                            prior_writes,
                         ))
                     }
                 }
@@ -1405,10 +1473,12 @@ impl VaultCollectionRuntime {
             //
             // A Git-capable source the scheduler does *not* track — an
             // `ExistingGit` Vault in `LocalHistory` mode, which has no remote
-            // to poll — still needs its activation turn from here, because
-            // nothing else will ever request one for it.
+            // to poll, needs its activation turn from here: nothing else
+            // publishes a first Git status for it. A commit turn, because a
+            // commit is the whole of what such a Vault's Git does; the
+            // watcher and a manual control ask for the same kind (#267).
             if snapshot.git == VaultGitStatus::Pending && scheduled.is_none() {
-                coordinator.request(*vault_id, VaultWorkKind::Git);
+                coordinator.request(*vault_id, VaultWorkKind::Commit);
             }
         }
     }
@@ -1780,6 +1850,7 @@ fn collection_capabilities(
         | RegistryVaultSource::ManagedGit { mode, .. } => Some(*mode),
     };
     let pull_only = git_mode == Some(VaultGitMode::PullOnly);
+    let source = definition.source();
     VaultCapabilities {
         browse,
         search: matches!(
@@ -1802,6 +1873,8 @@ fn collection_capabilities(
         .into_iter()
         .flatten()
         .any(|error| error.retryable),
+        commit: crate::git::source_commits(source),
+        sync: crate::git::source_syncs_remote(source),
     }
 }
 

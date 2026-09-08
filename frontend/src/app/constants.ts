@@ -6,6 +6,10 @@ export const EXPLORER_SCROLL_TOP_KEY = "hatchdoor.explorerScrollTop";
 export const RECENT_NOTES_COLLAPSED_KEY = "hatchdoor.recentNotesCollapsed";
 export const SCOPE_ZONE_COLLAPSED_KEY = "hatchdoor.scopeZoneCollapsed";
 export const LAST_NOTE_KEY = "hatchdoor.lastNote";
+// Every Vault's own last-viewed note, as `vaultId -> slug`. Switching the
+// browsing scope to one Vault reads it to bring back the note that Vault was
+// left on, the way LAST_NOTE_KEY restores the last note on a fresh load.
+export const LAST_NOTE_BY_VAULT_KEY = "hatchdoor.lastNoteByVault";
 export const NOTE_PROPERTIES_COLLAPSED_KEY =
   "hatchdoor.notePropertiesCollapsed";
 export const THEME_KEY = "hatchdoor.theme";

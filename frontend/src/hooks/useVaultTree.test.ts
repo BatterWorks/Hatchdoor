@@ -120,9 +120,7 @@ describe("useVaultTree — per-Vault trees (#142)", () => {
             name: "Nested",
             note_count: 1,
             folders: [],
-            notes: [
-              { title: `${vault.name} nested`, slug: `nested-${index}` },
-            ],
+            notes: [{ title: `${vault.name} nested`, slug: `nested-${index}` }],
           },
         ],
         notes: [{ title: `${vault.name} home`, slug: `home-${index}` }],

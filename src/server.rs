@@ -1137,12 +1137,14 @@ pub async fn run_server() {
     } else {
         startup.set_scanning();
     }
+    let commit_cooldown = Arc::new(crate::git::CommitCooldown::new());
     let shutdown_vaults = vaults.clone();
     let state = AppState {
         vault_registry,
         vaults,
         vault_work: vault_work.clone(),
         managed_git: managed_git.clone(),
+        commit_cooldown: commit_cooldown.clone(),
         legacy_migration_recovery: Arc::new(std::sync::RwLock::new(legacy_migration_recovery)),
         startup_sqlite: sqlite.clone(),
         mcp_tools_changed,
@@ -1185,14 +1187,25 @@ pub async fn run_server() {
     let watcher_index_task = watcher_changes.map(|mut changes| {
         let watcher_work = vault_work.clone();
         let watcher_vaults = state.vaults.clone();
+        let watcher_cooldown = commit_cooldown.clone();
         tokio::spawn(async move {
-            while forward_vault_change_intent(changes.recv().await, &watcher_work, &watcher_vaults)
-            {
-            }
+            while forward_vault_change_intent(
+                changes.recv().await,
+                &watcher_work,
+                &watcher_vaults,
+                &watcher_cooldown,
+            ) {}
         })
     });
     let scheduler_tick_task =
         crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
+    // Lets a Vault whose commit failed resume committing on its own once its
+    // cooldown elapses, instead of waiting for the operator's next save.
+    let commit_cooldown_tick_task = crate::git::spawn_commit_cooldown_tick(
+        commit_cooldown.clone(),
+        vault_work.clone(),
+        crate::git::COMMIT_COOLDOWN_TICK_INTERVAL,
+    );
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
         error!("Address error: {e}");
@@ -1239,6 +1252,7 @@ pub async fn run_server() {
     // coordinator has stopped accepting work; the dispatch loop drains and
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
+    commit_cooldown_tick_task.abort();
     if let Some(task) = watcher_index_task {
         task.abort();
     }
@@ -1250,26 +1264,54 @@ pub async fn run_server() {
     }
 }
 
-/// Forward a per-Vault watcher invalidation to the one shared Index queue.
+/// Forward a per-Vault watcher invalidation to the one shared work queue: a
+/// commit turn for a Vault whose Git mode commits, and an Index turn always.
 /// A lagged broadcast intentionally falls back to every active Vault because
 /// the channel is a coalescible hint rather than a durable event log.
+///
+/// The commit is requested *before* the index, because the coordinator keeps
+/// a Vault's requests in the order they arrived and an Index turn can run for
+/// minutes on a large Vault. Asking the other way round would make "commits
+/// within seconds of the write" mean "commits after the reindex".
+///
+/// The Index request stays unconditional and independent of the commit, so a
+/// Vault whose Git is broken still keeps its search current (#267).
 fn forward_vault_change_intent(
     change: Result<crate::vault_registry::VaultId, tokio::sync::broadcast::error::RecvError>,
     coordinator: &VaultWorkCoordinator,
     vaults: &VaultCollectionRuntime,
+    commit_cooldown: &crate::git::CommitCooldown,
 ) -> bool {
     match change {
         Ok(vault_id) => {
+            request_commit_for_change(vault_id, coordinator, vaults, commit_cooldown);
             coordinator.request(vault_id, VaultWorkKind::Index);
             true
         }
         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
             for vault_id in vaults.active_vault_ids() {
+                request_commit_for_change(vault_id, coordinator, vaults, commit_cooldown);
                 coordinator.request(vault_id, VaultWorkKind::Index);
             }
             true
         }
         Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+    }
+}
+
+/// Ask for a commit turn for one changed Vault, unless its mode makes no
+/// local commits or a previous commit failure has it in cooldown.
+fn request_commit_for_change(
+    vault_id: crate::vault_registry::VaultId,
+    coordinator: &VaultWorkCoordinator,
+    vaults: &VaultCollectionRuntime,
+    commit_cooldown: &crate::git::CommitCooldown,
+) {
+    let commits = vaults
+        .runtime(vault_id)
+        .is_some_and(|runtime| crate::git::source_commits(runtime.definition().source()));
+    if commits && commit_cooldown.try_admit(vault_id) {
+        coordinator.request(vault_id, VaultWorkKind::Commit);
     }
 }
 
@@ -1339,11 +1381,13 @@ mod tests {
         let vaults = VaultCollectionRuntime::new();
         vaults.reconcile(&registry, &snapshot);
         let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let commit_cooldown = crate::git::CommitCooldown::new();
 
         assert!(forward_vault_change_intent(
             Ok(vault_id),
             &coordinator,
-            &vaults
+            &vaults,
+            &commit_cooldown,
         ));
         let direct = worker
             .run_next(|request| async move {
@@ -1359,6 +1403,7 @@ mod tests {
             Err(tokio::sync::broadcast::error::RecvError::Lagged(1)),
             &coordinator,
             &vaults,
+            &commit_cooldown,
         ));
         let after_lag = worker
             .run_next(|request| async move {
@@ -1373,7 +1418,146 @@ mod tests {
             Err(tokio::sync::broadcast::error::RecvError::Closed),
             &coordinator,
             &vaults,
+            &commit_cooldown,
         ));
+    }
+
+    /// #267: the watcher noticed every change within its debounce window but
+    /// only ever asked for an index rebuild, so a Vault that commits never
+    /// got a commit requested for it after activation. It does now, and
+    /// ahead of the index, because an Index turn can run for minutes and a
+    /// commit queued behind one is not "within seconds of the write".
+    ///
+    /// The same test covers the two things the watcher must *not* do: ask a
+    /// Vault that does not commit, and keep asking a Vault whose last commit
+    /// failed.
+    #[tokio::test]
+    async fn a_watcher_change_asks_a_committing_vault_to_commit_before_it_reindexes() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let repository_path = directory.path().join("checkout");
+        std::fs::create_dir_all(&repository_path).expect("create checkout");
+        git2::Repository::init(&repository_path).expect("init repository");
+        let plain_path = directory.path().join("plain");
+        std::fs::create_dir_all(&plain_path).expect("create plain Vault directory");
+
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Local history".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::ExistingGit {
+                        repository_path,
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_registry::VaultGitMode::LocalHistory,
+                        poll_interval_secs:
+                            crate::vault_registry::DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add committing Vault");
+        let snapshot = registry
+            .add(
+                snapshot.revision(),
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Plain".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local { path: plain_path },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add plain Vault");
+        let named = |name: &str| {
+            snapshot
+                .definitions()
+                .find(|definition| definition.name() == name)
+                .expect("Vault definition")
+                .vault_id()
+        };
+        let committing = named("Local history");
+        let plain = named("Plain");
+
+        let vaults = VaultCollectionRuntime::new();
+        vaults.reconcile(&registry, &snapshot);
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let commit_cooldown = crate::git::CommitCooldown::new();
+
+        assert!(forward_vault_change_intent(
+            Ok(committing),
+            &coordinator,
+            &vaults,
+            &commit_cooldown,
+        ));
+        let mut observed = Vec::new();
+        for _ in 0..2 {
+            observed.push(
+                worker
+                    .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+                    .await
+                    .expect("queued turn")
+                    .request,
+            );
+        }
+        assert_eq!(
+            observed
+                .iter()
+                .map(|request| request.kind())
+                .collect::<Vec<_>>(),
+            vec![VaultWorkKind::Commit, VaultWorkKind::Index],
+            "the commit is asked for first, so it does not wait out the reindex"
+        );
+
+        // A plain local folder has no Git, so its change asks for the index
+        // and nothing else.
+        assert!(forward_vault_change_intent(
+            Ok(plain),
+            &coordinator,
+            &vaults,
+            &commit_cooldown,
+        ));
+        let plain_turn = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("queued turn");
+        assert_eq!(plain_turn.request.vault_id(), plain);
+        assert_eq!(plain_turn.request.kind(), VaultWorkKind::Index);
+        assert!(
+            !coordinator.has_work(plain, VaultWorkKind::Commit),
+            "a Vault with no Git is never asked to commit"
+        );
+
+        // With the committing Vault in cooldown after a failure, further
+        // changes stop asking for a commit but never stop the reindex.
+        commit_cooldown.arm(committing);
+        assert!(forward_vault_change_intent(
+            Ok(committing),
+            &coordinator,
+            &vaults,
+            &commit_cooldown,
+        ));
+        let suppressed = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("queued turn");
+        assert_eq!(
+            suppressed.request.kind(),
+            VaultWorkKind::Index,
+            "a Vault in cooldown still keeps its search current"
+        );
+        assert!(
+            !coordinator.has_work(committing, VaultWorkKind::Commit),
+            "and asks for no further automatic commit while suppressed"
+        );
     }
 
     #[test]
@@ -1661,6 +1845,7 @@ mod tests {
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
+            commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,
@@ -1742,6 +1927,7 @@ mod tests {
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
+            commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,

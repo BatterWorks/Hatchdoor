@@ -13,10 +13,24 @@ the agent's change and to navigate notes visually.
 4. Use the Vault selector to narrow to one Vault, or choose **All Vaults** to
    browse across enabled Vaults.
 
+Narrowing to one Vault while you are reading a note takes you with it: the
+note you last had open in that Vault comes back, the same way reopening
+Hatchdoor returns you to the note you left. Pick a Vault you have not read
+anything in yet and you land on the empty start page instead, with that
+Vault's notes in the explorer. Choosing **All Vaults**, or switching while you
+are in Settings, Statistics or the graph, leaves the page you are on alone.
+
 To find notes yourself, select **Search** in the top bar (or press `/` outside
 a text field). Semantic search is the default: use it for ideas and meaning.
 Turn on **Keyword mode** when exact wording matters, such as a hostname, tag,
 filename, command, or ID.
+
+Search always looks in every enabled Vault, whichever one the Vault selector
+is narrowed to. The list down the left of the search panel says how many
+matching notes each Vault holds, and starts on the Vault you were browsing.
+Select another Vault to read its matches, or **All results** to see them
+together. On a phone the same choice is the **Scope** field under the search
+box.
 
 > [!note]
 > Browser search and agent search complement each other. Search in the Web UI when you want to scan results; ask the agent when you want a controlled research or editing workflow.

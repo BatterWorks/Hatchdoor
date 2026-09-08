@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "hatchdoor"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "ahash",
  "arc-swap",

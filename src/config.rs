@@ -9,6 +9,17 @@ use tracing_subscriber::EnvFilter;
 
 use crate::vault_runtime::VaultSource;
 
+/// The version reported to clients and logs. Nightly images bake the source
+/// commit in through the `HATCHDOOR_GIT_SHA` compile-time env var (fed by the
+/// Docker build arg of the same name); release builds leave it unset and
+/// report the plain crate version.
+pub fn version_string() -> String {
+    match option_env!("HATCHDOOR_GIT_SHA") {
+        Some(sha) if !sha.is_empty() => format!("{} (dev {sha})", env!("CARGO_PKG_VERSION")),
+        _ => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LegacyVaultEnvironmentKeyKind {
     DeploymentPath,

@@ -7,19 +7,24 @@ import type {
   VaultId,
   VaultParticipant,
   VaultReadProjection,
-  VaultScope,
 } from "../../types";
 import type { SearchResponse, SearchResult } from "./types";
 
 /**
  * Command-palette search state: open/query/mode plus the debounced fetch and
  * focus-management effects. `setSearchOpen` is exposed so the shell's global
- * keyboard shortcuts can open the dialog. `scope` is the browsing scope
- * (#137: state/storage only, no chrome) — the dialog's own Keyword-mode
- * toggle and Vault filter (#144) are lenses over the answer, never the
- * browsing scope itself (#119).
+ * keyboard shortcuts can open the dialog.
+ *
+ * The read is always collection-wide. Narrowing the browsing scope used to
+ * narrow this fetch as well, which pinned search to one Vault with nothing on
+ * screen saying so: the dialog's facet rail was hidden at exactly that scope,
+ * so a query matching only elsewhere came back looking like a query matching
+ * nowhere. Search now asks every enabled Vault every time and hands the whole
+ * answer to the dialog, whose own Vault filter (#144) opens on the browsing
+ * scope and can be widened in place. Both stay lenses over the answer;
+ * neither is the browsing scope itself (#119).
  */
-export function useSearch(scope: VaultScope) {
+export function useSearch() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
@@ -94,11 +99,14 @@ export function useSearch(scope: VaultScope) {
           const params = new URLSearchParams({
             q: query,
             mode: searchIncludeContent ? "keyword" : "semantic",
-            limit: "30",
+            // The ceiling `clamp_search_limit` allows. One collection-wide
+            // budget now covers every Vault where a narrowed scope once had
+            // 30 rows to itself, so ask for every row on offer.
+            limit: "50",
             per_note_cap: "2",
           });
           const res = await apiFetch(
-            `/api/v1/vaults/${encodeURIComponent(scope)}/search?${params.toString()}`,
+            `/api/v1/vaults/all/search?${params.toString()}`,
           );
           if (!res.ok) {
             throw new Error(await readErrorMessage(res, "Search failed"));
@@ -135,7 +143,7 @@ export function useSearch(scope: VaultScope) {
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [scope, searchIncludeContent, searchOpen, searchQuery]);
+  }, [searchIncludeContent, searchOpen, searchQuery]);
 
   return {
     searchOpen,

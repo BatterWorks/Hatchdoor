@@ -31,9 +31,11 @@ Open **Settings** → **Add a Vault**, then:
 | Behaviour | What it does | Available on |
 | --- | --- | --- |
 | **No Git** | Nothing — a plain folder, no history, no remote. | A folder on this server |
-| **Local history** | Hatchdoor commits every change locally. Never contacts a remote. | A folder on this server |
-| **Pull-only** | Also fetches from the remote on the sync schedule. Content flows in; Hatchdoor's own commits stay local and are never pushed. | Either |
-| **Two-way** | Also pushes Hatchdoor's own commits back to the remote. | Either |
+| **Local history** | Hatchdoor commits your changes locally, shortly after you stop writing. Never contacts a remote. | A folder on this server |
+| **Pull-only** | Fetches from the remote on the sync schedule and sends nothing back. The Vault refuses every write, so Hatchdoor never commits on it. | Either |
+| **Two-way** | Commits your changes locally, and fetches from and pushes to the remote on the sync schedule. | Either |
+
+Hatchdoor commits a few seconds after the writing stops, so one commit usually gathers a burst of changes rather than one save. Sending those commits to a remote is separate and still happens on the sync schedule, so on Two-way your history is current locally long before the remote sees it. The subject names the first few writes it recorded and how many files they touched, and the body carries whatever one-line summary each of those writes supplied. An agent connected over MCP can pass a summary on every write, which is what turns the history into an answer to "why did this note change?". Edits you make in the Vault folder yourself carry no summary, so a commit made up only of those keeps the generic `hatchdoor: vault update`.
 
 > [!warning]
 > Local history creates a hidden `.git` folder inside the Vault's own notes folder to hold its history, and that folder grows permanently: every image and PDF ever attached stays in it, even after you delete the file from the Vault. Don't reach for Local history on a Vault with large attachments unless you're prepared for that growth.
@@ -68,9 +70,11 @@ Two kinds of edit behave differently:
 
 If the final restart step ever fails, the Vault is left paused and hidden rather than silently broken — a banner appears with a **Try to bring this Vault back** button to retry just that step.
 
-## If a sync fails
+## If a commit or a sync fails
 
-The Sync console reports what happened in plain language rather than a code — things like a rejected sign-in, an unreachable remote, local edits Hatchdoor isn't sure how to reconcile, or unpushed commits sitting on a Pull-only Vault it isn't allowed to push. Every failure sentence says what happened, confirms nothing was lost, and states the one thing that clears it, ending in **Try again**.
+Every Git-backed Vault has a console on its Settings page. On a Vault with a remote it is headed **Sync** and its button reads **Sync now**; on a Local history Vault it is headed **History** and reads **Commit now**, because there is nothing to sync with. Either way it reports what happened in plain language rather than a code: a rejected sign-in, an unreachable remote, local edits Hatchdoor isn't sure how to reconcile, or unpushed commits sitting on a Pull-only Vault it isn't allowed to push. Every failure sentence says what happened, confirms nothing was lost, and states the one thing that clears it, ending in **Try again**.
+
+After a failed commit Hatchdoor waits five minutes before trying again on its own, however much you write meanwhile, so a standing problem doesn't fill the log with the same error. Fix the cause and it resumes by itself; press **Commit now** or **Try again** if you don't want to wait.
 
 ---
 

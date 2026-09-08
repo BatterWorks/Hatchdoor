@@ -110,10 +110,9 @@ describe("VaultCreationDialog — exclusion patterns", () => {
     fireEvent.change(screen.getByLabelText("Folder path"), {
       target: { value: "/notes" },
     });
-    fireEvent.change(
-      screen.getByLabelText("Ignore these files and folders"),
-      { target: { value: " node_modules , .git ,, dist " } },
-    );
+    fireEvent.change(screen.getByLabelText("Ignore these files and folders"), {
+      target: { value: " node_modules , .git ,, dist " },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
 
     await vi.waitFor(() => expect(postedBody).not.toBeNull());

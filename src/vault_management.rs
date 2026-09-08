@@ -475,17 +475,26 @@ fn vault_summary(
 /// The public-safe projection of one enabled Vault for a read-only demo (#109).
 ///
 /// Keeps everything a visitor browses with — identity, name, and the four
-/// independent status fields plus capabilities, so partial/stale/unavailable
-/// participation stays honest (#109's fourth criterion, and #116's slot
-/// vocabulary) — and withholds everything that describes the operator's
-/// deployment rather than the content: the source's absolute path or remote,
-/// the exclusion list, the archive folder, the commit author's name and email,
-/// and the runtime error details, whose messages embed absolute paths. The
-/// browser already falls back to its own sentence for every absent error, which
-/// is what #124 asks a demo to show anyway.
+/// independent status fields, so partial/stale/unavailable participation stays
+/// honest (#109's fourth criterion, and #116's slot vocabulary) — and withholds
+/// everything that describes the operator's deployment rather than the content:
+/// the source's absolute path or remote, the exclusion list, the archive
+/// folder, the commit author's name and email, and the runtime error details,
+/// whose messages embed absolute paths. The browser already falls back to its
+/// own sentence for every absent error, which is what #124 asks a demo to show
+/// anyway.
 ///
 /// `credential_configured` survives deliberately: #133 designates it the only
 /// credential signal, and it names no path, URL, or secret.
+///
+/// The capability block is rewritten rather than withheld or passed through
+/// (#243). Derived, it describes the Vault's directory and source; published
+/// unauthenticated it would name writes, pulls and retries that the demo guard
+/// refuses. [`VaultCapabilities::for_public_demo`] holds that rule, so the
+/// fields are not hand-assembled here. `local_content` is left alone: it is a
+/// status field about the directory, and reporting `read_write` next to
+/// `mutate: false` already means the right thing in this API, where a
+/// pull-only Git Vault reads exactly the same way.
 fn public_vault_summary(
     definition: &VaultDefinition,
     snapshot: &CollectionVaultSnapshot,
@@ -506,7 +515,7 @@ fn public_vault_summary(
         last_checked_at: None,
         next_attempt_at: None,
         watcher: snapshot.watcher,
-        capabilities: snapshot.capabilities,
+        capabilities: snapshot.capabilities.for_public_demo(),
         activation_error: None,
         search_error: None,
         git_error: None,
@@ -763,8 +772,9 @@ impl<'a> VaultCollectionManagement<'a> {
         Ok(self.mutation_response(&snapshot, None))
     }
 
-    /// Request an immediate managed-Git turn for one Vault, bypassing its
-    /// daily schedule.
+    /// Request an immediate Git turn for one Vault, bypassing its schedule: a
+    /// remote sync for a Vault that has a remote, and a local commit for one
+    /// that does not.
     pub fn sync(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
         self.managed_git_control(vault_id, false)
     }
@@ -775,6 +785,20 @@ impl<'a> VaultCollectionManagement<'a> {
         self.managed_git_control(vault_id, true)
     }
 
+    /// Admit one manual Git operation, choosing it from what this Vault
+    /// actually has (#267).
+    ///
+    /// A Vault with a remote gets its remote sync, unchanged. A Vault with no
+    /// remote, which means Local history, gets a commit turn, which is the
+    /// whole of its Git behaviour. Only a Vault with neither is refused, so the old blanket
+    /// refusal narrows from "this Vault has no remote" to "this Vault has no
+    /// Git at all": remote *synchronisation* is still never attempted for
+    /// Local history, because a commit turn opens no connection.
+    ///
+    /// A manual commit also clears any cooldown a previous failure armed. The
+    /// operator asking for one is the case that suppression must not swallow,
+    /// exactly as `VaultWorkCoordinator::request_if_idle`'s own doc comment
+    /// reserves the guaranteed rerun for a user-driven request.
     fn managed_git_control(
         &self,
         vault_id: VaultId,
@@ -782,12 +806,21 @@ impl<'a> VaultCollectionManagement<'a> {
     ) -> Result<VaultScheduleResponse, VaultOperationError> {
         let definition = self.enabled_definition(vault_id)?;
         let Some(poll_interval) = definition.source().managed_git_poll_interval() else {
-            return Err(VaultOperationError::new(
-                "capability_unavailable",
-                "Manual Git sync is only available for a Vault with a configured remote",
-                Some(vault_id),
-                false,
-            ));
+            if !crate::git::source_commits(definition.source()) {
+                return Err(VaultOperationError::new(
+                    "capability_unavailable",
+                    "Manual Git sync is only available for a Vault that keeps Git history",
+                    Some(vault_id),
+                    false,
+                ));
+            }
+            self.state.commit_cooldown.clear(vault_id);
+            return schedule_response(
+                vault_id,
+                self.state
+                    .vault_work
+                    .request(vault_id, VaultWorkKind::Commit),
+            );
         };
 
         let schedule = if retry {
@@ -1088,6 +1121,7 @@ pub(crate) mod test_support {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
+            commit_cooldown: std::sync::Arc::new(crate::git::CommitCooldown::new()),
             legacy_migration_recovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: std::sync::Arc::new(
                 SqliteCache::in_memory(384).expect("in-memory cache"),
@@ -1195,13 +1229,22 @@ mod tests {
     /// only enabled Vaults, and withholds everything that describes the
     /// operator's deployment rather than the content. `credential_configured`
     /// survives deliberately (#133 designates it the only credential signal).
+    ///
+    /// #243 adds the capability block to what the demo rewrites. The Vaults
+    /// here are driven into states whose *derived* capabilities disagree with
+    /// what a visitor may do — one writable and retryable, one unavailable —
+    /// so the demo form is proven to override rather than to coincide.
     #[tokio::test]
     async fn demo_discovery_publishes_only_enabled_vaults_through_the_public_projection() {
         let (mut state, _worker, directory) = test_state();
         let published_path = directory.path().join("published");
         let hidden_path = directory.path().join("hidden");
+        let offline_path = directory.path().join("offline");
+        let indexing_path = directory.path().join("indexing");
         std::fs::create_dir_all(&published_path).expect("vault dir");
         std::fs::create_dir_all(&hidden_path).expect("vault dir");
+        std::fs::create_dir_all(&offline_path).expect("vault dir");
+        std::fs::create_dir_all(&indexing_path).expect("vault dir");
 
         let core = VaultCollectionManagement::new(&state);
         core.create(CreateVaultRequest {
@@ -1230,22 +1273,152 @@ mod tests {
         .await
         .expect("create the disabled Vault");
 
+        let revision = ready_snapshot(&state).revision();
+        core.create(CreateVaultRequest {
+            expected_registry_revision: revision,
+            ..create_request("Offline", VaultSource::Local { path: offline_path })
+        })
+        .await
+        .expect("create the unavailable Vault");
+
+        let revision = ready_snapshot(&state).revision();
+        core.create(CreateVaultRequest {
+            expected_registry_revision: revision,
+            ..create_request(
+                "Indexing",
+                VaultSource::Local {
+                    path: indexing_path,
+                },
+            )
+        })
+        .await
+        .expect("create the indexing Vault");
+
+        // Drive every enabled Vault into a state a real instance reaches, so
+        // the capabilities under test are the derived ones rather than the
+        // all-false placeholder an unreconciled definition carries.
+        let registry_snapshot = ready_snapshot(&state);
+        state
+            .vaults
+            .reconcile(&state.vault_registry, &registry_snapshot);
+        let vault_id = |name: &str| {
+            registry_snapshot
+                .definitions()
+                .find(|definition| definition.name() == name)
+                .expect("the named definition")
+                .vault_id()
+        };
+        let retryable = |code: &str| VaultRuntimeError {
+            code: code.to_string(),
+            message: "try again".to_string(),
+            retryable: true,
+            detail: None,
+        };
+
+        let published_runtime = state
+            .vaults
+            .runtime(vault_id("Published"))
+            .expect("the published Vault is live");
+        published_runtime
+            .set_local_content_status(LocalContentStatus::ReadWrite, None)
+            .expect("publish local content");
+        // Stale, not Ready: the Vault still answers searches from its last
+        // generation while the failed turn stays retryable, which is what
+        // makes `retry` derive true next to `mutate`.
+        published_runtime
+            .set_search_status(VaultSearchStatus::Stale, Some(retryable("index_failed")))
+            .expect("publish search status");
+
+        let offline_runtime = state
+            .vaults
+            .runtime(vault_id("Offline"))
+            .expect("the offline Vault is live");
+        offline_runtime
+            .set_local_content_status(
+                LocalContentStatus::Unavailable,
+                Some(retryable("vault_path_unreadable")),
+            )
+            .expect("publish local content");
+        offline_runtime
+            .set_search_status(VaultSearchStatus::Unavailable, None)
+            .expect("publish search status");
+
+        // Browsable while its first index runs: `browse` true, `search` false.
+        // The pair that proves the demo form passes these two through rather
+        // than pinning the whole block false.
+        let indexing_runtime = state
+            .vaults
+            .runtime(vault_id("Indexing"))
+            .expect("the indexing Vault is live");
+        indexing_runtime
+            .set_local_content_status(LocalContentStatus::ReadWrite, None)
+            .expect("publish local content");
+        indexing_runtime
+            .set_search_status(VaultSearchStatus::Indexing, None)
+            .expect("publish search status");
+
         let authenticated = VaultCollectionManagement::new(&state)
             .list()
             .expect("authenticated discovery");
-        assert_eq!(authenticated.vaults.len(), 2);
+        assert_eq!(authenticated.vaults.len(), 4);
         assert!(!authenticated.demo_mode);
-        let published = authenticated
-            .vaults
-            .iter()
-            .find(|vault| vault.name == "Published")
-            .expect("the published Vault");
+        fn named<'a>(vaults: &'a [VaultSummary], name: &str) -> &'a VaultSummary {
+            vaults
+                .iter()
+                .find(|vault| vault.name == name)
+                .unwrap_or_else(|| panic!("the {name} Vault"))
+        }
+        let published = named(&authenticated.vaults, "Published");
         assert!(published.source.is_some());
         assert_eq!(published.exclude_patterns, vec!["Private/**".to_string()]);
         // The registry canonicalizes the stored folder, so the projection
         // reports what was committed rather than what was requested.
         assert_eq!(published.archive_folder.as_deref(), Some("Archive/"));
         assert!(published.commit_identity.is_some());
+        // The premise of the demo assertions below: an operator sees a Vault
+        // that really is writable and really has something to retry.
+        assert_eq!(
+            published.capabilities,
+            VaultCapabilities {
+                browse: true,
+                search: true,
+                mutate: true,
+                pull: false,
+                push: false,
+                retry: true,
+                commit: false,
+                sync: false,
+            },
+            "the authenticated projection keeps reporting the derived capabilities"
+        );
+        assert_eq!(
+            named(&authenticated.vaults, "Offline").capabilities,
+            VaultCapabilities {
+                browse: false,
+                search: false,
+                mutate: false,
+                pull: false,
+                push: false,
+                retry: true,
+                commit: false,
+                sync: false,
+            },
+            "an unavailable Vault browses nowhere but is worth retrying"
+        );
+        assert_eq!(
+            named(&authenticated.vaults, "Indexing").capabilities,
+            VaultCapabilities {
+                browse: true,
+                search: false,
+                mutate: true,
+                pull: false,
+                push: false,
+                retry: false,
+                commit: false,
+                sync: false,
+            },
+            "a Vault mid-index browses but does not search"
+        );
 
         state.demo_mode = true;
         let demo = VaultCollectionManagement::new(&state)
@@ -1254,11 +1427,14 @@ mod tests {
         assert!(demo.demo_mode);
         assert_eq!(
             demo.vaults.len(),
-            1,
+            3,
             "a demo must not name a Vault it does not serve"
         );
-        let published = &demo.vaults[0];
-        assert_eq!(published.name, "Published");
+        assert!(
+            !demo.vaults.iter().any(|vault| vault.name == "Hidden"),
+            "a demo must not name a disabled Vault"
+        );
+        let published = named(&demo.vaults, "Published");
         assert!(published.source.is_none());
         assert!(published.exclude_patterns.is_empty());
         assert!(published.archive_folder.is_none());
@@ -1268,16 +1444,52 @@ mod tests {
         assert!(published.git_error.is_none());
         assert!(published.watcher_error.is_none());
         assert!(!published.credential_configured);
-        // Capabilities stay honest in demo mode (#133): the browser branches
-        // on the instance-level flag, not on a rewritten per-Vault capability.
+        // #243: the capability block answers the visitor's question, not the
+        // directory's. Every route behind `mutate`, `pull`, `push` and `retry`
+        // answers `403 demo_read_only`, so reporting them true names requests
+        // that cannot succeed.
         assert_eq!(
             published.capabilities,
-            authenticated
-                .vaults
-                .iter()
-                .find(|vault| vault.name == "Published")
-                .expect("the published Vault")
-                .capabilities
+            VaultCapabilities {
+                browse: true,
+                search: true,
+                mutate: false,
+                pull: false,
+                push: false,
+                retry: false,
+                commit: false,
+                sync: false,
+            },
+            "a demo reports what an unauthenticated visitor may do"
+        );
+        // `local_content` is a status field about the directory and stays as
+        // derived, exactly as it already does for a pull-only Git Vault.
+        assert_eq!(published.local_content, LocalContentStatus::ReadWrite);
+        // `browse` and `search` keep their derived values, because those reads
+        // do work on a demo. The mid-index Vault is the discriminating case:
+        // it comes back `browse: true, search: false`, so the two are passed
+        // through rather than pinned either way, and its derived `mutate: true`
+        // is rewritten like every other Vault's.
+        assert_eq!(
+            named(&demo.vaults, "Indexing").capabilities,
+            VaultCapabilities {
+                browse: true,
+                search: false,
+                mutate: false,
+                pull: false,
+                push: false,
+                retry: false,
+                commit: false,
+                sync: false,
+            },
+            "a demo passes browse and search through untouched"
+        );
+        // Its derived `retry: true` names the one Vault-control route a demo
+        // also refuses, so the demo form drops it with the rest.
+        assert_eq!(
+            named(&demo.vaults, "Offline").capabilities,
+            VaultCapabilities::default(),
+            "a demo offers no retry for a Vault a visitor cannot retry"
         );
     }
 
@@ -1725,12 +1937,15 @@ mod tests {
     }
 
     /// Companion to `sync_and_retry_admit_an_existing_git_pull_only_vault_and_track_its_schedule`:
-    /// the other half of the acceptance criterion "An `ExistingGit` Vault in
-    /// `LocalHistory` ... still refuse[s] both and carr[ies] no schedule" —
-    /// `LocalHistory` has no remote to poll and must keep refusing both
-    /// controls exactly as before.
+    /// the other half of "an `ExistingGit` Vault in `LocalHistory` carries no
+    /// schedule". It still carries none, because nothing here polls a
+    /// remote, but the refusal it used to get has narrowed (#267). A manual control on a
+    /// Vault with no remote now admits the one Git operation it does have, a
+    /// commit turn, and admits it through the work coordinator rather than
+    /// the managed-Git scheduler, which is what keeps "Local history never
+    /// contacts a remote" true.
     #[tokio::test]
-    async fn sync_and_retry_still_refuse_an_existing_git_local_history_vault() {
+    async fn sync_and_retry_admit_a_commit_turn_for_an_existing_git_local_history_vault() {
         let (state, _worker, directory) = test_state();
         let repository_path = directory.path().join("local-history-repo");
         std::fs::create_dir_all(&repository_path).expect("create repo directory");
@@ -1762,6 +1977,45 @@ mod tests {
         );
 
         let core = VaultCollectionManagement::new(&state);
+        core.sync(vault_id)
+            .expect("manual sync admits a commit turn for a Vault with no remote");
+        assert!(
+            state.vault_work.has_work(vault_id, VaultWorkKind::Commit),
+            "the admitted operation is a commit, not a remote sync"
+        );
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "no remote-sync turn is ever requested for a Vault with no remote"
+        );
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            None,
+            "and admitting it still does not put the Vault on a remote schedule"
+        );
+
+        core.retry(vault_id)
+            .expect("manual retry admits the same commit turn");
+    }
+
+    /// A `Local` Vault has no Git at all, so both manual controls still
+    /// refuse it outright. This is what is left of the blanket refusal #267
+    /// narrowed: "no remote" no longer means "nothing to do".
+    #[tokio::test]
+    async fn sync_and_retry_still_refuse_a_local_vault() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("plain-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+
+        VaultCollectionManagement::new(&state)
+            .create(create_request("Plain notes", VaultSource::Local { path }))
+            .await
+            .expect("create the Vault");
+        let vault_id = ready_snapshot(&state)
+            .vault_ids()
+            .next()
+            .expect("one Vault");
+
+        let core = VaultCollectionManagement::new(&state);
         assert_eq!(
             core.sync(vault_id).expect_err("sync refused").code,
             "capability_unavailable"
@@ -1769,6 +2023,10 @@ mod tests {
         assert_eq!(
             core.retry(vault_id).expect_err("retry refused").code,
             "capability_unavailable"
+        );
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Commit),
+            "a refused control queues nothing"
         );
     }
 

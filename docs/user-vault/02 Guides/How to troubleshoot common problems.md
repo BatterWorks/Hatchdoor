@@ -67,11 +67,11 @@ A softer variant: `local_content` reports `read_only` rather than `unavailable` 
 
 ## Git sync is failing
 
-Check the Vault's Sync console for the specific failure rather than assuming — these need different fixes:
+Check the Vault's Git console for the specific failure rather than assuming. (It is headed **Sync** on a Vault with a remote and **History** on one without, and its button reads **Sync now** or **Commit now** to match.) These need different fixes:
 
 - **Authentication failed** — the stored HTTPS token was rejected by the remote. Re-enter it under **Sign-in** on the Vault's own page; see [[How to set up a Git-backed Vault]].
 - **Clone/fetch failed, or the remote is unreachable** — a network or DNS problem, or the repository URL itself is wrong. Confirm the URL resolves from wherever the container runs, not just from your own machine.
-- **Local commits ahead on a Pull-only Vault** — Hatchdoor made local commits (from note edits) that a Pull-only Vault is configured never to push. This isn't a failure exactly — it's Hatchdoor accurately reporting that local history and the remote have diverged and staying pull-only rather than silently discarding your local commits. Switch the Vault to **Two-way** if you want those commits pushed, or accept that Pull-only Vaults are meant to be read-mostly.
+- **Local commits ahead on a Pull-only Vault** — the checkout has commits the remote doesn't, and a Pull-only Vault never pushes. They aren't Hatchdoor's: such a Vault refuses every write, so anything committed there you committed yourself, by hand or before you switched the Vault to Pull-only. This isn't a failure exactly. Hatchdoor is reporting that local history and the remote have diverged, and staying pull-only rather than silently discarding your commits. Switch the Vault to **Two-way** if you want them pushed, or accept that Pull-only Vaults are meant to be read-mostly.
 
 > [!note]
 > A Vault reporting `git: pending` isn't stuck by default — that's the normal state while a clone or fetch is in flight. Only treat it as a problem if it stays `pending` well past the configured sync interval.
@@ -84,7 +84,9 @@ If `next_attempt_at` is in the past by more than a minute or so, something is ge
 
 ## Search returns nothing, or not what you expected
 
-Before assuming something's broken: search only considers the **default surface** unless you explicitly ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search — see [[How to organize a Vault with layers]] for how to search across layers deliberately. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
+First, check you want a search at all. `search_notes` finds notes by meaning and ranks them; if what you actually want is every note carrying a tag, sitting in a folder, or holding a frontmatter property, that is `query_notes`, which selects rather than ranks and never comes back empty for want of a good enough match. It also reads every layer, so a demoted note it selects is one an ordinary search would not have shown you.
+
+If a search is what you want: search only considers the **default surface** unless you explicitly ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search — see [[How to organize a Vault with layers]] for how to search across layers deliberately. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
 
 ---
 

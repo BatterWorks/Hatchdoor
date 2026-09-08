@@ -2,14 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::cache::parse::{for_non_code_line, parse_fence_marker};
+use crate::vault::paths::split_wikilink_asset_body;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
-    create_parent_dir_inside_root, ensure_existing_path_inside_root, is_trashed_path,
-    relative_link_target, resolve_reference_inside_root, same_existing_path,
+    create_parent_dir_inside_root, ensure_existing_path_inside_root, is_markdown_path,
+    is_trashed_path, relative_link_target, resolve_reference_inside_root, same_existing_path,
     unique_trash_attachment_relative_path, vault_relative_dir,
 };
-use super::rewrites::{parse_fence_marker, rewrite_content_or_read};
+use super::rewrites::{planned_content, rewrite_content_or_read};
 use super::types::{AssetMove, TextRewrite, WriteError};
 
 pub(super) fn asset_move_plan(
@@ -143,13 +145,22 @@ pub(super) fn asset_move_plan(
     // the note's destination path: by the time rewrites are applied, the note
     // itself has already moved there.
     if !stationary.is_empty() {
-        let rewritten = transform_asset_references(&content, |target| {
+        // The backlink planner keys the note's own self-link rewrite to that
+        // same destination path (#254), and the merge keeps only the last
+        // entry per path, so this composes onto whatever is already planned
+        // for the note instead of appending a rewrite that would discard it.
+        // The locally accumulated rewrites are consulted first, because they
+        // are applied after the baseline.
+        let planned = planned_content(destination_note, &rewrites)
+            .or_else(|| planned_content(destination_note, baseline_rewrites));
+        let note_body_so_far = planned.as_deref().unwrap_or(content.as_str());
+        let rewritten = transform_asset_references(note_body_so_far, |target| {
             stationary
                 .get(target)
                 .cloned()
                 .unwrap_or_else(|| target.to_string_lossy().into_owned())
         });
-        if rewritten != content {
+        if rewritten != note_body_so_far {
             rewrites.push(TextRewrite {
                 path: destination_note.to_path_buf(),
                 content: rewritten,
@@ -372,64 +383,11 @@ fn transform_wiki_asset_body<F>(body: &str, transform_target: &F) -> String
 where
     F: Fn(&Path) -> String,
 {
-    let target_end = body.find('|').unwrap_or(body.len());
-    let target = body[..target_end].trim();
+    let (target, suffix) = split_wikilink_asset_body(body);
     let Some(asset) = asset_path_from_target(target) else {
         return body.to_string();
     };
-    format!("{}{}", transform_target(&asset), &body[target_end..])
-}
-
-fn for_non_code_line<F>(content: &str, mut visit: F)
-where
-    F: FnMut(&str),
-{
-    let mut fenced_marker: Option<(u8, usize)> = None;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if let Some((marker, min_len)) = fenced_marker {
-            if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
-                && close_marker == marker
-                && close_len >= min_len
-            {
-                fenced_marker = None;
-            }
-            continue;
-        }
-        if let Some(marker) = parse_fence_marker(trimmed) {
-            fenced_marker = Some(marker);
-            continue;
-        }
-        let no_inline_code = strip_inline_code_segments(line);
-        visit(&no_inline_code);
-    }
-}
-
-fn strip_inline_code_segments(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
-    let mut idx = 0usize;
-    let mut inline_marker_len = 0usize;
-    while idx < chars.len() {
-        if chars[idx] == '`' {
-            let mut marker_len = 1usize;
-            while idx + marker_len < chars.len() && chars[idx + marker_len] == '`' {
-                marker_len += 1;
-            }
-            if inline_marker_len == 0 {
-                inline_marker_len = marker_len;
-            } else if marker_len == inline_marker_len {
-                inline_marker_len = 0;
-            }
-            idx += marker_len;
-            continue;
-        }
-        if inline_marker_len == 0 {
-            out.push(chars[idx]);
-        }
-        idx += 1;
-    }
-    out
+    format!("{}{suffix}", transform_target(&asset))
 }
 
 fn extract_markdown_assets(line: &str, assets: &mut Vec<PathBuf>) {
@@ -454,7 +412,7 @@ fn extract_wiki_assets(line: &str, assets: &mut Vec<PathBuf>) {
         let Some(end) = rest.find("]]") else {
             break;
         };
-        let target = rest[..end].split('|').next().unwrap_or("").trim();
+        let (target, _) = split_wikilink_asset_body(&rest[..end]);
         if let Some(asset) = asset_path_from_target(target) {
             assets.push(asset);
         }
@@ -481,15 +439,22 @@ fn asset_path_from_target(target: &str) -> Option<PathBuf> {
     }) {
         return None;
     }
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    if matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "bmp" | "pdf"
-    ) {
-        Some(path.to_path_buf())
-    } else {
-        None
+    // Any file that is not Markdown counts (#247). A Vault is a plain folder
+    // the operator also edits in Obsidian, so it routinely holds video, audio,
+    // data and archives; while this list named nine image-ish types, every
+    // other file was invisible to the note-move planner and to
+    // `list_note_attachments`, which is how a video got left behind with a
+    // dead reference and nothing reported it.
+    //
+    // An extension is still required. It is what separates a file reference
+    // from a wikilink to a note, and every caller then checks the file exists
+    // before planning anything, which is what keeps a note titled
+    // `Q3 2026 v1.2` - apparent extension `2` - out of the asset plan.
+    path.extension()?;
+    if is_markdown_path(path) {
+        return None;
     }
+    Some(path.to_path_buf())
 }
 
 #[cfg(test)]

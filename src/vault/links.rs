@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-use super::paths::{normalize_link_target, normalize_title, slugify};
+use crate::cache::parse::for_non_code_line;
+
+use super::paths::{normalize_link_target, normalize_title, slugify, split_wikilink_note_body};
 use super::types::NoteEntry;
 
 pub fn build_link_graph(
@@ -79,30 +81,9 @@ fn sort_slug_links(links: &mut [String], by_slug: &HashMap<String, NoteEntry>) {
 
 fn extract_wikilink_targets(content: &str) -> Vec<String> {
     let mut targets = Vec::new();
-    let mut fenced_marker: Option<(u8, usize)> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-
-        if let Some((marker, min_len)) = fenced_marker {
-            if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
-                && close_marker == marker
-                && close_len >= min_len
-            {
-                fenced_marker = None;
-            }
-            continue;
-        }
-
-        if let Some(marker) = parse_fence_marker(trimmed) {
-            fenced_marker = Some(marker);
-            continue;
-        }
-
-        let no_inline_code = strip_inline_code_segments(line);
-        extract_line_wikilink_targets(&no_inline_code, &mut targets);
-    }
-
+    for_non_code_line(content, |line| {
+        extract_line_wikilink_targets(line, &mut targets);
+    });
     targets
 }
 
@@ -132,80 +113,14 @@ fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>) {
 
         if !is_embed {
             let body = &line[idx + 2..end];
-            let target = parse_wikilink_target(body);
+            let (target, _) = split_wikilink_note_body(body);
             if !target.is_empty() {
-                targets.push(target);
+                targets.push(target.to_string());
             }
         }
 
         idx = end + 2;
     }
-}
-
-fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
-    let bytes = trimmed_line.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let marker = bytes[0];
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-
-    let mut len = 1usize;
-    while len < bytes.len() && bytes[len] == marker {
-        len += 1;
-    }
-
-    if len >= 3 { Some((marker, len)) } else { None }
-}
-
-fn strip_inline_code_segments(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
-    let mut idx = 0usize;
-    let mut inline_marker_len = 0usize;
-
-    while idx < chars.len() {
-        if chars[idx] == '`' {
-            let mut marker_len = 1usize;
-            while idx + marker_len < chars.len() && chars[idx + marker_len] == '`' {
-                marker_len += 1;
-            }
-
-            if inline_marker_len == 0 {
-                inline_marker_len = marker_len;
-            } else if marker_len == inline_marker_len {
-                inline_marker_len = 0;
-            }
-
-            idx += marker_len;
-            continue;
-        }
-
-        if inline_marker_len == 0 {
-            out.push(chars[idx]);
-        }
-        idx += 1;
-    }
-
-    out
-}
-
-fn parse_wikilink_target(body: &str) -> String {
-    let before_alias = body.split('|').next().unwrap_or(body).trim();
-    let before_heading = before_alias
-        .split('#')
-        .next()
-        .unwrap_or(before_alias)
-        .trim();
-    before_heading
-        .split('^')
-        .next()
-        .unwrap_or(before_heading)
-        .trim()
-        .to_string()
 }
 
 fn resolve_target_slug(

@@ -29,19 +29,35 @@ type NoteGroup = {
 };
 
 /** One row of the dialog's own Vault filter (#144) — never the browsing
- * scope. `count: null` means the Vault did not answer this search at all;
- * `0` means it answered with nothing. The two read differently but both
- * keep their row rather than disappearing, per #116's "a missing facet
- * would be an absence; a named one is a fact." */
-type FacetRow = { vaultId: VaultId; label: string; count: number | null };
+ * scope. A `number` is how many notes that Vault put in this answer, `0`
+ * included: it answered with nothing. `"no-answer"` is a Vault that was asked
+ * and did not answer. `"unasked"` is every Vault before a search has run at
+ * all, which has no count to give and no fault to report. All three keep
+ * their row rather than disappearing, per #116's "a missing facet would be an
+ * absence; a named one is a fact." */
+type FacetRow = {
+  vaultId: VaultId;
+  label: string;
+  count: number | "no-answer" | "unasked";
+};
 
-/** Vault-management order, restricted to Vaults that actually participated
- * in this read — never re-sorted by count or condition (#117). */
+/** Vault-management order, never re-sorted by count or condition (#117).
+ * Once a search has run the rows are the Vaults that participated in it;
+ * before one has, they are simply every Vault, so the rail is a selector from
+ * the moment the dialog opens rather than a column that fills in later. */
 function buildFacetRows(
   vaults: VaultSummary[],
   participants: VaultParticipant[],
   groups: NoteGroup[],
+  searchAnswered: boolean,
 ): FacetRow[] {
+  if (!searchAnswered) {
+    return vaults.map((vault) => ({
+      vaultId: vault.vault_id,
+      label: vault.name,
+      count: "unasked" as const,
+    }));
+  }
   const participantById = new Map(
     participants.map((participant) => [participant.vault_id, participant]),
   );
@@ -59,7 +75,9 @@ function buildFacetRows(
       return {
         vaultId: vault.vault_id,
         label: vault.name,
-        count: answered ? (countByVault.get(vault.vault_id) ?? 0) : null,
+        count: answered
+          ? (countByVault.get(vault.vault_id) ?? 0)
+          : ("no-answer" as const),
       };
     });
 }
@@ -145,10 +163,14 @@ export function SearchDialog({
   missingVaultNames: string[];
   /** Feeds the dialog's own Vault filter (#144) — never the browsing scope. */
   participants: VaultParticipant[];
-  /** Pre-selects a facet from a tag tap; read once, on mount only, since the
-   * dialog unmounts on close and remounts fresh on open. */
+  /** Pre-selects a facet from a tag tap, overriding the browsing scope's own
+   * pre-selection; read once, on mount only, since the dialog unmounts on
+   * close and remounts fresh on open. */
   initialVaultFilter: VaultId | undefined;
   vaults: VaultSummary[];
+  /** The browsing scope, which the Vault filter opens on and the reader can
+   * then widen or move. It no longer narrows the search itself — the fetch is
+   * always collection-wide (see `useSearch`). */
   scope: VaultScope;
   inputRef: RefObject<HTMLInputElement | null>;
   /** The shrunk startup gate's own state (#150): a first index in flight or
@@ -167,8 +189,6 @@ export function SearchDialog({
   const startupPercent =
     startupStatus?.state === "indexing" ? startupStatus.percent : null;
   const startupFailed = startupStatus?.state === "failed";
-  // Provenance only where results can actually span Vaults (#140).
-  const showVaultPrefix = scope === "all" && vaults.length > 1;
   const vaultName = (vaultId: string) =>
     vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId;
   const resultsListRef = useRef<HTMLUListElement | null>(null);
@@ -204,11 +224,35 @@ export function SearchDialog({
   // The dialog's own filter (#144) — a lens over the answer in front of you,
   // never the browsing scope. Local state: it dies when the dialog closes,
   // because App.tsx only mounts <SearchDialog> while searchOpen is true, so
-  // every open starts fresh unless a tag tap pre-selected a Vault.
-  const [vaultFilter, setVaultFilter] = useState<VaultId | "all">(
-    () => initialVaultFilter ?? "all",
+  // every open starts fresh.
+  //
+  // It opens on the browsing scope so a reader who narrowed the sidebar sees
+  // what they expected to see, and the rail beside it shows the Vaults they
+  // did not narrow to, with counts, one click away. A tag tap wins over the
+  // scope: it names the Vault the tag was read in.
+  //
+  // Both are filtered through the enabled Vaults first. `useVaultScope` reads
+  // the browsing scope straight out of localStorage and never reconciles it
+  // against the collection, so a Vault disabled since it was last browsed
+  // leaves a stale id behind. Seeding on that would open the dialog filtered
+  // to a Vault with no row to click, with nothing selected and the raw id
+  // rendered as a name. All results is the honest fallback.
+  const [vaultFilter, setVaultFilter] = useState<VaultId | "all">(() => {
+    const preferred = initialVaultFilter ?? scope;
+    return vaults.some((vault) => vault.vault_id === preferred)
+      ? preferred
+      : "all";
+  });
+  // No Vault has been asked yet — the query is still too short, or the first
+  // answer has not landed. Counts would all read `0`, which is a claim about
+  // the collection rather than about this search.
+  const searchAnswered = participants.length > 0;
+  const facetRows = buildFacetRows(
+    vaults,
+    participants,
+    groups,
+    searchAnswered,
   );
-  const facetRows = buildFacetRows(vaults, participants, groups);
   // Two different reasons a semantic search came back partial, told apart
   // because they ask different things of the reader: a Vault that did not
   // answer may need attention, while one still building search only needs
@@ -224,19 +268,38 @@ export function SearchDialog({
   ]
     .filter(Boolean)
     .join(" ");
-  const showFacetRail = scope === "all" && vaults.length > 1;
-  const showScopeField = vaults.length > 1;
+  // One condition, both shapes: the rail on desktop and the phone's Scope
+  // field are the same filter, so they appear and disappear together.
+  // Shown wherever there is more than one Vault to tell apart, narrowed
+  // browsing scope included. Hiding it at a narrowed scope was the whole bug:
+  // the one state where the reader most needs to know their search is pinned
+  // was the one state that said nothing.
+  const showVaultFilter = vaults.length > 1;
+  // Provenance only where the visible rows can actually span Vaults (#140).
+  const showVaultPrefix = vaultFilter === "all" && vaults.length > 1;
   const visibleGroups =
     vaultFilter === "all"
       ? groups
       : groups.filter((group) => group.vault_id === vaultFilter);
+  const filteredRow =
+    vaultFilter === "all"
+      ? null
+      : (facetRows.find((row) => row.vaultId === vaultFilter) ?? null);
+  // The browsing scope can seed the filter onto a Vault that then fails to
+  // answer, which is the one case where the filter's empty list is not a fact
+  // about the Vault's contents. "No results in Beta" would be #141's exact
+  // lie; the row's own `no answer` and the partial sentence already say what
+  // actually happened, so say nothing more here.
+  const filteredToNoAnswer = filteredRow?.count === "no-answer";
   const filteredToEmpty =
-    vaultFilter !== "all" && groups.length > 0 && visibleGroups.length === 0;
+    vaultFilter !== "all" &&
+    !filteredToNoAnswer &&
+    groups.length > 0 &&
+    visibleGroups.length === 0;
   const filterLabel =
     vaultFilter === "all"
       ? null
-      : (facetRows.find((row) => row.vaultId === vaultFilter)?.label ??
-        vaultName(vaultFilter));
+      : (filteredRow?.label ?? vaultName(vaultFilter));
 
   return (
     <div
@@ -252,7 +315,7 @@ export function SearchDialog({
       }}
     >
       <UiPanel
-        className={`search-panel${showFacetRail ? " search-panel--faceted" : ""}`}
+        className={`search-panel${showVaultFilter ? " search-panel--faceted" : ""}`}
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           if (event.key !== "Tab") return;
@@ -316,12 +379,13 @@ export function SearchDialog({
         </label>
 
         {/* Phone: Scope beside Mode, in one field strip under the input
-            (#119, #144). Scope only where there is anything to filter
-            across; it stays even when the sidebar's browsing scope is
-            narrowed, because the panel covers the Scope zone here and the
-            current scope must stay visible some other way. */}
+            (#119, #144). The rail has no room as a column here, so it takes
+            this shape instead — same filter, same semantics. It opens on the
+            browsing scope like the rail does, and like the rail it is the
+            filter from the first change onwards, never the browsing scope
+            itself. */}
         <div className="search-field-strip">
-          {showScopeField ? (
+          {showVaultFilter ? (
             <div className="field">
               <label className="field-label" htmlFor="search-scope-field">
                 Scope
@@ -337,9 +401,9 @@ export function SearchDialog({
                   <option
                     key={row.vaultId}
                     value={row.vaultId}
-                    disabled={row.count === null}
+                    disabled={row.count === "no-answer"}
                   >
-                    {row.count === null
+                    {row.count === "no-answer"
                       ? `${row.label} (no answer)`
                       : row.label}
                   </option>
@@ -415,10 +479,9 @@ export function SearchDialog({
 
         <div className="search-body">
           {/* Desktop: the facet rail, a narrow column beside the results
-              (#119, #144). Absent when narrowed or at one enabled Vault —
-              there is nothing to filter across, and the Scope zone is on
-              screen behind the overlay saying what the scope is. */}
-          {showFacetRail ? (
+              (#119, #144). Absent only at one enabled Vault, where there is
+              nothing to filter across. */}
+          {showVaultFilter ? (
             <div className="search-facet-rail" aria-label="Filter by Vault">
               <button
                 type="button"
@@ -426,26 +489,28 @@ export function SearchDialog({
                 onClick={() => setVaultFilter("all")}
               >
                 <span className="search-facet-label">All results</span>
-                <span className="side-count">{groups.length}</span>
+                {searchAnswered ? (
+                  <span className="side-count">{groups.length}</span>
+                ) : null}
               </button>
               {facetRows.map((row) => (
                 <button
                   key={row.vaultId}
                   type="button"
                   className={`search-facet-row${vaultFilter === row.vaultId ? " is-selected" : ""}`}
-                  aria-disabled={row.count === null}
+                  aria-disabled={row.count === "no-answer"}
                   onClick={() => {
-                    if (row.count !== null) {
+                    if (row.count !== "no-answer") {
                       setVaultFilter(row.vaultId);
                     }
                   }}
                 >
                   <span className="search-facet-label">{row.label}</span>
-                  {row.count === null ? (
+                  {row.count === "no-answer" ? (
                     <span className="vault-slot-condition vault-tier-error">
                       no answer
                     </span>
-                  ) : (
+                  ) : row.count === "unasked" ? null : (
                     <span className="side-count">{row.count}</span>
                   )}
                 </button>

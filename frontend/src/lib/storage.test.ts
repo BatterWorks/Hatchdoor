@@ -4,11 +4,15 @@ import {
   clampSidebarWidth,
   clearLegacyNoteScopedBrowserState,
   getStoredExpandedFolders,
+  getStoredLastNoteForVault,
+  getStoredLastNotesByVault,
   getStoredNumber,
   getStoredRecentNotes,
   getStoredScope,
   getStoredString,
   isEditableTarget,
+  pruneStoredLastNotesByVault,
+  rememberLastNoteForVault,
   setStoredScope,
 } from "./storage";
 
@@ -103,6 +107,36 @@ describe("storage helpers", () => {
     window.localStorage.setItem("hatchdoor.recentNotes", "[1]");
     expect(clearLegacyNoteScopedBrowserState()).toBe(false);
     expect(window.localStorage.getItem("hatchdoor.recentNotes")).toBe("[1]");
+  });
+
+  it("getStoredLastNotesByVault drops malformed entries and bad json", () => {
+    window.localStorage.setItem(
+      "hatchdoor.lastNoteByVault",
+      JSON.stringify({ v1: "home", v2: 7, v3: "", "": "orphan" }),
+    );
+    expect(getStoredLastNotesByVault()).toEqual({ v1: "home" });
+    expect(getStoredLastNoteForVault("v1")).toBe("home");
+    expect(getStoredLastNoteForVault("v2")).toBeNull();
+
+    window.localStorage.setItem("hatchdoor.lastNoteByVault", "{not json");
+    expect(getStoredLastNotesByVault()).toEqual({});
+  });
+
+  it("rememberLastNoteForVault keeps one note per Vault", () => {
+    rememberLastNoteForVault("v1", "home");
+    rememberLastNoteForVault("v2", "index");
+    rememberLastNoteForVault("v1", "later");
+
+    expect(getStoredLastNotesByVault()).toEqual({ v1: "later", v2: "index" });
+  });
+
+  it("pruneStoredLastNotesByVault forgets Vaults that are no longer listed", () => {
+    rememberLastNoteForVault("v1", "home");
+    rememberLastNoteForVault("gone", "orphan");
+
+    pruneStoredLastNotesByVault(["v1", "v2"]);
+
+    expect(getStoredLastNotesByVault()).toEqual({ v1: "home" });
   });
 
   it("isEditableTarget detects editable controls", () => {

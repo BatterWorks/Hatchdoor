@@ -36,6 +36,8 @@ selected or default Vault. Every collection read uses `scope` (one Vault ID or
 
 Use `search_notes` first for most questions.
 
+Use `query_notes` when a note's tags, folder or properties decide the answer on their own: notes carrying a tag, notes under a folder, notes whose frontmatter property equals a value, has passed a date, exists, or is empty. It selects rather than ranks and involves no embedding, so it answers in full even while a Vault is still indexing. `search_notes` for what a note says, `query_notes` for what a note is.
+
 Use semantic search for ideas, topics, decisions, projects, and natural-language retrieval.
 
 Use keyword search for exact tags, filenames, paths, commands, hostnames, IDs, code symbols, quoted text, and wording-sensitive checks.
@@ -50,7 +52,7 @@ Use `get_tree` only when the task is specifically about folder structure or broa
 
 ## Stale collection reads
 
-`search_notes`, `get_tree`, `get_graph`, `get_stats`, and `recently_modified` answer from a published snapshot and report its freshness. When a result comes back with `partial: true` and the Vault's entry in `participants` reads `stale`, that snapshot is behind the Vault's Markdown.
+`search_notes`, `query_notes`, `get_tree`, `get_graph`, `get_stats`, and `recently_modified` answer from a published snapshot and report its freshness. When a result comes back with `partial: true` and the Vault's entry in `participants` reads `stale`, that snapshot is behind the Vault's Markdown.
 
 Call `refresh_vault` with that `vault_id` to request the index turn that republishes it, then re-read. It returns as soon as the turn is admitted (`queued`, or `coalesced` when one is already pending), not when the turn finishes, so check the freshness fields again rather than trusting the response. This is not `sync_vault`: it contacts no Git remote and works on any Vault. Do not fall back to editing files directly because a read looked stale.
 

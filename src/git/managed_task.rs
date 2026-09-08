@@ -24,12 +24,13 @@ use crate::vault_work::{
 
 use super::managed_checkout::{
     ManagedCheckoutError, ManagedCheckoutLease, ManagedCheckoutRequest, ManagedHttpsCredentials,
-    acquire_or_reuse,
+    acquire_or_reuse, reuse_existing_checkout,
 };
 use super::managed_sync::{
     ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome,
-    synchronize_managed_checkout,
+    commit_managed_checkout, synchronize_managed_checkout,
 };
+use super::message::WriteLedger;
 
 /// The default interval a managed Vault waits before its next scheduled Git
 /// turn after a success or non-retryable failure, absent an explicitly
@@ -150,6 +151,7 @@ pub enum ManagedGitOutcome {
 pub fn run_managed_git_turn(
     config: &ManagedGitTurnConfig,
     lease: &ManagedCheckoutLease,
+    ledger: &WriteLedger,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let sync_mode = match config.mode {
         VaultGitMode::PullOnly => ManagedSyncMode::PullOnly,
@@ -192,12 +194,122 @@ pub fn run_managed_git_turn(
         author_name: config.author_name.clone(),
         author_email: config.author_email.clone(),
     };
-    let outcome = synchronize_managed_checkout(&sync_config).map_err(classify_sync_error)?;
+    let outcome =
+        synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
     Ok(match outcome {
         ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
         ManagedSyncOutcome::PullOnlyFastForwarded
         | ManagedSyncOutcome::TwoWaySynchronized { .. } => ManagedGitOutcome::Synchronized,
     })
+}
+
+/// Run one commit-only turn for a managed-Git Vault: commit whatever changed
+/// in its Vault subtree, and never contact the remote (issue #267).
+///
+/// The one thing this does *not* share with [`run_managed_git_turn`] is the
+/// acquisition: it reuses the checkout this Vault already has and reports
+/// `UpToDate` when there is none, because cloning is a network operation and
+/// a Vault whose first clone has not landed has no local change to commit
+/// either. Everything else is the same local work: the ownership lease, the
+/// receipt check, the commit itself.
+///
+/// Must run from `spawn_blocking`.
+pub fn run_managed_git_commit_turn(
+    config: &ManagedGitTurnConfig,
+    lease: &ManagedCheckoutLease,
+    ledger: &WriteLedger,
+) -> Result<ManagedGitOutcome, VaultWorkError> {
+    if config.mode != VaultGitMode::TwoWay {
+        return Err(commit_mode_error());
+    }
+    let request = ManagedCheckoutRequest {
+        state_directory: config.state_directory.clone(),
+        vault_id: config.vault_id,
+        repository_url: config.repository_url.clone(),
+        branch: config.branch.clone(),
+        vault_subdirectory: config.vault_subdirectory.clone(),
+        // A commit opens no connection, so it carries no credentials: the
+        // reuse path below has nothing to authenticate against.
+        credentials: None,
+    };
+    let Some(checkout) =
+        reuse_existing_checkout(lease, &request).map_err(classify_checkout_error)?
+    else {
+        return Ok(ManagedGitOutcome::UpToDate);
+    };
+
+    let sync_config = ManagedSyncConfig {
+        repository_path: checkout.repository_path,
+        vault_path: checkout.vault_path,
+        repository_url: config.repository_url.clone(),
+        branch: checkout.resolved_branch,
+        mode: ManagedSyncMode::TwoWay,
+        credentials: None,
+        author_name: config.author_name.clone(),
+        author_email: config.author_email.clone(),
+    };
+    commit_outcome(commit_managed_checkout(&sync_config, ledger))
+}
+
+/// Run one commit-only turn for an `ExistingGit` Vault in `TwoWay` mode
+/// against the operator's own checkout at `repository_path`. The Local-history
+/// commit turn is [`super::sync::run_local_history_git_turn`]; this is the
+/// same operation for the mode that *also* has a remote, minus the remote.
+///
+/// Takes no `repository_url`, unlike [`run_existing_git_remote_turn`], and
+/// leaves it blank in the shared [`ManagedSyncConfig`]: a commit opens no
+/// connection, so there is no remote identity to agree with. `branch` is
+/// carried through, because `commit_managed_checkout` does check it. An
+/// `ExistingGit` Vault may genuinely have none configured, and `None` becomes
+/// the empty string that means "follow whatever the operator has checked
+/// out" — the branch is still required to *be* a branch either way, so a
+/// commit never lands on a detached HEAD.
+///
+/// Must run from `spawn_blocking`.
+pub fn run_existing_git_commit_turn(
+    repository_path: PathBuf,
+    vault_path: PathBuf,
+    branch: Option<String>,
+    mode: VaultGitMode,
+    author_name: String,
+    author_email: String,
+    ledger: &WriteLedger,
+) -> Result<ManagedGitOutcome, VaultWorkError> {
+    if mode != VaultGitMode::TwoWay {
+        return Err(commit_mode_error());
+    }
+    let sync_config = ManagedSyncConfig {
+        repository_path,
+        vault_path,
+        repository_url: String::new(),
+        branch: branch.unwrap_or_default(),
+        mode: ManagedSyncMode::TwoWay,
+        credentials: None,
+        author_name,
+        author_email,
+    };
+    commit_outcome(commit_managed_checkout(&sync_config, ledger))
+}
+
+/// The failure both commit turns above report when they are handed a mode
+/// that does not commit. A caller bug, not a transient condition: the
+/// executor resolves the mode before requesting the turn.
+fn commit_mode_error() -> VaultWorkError {
+    VaultWorkError::new(
+        "vault_commit_mode_does_not_commit",
+        "commit turn requested for a Vault whose Git mode makes no local commits",
+        false,
+    )
+}
+
+fn commit_outcome(
+    result: Result<ManagedSyncOutcome, ManagedSyncError>,
+) -> Result<ManagedGitOutcome, VaultWorkError> {
+    match result.map_err(classify_sync_error)? {
+        ManagedSyncOutcome::UpToDate => Ok(ManagedGitOutcome::UpToDate),
+        ManagedSyncOutcome::PullOnlyFastForwarded
+        | ManagedSyncOutcome::TwoWaySynchronized { .. } => Ok(ManagedGitOutcome::Synchronized),
+    }
 }
 
 /// Run one remote-sync turn for an `ExistingGit` Vault in `PullOnly` or
@@ -237,6 +349,7 @@ pub fn run_existing_git_remote_turn(
     credentials: Option<HttpsCredentials>,
     author_name: String,
     author_email: String,
+    ledger: &WriteLedger,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let Some(repository_url) = repository_url else {
         return Err(classify_sync_error(ManagedSyncError::Validation));
@@ -284,7 +397,8 @@ pub fn run_existing_git_remote_turn(
         author_name,
         author_email,
     };
-    let outcome = synchronize_managed_checkout(&sync_config).map_err(classify_sync_error)?;
+    let outcome =
+        synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
     Ok(match outcome {
         ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
         ManagedSyncOutcome::PullOnlyFastForwarded
@@ -1069,7 +1183,8 @@ mod tests {
         let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
             .expect("lease");
 
-        let outcome = run_managed_git_turn(&config, &lease).expect("first turn acquires and syncs");
+        let outcome = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect("first turn acquires and syncs");
 
         assert_eq!(outcome, ManagedGitOutcome::UpToDate);
         assert!(
@@ -1093,7 +1208,7 @@ mod tests {
         // held.
         let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
             .expect("lease");
-        run_managed_git_turn(&config, &lease).expect("first turn");
+        run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first turn");
 
         let repository_root = config
             .state_directory
@@ -1102,10 +1217,164 @@ mod tests {
             .join("repository");
         std::fs::write(repository_root.join("vault/Local.md"), "local\n").expect("local edit");
 
-        let outcome =
-            run_managed_git_turn(&config, &lease).expect("second turn reuses the checkout");
+        let outcome = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect("second turn reuses the checkout");
 
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
+    }
+
+    /// A managed Two-way Vault's commit turn commits the checkout's Vault
+    /// drift and leaves the remote exactly where it was (#267). The remote is
+    /// proved untouched from the far side: its own branch has not moved, and
+    /// a commit pushed there before the turn is still absent locally.
+    #[test]
+    fn run_managed_git_commit_turn_commits_without_fetching_or_pushing() {
+        let (root, config) = fixture(VaultGitMode::TwoWay);
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
+        run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("acquire the checkout");
+
+        // Someone else pushes to the remote after the checkout exists.
+        let actor = root.path().join("actor");
+        let actor_repository =
+            Repository::clone(&config.repository_url, &actor).expect("actor checkout");
+        commit(&actor_repository, "vault/Theirs.md", "# theirs\n");
+        actor_repository
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("actor push");
+        let remote_head_before = Repository::open(root.path().join("remote.git"))
+            .expect("open remote")
+            .refname_to_id("refs/heads/master")
+            .expect("remote master");
+
+        let repository_root = config
+            .state_directory
+            .join("vaults")
+            .join(config.vault_id.to_string())
+            .join("repository");
+        std::fs::write(repository_root.join("vault/Mine.md"), "mine\n").expect("local write");
+
+        let outcome = run_managed_git_commit_turn(&config, &lease, &WriteLedger::new())
+            .expect("the commit turn succeeds");
+        assert_eq!(outcome, ManagedGitOutcome::Synchronized);
+
+        let checkout = Repository::open(&repository_root).expect("open checkout");
+        let head = checkout
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("HEAD commit");
+        assert!(
+            head.tree()
+                .expect("tree")
+                .get_path(Path::new("vault/Mine.md"))
+                .is_ok(),
+            "the local write is committed"
+        );
+        assert!(
+            head.tree()
+                .expect("tree")
+                .get_path(Path::new("vault/Theirs.md"))
+                .is_err(),
+            "the commit turn never fetched"
+        );
+        assert_eq!(
+            Repository::open(root.path().join("remote.git"))
+                .expect("open remote")
+                .refname_to_id("refs/heads/master")
+                .expect("remote master"),
+            remote_head_before,
+            "the commit turn never pushed"
+        );
+    }
+
+    /// A managed Vault whose first clone has not landed has no Vault subtree
+    /// to have changed, so its commit turn reports `UpToDate` rather than
+    /// cloning one. Cloning is exactly the network call a commit turn must
+    /// never make.
+    #[test]
+    fn run_managed_git_commit_turn_never_clones_a_missing_checkout() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
+
+        let outcome = run_managed_git_commit_turn(&config, &lease, &WriteLedger::new())
+            .expect("a missing checkout is not a failure");
+
+        assert_eq!(outcome, ManagedGitOutcome::UpToDate);
+        assert!(
+            !config
+                .state_directory
+                .join("vaults")
+                .join(config.vault_id.to_string())
+                .join("repository")
+                .exists(),
+            "nothing was cloned"
+        );
+    }
+
+    /// A commit lands on `HEAD`, so a detached HEAD would put it on no branch
+    /// at all and a HEAD other than the configured branch would put the
+    /// Vault's history where the sync turn will never push from. Both are
+    /// refused rather than committed onto.
+    #[test]
+    fn run_existing_git_commit_turn_refuses_a_head_that_is_not_the_vaults_branch() {
+        let (root, _config) = fixture(VaultGitMode::TwoWay);
+        let checkout = root.path().join("source");
+        let vault_path = checkout.join("vault");
+        std::fs::write(vault_path.join("Mine.md"), "mine\n").expect("local write");
+
+        let wrong_branch = run_existing_git_commit_turn(
+            checkout.clone(),
+            vault_path.clone(),
+            Some("release".to_string()),
+            VaultGitMode::TwoWay,
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("a checkout on another branch is not this Vault's history");
+        assert_eq!(wrong_branch.code(), "managed_git_validation_failed");
+
+        // Detach HEAD at the same commit and try again with no configured
+        // branch, which is otherwise the "follow the operator" case.
+        let repository = Repository::open(&checkout).expect("open checkout");
+        let head = repository
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("HEAD commit")
+            .id();
+        repository.set_head_detached(head).expect("detach HEAD");
+
+        let detached = run_existing_git_commit_turn(
+            checkout,
+            vault_path,
+            None,
+            VaultGitMode::TwoWay,
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("a detached HEAD has no branch to commit onto");
+        assert_eq!(detached.code(), "managed_git_validation_failed");
+    }
+
+    /// Pull-only never commits, so asking it to is a caller bug rather than a
+    /// condition to retry.
+    #[test]
+    fn run_managed_git_commit_turn_refuses_a_mode_that_does_not_commit() {
+        let (_root, config) = fixture(VaultGitMode::PullOnly);
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
+
+        let error = run_managed_git_commit_turn(&config, &lease, &WriteLedger::new())
+            .expect_err("Pull-only makes no local commits");
+
+        assert_eq!(error.code(), "vault_commit_mode_does_not_commit");
+        assert!(!error.retryable());
     }
 
     #[test]
@@ -1119,7 +1388,8 @@ mod tests {
         let lease = ManagedCheckoutLease::acquire(scratch.path().to_path_buf(), config.vault_id)
             .expect("scratch lease");
 
-        let error = run_managed_git_turn(&config, &lease).expect_err("Local history has no remote");
+        let error = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect_err("Local history has no remote");
 
         assert_eq!(error.code(), "managed_git_not_remote");
         assert!(!error.retryable());
@@ -1864,7 +2134,7 @@ mod tests {
         let lease = scheduler
             .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
             .expect("first turn acquires a fresh lease");
-        run_managed_git_turn(&config, &lease).expect("first turn");
+        run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first turn");
         scheduler.keep_checkout_lease(config.vault_id, lease);
 
         // Between turns — exactly the gap the old, turn-scoped lease used
@@ -1892,8 +2162,8 @@ mod tests {
         let lease = scheduler
             .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
             .expect("second turn reuses the held lease");
-        let outcome =
-            run_managed_git_turn(&config, &lease).expect("second turn reuses the checkout");
+        let outcome = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect("second turn reuses the checkout");
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
         scheduler.keep_checkout_lease(config.vault_id, lease);
 
