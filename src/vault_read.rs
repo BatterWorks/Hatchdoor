@@ -8,7 +8,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize, Serializer};
 use std::str::FromStr;
 
-use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
+use crate::cache::{
+    SqliteCache,
+    vault_snapshots::{NoteBodies, VaultSnapshotRead},
+};
 use crate::search::LayerSelection;
 use crate::vault::{Note, NoteLink, NoteLinks};
 use crate::vault_error::VaultOperationError;
@@ -490,7 +493,7 @@ impl BrowseSurface {
             notes,
             links,
             mut tags_by_note,
-            chunks,
+            mut note_bodies,
             ..
         } = read;
         let notes: Vec<_> = notes
@@ -505,13 +508,8 @@ impl BrowseSurface {
                     && visible.contains(link.target_slug.as_str())
             })
             .collect();
-        let chunks = chunks
-            .into_iter()
-            .filter(|chunk| {
-                !self.hides(chunk.layer.as_deref()) && visible.contains(chunk.note_slug.as_str())
-            })
-            .collect();
         tags_by_note.retain(|slug, _| visible.contains(slug.as_str()));
+        note_bodies.retain(|slug, _| visible.contains(slug.as_str()));
         // A restricted surface can select no layer, so it publishes no
         // catalogue: an empty catalogue is also what a Vault with no markers
         // reports, keeping the two indistinguishable.
@@ -519,7 +517,7 @@ impl BrowseSurface {
             notes,
             links,
             tags_by_note,
-            chunks,
+            note_bodies,
             layer_catalog: Vec::new(),
         }
     }
@@ -777,13 +775,14 @@ impl<'a> VaultReadCore<'a> {
         scope: VaultScope,
         tree_scope: TreeScope,
     ) -> Result<VaultReadProjection<Vec<VaultTree>>, VaultReadError> {
-        let projection = self.try_collection(scope, |vault_id, vault_name, snapshot| {
-            Ok(VaultTree {
-                vault_id,
-                vault_name: vault_name.to_string(),
-                tree: tree_for(vault_id, snapshot, &tree_scope)?,
-            })
-        })?;
+        let projection =
+            self.try_collection(scope, NoteBodies::Omit, |vault_id, vault_name, snapshot| {
+                Ok(VaultTree {
+                    vault_id,
+                    vault_name: vault_name.to_string(),
+                    tree: tree_for(vault_id, snapshot, &tree_scope)?,
+                })
+            })?;
 
         // When no Vault has the folder, the caller asked for one thing and
         // would otherwise be handed an empty collection — the very blur the
@@ -924,8 +923,12 @@ impl<'a> VaultReadCore<'a> {
         &self,
         vault_id: VaultId,
     ) -> Result<VaultQualifiedStats, VaultReadError> {
-        let projection = self.collection(
+        // The one report that counts words rather than rows, so the one read
+        // that asks for Markdown text. Every other collection read projects
+        // structure alone and never pays for it.
+        let projection = self.collection_with(
             VaultScope::One(vault_id),
+            NoteBodies::Load,
             |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot),
         )?;
         let stats = projection
@@ -1215,7 +1218,20 @@ impl<'a> VaultReadCore<'a> {
         scope: VaultScope,
         map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> T,
     ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
-        self.try_collection(scope, |vault_id, vault_name, snapshot| {
+        self.collection_with(scope, NoteBodies::Omit, map)
+    }
+
+    /// [`Self::collection`] for a projection that reads Markdown text rather
+    /// than structure. Only the detailed stats report does, and it takes the
+    /// bodies from the same snapshot read as the note list so both describe
+    /// one published generation.
+    fn collection_with<T>(
+        &self,
+        scope: VaultScope,
+        bodies: NoteBodies,
+        map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> T,
+    ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
+        self.try_collection(scope, bodies, |vault_id, vault_name, snapshot| {
             Ok(map(vault_id, vault_name, snapshot))
         })
     }
@@ -1232,6 +1248,7 @@ impl<'a> VaultReadCore<'a> {
     fn try_collection<T>(
         &self,
         scope: VaultScope,
+        bodies: NoteBodies,
         map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> Result<T, VaultReadError>,
     ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
         let snapshot = self.vaults.snapshot();
@@ -1239,7 +1256,7 @@ impl<'a> VaultReadCore<'a> {
         let mut data = Vec::new();
         let mut participants = Vec::with_capacity(selected.len());
         for selected in selected {
-            let published = self.cache.read_vault_snapshot(selected.vault_id);
+            let published = self.cache.read_vault_snapshot(selected.vault_id, bodies);
             let participant = match published {
                 Ok(Some(published)) => {
                     let state = match published.status.freshness {
@@ -1598,6 +1615,10 @@ impl FolderBuilder {
 /// lean projection: every note in the published snapshot counts, consistent
 /// with what that already-shipped collection endpoint reports for the same
 /// Vault.
+/// Counts words and images in `snapshot.note_bodies`, which the same read that
+/// produced `snapshot.notes` supplied, so both describe one published
+/// generation. A withheld note has neither a row nor a body here, because
+/// `restrict` drops both together.
 fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultStatsResponse {
     use crate::api_types::{
         FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
@@ -1611,9 +1632,14 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     let mut total_image_count = 0usize;
     let mut word_counts: Vec<(&str, &str, usize)> = Vec::with_capacity(snapshot.notes.len());
     for note in &snapshot.notes {
-        let word_count = word_count_for_content(&note.content);
+        let content = snapshot
+            .note_bodies
+            .get(&note.slug)
+            .map(String::as_str)
+            .unwrap_or("");
+        let word_count = word_count_for_content(content);
         total_word_count += word_count;
-        total_image_count += note.content.matches("![").count();
+        total_image_count += content.matches("![").count();
         word_counts.push((note.slug.as_str(), note.title.as_str(), word_count));
     }
     let avg_word_count = if note_count > 0 {
@@ -1935,6 +1961,60 @@ mod parsing_tests {
                 LayerSelection::default_surface(),
                 "{raw:?}"
             );
+        }
+    }
+
+    /// #109: a withheld Note's Markdown text must go the way its row does. The
+    /// detailed stats report is the one projection that reads bodies, and it
+    /// looks them up by slug, so a body left behind here would be text from a
+    /// demoted Note sitting in a snapshot the restricted surface produced.
+    #[test]
+    fn a_restricted_surface_withholds_a_demoted_notes_body_with_its_row() {
+        let read = VaultSnapshotRead {
+            notes: vec![
+                snapshot_note("wiki", None),
+                snapshot_note("clip", Some("sources")),
+            ],
+            links: Vec::new(),
+            tags_by_note: BTreeMap::new(),
+            note_bodies: [
+                ("wiki".to_string(), "public text".to_string()),
+                ("clip".to_string(), "demoted text".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            layer_catalog: Vec::new(),
+        };
+
+        let restricted = BrowseSurface::DefaultOnly.restrict(read);
+
+        assert_eq!(
+            restricted
+                .notes
+                .iter()
+                .map(|note| &note.slug)
+                .collect::<Vec<_>>(),
+            vec!["wiki"]
+        );
+        assert_eq!(
+            restricted.note_bodies.keys().collect::<Vec<_>>(),
+            vec!["wiki"],
+            "a demoted Note's text must not survive the row it belongs to"
+        );
+    }
+
+    fn snapshot_note(
+        slug: &str,
+        layer: Option<&str>,
+    ) -> crate::cache::vault_snapshots::VaultSnapshotNote {
+        crate::cache::vault_snapshots::VaultSnapshotNote {
+            title: slug.to_string(),
+            slug: slug.to_string(),
+            relative_path: slug.to_string(),
+            size_bytes: 0,
+            mtime_ns: 0,
+            layer: layer.map(str::to_string),
+            metadata: crate::vault::NoteMetadata::default(),
         }
     }
 
@@ -2882,6 +2962,43 @@ mod tests {
             .collect();
         assert_eq!(folder_counts.get(""), Some(&2));
         assert_eq!(folder_counts.get("Folder"), Some(&1));
+    }
+
+    /// Word and image counts are the one thing in the whole read surface that
+    /// looks at Markdown text rather than structure, and bodies reach the
+    /// report through their own read now that the published snapshot carries
+    /// structure alone. Counting from an empty body would silently report
+    /// zeroes rather than fail, so assert the numbers themselves.
+    #[test]
+    fn statistics_detail_counts_words_and_images_from_the_published_bodies() {
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Long.md",
+                    "---\ntags: [alpha]\n---\none two three four five\n\n![](a.png)\n",
+                ),
+                ("Short.md", "one two\n\n![](b.png)\n![](c.png)\n"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let stats = reads
+            .statistics_detail(workspace.vault_ids[0])
+            .expect("statistics detail succeeds")
+            .stats;
+
+        // "one two three four five" plus its image, and "one two" plus two.
+        assert_eq!(stats.word_count, 5 + 1 + 2 + 2);
+        assert_eq!(stats.image_count, 3);
+        assert_eq!(
+            stats
+                .longest_notes
+                .iter()
+                .map(|note| (note.slug.as_str(), note.word_count))
+                .collect::<Vec<_>>(),
+            vec![("long", 6), ("short", 4)]
+        );
     }
 
     #[test]

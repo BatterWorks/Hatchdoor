@@ -24,8 +24,11 @@ import type {
  * legacy import still needs recovery) are mutually exclusive broken-start
  * conditions (#150): both leave the lists empty, but only one is ever set.
  *
- * `revision` is the collection revision the SSE stream last reported; it starts
- * at 0, meaning "nothing has changed since load".
+ * `revision` is the collection revision the state reflects: seeded from the
+ * discovery response and advanced by the SSE stream. `null` until a discovery
+ * lands, which is a different fact from a server sitting at revision 0 — the
+ * two shared the `0` sentinel until a freshly restarted server was found to
+ * spend its first genuine change being mistaken for "nothing known yet".
  */
 export type VaultCollectionState = {
   vaults: VaultSummary[];
@@ -36,7 +39,7 @@ export type VaultCollectionState = {
   recovery: VaultRegistryRecovery | null;
   legacyMigrationRecovery: LegacyMigrationRecovery | null;
   registryRevision: number | null;
-  revision: number;
+  revision: number | null;
   noteCounts: Record<VaultId, number>;
 };
 
@@ -49,7 +52,7 @@ const EMPTY_STATE: VaultCollectionState = {
   recovery: null,
   legacyMigrationRecovery: null,
   registryRevision: null,
-  revision: 0,
+  revision: null,
   noteCounts: {},
 };
 
@@ -150,6 +153,22 @@ async function loadCollection(forGeneration: number): Promise<void> {
         discovery.legacy_migration_recovery ?? null,
       ),
       registryRevision: discovery.registry_revision ?? null,
+      // Seed the baseline, once, from the read the vaults themselves came
+      // from. The stream reports the server's current revision the moment it
+      // connects rather than a delta, so against a starting `revision` of 0
+      // that first event always read as an invalidation and every consumer
+      // keyed on it reloaded: the explorer tree and the recent list were each
+      // fetched twice on every page load. Only the baseline is taken here.
+      // Once a revision is known the stream alone moves it, which is what
+      // keeps a revision counting from zero again after a server restart a
+      // change this client follows rather than one a later discovery undoes.
+      // The narrow race stays honest either way: a collection that genuinely
+      // changed between this response and the stream connecting reports a
+      // different revision, and that one still invalidates.
+      revision:
+        state.revision === null
+          ? discovery.collection_revision
+          : state.revision,
       error: null,
     });
     // A broken registry has no collection to count, and the stats read would

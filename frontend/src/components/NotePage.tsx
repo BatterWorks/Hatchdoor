@@ -119,7 +119,8 @@ export function NotePage({
    * this note's own Vault to pre-select in its filter (#144). */
   onTagSelect: (tag: string, vaultId: VaultId) => void;
   propertiesCollapsedStorageKey: string;
-  vaultRevision: number;
+  /** `null` until the collection client has discovered anything. */
+  vaultRevision: number | null;
   writeEnabled: boolean;
   editRequestId: number;
   onWriteNotice?: (message: string | null) => void;
@@ -218,7 +219,9 @@ export function NotePage({
   const noteKey = `${vaultId}:${slug}`;
   const currentNoteKeyRef = useRef(noteKey);
   const lastEditRequestIdRef = useRef(editRequestId);
-  const lastHandledRevisionRef = useRef(0);
+  // `null` until a revision is known. The first one observed is the revision
+  // the open note was already read at, not a change to it.
+  const lastHandledRevisionRef = useRef<number | null>(null);
   const autosaveStatusRef = useRef<string>("idle");
   const activeUnitRef = useRef<string | null>(null);
   const latestContentRef = useRef("");
@@ -301,12 +304,25 @@ export function NotePage({
 
   useEffect(() => {
     if (
-      vaultRevision === 0 ||
+      vaultRevision === null ||
       vaultRevision === lastHandledRevisionRef.current
     ) {
       return;
     }
+    // The collection client publishes the revision it discovered the Vaults
+    // at, which lands just after this note was read and describes the same
+    // state. Adopting it without acting is what keeps a plain page load from
+    // reading the note a second time and reseeding the hash the editor saves
+    // against. A genuine later change reports a revision past this one.
+    //
+    // `null` above is "no discovery yet", never "revision 0": a server that
+    // restarted and is genuinely at 0 publishes 0, takes it as the baseline
+    // here, and its next change is acted on rather than eaten.
+    const isBaseline = lastHandledRevisionRef.current === null;
     lastHandledRevisionRef.current = vaultRevision;
+    if (isBaseline) {
+      return;
+    }
 
     // Never refetch the note out from under an open editor: doing so would move
     // the content hash the editor saves against and silently defeat the

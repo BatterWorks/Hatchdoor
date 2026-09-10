@@ -47,7 +47,7 @@ it("prompts for the web token when first-run model setup is unauthorized", async
     legacyMigrationRecovery: null,
     allVaults: [{ enabled: true }],
     registryRevision: 0,
-    revision: 0,
+    revision: null,
     noteCounts: {},
     refresh: vi.fn(),
   });

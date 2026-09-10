@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiFetch } from "../api/api";
 import { useVaultCollection } from "../vaults";
@@ -58,6 +58,14 @@ export function useVaultTree(scope: VaultScope) {
     string[]
   >([]);
   const { revision: vaultRevision } = useVaultCollection();
+  // The collection revision the loaded tree reflects, taken from the
+  // projection envelope rather than assumed. `loadInFlightRef` holds the load
+  // that has not answered yet, because the revision the collection client
+  // publishes on load arrives while the very first tree read is still open:
+  // without waiting for it there is nothing to compare against, and the tree
+  // and the recent list are each fetched a second time on every page load.
+  const loadedRevisionRef = useRef<number | null>(null);
+  const loadInFlightRef = useRef<Promise<void> | null>(null);
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -74,6 +82,7 @@ export function useVaultTree(scope: VaultScope) {
       // Notes arrive without a vault ID; the tree they hang from carries it
       // (#192). Stamping them here is the last point at which the grouping is
       // still intact — everything below merges or flattens the trees.
+      loadedRevisionRef.current = projection.collection_revision;
       const trees = projection.data.map(attributeVaultTree);
       const nextTree = mergeVaultTrees(trees);
       setTree((prev) =>
@@ -112,23 +121,44 @@ export function useVaultTree(scope: VaultScope) {
     }
   }, [scope]);
 
-  useEffect(() => {
-    void (async () => {
-      setLoadingTree(true);
+  const loadTreeAndRecent = useCallback(async () => {
+    const running = (async () => {
       await loadTree();
       await loadModifiedNotes();
-      setLoadingTree(false);
     })();
+    loadInFlightRef.current = running;
+    try {
+      await running;
+    } finally {
+      if (loadInFlightRef.current === running) {
+        loadInFlightRef.current = null;
+      }
+    }
   }, [loadModifiedNotes, loadTree]);
 
   useEffect(() => {
-    if (vaultRevision === 0) {
+    loadedRevisionRef.current = null;
+    void (async () => {
+      setLoadingTree(true);
+      await loadTreeAndRecent();
+      setLoadingTree(false);
+    })();
+  }, [loadTreeAndRecent]);
+
+  useEffect(() => {
+    if (vaultRevision === null) {
       return;
     }
 
-    void loadTree();
-    void loadModifiedNotes();
-  }, [loadModifiedNotes, loadTree, vaultRevision]);
+    void (async () => {
+      // A read already open may be about to answer at exactly this revision.
+      await loadInFlightRef.current;
+      if (loadedRevisionRef.current === vaultRevision) {
+        return;
+      }
+      await loadTreeAndRecent();
+    })();
+  }, [loadTreeAndRecent, vaultRevision]);
 
   // Folder lists stay separated by Vault. Flattening the merged tree instead
   // produced one list in which "Projects" could mean a different Vault's

@@ -164,10 +164,12 @@ export function FolderTree({
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
 }) {
-  const current = pathToNoteIdentity(currentPath);
+  // Keyed on the pathname, not on the parsed identity: `pathToNoteIdentity`
+  // returns a fresh object every call, so a dependency on it changed on every
+  // render and this walked the whole tree each time instead of never.
   const activePathFolders = useMemo(
-    () => collectAncestorFolderPaths(root, current),
-    [current, root],
+    () => collectAncestorFolderPaths(root, pathToNoteIdentity(currentPath)),
+    [currentPath, root],
   );
 
   return (
@@ -250,28 +252,38 @@ function FolderNode({
             </button>
           ) : null}
         </summary>
+        {/* A closed folder renders nothing inside it. The browser hides a
+            collapsed <details>' content either way, so mounting it bought
+            nothing but DOM — on a whole Vault that is the difference between
+            a handful of rows and one per note. The cost is that find-in-page
+            no longer reaches a note in a collapsed folder on the browsers
+            that looked inside one; the in-app search does. */}
         <ul className="tree">
-          {folder.folders.map((child) => (
-            <FolderNode
-              key={`${folder.name}-${child.name}`}
-              folder={child}
-              currentPath={currentPath}
-              folderPath={`${folderPath}/${child.name}`}
-              expandedFolders={expandedFolders}
-              activePathFolders={activePathFolders}
-              writeEnabled={writeEnabled}
-              onCreateNoteInFolder={onCreateNoteInFolder}
-              onToggleFolder={onToggleFolder}
-            />
-          ))}
-          {folder.notes.map((note, index) => (
-            <NoteNode
-              key={note.slug}
-              note={note}
-              currentPath={currentPath}
-              index={index}
-            />
-          ))}
+          {shouldOpen ? (
+            <>
+              {folder.folders.map((child) => (
+                <FolderNode
+                  key={`${folder.name}-${child.name}`}
+                  folder={child}
+                  currentPath={currentPath}
+                  folderPath={`${folderPath}/${child.name}`}
+                  expandedFolders={expandedFolders}
+                  activePathFolders={activePathFolders}
+                  writeEnabled={writeEnabled}
+                  onCreateNoteInFolder={onCreateNoteInFolder}
+                  onToggleFolder={onToggleFolder}
+                />
+              ))}
+              {folder.notes.map((note, index) => (
+                <NoteNode
+                  key={note.slug}
+                  note={note}
+                  currentPath={currentPath}
+                  index={index}
+                />
+              ))}
+            </>
+          ) : null}
         </ul>
       </details>
     </li>

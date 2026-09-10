@@ -59,6 +59,20 @@ pub(crate) struct MutationGuardHandoff {
         Box<dyn FnOnce() -> (VaultSnapshotFreshness, tokio::sync::OwnedMutexGuard<()>) + Send>,
 }
 
+/// Whether a snapshot read carries the Markdown text of its notes.
+///
+/// Bodies are the expensive half of the notes table and only the detailed
+/// stats report counts anything in them, so every other read omits them. They
+/// are a flag on the snapshot read rather than a read of their own because
+/// they must describe the same published generation the note list does: read
+/// separately, an Index turn landing in between would pair one generation's
+/// notes with another's text and silently count a new note as empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NoteBodies {
+    Omit,
+    Load,
+}
+
 /// One Vault's complete published read snapshot. This is intentionally a
 /// cache-local representation: callers must treat it as disposable data and
 /// keep exact note reads on the authoritative Markdown path.
@@ -67,7 +81,9 @@ pub(crate) struct VaultSnapshotRead {
     pub(crate) notes: Vec<VaultSnapshotNote>,
     pub(crate) links: Vec<VaultSnapshotLink>,
     pub(crate) tags_by_note: BTreeMap<String, Vec<String>>,
-    pub(crate) chunks: Vec<VaultSnapshotChunk>,
+    /// Each note's Markdown text, keyed by slug, and empty unless the read
+    /// asked for [`NoteBodies::Load`].
+    pub(crate) note_bodies: BTreeMap<String, String>,
     /// This Vault's declared layer catalog (name + optional description), as
     /// published alongside this generation's other snapshot rows. Sourced
     /// from `.hatchdoor-layer` markers at populate time, not inferred from
@@ -86,27 +102,19 @@ pub(crate) struct PublishedVaultSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// One published note's structural row. Deliberately without its Markdown
+/// body: every collection read projects these, and only the detailed stats
+/// report reads bodies at all, so it fetches them separately through
+/// [`SqliteCache::read_vault_note_bodies`] rather than making every tree,
+/// recent, graph, and query read carry the whole Vault's text.
 pub(crate) struct VaultSnapshotNote {
     pub(crate) title: String,
     pub(crate) slug: String,
     pub(crate) relative_path: String,
-    pub(crate) content: String,
     pub(crate) size_bytes: i64,
     pub(crate) mtime_ns: i64,
     pub(crate) layer: Option<String>,
     pub(crate) metadata: NoteMetadata,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VaultSnapshotChunk {
-    pub(crate) chunk_id: i64,
-    pub(crate) note_slug: String,
-    pub(crate) heading_path: Option<String>,
-    pub(crate) content: String,
-    pub(crate) layer: Option<String>,
-    /// Demoted chunks can intentionally remain keyword-only when the Index
-    /// turn bound `HATCHDOOR_EMBED_LAYERS=false`.
-    pub(crate) embedding: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,6 +428,7 @@ impl SqliteCache {
     pub(crate) fn read_vault_snapshot(
         &self,
         vault_id: VaultId,
+        bodies: NoteBodies,
     ) -> Result<Option<PublishedVaultSnapshot>, String> {
         let conn = self.read()?;
         conn.execute_batch("BEGIN")
@@ -431,7 +440,7 @@ impl SqliteCache {
             if !status.participating {
                 return Ok(None);
             }
-            let read = Self::read_vault_snapshot_rows(&conn, vault_id)?;
+            let read = Self::read_vault_snapshot_rows(&conn, vault_id, bodies)?;
             Ok(Some(PublishedVaultSnapshot { status, read }))
         })();
         let close = if result.is_ok() {
@@ -451,6 +460,7 @@ impl SqliteCache {
     pub(crate) fn read_vault_snapshot_on(
         conn: &rusqlite::Connection,
         vault_id: VaultId,
+        bodies: NoteBodies,
     ) -> Result<Option<PublishedVaultSnapshot>, String> {
         let Some(status) = Self::read_snapshot_status(conn, vault_id)? else {
             return Ok(None);
@@ -460,7 +470,7 @@ impl SqliteCache {
         }
         Ok(Some(PublishedVaultSnapshot {
             status,
-            read: Self::read_vault_snapshot_rows(conn, vault_id)?,
+            read: Self::read_vault_snapshot_rows(conn, vault_id, bodies)?,
         }))
     }
 
@@ -499,11 +509,12 @@ impl SqliteCache {
     fn read_vault_snapshot_rows(
         conn: &rusqlite::Connection,
         vault_id: VaultId,
+        bodies: NoteBodies,
     ) -> Result<VaultSnapshotRead, String> {
         let vault_id = vault_id.to_string();
         let mut notes_statement = conn
             .prepare(
-                "SELECT title, slug, relative_path, content, size_bytes, mtime_ns, layer, \
+                "SELECT title, slug, relative_path, size_bytes, mtime_ns, layer, \
                  aliases_json, frontmatter_json \
                  FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path",
             )
@@ -514,25 +525,24 @@ impl SqliteCache {
                     title: row.get(0)?,
                     slug: row.get(1)?,
                     relative_path: row.get(2)?,
-                    content: row.get(3)?,
-                    size_bytes: row.get(4)?,
-                    mtime_ns: row.get(5)?,
-                    layer: row.get(6)?,
+                    size_bytes: row.get(3)?,
+                    mtime_ns: row.get(4)?,
+                    layer: row.get(5)?,
                     metadata: NoteMetadata {
                         tags: Vec::new(),
-                        aliases: serde_json::from_str(&row.get::<_, String>(7)?).map_err(
+                        aliases: serde_json::from_str(&row.get::<_, String>(6)?).map_err(
                             |error| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    7,
+                                    6,
                                     rusqlite::types::Type::Text,
                                     Box::new(error),
                                 )
                             },
                         )?,
-                        properties: serde_json::from_str(&row.get::<_, String>(8)?).map_err(
+                        properties: serde_json::from_str(&row.get::<_, String>(7)?).map_err(
                             |error| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    8,
+                                    7,
                                     rusqlite::types::Type::Text,
                                     Box::new(error),
                                 )
@@ -586,31 +596,26 @@ impl SqliteCache {
         }
         drop(tags_statement);
 
-        let mut chunks_statement = conn
-            .prepare(
-                "SELECT c.id, c.note_slug, c.heading_path, c.content, n.layer, \
-                 COALESCE(v.embedding, d.embedding) \
-                 FROM vault_chunks c \
-                 JOIN vault_notes n ON n.vault_id = c.vault_id AND n.slug = c.note_slug \
-                 LEFT JOIN vault_chunk_vectors v ON v.chunk_id = c.id \
-                 LEFT JOIN vault_chunk_vectors_demoted d ON d.chunk_id = c.id \
-                 WHERE c.vault_id = ?1 ORDER BY c.id",
-            )
-            .map_err(|error| format!("prepare Vault snapshot chunks: {error}"))?;
-        let chunks = chunks_statement
-            .query_map(params![&vault_id], |row| {
-                Ok(VaultSnapshotChunk {
-                    chunk_id: row.get(0)?,
-                    note_slug: row.get(1)?,
-                    heading_path: row.get(2)?,
-                    content: row.get(3)?,
-                    layer: row.get(4)?,
-                    embedding: row.get(5)?,
-                })
-            })
-            .map_err(|error| format!("query Vault snapshot chunks: {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("read Vault snapshot chunks: {error}"))?;
+        let note_bodies = match bodies {
+            NoteBodies::Omit => BTreeMap::new(),
+            NoteBodies::Load => {
+                let mut statement = conn
+                    .prepare("SELECT slug, content FROM vault_notes WHERE vault_id = ?1")
+                    .map_err(|error| format!("prepare Vault snapshot note bodies: {error}"))?;
+                let rows = statement
+                    .query_map(params![&vault_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|error| format!("query Vault snapshot note bodies: {error}"))?;
+                let mut loaded = BTreeMap::new();
+                for row in rows {
+                    let (slug, content) =
+                        row.map_err(|error| format!("read Vault snapshot note body: {error}"))?;
+                    loaded.insert(slug, content);
+                }
+                loaded
+            }
+        };
 
         let layer_catalog_json: Option<String> = conn
             .query_row(
@@ -630,7 +635,7 @@ impl SqliteCache {
             notes,
             links,
             tags_by_note,
-            chunks,
+            note_bodies,
             layer_catalog,
         })
     }
@@ -1406,11 +1411,12 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{VaultSnapshotFreshness, VaultSnapshotStatus};
+    use super::{NoteBodies, VaultSnapshotFreshness, VaultSnapshotStatus};
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
     use crate::vault_registry::VaultId;
+    use rusqlite::params;
 
     struct NamedEmbedder {
         inner: StubEmbedder,
@@ -1487,15 +1493,16 @@ mod tests {
     /// structure-only signature; search skips vectorless chunks, so this is
     /// exactly what separates a browsable Vault from a searchable one.
     fn vectored_chunks(cache: &SqliteCache, vault_id: VaultId) -> usize {
-        cache
-            .read_vault_snapshot(vault_id)
-            .expect("read published snapshot")
-            .expect("snapshot participates")
-            .read
-            .chunks
-            .iter()
-            .filter(|chunk| chunk.embedding.is_some())
-            .count()
+        let conn = cache.read().expect("read connection");
+        conn.query_row(
+            "SELECT COUNT(*) FROM vault_chunks c \
+             WHERE c.vault_id = ?1 \
+             AND (EXISTS (SELECT 1 FROM vault_chunk_vectors v WHERE v.chunk_id = c.id) \
+                  OR EXISTS (SELECT 1 FROM vault_chunk_vectors_demoted d WHERE d.chunk_id = c.id))",
+            params![vault_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("count vectored chunks") as usize
     }
 
     #[test]
@@ -1528,7 +1535,7 @@ mod tests {
             "structural rows are current, so the generation is fresh but not searchable"
         );
         let read = cache
-            .read_vault_snapshot(id)
+            .read_vault_snapshot(id, NoteBodies::Omit)
             .expect("read snapshot")
             .expect("snapshot participates")
             .read;
@@ -1789,7 +1796,7 @@ mod tests {
              `any(state != Fresh)` over these participants"
         );
         let read = cache
-            .read_vault_snapshot(id)
+            .read_vault_snapshot(id, NoteBodies::Omit)
             .expect("read snapshot")
             .expect("snapshot participates")
             .read;
@@ -1898,7 +1905,7 @@ mod tests {
         );
         assert_eq!(
             cache
-                .read_vault_snapshot(id)
+                .read_vault_snapshot(id, NoteBodies::Omit)
                 .expect("read snapshot")
                 .expect("snapshot participates")
                 .read
@@ -2113,7 +2120,7 @@ mod tests {
         assert_eq!(cache.snapshot_status(first).expect("first status"), None);
         assert!(
             cache
-                .read_vault_snapshot(first)
+                .read_vault_snapshot(first, NoteBodies::Omit)
                 .expect("read disconnected snapshot")
                 .is_none(),
             "a disconnected Vault must be unavailable, never an empty projection"

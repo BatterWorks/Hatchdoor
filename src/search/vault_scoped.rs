@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
+use crate::cache::{
+    SqliteCache,
+    vault_snapshots::{NoteBodies, VaultSnapshotRead},
+};
 use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, NoteSummary};
 use crate::vault_read::{
@@ -153,7 +156,11 @@ impl<'a> VaultSearchCore<'a> {
         let mut snapshots = BTreeMap::new();
         let mut participants = Vec::with_capacity(selected.len());
         for vault in selected {
-            match SqliteCache::read_vault_snapshot_on(&cache_snapshot, vault.vault_id) {
+            match SqliteCache::read_vault_snapshot_on(
+                &cache_snapshot,
+                vault.vault_id,
+                NoteBodies::Omit,
+            ) {
                 Ok(Some(snapshot)) => {
                     let state = match snapshot.status.freshness {
                         crate::cache::vault_snapshots::VaultSnapshotFreshness::Fresh => {

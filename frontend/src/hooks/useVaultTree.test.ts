@@ -1,12 +1,15 @@
-import { cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   collectionEnvelope,
+  discoveryResponse,
   EIGHT_VAULTS,
+  ONE_VAULT,
   participantFor,
   THREE_VAULTS,
 } from "../test/fixtures/vaults";
+import { resetVaultCollection } from "../vaults/vaultCollectionStore";
 import { useVaultTree } from "./useVaultTree";
 
 function jsonResponse(body: unknown): Response {
@@ -33,6 +36,7 @@ function mockFetch(recentEnvelope: unknown, treeData: unknown[] = []) {
 
 afterEach(() => {
   cleanup();
+  resetVaultCollection();
   vi.restoreAllMocks();
 });
 
@@ -144,5 +148,77 @@ describe("useVaultTree — per-Vault trees (#142)", () => {
       ].sort(),
     ).toEqual(THREE_VAULTS.map((vault) => vault.vault_id).sort());
     expect(result.current.noteCandidates).toHaveLength(6);
+  });
+});
+
+describe("useVaultTree — one load per collection revision", () => {
+  /** Answers discovery, the tree and the recent list, counting the two reads
+   * the explorer makes, with the collection revision under the test's control
+   * on both the discovery response and the projection envelopes. */
+  function mockAtRevision(revision: number) {
+    const counts = { tree: 0, recent: 0 };
+    const envelope = (data: unknown[]) => ({
+      ...collectionEnvelope("all", data, []),
+      collection_revision: revision,
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse({
+            ...discoveryResponse(ONE_VAULT),
+            collection_revision: revision,
+          });
+        }
+        if (url.endsWith("/api/v1/vaults/all/stats")) {
+          return jsonResponse(collectionEnvelope("all", [], []));
+        }
+        if (url.includes("/tree")) {
+          counts.tree += 1;
+          return jsonResponse(envelope([]));
+        }
+        if (url.includes("/recent")) {
+          counts.recent += 1;
+          return jsonResponse(envelope([]));
+        }
+        return jsonResponse({ error: "not found" });
+      },
+    );
+    return counts;
+  }
+
+  it("reads the tree and the recent list once for a plain load", async () => {
+    const counts = mockAtRevision(7);
+
+    const { result } = renderHook(() => useVaultTree("all"));
+    await waitFor(() => expect(result.current.loadingTree).toBe(false));
+    // Discovery publishing the revision it answered at is what used to look
+    // like a change and fetch everything a second time.
+    await waitFor(() => expect(result.current.vaultRevision).toBe(7));
+
+    expect(counts.tree).toBe(1);
+    expect(counts.recent).toBe(1);
+  });
+
+  it("reads again when the revision moves past the one it loaded at", async () => {
+    const counts = mockAtRevision(7);
+
+    const { result } = renderHook(() => useVaultTree("all"));
+    await waitFor(() => expect(result.current.vaultRevision).toBe(7));
+    expect(counts.tree).toBe(1);
+
+    act(() => {
+      for (const source of window.__hatchdoorEventSources) {
+        if (source.url.includes("/api/v1/vaults/events")) {
+          source.emit(
+            "vault-collection-revision",
+            JSON.stringify({ collection_revision: 8 }),
+          );
+        }
+      }
+    });
+
+    await waitFor(() => expect(counts.tree).toBe(2));
+    expect(counts.recent).toBe(2);
   });
 });

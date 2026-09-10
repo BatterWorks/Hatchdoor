@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The explorer took seconds to appear on a Vault of any size, and got slower as the collection grew rather than as the Vault did. On 600 notes the tree took about nine tenths of a second to answer and the sidebar a little over two seconds to draw; at 2400 notes the read alone was over two seconds, and adding a second Vault slowed down the first one. The cause was that every read that lists notes — the tree, the recently changed list, the graph, the statistics, `query_notes` — loaded the whole Vault out of the cache first, including the search vectors behind every chunk of every note, and then discarded all of it to send back a list of names and paths. The vectors were 97% of the work and nothing read them: search fetches its own. They are no longer loaded, and neither is the text of your notes, which only the statistics page counts words in and which now asks for it separately. The tree read is around fifteen times faster on 600 notes and thirty on 2400, and it no longer degrades as you connect more Vaults. Two smaller things came out with it. The tree and the recently changed list were each fetched twice on every page load, because the event stream announces the current state when it connects and that was being read as a change; the app now knows which state it already has. And a collapsed folder no longer builds the rows for the notes inside it, which the browser was hiding anyway. One consequence of that last one: your browser's own find-on-page, `Ctrl+F`, no longer matches a note's name inside a folder you have not opened. Hatchdoor's own search, in the top bar, is unaffected and searches every note whether its folder is open or not. [#301]
+
+[#301]: https://github.com/BatterWorks/Hatchdoor/pull/301
+
 ## v2.6.1 - 2026-09-08
 
 The follow-up release, and there is nothing new to learn in it. These are the fixes that came out of running v2.6.0 in earnest, plus one tool that should never have gone missing. Vaults that were quietly not committing your notes now commit them. Links inside tables, and links a note makes to itself, stop breaking on rename. The editor puts the caret where you clicked, and `query_notes` is back.
