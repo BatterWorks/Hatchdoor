@@ -59,6 +59,20 @@ pub(crate) struct MutationGuardHandoff {
         Box<dyn FnOnce() -> (VaultSnapshotFreshness, tokio::sync::OwnedMutexGuard<()>) + Send>,
 }
 
+/// Whether a snapshot read carries the Markdown text of its notes.
+///
+/// Bodies are the expensive half of the notes table and only the detailed
+/// stats report counts anything in them, so every other read omits them. They
+/// are a flag on the snapshot read rather than a read of their own because
+/// they must describe the same published generation the note list does: read
+/// separately, an Index turn landing in between would pair one generation's
+/// notes with another's text and silently count a new note as empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NoteBodies {
+    Omit,
+    Load,
+}
+
 /// One Vault's complete published read snapshot. This is intentionally a
 /// cache-local representation: callers must treat it as disposable data and
 /// keep exact note reads on the authoritative Markdown path.
@@ -67,6 +81,9 @@ pub(crate) struct VaultSnapshotRead {
     pub(crate) notes: Vec<VaultSnapshotNote>,
     pub(crate) links: Vec<VaultSnapshotLink>,
     pub(crate) tags_by_note: BTreeMap<String, Vec<String>>,
+    /// Each note's Markdown text, keyed by slug, and empty unless the read
+    /// asked for [`NoteBodies::Load`].
+    pub(crate) note_bodies: BTreeMap<String, String>,
     /// This Vault's declared layer catalog (name + optional description), as
     /// published alongside this generation's other snapshot rows. Sourced
     /// from `.hatchdoor-layer` markers at populate time, not inferred from
@@ -379,35 +396,6 @@ impl SqliteCache {
         .map_err(|error| format!("read Vault snapshot note {vault_id}/{slug}: {error}"))
     }
 
-    /// Every published note body in one Vault, keyed by slug.
-    ///
-    /// The one read that wants Markdown text rather than structure is the
-    /// detailed stats report, which counts words and images. It asks for
-    /// bodies here so [`VaultSnapshotRead`] can stay structural and the tree,
-    /// recent, graph, and query reads stop carrying the whole Vault's text
-    /// they never look at.
-    pub(crate) fn read_vault_note_bodies(
-        &self,
-        vault_id: VaultId,
-    ) -> Result<BTreeMap<String, String>, String> {
-        let conn = self.read()?;
-        let mut statement = conn
-            .prepare("SELECT slug, content FROM vault_notes WHERE vault_id = ?1")
-            .map_err(|error| format!("prepare Vault note bodies {vault_id}: {error}"))?;
-        let rows = statement
-            .query_map(params![vault_id.to_string()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| format!("query Vault note bodies {vault_id}: {error}"))?;
-        let mut bodies = BTreeMap::new();
-        for row in rows {
-            let (slug, content) =
-                row.map_err(|error| format!("read Vault note body {vault_id}: {error}"))?;
-            bodies.insert(slug, content);
-        }
-        Ok(bodies)
-    }
-
     pub(crate) fn snapshot_status(
         &self,
         vault_id: VaultId,
@@ -440,6 +428,7 @@ impl SqliteCache {
     pub(crate) fn read_vault_snapshot(
         &self,
         vault_id: VaultId,
+        bodies: NoteBodies,
     ) -> Result<Option<PublishedVaultSnapshot>, String> {
         let conn = self.read()?;
         conn.execute_batch("BEGIN")
@@ -451,7 +440,7 @@ impl SqliteCache {
             if !status.participating {
                 return Ok(None);
             }
-            let read = Self::read_vault_snapshot_rows(&conn, vault_id)?;
+            let read = Self::read_vault_snapshot_rows(&conn, vault_id, bodies)?;
             Ok(Some(PublishedVaultSnapshot { status, read }))
         })();
         let close = if result.is_ok() {
@@ -471,6 +460,7 @@ impl SqliteCache {
     pub(crate) fn read_vault_snapshot_on(
         conn: &rusqlite::Connection,
         vault_id: VaultId,
+        bodies: NoteBodies,
     ) -> Result<Option<PublishedVaultSnapshot>, String> {
         let Some(status) = Self::read_snapshot_status(conn, vault_id)? else {
             return Ok(None);
@@ -480,7 +470,7 @@ impl SqliteCache {
         }
         Ok(Some(PublishedVaultSnapshot {
             status,
-            read: Self::read_vault_snapshot_rows(conn, vault_id)?,
+            read: Self::read_vault_snapshot_rows(conn, vault_id, bodies)?,
         }))
     }
 
@@ -519,6 +509,7 @@ impl SqliteCache {
     fn read_vault_snapshot_rows(
         conn: &rusqlite::Connection,
         vault_id: VaultId,
+        bodies: NoteBodies,
     ) -> Result<VaultSnapshotRead, String> {
         let vault_id = vault_id.to_string();
         let mut notes_statement = conn
@@ -605,6 +596,27 @@ impl SqliteCache {
         }
         drop(tags_statement);
 
+        let note_bodies = match bodies {
+            NoteBodies::Omit => BTreeMap::new(),
+            NoteBodies::Load => {
+                let mut statement = conn
+                    .prepare("SELECT slug, content FROM vault_notes WHERE vault_id = ?1")
+                    .map_err(|error| format!("prepare Vault snapshot note bodies: {error}"))?;
+                let rows = statement
+                    .query_map(params![&vault_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|error| format!("query Vault snapshot note bodies: {error}"))?;
+                let mut loaded = BTreeMap::new();
+                for row in rows {
+                    let (slug, content) =
+                        row.map_err(|error| format!("read Vault snapshot note body: {error}"))?;
+                    loaded.insert(slug, content);
+                }
+                loaded
+            }
+        };
+
         let layer_catalog_json: Option<String> = conn
             .query_row(
                 "SELECT value FROM vault_snapshot_metadata WHERE vault_id = ?1 AND key = 'layer_catalog'",
@@ -623,6 +635,7 @@ impl SqliteCache {
             notes,
             links,
             tags_by_note,
+            note_bodies,
             layer_catalog,
         })
     }
@@ -1398,7 +1411,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{VaultSnapshotFreshness, VaultSnapshotStatus};
+    use super::{NoteBodies, VaultSnapshotFreshness, VaultSnapshotStatus};
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
@@ -1522,7 +1535,7 @@ mod tests {
             "structural rows are current, so the generation is fresh but not searchable"
         );
         let read = cache
-            .read_vault_snapshot(id)
+            .read_vault_snapshot(id, NoteBodies::Omit)
             .expect("read snapshot")
             .expect("snapshot participates")
             .read;
@@ -1783,7 +1796,7 @@ mod tests {
              `any(state != Fresh)` over these participants"
         );
         let read = cache
-            .read_vault_snapshot(id)
+            .read_vault_snapshot(id, NoteBodies::Omit)
             .expect("read snapshot")
             .expect("snapshot participates")
             .read;
@@ -1892,7 +1905,7 @@ mod tests {
         );
         assert_eq!(
             cache
-                .read_vault_snapshot(id)
+                .read_vault_snapshot(id, NoteBodies::Omit)
                 .expect("read snapshot")
                 .expect("snapshot participates")
                 .read
@@ -2107,7 +2120,7 @@ mod tests {
         assert_eq!(cache.snapshot_status(first).expect("first status"), None);
         assert!(
             cache
-                .read_vault_snapshot(first)
+                .read_vault_snapshot(first, NoteBodies::Omit)
                 .expect("read disconnected snapshot")
                 .is_none(),
             "a disconnected Vault must be unavailable, never an empty projection"

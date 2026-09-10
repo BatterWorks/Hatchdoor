@@ -119,7 +119,8 @@ export function NotePage({
    * this note's own Vault to pre-select in its filter (#144). */
   onTagSelect: (tag: string, vaultId: VaultId) => void;
   propertiesCollapsedStorageKey: string;
-  vaultRevision: number;
+  /** `null` until the collection client has discovered anything. */
+  vaultRevision: number | null;
   writeEnabled: boolean;
   editRequestId: number;
   onWriteNotice?: (message: string | null) => void;
@@ -303,7 +304,7 @@ export function NotePage({
 
   useEffect(() => {
     if (
-      vaultRevision === 0 ||
+      vaultRevision === null ||
       vaultRevision === lastHandledRevisionRef.current
     ) {
       return;
@@ -313,6 +314,10 @@ export function NotePage({
     // state. Adopting it without acting is what keeps a plain page load from
     // reading the note a second time and reseeding the hash the editor saves
     // against. A genuine later change reports a revision past this one.
+    //
+    // `null` above is "no discovery yet", never "revision 0": a server that
+    // restarted and is genuinely at 0 publishes 0, takes it as the baseline
+    // here, and its next change is acted on rather than eaten.
     const isBaseline = lastHandledRevisionRef.current === null;
     lastHandledRevisionRef.current = vaultRevision;
     if (isBaseline) {

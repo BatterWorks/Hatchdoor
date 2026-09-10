@@ -1394,7 +1394,15 @@ demoted-layer, note-summary, health-check, graph, and layered/filtered
 search variants are retired. The crate-private
 `vault_snapshots` seam owns Vault-ID-qualified candidate publication,
 stale/participation state, attempt ordering, and Vault-local disposal in the
-shared cache. Publication carries the caller's freshness verdict rather than
+shared cache. A published `VaultSnapshotRead` is structural: notes, links,
+tags, and the layer catalog. It carries no chunks — search reads those and
+their vectors through its own SQL rather than through a snapshot, so the
+`vault_chunk_vectors` join every collection read used to pay for is gone —
+and it carries note bodies only when the read asks for `NoteBodies::Load`.
+The detailed stats report is the only caller that does, because it counts
+words and images; bodies come back from the same pinned read as the note
+list so a projection can never pair one generation's rows with another's
+text. Publication carries the caller's freshness verdict rather than
 assuming `Fresh`, and `MutationGuardHandoff` is how an Index turn hands its
 Vault read lock through a build: released at the read/embed boundary, retaken
 to answer that verdict under one acquisition with the publication it labels
@@ -2757,6 +2765,18 @@ decision rather than making one — the client is where it is made, and the shel
 hands it down — so the slot vocabulary stays renderable in isolation and its
 own suites keep testing it that way.
 
+`revision` is the collection revision the published state reflects, and it is
+`null` — not `0` — until a discovery lands. The two were one sentinel until a
+freshly restarted server, genuinely at revision 0, was found to spend its
+first real change being read as "nothing known yet". The baseline is seeded
+from the discovery response's own `collection_revision`; once known, only the
+event stream moves it, which is what keeps a revision counting from zero again
+after a restart a change consumers follow rather than one a later discovery
+undoes. Seeding matters because the stream reports the server's current
+revision the moment it connects rather than a delta, so against a `0` start
+that first event always read as an invalidation and every consumer keyed on it
+reloaded.
+
 A refresh that finds nothing new keeps the previous value's identity, and a
 patch that changes nothing publishes nothing. Without that, a note write — which
 bumps the collection revision — would hand every consumer a fresh-but-identical
@@ -2887,7 +2907,15 @@ unchanged. `useVaultTree` also exposes `modifiedNotesPartial` and
 `modifiedNotesMissingVaults` from the `/recent` read's own envelope (#141);
 `ChangesPanel` never banners a partial read — a trailing warn-ink line below
 the last row names only the missing Vaults, and `StateBlock tone="error"`
-replaces the empty state outright when nothing is usable. The tree read's own
+replaces the empty state outright when nothing is usable. `useVaultTree` reads once per collection revision: it records the
+`collection_revision` its loaded tree came back with, and a revision event
+matching it is not a reload. A read still open is awaited before that
+comparison, because the discovery revision lands while the very first tree
+read is in flight and there would otherwise be nothing to compare against. A
+collapsed folder renders none of its children — the browser hides a closed
+`<details>`' content anyway, so mounting a row per note bought DOM and render
+time and nothing else; the cost is that find-in-page no longer reaches a note
+inside a collapsed folder. The tree read's own
 `partial` (`treePartial`) is deliberately left untouched: #116 rules grouped
 surfaces (tree, graph, statistics) show a missing Vault as a visible missing
 group, which belongs to #142/#143, not this flattened-list rule.

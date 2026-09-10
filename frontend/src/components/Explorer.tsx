@@ -254,14 +254,14 @@ function FolderNode({
         </summary>
         {/* A closed folder renders nothing inside it. The browser hides a
             collapsed <details>' content either way, so mounting it bought
-            nothing but DOM: at 600 notes this is 14 tree rows instead of 684,
-            and 32ms of render instead of 94ms. The cost is that find-in-page
+            nothing but DOM — on a whole Vault that is the difference between
+            a handful of rows and one per note. The cost is that find-in-page
             no longer reaches a note in a collapsed folder on the browsers
             that looked inside one; the in-app search does. */}
         <ul className="tree">
-          {!shouldOpen
-            ? null
-            : folder.folders.map((child) => (
+          {shouldOpen ? (
+            <>
+              {folder.folders.map((child) => (
                 <FolderNode
                   key={`${folder.name}-${child.name}`}
                   folder={child}
@@ -274,9 +274,7 @@ function FolderNode({
                   onToggleFolder={onToggleFolder}
                 />
               ))}
-          {!shouldOpen
-            ? null
-            : folder.notes.map((note, index) => (
+              {folder.notes.map((note, index) => (
                 <NoteNode
                   key={note.slug}
                   note={note}
@@ -284,6 +282,8 @@ function FolderNode({
                   index={index}
                 />
               ))}
+            </>
+          ) : null}
         </ul>
       </details>
     </li>

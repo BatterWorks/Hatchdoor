@@ -121,7 +121,7 @@ export function useVaultTree(scope: VaultScope) {
     }
   }, [scope]);
 
-  const load = useCallback(async () => {
+  const loadTreeAndRecent = useCallback(async () => {
     const running = (async () => {
       await loadTree();
       await loadModifiedNotes();
@@ -140,13 +140,13 @@ export function useVaultTree(scope: VaultScope) {
     loadedRevisionRef.current = null;
     void (async () => {
       setLoadingTree(true);
-      await load();
+      await loadTreeAndRecent();
       setLoadingTree(false);
     })();
-  }, [load]);
+  }, [loadTreeAndRecent]);
 
   useEffect(() => {
-    if (vaultRevision === 0) {
+    if (vaultRevision === null) {
       return;
     }
 
@@ -156,9 +156,9 @@ export function useVaultTree(scope: VaultScope) {
       if (loadedRevisionRef.current === vaultRevision) {
         return;
       }
-      await load();
+      await loadTreeAndRecent();
     })();
-  }, [load, vaultRevision]);
+  }, [loadTreeAndRecent, vaultRevision]);
 
   // Folder lists stay separated by Vault. Flattening the merged tree instead
   // produced one list in which "Projects" could mean a different Vault's
