@@ -265,8 +265,10 @@ describe("App navigation/search", () => {
     act(() => {
       window.__hatchdoorEventSources[0].emit(
         "vault-collection-revision",
+        // Past the revision discovery answered at, so this is news. An event
+        // repeating the revision the client already reflects is not.
         JSON.stringify({
-          collection_revision: 1,
+          collection_revision: 2,
           vault_ids: [VAULT_ID],
           category: "content",
         }),

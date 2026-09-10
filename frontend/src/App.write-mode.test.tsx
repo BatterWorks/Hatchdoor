@@ -494,7 +494,9 @@ describe("App write mode", () => {
     act(() => {
       window.__hatchdoorEventSources[0].emit(
         "vault-collection-revision",
-        JSON.stringify({ collection_revision: 1, vault_ids: [VAULT_ID] }),
+        // Past the revision discovery answered at, so this is a real change
+        // arriving mid-edit rather than an echo of the state already loaded.
+        JSON.stringify({ collection_revision: 2, vault_ids: [VAULT_ID] }),
       );
     });
 

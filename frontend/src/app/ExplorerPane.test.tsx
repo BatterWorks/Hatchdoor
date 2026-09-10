@@ -1149,16 +1149,17 @@ describe("ExplorerPane scope-change motion (#147)", () => {
 
     rerenderWith({ loadingTree: true });
 
-    // "Finance" is unique to the folder tree — unlike "Home", which also
-    // appears in the always-rendered Recently viewed list.
-    expect(screen.getByText("Finance")).toBeInTheDocument();
+    // "10-topics" is unique to the folder tree — unlike "Home", which also
+    // appears in the always-rendered Recently viewed list. The folder rather
+    // than the note inside it: a collapsed folder renders no children.
+    expect(screen.getByText("10-topics")).toBeInTheDocument();
     expect(document.querySelector(".skeleton-list")).toBeNull();
 
     act(() => {
       vi.advanceTimersByTime(199);
     });
 
-    expect(screen.getByText("Finance")).toBeInTheDocument();
+    expect(screen.getByText("10-topics")).toBeInTheDocument();
     expect(document.querySelector(".skeleton-list")).toBeNull();
   });
 
@@ -1171,7 +1172,7 @@ describe("ExplorerPane scope-change motion (#147)", () => {
     });
 
     expect(document.querySelector(".skeleton-list")).not.toBeNull();
-    expect(screen.queryByText("Finance")).not.toBeInTheDocument();
+    expect(screen.queryByText("10-topics")).not.toBeInTheDocument();
   });
 
   it("swaps straight to the narrowed answer with no skeleton flash once it lands", () => {

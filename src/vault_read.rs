@@ -490,7 +490,6 @@ impl BrowseSurface {
             notes,
             links,
             mut tags_by_note,
-            chunks,
             ..
         } = read;
         let notes: Vec<_> = notes
@@ -505,12 +504,6 @@ impl BrowseSurface {
                     && visible.contains(link.target_slug.as_str())
             })
             .collect();
-        let chunks = chunks
-            .into_iter()
-            .filter(|chunk| {
-                !self.hides(chunk.layer.as_deref()) && visible.contains(chunk.note_slug.as_str())
-            })
-            .collect();
         tags_by_note.retain(|slug, _| visible.contains(slug.as_str()));
         // A restricted surface can select no layer, so it publishes no
         // catalogue: an empty catalogue is also what a Vault with no markers
@@ -519,7 +512,6 @@ impl BrowseSurface {
             notes,
             links,
             tags_by_note,
-            chunks,
             layer_catalog: Vec::new(),
         }
     }
@@ -924,9 +916,16 @@ impl<'a> VaultReadCore<'a> {
         &self,
         vault_id: VaultId,
     ) -> Result<VaultQualifiedStats, VaultReadError> {
+        // Bodies are read once, outside the per-Vault projection, because this
+        // is the one report that counts words rather than rows. Every other
+        // collection read projects structure alone and never pays for text.
+        let bodies = self
+            .cache
+            .read_vault_note_bodies(vault_id)
+            .map_err(|message| unavailable(vault_id, "vault_read_unavailable", message, true))?;
         let projection = self.collection(
             VaultScope::One(vault_id),
-            |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot),
+            |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot, &bodies),
         )?;
         let stats = projection
             .data
@@ -1598,7 +1597,15 @@ impl FolderBuilder {
 /// lean projection: every note in the published snapshot counts, consistent
 /// with what that already-shipped collection endpoint reports for the same
 /// Vault.
-fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultStatsResponse {
+/// `bodies` carries the Markdown text this report counts words and images in,
+/// keyed by slug. It is looked up per note in `snapshot.notes`, so a note the
+/// restricted surface withheld is never counted even though the map was read
+/// before the restriction was applied. A slug with no body reads as empty,
+/// which is what a note with no text would have counted as anyway.
+fn detailed_stats_for(
+    snapshot: &VaultSnapshotRead,
+    bodies: &BTreeMap<String, String>,
+) -> crate::api_types::VaultStatsResponse {
     use crate::api_types::{
         FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
         VaultStatsResponse,
@@ -1611,9 +1618,10 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     let mut total_image_count = 0usize;
     let mut word_counts: Vec<(&str, &str, usize)> = Vec::with_capacity(snapshot.notes.len());
     for note in &snapshot.notes {
-        let word_count = word_count_for_content(&note.content);
+        let content = bodies.get(&note.slug).map(String::as_str).unwrap_or("");
+        let word_count = word_count_for_content(content);
         total_word_count += word_count;
-        total_image_count += note.content.matches("![").count();
+        total_image_count += content.matches("![").count();
         word_counts.push((note.slug.as_str(), note.title.as_str(), word_count));
     }
     let avg_word_count = if note_count > 0 {
@@ -2882,6 +2890,43 @@ mod tests {
             .collect();
         assert_eq!(folder_counts.get(""), Some(&2));
         assert_eq!(folder_counts.get("Folder"), Some(&1));
+    }
+
+    /// Word and image counts are the one thing in the whole read surface that
+    /// looks at Markdown text rather than structure, and bodies reach the
+    /// report through their own read now that the published snapshot carries
+    /// structure alone. Counting from an empty body would silently report
+    /// zeroes rather than fail, so assert the numbers themselves.
+    #[test]
+    fn statistics_detail_counts_words_and_images_from_the_published_bodies() {
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Long.md",
+                    "---\ntags: [alpha]\n---\none two three four five\n\n![](a.png)\n",
+                ),
+                ("Short.md", "one two\n\n![](b.png)\n![](c.png)\n"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let stats = reads
+            .statistics_detail(workspace.vault_ids[0])
+            .expect("statistics detail succeeds")
+            .stats;
+
+        // "one two three four five" plus its image, and "one two" plus two.
+        assert_eq!(stats.word_count, 5 + 1 + 2 + 2);
+        assert_eq!(stats.image_count, 3);
+        assert_eq!(
+            stats
+                .longest_notes
+                .iter()
+                .map(|note| (note.slug.as_str(), note.word_count))
+                .collect::<Vec<_>>(),
+            vec![("long", 6), ("short", 4)]
+        );
     }
 
     #[test]

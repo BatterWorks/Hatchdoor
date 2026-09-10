@@ -218,7 +218,9 @@ export function NotePage({
   const noteKey = `${vaultId}:${slug}`;
   const currentNoteKeyRef = useRef(noteKey);
   const lastEditRequestIdRef = useRef(editRequestId);
-  const lastHandledRevisionRef = useRef(0);
+  // `null` until a revision is known. The first one observed is the revision
+  // the open note was already read at, not a change to it.
+  const lastHandledRevisionRef = useRef<number | null>(null);
   const autosaveStatusRef = useRef<string>("idle");
   const activeUnitRef = useRef<string | null>(null);
   const latestContentRef = useRef("");
@@ -306,7 +308,16 @@ export function NotePage({
     ) {
       return;
     }
+    // The collection client publishes the revision it discovered the Vaults
+    // at, which lands just after this note was read and describes the same
+    // state. Adopting it without acting is what keeps a plain page load from
+    // reading the note a second time and reseeding the hash the editor saves
+    // against. A genuine later change reports a revision past this one.
+    const isBaseline = lastHandledRevisionRef.current === null;
     lastHandledRevisionRef.current = vaultRevision;
+    if (isBaseline) {
+      return;
+    }
 
     // Never refetch the note out from under an open editor: doing so would move
     // the content hash the editor saves against and silently defeat the
