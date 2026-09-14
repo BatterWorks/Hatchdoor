@@ -9,22 +9,25 @@
   <a href="https://hatchdoor.battercloud.cc"><img alt="Live demo" src="https://img.shields.io/badge/live_demo-hatchdoor.battercloud.cc-e4572e"></a>
   <a href="https://docs-hatchdoor.battercloud.cc"><img alt="Documentation" src="https://img.shields.io/badge/docs-docs--hatchdoor.battercloud.cc-6f42c1"></a>
   <a href="https://hub.docker.com/r/battermanz/hatchdoor"><img alt="Docker Hub" src="https://img.shields.io/docker/v/battermanz/hatchdoor?sort=semver&label=docker%20hub&color=2496ed"></a>
-  <a href="https://github.com/BattermanZ/Hatchdoor/blob/main/Dockerfile"><img alt="Rootless and distroless image" src="https://img.shields.io/badge/image-rootless_%26_distroless-2ea44f"></a>
+  <a href="https://github.com/BatterWorks/Hatchdoor/blob/main/Dockerfile"><img alt="Rootless and distroless image" src="https://img.shields.io/badge/image-rootless_%26_distroless-2ea44f"></a>
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
 # Hatchdoor
 
-Hatchdoor is a self-hosted, **agent-native** web app for your Obsidian-style
-Markdown vault. Browse, search, and edit your notes in a fast web UI, and give
-AI agents first-class access to the very same vault over the Model Context
-Protocol (MCP).
+**Self-host your Obsidian vaults: a web UI for you, MCP for your AI agents.
+No Obsidian, no plugins required.**
 
-Point an MCP client like Claude, Claude Code, Codex, Cursor, or Hermes at
-Hatchdoor and your agent can read, search (keyword and semantic), create, edit,
-move, and link notes. Every action goes through the same safe, atomic vault
-operations the UI uses, with optional automatic git commit-and-push. The web UI
-and your agents are two front doors to one vault.
+Hatchdoor reads your vault directly from disk, and any folder of Markdown
+notes works. No Local REST API plugin, no desktop app that has to stay
+running. Browse, search, and edit your notes in a fast web UI, and point a
+Model Context Protocol (MCP) client like Claude, Claude Code, Codex, Cursor,
+or Hermes at the same vault so your agent can read, search (keyword and
+semantic), create, edit, move, and link notes. One server manages as many
+vaults as you give it, every write goes through the same atomic vault
+operations the UI uses, with optimistic concurrency and optional automatic
+git commit-and-push. The web UI and your agents are two front doors to one
+vault.
 
 Your Markdown files stay the source of truth. Hatchdoor builds a disposable
 SQLite read model for fast browsing, links, backlinks, keyword search, semantic
@@ -52,6 +55,7 @@ under close human review, with tests and a documented safety model.
 - [What You Get](#what-you-get)
 - [Screenshots](#screenshots)
 - [Who It Is For](#who-it-is-for)
+- [How Hatchdoor Compares](#how-hatchdoor-compares)
 - [What Is Next](#what-is-next)
 - [Quick Start With Docker](#quick-start-with-docker)
 - [Data And Safety Model](#data-and-safety-model)
@@ -70,6 +74,8 @@ under close human review, with tests and a documented safety model.
 ## What You Get
 
 - A web UI for browsing folders and Markdown notes.
+- Native multi-vault: one instance serves several vaults, each with its own
+  source, git sync, and agent scope.
 - Clean note URLs at `/n/:slug`.
 - Obsidian-style wikilinks for `[[Note]]`, `[[Folder/Note]]`, and
   `[[Note|Alias]]`.
@@ -124,6 +130,28 @@ semantic search, and local development.
 Hatchdoor is not a hosted sync service, not a multi-user collaboration platform,
 and not a replacement for Obsidian. It is a self-hosted companion for a Markdown
 vault you control.
+
+## How Hatchdoor Compares
+
+The MCP-for-Obsidian field is crowded. The honest short version: if you live
+inside the Obsidian app and want the smallest possible bridge to it, the
+plugin-based tools are fine. Hatchdoor is for when you want the vault served
+independently of Obsidian: from a homelab box, for browsers and agents at
+once, across more than one vault.
+
+| | Hatchdoor | [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian) | [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) | [Basic Memory](https://github.com/basicmachines-co/basic-memory) | [OpenKnowledge](https://github.com/inkeep/open-knowledge) |
+|---|---|---|---|---|---|
+| What it is | Self-hosted vault server: web UI + MCP | MCP bridge to the REST plugin | The REST plugin itself | AI memory over local Markdown, MCP-first | WYSIWYG Markdown editor with side-by-side AI |
+| Works without Obsidian installed | ✅ reads the vault from disk | ❌ needs Obsidian + plugin running | ❌ runs inside Obsidian | ✅ | ✅ own editor |
+| Web UI for humans | ✅ self-hosted, [live demo](https://hatchdoor.battercloud.cc) | ❌ | ❌ | Paid cloud app | ✅ desktop + local web app |
+| Serves multiple vaults | ✅ one server, per-vault git sync | ❌ | ❌ | ✅ projects | ❌ one folder per instance |
+| Write safety for agent edits | Atomic writes, optimistic concurrency | Via plugin REST API | — | Overwrite guards | — |
+| Deploys as a service | ✅ Docker/Podman, rootless, token auth | ❌ desktop-bound | ❌ | ❌ local process (cloud is paid) | ❌ local CLI app |
+
+Basic Memory and OpenKnowledge are good projects solving adjacent problems
+(agent memory, an AI-native editor). Hatchdoor overlaps them only where your
+notes are a vault you want served: one always-on service, for browsers and
+agents at once.
 
 ## What Is Next
 
