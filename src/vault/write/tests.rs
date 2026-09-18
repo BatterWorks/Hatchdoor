@@ -2038,14 +2038,19 @@ fn a_preserved_bare_title_backlink_keeps_its_alias_anchor_and_embed_form() {
 }
 
 #[test]
-fn move_note_rewrites_a_slug_form_backlink_to_the_new_full_path() {
-    // Settled in triage on #235: a slug-form target is machine-authored, so it
-    // takes the full path like any other non-title form. No slug branch.
+fn move_note_keeps_a_slug_form_backlink_bare() {
+    // #256 reverses the slug half of #235: a target with no folder path keeps
+    // its bare form whichever lookup pass resolved it, so a slug-form link
+    // picks up the moved note's new title rather than its full path.
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     fs::create_dir_all(root.join("Notes")).expect("notes");
     fs::write(root.join("Notes/Some Note.md"), "body").expect("target");
-    fs::write(root.join("Backlink.md"), "See [[some-note]]").expect("backlink");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[some-note]], [[some-note|Alias]], [[some-note#Heading]] and ![[some-note^block-id]]",
+    )
+    .expect("backlink");
     let index = build(root);
     let entry = index.find_by_slug("some-note").expect("some note");
 
@@ -2060,7 +2065,97 @@ fn move_note_rewrites_a_slug_form_backlink_to_the_new_full_path() {
 
     assert_eq!(
         fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
-        "See [[Archive/Some Note]]"
+        "See [[Some Note]], [[Some Note|Alias]], [[Some Note#Heading]] and ![[Some Note^block-id]]"
+    );
+}
+
+#[test]
+fn move_note_keeps_a_backlink_bare_when_its_punctuation_differs_from_the_filename() {
+    // The case #256 reported: the link was written with an em dash, the file
+    // with a hyphen. The title lookup misses and the slug lookup finds it, and
+    // the author still wrote a bare title, so it stays one.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let title = "11 - Used self-charging hybrid market and running costs";
+    fs::create_dir_all(root.join("wayfinder/family-car")).expect("folder");
+    fs::write(
+        root.join(format!("wayfinder/family-car/{title}.md")),
+        "body",
+    )
+    .expect("target");
+    fs::write(
+        root.join("Brief.md"),
+        "after [[11 \u{2014} Used self-charging hybrid market and running costs|ticket 11]]",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink(&format!("wayfinder/family-car/{title}"))
+        .expect("ticket");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        &format!("wayfinder/family-car/issues/{title}.md"),
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Brief.md")).expect("backlink"),
+        format!("after [[{title}|ticket 11]]")
+    );
+    let after = build(root);
+    assert_eq!(
+        after
+            .resolve_wikilink(title)
+            .expect("the rewritten link must still resolve")
+            .slug,
+        outcome.slug.expect("moved slug"),
+    );
+}
+
+#[test]
+fn move_note_falls_back_to_the_full_path_for_a_slug_form_backlink_when_the_new_title_collides() {
+    // Widening the bare branch leaves the safety condition alone: a new title
+    // another note already carries sends every slash-free target to the full
+    // path, slug-form and punctuation near-misses included.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::create_dir_all(root.join("Other")).expect("other");
+    fs::write(root.join("Notes/Some Note.md"), "body").expect("target");
+    fs::write(root.join("Other/Renamed Note.md"), "unrelated").expect("collider");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[some-note]] and [[Some \u{2014} Note|alias]]",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("some-note").expect("some note");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed Note.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Archive/Renamed Note]] and [[Archive/Renamed Note|alias]]"
+    );
+    let after = build(root);
+    assert_eq!(
+        after
+            .resolve_wikilink("Archive/Renamed Note")
+            .expect("the rewritten link must still resolve")
+            .slug,
+        outcome.slug.expect("moved slug"),
+        "the fallback form must resolve to the moved note, not its same-titled neighbour"
     );
 }
 

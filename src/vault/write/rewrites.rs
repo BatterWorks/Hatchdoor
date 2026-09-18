@@ -22,11 +22,13 @@ pub(super) struct MovedTo<'a> {
 
 /// Retarget every backlink to the moved note, keeping the form its author wrote.
 ///
-/// A link written as a bare title stays a bare title, a path-qualified link
-/// gets the new full path, and `new_target: None` removes the link entirely
-/// (delete). The bare form is only safe while the new title names exactly one
-/// note, so a title another note already carries falls back to the full path:
-/// a link that resolved before the move must still resolve after it (#235).
+/// A link written without a folder path stays bare and picks up the new title,
+/// whether it named the note by title, by a title whose punctuation drifted
+/// from the filename, or by slug (#256). A path-qualified link gets the new
+/// full path, and `new_target: None` removes the link entirely (delete). The
+/// bare form is only safe while the new title names exactly one note, so a
+/// title another note already carries falls back to the full path: a link
+/// that resolved before the move must still resolve after it (#235).
 ///
 /// The moved note holds links to itself like any other note, and its
 /// self-links follow the same rules (#254). Its rewrite is keyed to
@@ -65,9 +67,10 @@ pub(super) fn backlink_rewrite_plan(
                 return Some(target.to_string());
             }
             match bare_new_target.as_deref() {
-                Some(bare) if target_is_the_moved_notes_bare_title(target, &candidate.title) => {
-                    Some(bare.to_string())
-                }
+                // The target resolved to the moved note through any lookup
+                // pass, title or slug, so its folder path is all that decides
+                // its form.
+                Some(bare) if is_bare_target(target) => Some(bare.to_string()),
                 _ => new_target.map(ToOwned::to_owned),
             }
         });
@@ -103,15 +106,14 @@ fn unambiguous_bare_title(
     (!taken_by_another_note).then(|| bare.to_string())
 }
 
-/// Whether this target is the moved note's own title, written bare.
+/// Whether this target names its note without a folder path.
 ///
-/// A slug-form target (`[[some-note]]` for "Some Note") is machine-authored
-/// and takes the full path like any other non-title form; for a single-word
-/// title the two forms normalize alike, so the distinction only ever arises
-/// for multi-word titles.
-fn target_is_the_moved_notes_bare_title(target: &str, moved_title: &str) -> bool {
-    let normalized = normalize_link_target(target);
-    !normalized.contains('/') && normalize_title(&normalized) == normalize_title(moved_title)
+/// A title, a title whose punctuation drifted from the filename
+/// (`[[11 — Used ...]]` for a file named `11 - Used ...`) and a slug
+/// (`[[some-note]]`) all read as bare links, so all of them stay one (#256,
+/// reversing the slug half of #235).
+fn is_bare_target(target: &str) -> bool {
+    !normalize_link_target(target).contains('/')
 }
 
 pub(super) fn transform_wikilinks<F>(content: &str, transform_target: F) -> String
