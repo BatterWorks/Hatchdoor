@@ -208,6 +208,37 @@ pub struct NoteWriteResult {
     pub trashed_path: Option<String>,
 }
 
+/// `rename_tag`'s answer, for a plan and for an applied rename alike.
+/// `applied` says which. `plan_hash` is the fingerprint to send back as
+/// `expected_plan_hash`; it is absent when no note would change.
+/// `frontmatter_notes` and `body_notes` count the notes each form of the tag
+/// changes in, so they can add up to more than `notes_affected`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RenameTagResult {
+    pub vault_id: String,
+    pub ok: bool,
+    pub applied: bool,
+    pub old_tag: String,
+    pub new_tag: String,
+    pub notes_affected: usize,
+    pub frontmatter_notes: usize,
+    pub body_notes: usize,
+    pub already_tagged_notes: usize,
+    pub plan_hash: Option<String>,
+    pub notes: Vec<RenameTagNote>,
+}
+
+/// One note a tag rename changes. `content_hash` is the note's hash as it
+/// stands after the call: unchanged for a plan, rewritten once applied.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RenameTagNote {
+    pub slug: String,
+    pub relative_path: String,
+    pub frontmatter: bool,
+    pub body: bool,
+    pub content_hash: String,
+}
+
 /// `get_frontmatter`'s answer: the note's frontmatter projection — tags,
 /// aliases, and every remaining property — without the Markdown body. A
 /// note with no frontmatter block answers `has_frontmatter: false` with an
@@ -341,6 +372,7 @@ output_schemas! {
     "move_attachment" => AttachmentWriteResult,
     "rename_attachment" => AttachmentWriteResult,
     "delete_attachment" => AttachmentWriteResult,
+    "rename_tag" => RenameTagResult,
 }
 
 /// Serializes a typed tool result into the value embedded in a tool success
@@ -390,12 +422,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 41,
-            "3 setup + 14 read + 1 batch + 8 management + 15 write tools"
+            total, 42,
+            "3 setup + 14 read + 1 batch + 8 management + 16 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 41, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 42, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

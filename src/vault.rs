@@ -23,8 +23,9 @@ pub use types::{
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,
 };
 pub use write::{
-    AttachmentInfo, AttachmentOutcome, SectionMode, WriteError, WriteOutcome,
-    allowed_attachment_extensions, append_note, archive_note, create_note, delete_attachment,
-    delete_note, edit_note, import_attachment_bytes, list_note_attachments, move_attachment,
-    move_or_rename_note, rename_attachment, replace_section, update_note, update_note_frontmatter,
+    AttachmentInfo, AttachmentOutcome, SectionMode, TagRename, TagRenameError, TagRenameNote,
+    UnsupportedTagNote, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
+    archive_note, create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
+    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment, rename_tag,
+    replace_section, update_note, update_note_frontmatter,
 };

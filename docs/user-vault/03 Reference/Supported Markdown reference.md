@@ -120,6 +120,8 @@ Hashtags inside code are never tags, so a note that documents a tag convention d
 Write it as `#not/a-tag` in your note.
 ````
 
+An agent renaming a tag across the Vault with `rename_tag` goes by these same rules, so a hashtag in code is left as written.
+
 ---
 
 Related: [[MCP tools reference]] · [[HTTP API reference]]

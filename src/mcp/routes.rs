@@ -3043,6 +3043,173 @@ mod tests {
         assert_eq!(batch[0].summary.as_deref(), Some("shout the token"));
     }
 
+    /// Issue #242: the plan call writes nothing and records nothing; the
+    /// applying call rewrites every note and lands in the ledger as one write,
+    /// which is what makes a synced Vault commit it once.
+    #[tokio::test]
+    async fn rename_tag_plans_then_applies_as_one_recorded_write() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+        std::fs::write(
+            root.join("A.md"),
+            "---\ntags: [domain/x, keep]\n---\nBody #domain/y\n",
+        )
+        .expect("a");
+        std::fs::write(root.join("B.md"), "---\ntags:\n  - domain\n---\n").expect("b");
+
+        let plan = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "#domain", "new_tag": "topic"}),
+        )
+        .await;
+        let plan = &plan["result"]["structuredContent"];
+        assert_eq!(plan["ok"], true, "{plan}");
+        assert_eq!(plan["applied"], false);
+        assert_eq!(plan["old_tag"], "domain");
+        assert_eq!(plan["notes_affected"], 2);
+        assert_eq!(plan["frontmatter_notes"], 2);
+        assert_eq!(plan["body_notes"], 1);
+        assert_eq!(plan["already_tagged_notes"], 0);
+        assert_eq!(plan["notes"][0]["relative_path"], "A");
+        assert_eq!(plan["notes"][0]["body"], true);
+        let hash = plan["plan_hash"].as_str().expect("plan hash").to_string();
+        let runtime = state
+            .vaults
+            .runtime(vault_id_of(&state))
+            .expect("Vault runtime");
+        assert!(
+            runtime.write_ledger().take().is_empty(),
+            "a plan records nothing"
+        );
+
+        let applied = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "topic", "expected_plan_hash": hash, "commit_summary": "merge namespaces"}),
+        )
+        .await;
+        let applied = &applied["result"]["structuredContent"];
+        assert_eq!(applied["applied"], true, "{applied}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("A.md")).expect("a"),
+            "---\ntags: [topic/x, keep]\n---\nBody #topic/y\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("B.md")).expect("b"),
+            "---\ntags:\n  - topic\n---\n"
+        );
+        let records = runtime.write_ledger().take();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].op, "rename tag");
+        assert_eq!(records[0].target, "#domain -> #topic");
+        assert_eq!(records[0].affected_paths.len(), 2);
+        assert_eq!(records[0].summary.as_deref(), Some("merge namespaces"));
+
+        let stale = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "topic", "expected_plan_hash": hash}),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true);
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"],
+            "tag_rename_plan_stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_tag_refusals_carry_their_own_codes() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+        std::fs::write(root.join("Quoted.md"), "---\ntags: [\"domain/x\"]\n---\n").expect("note");
+
+        let invalid = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "Topic"}),
+        )
+        .await;
+        assert_eq!(invalid["result"]["isError"], true);
+        assert_eq!(
+            invalid["result"]["structuredContent"]["code"],
+            "invalid_tag_name"
+        );
+
+        let unsupported = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "topic"}),
+        )
+        .await;
+        let error = &unsupported["result"]["structuredContent"];
+        assert_eq!(error["code"], "tag_shape_unsupported", "{unsupported}");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("'Quoted'"),
+            "the refusal names the note: {error}"
+        );
+        assert_eq!(error["retryable"], false);
+        assert!(error.get("plan_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn rename_tag_waits_for_the_vaults_mutation_lock() {
+        let (state, _tmp) = write_state();
+        std::fs::write(
+            registered_vault_path(&state).join("A.md"),
+            "---\ntags: [a/b]\n---\n",
+        )
+        .expect("note");
+        let runtime = state
+            .vaults
+            .runtime(vault_id_of(&state))
+            .expect("Vault runtime");
+        let guard = runtime.acquire_mutation().await.expect("lock");
+        let call = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "a/b", "new_tag": "c/d"}),
+        );
+        tokio::pin!(call);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut call)
+                .await
+                .is_err(),
+            "rename_tag ran while another holder had the Vault's mutation lock"
+        );
+        drop(guard);
+        let plan = call.await;
+        assert_eq!(plan["result"]["structuredContent"]["notes_affected"], 1);
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_rename_tag_before_running_anything() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": "Should/Not.md", "content": "x"}},
+                {"op": "rename_tag", "arguments": {"vault_id": vault_id, "old_tag": "a", "new_tag": "b"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602, "{body:#}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("'rename_tag' is not allowed inside batch"),
+            "{body:#}"
+        );
+        assert!(!registered_vault_path(&state).join("Should/Not.md").exists());
+    }
+
     #[tokio::test]
     async fn rename_note_returns_new_slug() {
         let (state, _tmp) = write_state();
