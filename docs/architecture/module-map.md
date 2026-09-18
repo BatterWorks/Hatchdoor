@@ -951,10 +951,12 @@ write API/types, and configuration for archive or upload limits.
   `MutationJournal` one note at a time, and a failure restores every note
   already written.
 - Delete is recoverable trash; archive is move-based (ADR-11).
-- A rewritten backlink keeps the form its author wrote, and a link that
-  resolved before a move still resolves after it: the bare-title form is used
-  only while the new title names exactly one note, and falls back to the full
-  path otherwise (#235). An escaped alias pipe is part of that form: the
+- A rewritten backlink keeps its shape, and a link that resolved before a
+  move still resolves after it: a path-qualified link takes the new full path,
+  and any target without a folder path, whether a title, a title whose
+  punctuation drifted from the filename, or a slug, stays bare as the note's
+  new title (#256). The bare form is used only while the new title names
+  exactly one note, and falls back to the full path otherwise (#235). An escaped alias pipe is part of that form: the
   rewrite retargets `[[Old\|alias]]` and hands the escape back, so the table
   cell it protects stays valid Markdown (#252).
 - The note being renamed or moved is one more note holding links to the target,
