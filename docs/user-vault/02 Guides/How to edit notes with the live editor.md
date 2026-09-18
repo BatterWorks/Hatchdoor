@@ -18,7 +18,7 @@ Links, task-list checkboxes, and callout summary lines never open for editing on
 
 Each click targets one **block**, not the whole note: one paragraph, one heading, one list item, one table row, one callout line, or one fenced code block. Markdown syntax you don't normally see — `## `, `- `, `> `, the code fence — appears only inside the block you're actively editing, and disappears again once you move on. The rest of the note keeps rendering normally while you edit one piece of it.
 
-A saved query is one block as well. Its table is drawn from a fenced `base` block, and clicking the table opens that block's definition for editing. Once the edit saves, the table is worked out again from the new definition. Source mode's preview shows the definition rather than a table, because it previews text that isn't saved yet and only the saved note is evaluated.
+A saved query is one block as well. Its table is drawn from a fenced `base` block, and clicking the table opens that block's definition for editing. A column heading and a row's link are the exceptions: a heading sorts the table and a link opens its note. Once the edit saves, the table is worked out again from the new definition. Source mode's preview shows the definition rather than a table, because it previews text that isn't saved yet and only the saved note is evaluated.
 
 Note properties (the frontmatter block — tags, status, and so on) are also editable inline, right above the note body.
 

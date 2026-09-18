@@ -25,7 +25,8 @@ mod saved_query;
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
 pub use saved_query::{
-    SavedQueriesResponse, SavedQueryColumn, SavedQueryOutcome, SavedQueryResult, SavedQueryRow,
+    SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryIgnored,
+    SavedQueryMarkerProblem, SavedQueryOutcome, SavedQueryRefusal, SavedQueryResult, SavedQueryRow,
     SavedQueryTable, SavedQueryTruncation, SavedQueryTruncationReason,
 };
 
@@ -966,7 +967,7 @@ impl<'a> VaultReadCore<'a> {
                 saved_query::SavedQueryCeiling::ENFORCED,
             )
         })?;
-        let queries = projection
+        let evaluated = projection
             .data
             .into_iter()
             .next()
@@ -979,7 +980,8 @@ impl<'a> VaultReadCore<'a> {
             data: saved_query::SavedQueriesResponse {
                 vault_id,
                 slug: note.note.slug,
-                queries,
+                queries: evaluated.queries,
+                marker_problems: evaluated.marker_problems,
             },
         }))
     }
@@ -3743,7 +3745,7 @@ mod tests {
 
     fn table_titles(result: &super::SavedQueryResult) -> Vec<String> {
         match &result.outcome {
-            super::SavedQueryOutcome::Table(table) => {
+            super::SavedQueryOutcome::Populated(table) => {
                 table.rows.iter().map(|row| row.title.clone()).collect()
             }
             other => panic!("expected a table, got {other:?}"),
@@ -3775,7 +3777,7 @@ mod tests {
         assert_eq!(active.name.as_deref(), Some("active-subscriptions"));
         assert!(active.source.starts_with("filters:\n  and:"));
         assert_eq!(table_titles(active), ["Netflix", "Newspaper"]);
-        let super::SavedQueryOutcome::Table(table) = &active.outcome else {
+        let super::SavedQueryOutcome::Populated(table) = &active.outcome else {
             unreachable!()
         };
         assert!(table.rows.iter().all(|row| row.vault_id == vault_id));

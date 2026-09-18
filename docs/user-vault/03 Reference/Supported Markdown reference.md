@@ -96,9 +96,13 @@ What a saved query can contain:
 
 A property a note does not have counts as `null`: `finished == null` selects it, `status != "done"` selects it, and `price > 10` does not.
 
-Anything else is refused rather than half applied. That includes formulas, `properties` and `summaries`, more than one view, `cards`, `list` and other view types, `groupBy`, `sort`, and any function not listed above. A refused block shows **Not evaluated** with the reason in place of its table. See [[How to troubleshoot common problems]] for the other messages a saved query can show.
+Anything else that could change which notes appear is refused rather than half applied. That includes formulas, `properties`, more than one view, `sort`, and any function not listed above. A refused block shows **Not evaluated** in place of its table, followed by a sentence naming the part Hatchdoor could not use, such as `daysUntil()` or a line of broken YAML.
 
-An HTML comment of the form `<!-- hatchdoor-query: name -->` on the line before the block, with nothing but blank lines between them, gives the saved query a name. The name is lowercase letters, digits and hyphens and must be unique within the note. It is never shown on the page; a name that breaks either rule is set aside with a note under the table, and the rows still appear. It sits outside the block on purpose, so the block stays exactly what Obsidian expects to read.
+Three things only change how the rows would be drawn, so Hatchdoor draws the table anyway, with every row it would otherwise show, and says under it what it left out: `groupBy` (the rows appear ungrouped), `summaries` (no summary row), and a view `type` other than `table`, such as `cards` or `list` (drawn as a table).
+
+A block that is fine but matches no note shows **No matches.** and says it checked every note in the Vault, so it cannot be confused with a broken one. Click a column heading to sort that table by it: once for ascending, again for descending, a third time for the original order. The sort is only on your screen. It is not written into the note and a reload forgets it, the way Obsidian treats sorting. See [[How to troubleshoot common problems]] for the other messages a saved query can show.
+
+An HTML comment of the form `<!-- hatchdoor-query: name -->` on the line before the block, with nothing but blank lines between them, gives the saved query a name. The name is lowercase letters, digits and hyphens and must be unique within the note. It is never shown on the page. A name that is not usable, or that two blocks share, gets a note under the table and the rows still appear, since a name never changes which rows qualify. A marker with no block after it gets a note where it sits. The marker sits outside the block on purpose, so the block stays exactly what Obsidian expects to read.
 
 ## Math
 

@@ -94,21 +94,52 @@ fn evaluate_with(
     ceiling: SavedQueryCeiling,
 ) -> SavedQueryOutcome {
     let markdown = format!("```base\n{source}\n```\n");
-    let mut results = evaluate_saved_queries(
-        saved_query_blocks(&markdown),
-        vault_id(),
-        notes,
-        &clock(at),
-        ceiling,
-    );
+    let mut results = evaluate_note_at(&markdown, notes, at, ceiling).queries;
     assert_eq!(results.len(), 1, "one block in, one result out");
     results.remove(0).outcome
 }
 
+/// Every saved query in `markdown`, evaluated against `notes` at a fixed time.
+fn evaluate_note(
+    markdown: &str,
+    notes: &[VaultSnapshotNote],
+    ceiling: SavedQueryCeiling,
+) -> EvaluatedSavedQueries {
+    evaluate_note_at(markdown, notes, "2026-09-18T12:00:00", ceiling)
+}
+
+fn evaluate_note_at(
+    markdown: &str,
+    notes: &[VaultSnapshotNote],
+    at: &str,
+    ceiling: SavedQueryCeiling,
+) -> EvaluatedSavedQueries {
+    evaluate_saved_queries(
+        saved_query_blocks(markdown),
+        vault_id(),
+        notes,
+        &clock(at),
+        ceiling,
+    )
+}
+
+fn blocks(markdown: &str) -> Vec<SavedQueryBlock> {
+    saved_query_blocks(markdown).blocks
+}
+
+/// The rows an evaluated saved query produced, whether it found some or
+/// none. Tests about the three states match the variants themselves.
 fn table(outcome: SavedQueryOutcome) -> SavedQueryTable {
     match outcome {
-        SavedQueryOutcome::Table(table) => table,
-        other => panic!("expected a table, got {other:?}"),
+        SavedQueryOutcome::Populated(table) => table,
+        SavedQueryOutcome::Empty(empty) => SavedQueryTable {
+            view_name: empty.view_name,
+            columns: empty.columns,
+            rows: Vec::new(),
+            truncated: None,
+            ignored: empty.ignored,
+        },
+        other => panic!("expected an evaluated table, got {other:?}"),
     }
 }
 
@@ -116,9 +147,9 @@ fn titles(table: &SavedQueryTable) -> Vec<&str> {
     table.rows.iter().map(|row| row.title.as_str()).collect()
 }
 
-fn refusal(outcome: SavedQueryOutcome) -> String {
+fn refusal(outcome: SavedQueryOutcome) -> SavedQueryRefusal {
     match outcome {
-        SavedQueryOutcome::Refused { message } => message,
+        SavedQueryOutcome::Refused(refusal) => refusal,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -142,7 +173,7 @@ filters: 'price > 1'
 views: []
 ~~~~
 ";
-    let blocks = saved_query_blocks(markdown);
+    let blocks = blocks(markdown);
     assert_eq!(
         blocks
             .iter()
@@ -171,7 +202,7 @@ filters: 'b == 1'
 filters: 'c == 1'
 ```
 ";
-    let names: Vec<_> = saved_query_blocks(markdown)
+    let names: Vec<_> = blocks(markdown)
         .into_iter()
         .map(|block| block.name)
         .collect();
@@ -186,45 +217,22 @@ filters: 'c == 1'
 }
 
 #[test]
-fn a_marker_with_an_unusable_name_is_set_aside_and_the_rows_still_computed() {
-    let markdown = "<!-- hatchdoor-query: Active Subs -->\n```base\nfilters: 'price == 8'\n```\n";
-    let results = evaluate_saved_queries(
-        saved_query_blocks(markdown),
-        vault_id(),
-        &subscriptions(),
-        &clock("2026-09-18T12:00:00"),
-        SavedQueryCeiling::ENFORCED,
-    );
-    assert_eq!(results[0].name, None);
-    assert_eq!(
-        titles(&table(results[0].outcome.clone())),
-        vec!["Newspaper"]
-    );
-    assert_eq!(results[0].notices.len(), 1);
-    assert!(
-        results[0].notices[0].contains("Active Subs"),
-        "{:?}",
-        results[0].notices
-    );
-}
-
-#[test]
 fn the_frontmatter_is_not_searched_for_blocks() {
     let markdown = "---\nnote: |\n  ```base\n  filters: 'a == 1'\n  ```\n---\nBody\n";
-    assert!(saved_query_blocks(markdown).is_empty());
+    assert!(blocks(markdown).is_empty());
 }
 
 #[test]
 fn an_indented_fence_loses_its_indent_and_an_unclosed_one_runs_to_the_end() {
     let markdown = "  ```base\n  filters: 'a == 1'\n  views: []\n";
-    let blocks = saved_query_blocks(markdown);
+    let blocks = blocks(markdown);
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].source, "filters: 'a == 1'\nviews: []\n");
 }
 
 #[test]
 fn crlf_line_endings_do_not_leak_into_the_source() {
-    let blocks = saved_query_blocks("```base\r\nfilters: 'a == 1'\r\n```\r\n");
+    let blocks = blocks("```base\r\nfilters: 'a == 1'\r\n```\r\n");
     assert_eq!(blocks[0].source, "filters: 'a == 1'");
 }
 
@@ -372,7 +380,8 @@ fn rows_carry_their_notes_identity_so_they_can_link_to_them() {
         &subscriptions(),
         &clock("2026-09-18T12:00:00"),
         SavedQueryCeiling::ENFORCED,
-    );
+    )
+    .queries;
     let table = table(results[0].outcome.clone());
     let row = &table.rows[0];
     assert_eq!(row.vault_id, id);
@@ -426,7 +435,8 @@ views:
         &subscriptions(),
         &clock("2026-09-18T12:00:00"),
         SavedQueryCeiling::ENFORCED,
-    );
+    )
+    .queries;
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].name, None);
     assert_eq!(
@@ -557,7 +567,8 @@ fn a_note_cannot_multiply_its_way_past_the_ceiling() {
         &subscriptions(),
         &clock("2026-09-18T12:00:00"),
         SavedQueryCeiling::ENFORCED,
-    );
+    )
+    .queries;
     assert_eq!(results.len(), MAX_SAVED_QUERIES_PER_NOTE + 2);
     let stopped = results
         .iter()
@@ -566,32 +577,8 @@ fn a_note_cannot_multiply_its_way_past_the_ceiling() {
     assert_eq!(stopped, 2);
     assert!(matches!(
         results[MAX_SAVED_QUERIES_PER_NOTE - 1].outcome,
-        SavedQueryOutcome::Table(_)
+        SavedQueryOutcome::Populated(_)
     ));
-}
-
-#[test]
-fn a_repeated_name_is_set_aside_on_the_later_block_whose_rows_still_appear() {
-    let markdown = "<!-- hatchdoor-query: same -->\n```base\nviews: []\n```\n<!-- hatchdoor-query: same -->\n```base\nfilters: 'price == 8'\n```\n";
-    let results = evaluate_saved_queries(
-        saved_query_blocks(markdown),
-        vault_id(),
-        &subscriptions(),
-        &clock("2026-09-18T12:00:00"),
-        SavedQueryCeiling::ENFORCED,
-    );
-    assert_eq!(results[0].name.as_deref(), Some("same"));
-    assert!(results[0].notices.is_empty());
-    assert_eq!(results[1].name, None);
-    assert!(
-        results[1].notices[0].contains("same"),
-        "{:?}",
-        results[1].notices
-    );
-    assert_eq!(
-        titles(&table(results[1].outcome.clone())),
-        vec!["Newspaper"]
-    );
 }
 
 #[test]
@@ -609,9 +596,16 @@ fn the_scan_ceiling_is_one_budget_for_the_whole_note() {
         &subscriptions(),
         &clock("2026-09-18T12:00:00"),
         ceiling,
-    );
-    assert!(matches!(results[0].outcome, SavedQueryOutcome::Table(_)));
-    assert!(matches!(results[1].outcome, SavedQueryOutcome::Table(_)));
+    )
+    .queries;
+    assert!(matches!(
+        results[0].outcome,
+        SavedQueryOutcome::Populated(_)
+    ));
+    assert!(matches!(
+        results[1].outcome,
+        SavedQueryOutcome::Populated(_)
+    ));
     assert!(matches!(
         &results[2].outcome,
         SavedQueryOutcome::Stopped { message } if message.contains("10") && message.contains("12")
@@ -624,19 +618,20 @@ fn a_refused_query_spends_none_of_the_notes_scan_budget() {
         max_scanned_notes: 5,
         max_rows: 500,
     };
-    let markdown = "```base\nsummaries: {}\n```\n```base\nviews: []\n```\n";
+    let markdown = "```base\nformulas: {}\n```\n```base\nviews: []\n```\n";
     let results = evaluate_saved_queries(
         saved_query_blocks(markdown),
         vault_id(),
         &subscriptions(),
         &clock("2026-09-18T12:00:00"),
         ceiling,
-    );
+    )
+    .queries;
+    assert!(matches!(results[0].outcome, SavedQueryOutcome::Refused(_)));
     assert!(matches!(
-        results[0].outcome,
-        SavedQueryOutcome::Refused { .. }
+        results[1].outcome,
+        SavedQueryOutcome::Populated(_)
     ));
-    assert!(matches!(results[1].outcome, SavedQueryOutcome::Table(_)));
 }
 
 #[test]
@@ -660,10 +655,7 @@ fn anything_outside_the_subset_is_refused_by_name_rather_than_partly_applied() {
             "properties:\n  price:\n    displayName: Price",
             "properties",
         ),
-        ("summaries: {}", "summaries"),
-        ("views:\n  - type: cards", "cards"),
         ("views:\n  - type: table\n  - type: table", "2 views"),
-        ("views:\n  - type: table\n    groupBy: price", "groupBy"),
         ("views:\n  - type: table\n    sort: [price]", "sort"),
         ("views:\n  - type: table\n    limit: 0", "limit"),
         (
@@ -685,10 +677,10 @@ fn anything_outside_the_subset_is_refused_by_name_rather_than_partly_applied() {
         ("filters: [unclosed", "YAML"),
         ("", "empty"),
     ] {
-        let message = refusal(evaluate_one(source, &notes, at));
+        let refusal = refusal(evaluate_one(source, &notes, at));
         assert!(
-            message.contains(named),
-            "{source:?} should be refused naming {named:?}, got {message:?}"
+            refusal.message.contains(named),
+            "{source:?} should be refused naming {named:?}, got {refusal:?}"
         );
     }
 }
@@ -704,7 +696,8 @@ fn deeply_nested_expressions_are_refused_rather_than_overflowing() {
         &source,
         &subscriptions(),
         "2026-09-18T12:00:00",
-    ));
+    ))
+    .message;
     assert!(message.contains("nests"), "{message}");
 
     let negations = format!("filters: '{}price == 1'", "!".repeat(MAX_NESTING + 5));
@@ -712,37 +705,365 @@ fn deeply_nested_expressions_are_refused_rather_than_overflowing() {
         &negations,
         &subscriptions(),
         "2026-09-18T12:00:00",
-    ));
+    ))
+    .message;
     assert!(message.contains("nests"), "{message}");
+}
+
+// --- Refused, empty and populated (#276) ----------------------------------
+
+#[test]
+fn malformed_yaml_is_refused_naming_the_problem_rather_than_drawn_empty() {
+    let refusal = refusal(evaluate_one(
+        "filters:\n  and:\n    - 'price > 1'\n   - broken: [",
+        &subscriptions(),
+        "2026-09-18T12:00:00",
+    ));
+    assert_eq!(refusal.construct, "YAML");
+    assert!(refusal.message.contains("not valid YAML"), "{refusal:?}");
+    // The parser's own account of where it failed reaches the reader.
+    assert!(refusal.message.contains("line"), "{refusal:?}");
+}
+
+#[test]
+fn a_refusal_names_the_construct_it_could_not_use() {
+    let notes = subscriptions();
+    let at = "2026-09-18T12:00:00";
+    for (source, construct) in [
+        ("filters: 'daysUntil(next_payment) < 7'", "daysUntil()"),
+        (
+            "filters:\n  and:\n    - file.hasTag(\"type/entity/subscription\")\n    - 'price.contains(\"x\")'",
+            "contains()",
+        ),
+        ("filters: 'file.hasLink(\"x\")'", "file.hasLink"),
+        ("filters: 'formula.total > 1'", "formula"),
+        ("filters: 'price * 2 > 4'", "*"),
+        ("filters:\n  xor:\n    - 'price == 1'", "xor"),
+        ("formulas:\n  total: 'price * 12'", "formulas"),
+        ("views:\n  - type: table\n    sort: [price]", "sort"),
+        (
+            "views:\n  - type: table\n    order: [formula.total]",
+            "formula.total",
+        ),
+        ("views:\n  - type: table\n  - type: table", "views"),
+        ("filters: 'price > 1 &&'", "price > 1 &&"),
+    ] {
+        let refusal = refusal(evaluate_one(source, &notes, at));
+        assert_eq!(refusal.construct, construct, "{source:?}: {refusal:?}");
+        assert!(
+            refusal.message.contains(construct.trim_end_matches("()")),
+            "the message names {construct:?} too: {refusal:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unsupported_function_inside_a_filter_refuses_the_whole_saved_query() {
+    // The first condition alone selects four notes. Evaluating only the part
+    // that was understood would draw them; nothing is drawn instead.
+    let source = "filters:\n  and:\n    - file.hasTag(\"type/entity/subscription\")\n    - 'daysUntil(next_payment) < 7'";
+    let outcome = evaluate_one(source, &subscriptions(), "2026-09-18T12:00:00");
+    let SavedQueryOutcome::Refused(refusal) = outcome else {
+        panic!("expected a refusal, got {outcome:?}");
+    };
+    assert!(refusal.message.contains("daysUntil"), "{refusal:?}");
+}
+
+#[test]
+fn presentation_only_instructions_are_ignored_by_name_and_every_row_still_drawn() {
+    let notes = subscriptions();
+    let at = "2026-09-18T12:00:00";
+    let plain = table(evaluate_one(
+        "filters: 'file.hasTag(\"type/entity/subscription\")'",
+        &notes,
+        at,
+    ));
+    for (source, instruction) in [
+        (
+            "filters: 'file.hasTag(\"type/entity/subscription\")'\nviews:\n  - type: table\n    groupBy:\n      property: billing_period\n      direction: ASC",
+            "groupBy",
+        ),
+        (
+            "filters: 'file.hasTag(\"type/entity/subscription\")'\nviews:\n  - type: cards",
+            "type: cards",
+        ),
+        (
+            "filters: 'file.hasTag(\"type/entity/subscription\")'\nviews:\n  - type: table\n    summaries:\n      price: Sum",
+            "summaries",
+        ),
+        (
+            "filters: 'file.hasTag(\"type/entity/subscription\")'\nsummaries:\n  total: 'values.sum()'",
+            "summaries",
+        ),
+    ] {
+        let outcome = evaluate_one(source, &notes, at);
+        let SavedQueryOutcome::Populated(drawn) = outcome else {
+            panic!("{source:?} should draw its rows, got {outcome:?}");
+        };
+        assert_eq!(
+            titles(&drawn),
+            titles(&plain),
+            "{source:?}: same rows as without it"
+        );
+        assert_eq!(
+            drawn
+                .ignored
+                .iter()
+                .map(|ignored| ignored.instruction.as_str())
+                .collect::<Vec<_>>(),
+            vec![instruction],
+            "{source:?}"
+        );
+        assert!(!drawn.ignored[0].message.is_empty());
+    }
+}
+
+#[test]
+fn an_instruction_given_twice_is_reported_once() {
+    let drawn = table(evaluate_one(
+        "summaries:\n  total: 'values.sum()'\nviews:\n  - type: list\n    groupBy: price\n    summaries:\n      price: total",
+        &subscriptions(),
+        "2026-09-18T12:00:00",
+    ));
+    let instructions: Vec<_> = drawn
+        .ignored
+        .iter()
+        .map(|ignored| ignored.instruction.as_str())
+        .collect();
+    assert_eq!(instructions, vec!["summaries", "type: list", "groupBy"]);
+}
+
+#[test]
+fn a_refusing_construct_wins_over_an_ignorable_one() {
+    let outcome = evaluate_one(
+        "filters: 'daysUntil(next_payment) < 7'\nviews:\n  - type: table\n    groupBy: price",
+        &subscriptions(),
+        "2026-09-18T12:00:00",
+    );
+    assert!(
+        matches!(outcome, SavedQueryOutcome::Refused(ref refusal) if refusal.construct == "daysUntil()"),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn a_valid_definition_matching_nothing_is_empty_not_refused() {
+    let outcome = evaluate_one(
+        "filters: 'price > 1000'\nviews:\n  - type: table\n    name: Dear ones\n    order: [file.name, price]\n    groupBy: price",
+        &subscriptions(),
+        "2026-09-18T12:00:00",
+    );
+    let SavedQueryOutcome::Empty(empty) = outcome else {
+        panic!("expected empty, got {outcome:?}");
+    };
+    assert_eq!(empty.view_name.as_deref(), Some("Dear ones"));
+    assert_eq!(empty.columns.len(), 2);
+    assert_eq!(
+        empty.ignored.len(),
+        1,
+        "an empty answer still says what it ignored"
+    );
+}
+
+#[test]
+fn no_outcome_carries_zero_rows_without_saying_which_state_produced_them() {
+    let notes = subscriptions();
+    let at = "2026-09-18T12:00:00";
+    for source in [
+        "filters: 'price > 1000'",
+        "filters: 'price > 1'",
+        "filters: 'price > 1'\nviews:\n  - type: table\n    limit: 1",
+        "views: []",
+        "filters: 'nope('",
+        "filters: 'price > 1'\nviews:\n  - type: cards",
+    ] {
+        match evaluate_one(source, &notes, at) {
+            SavedQueryOutcome::Populated(table) => {
+                assert!(!table.rows.is_empty(), "{source:?}: populated with no rows");
+            }
+            SavedQueryOutcome::Empty(_)
+            | SavedQueryOutcome::Refused(_)
+            | SavedQueryOutcome::Stopped { .. } => {}
+        }
+    }
 }
 
 #[test]
 fn outcomes_serialize_with_a_status_a_reader_can_branch_on() {
-    let refused = SavedQueryResult {
+    let result = |outcome| SavedQueryResult {
         name: Some("named".to_string()),
-        source: "summaries: {}".to_string(),
-        notices: Vec::new(),
-        outcome: SavedQueryOutcome::Refused {
-            message: "no".to_string(),
-        },
+        source: "s".to_string(),
+        outcome,
     };
     assert_eq!(
-        serde_json::to_value(&refused).expect("serialize"),
-        json!({"name": "named", "source": "summaries: {}", "status": "refused", "message": "no"})
+        serde_json::to_value(result(SavedQueryOutcome::Refused(refuse(
+            "daysUntil()",
+            "no"
+        ))))
+        .expect("serialize"),
+        json!({"name": "named", "source": "s", "status": "refused", "construct": "daysUntil()", "message": "no"})
     );
-    let empty = SavedQueryResult {
-        name: None,
-        source: String::new(),
-        notices: vec!["set aside".to_string()],
-        outcome: SavedQueryOutcome::Table(SavedQueryTable {
+    assert_eq!(
+        serde_json::to_value(result(SavedQueryOutcome::Empty(SavedQueryEmpty {
             view_name: None,
             columns: Vec::new(),
-            rows: Vec::new(),
-            truncated: None,
-        }),
+            ignored: vec![ignore_grouping()],
+        })))
+        .expect("serialize"),
+        json!({
+            "name": "named",
+            "source": "s",
+            "status": "empty",
+            "columns": [],
+            "ignored": [{"instruction": "groupBy", "message": "Grouping is not supported, so the rows are shown ungrouped."}],
+        })
+    );
+    let populated =
+        serde_json::to_value(result(SavedQueryOutcome::Populated(table(evaluate_one(
+            "filters: 'price == 8'",
+            &subscriptions(),
+            "2026-09-18T12:00:00",
+        )))))
+        .expect("serialize");
+    assert_eq!(populated["status"], "populated");
+    assert_eq!(populated["rows"].as_array().map(Vec::len), Some(1));
+    assert!(populated.get("ignored").is_none());
+}
+
+// --- Marker problems (#276) -----------------------------------------------
+
+#[test]
+fn a_marker_followed_by_no_block_is_reported_where_it_sits_and_nothing_else_changes() {
+    let markdown = "\
+---
+tags: [x]
+---
+# Heading
+
+<!-- hatchdoor-query: before-prose -->
+Some prose.
+
+<!-- hatchdoor-query: before-rust -->
+```rust
+fn main() {}
+```
+
+<!-- hatchdoor-query: kept -->
+
+```base
+filters: 'price == 8'
+```
+
+<!-- hatchdoor-query: Replaced -->
+<!-- hatchdoor-query: at-the-end -->
+";
+    let found = saved_query_blocks(markdown);
+    assert_eq!(
+        found.orphaned_markers,
+        vec![
+            OrphanedMarker {
+                name: "before-prose".to_string(),
+                line: 6
+            },
+            OrphanedMarker {
+                name: "before-rust".to_string(),
+                line: 9
+            },
+            OrphanedMarker {
+                name: "Replaced".to_string(),
+                line: 20
+            },
+            OrphanedMarker {
+                name: "at-the-end".to_string(),
+                line: 21
+            },
+        ]
+    );
+
+    let evaluated = evaluate_note(markdown, &subscriptions(), SavedQueryCeiling::ENFORCED);
+    assert_eq!(evaluated.queries.len(), 1);
+    assert_eq!(evaluated.queries[0].name.as_deref(), Some("kept"));
+    assert_eq!(
+        titles(&table(evaluated.queries[0].outcome.clone())),
+        vec!["Newspaper"]
+    );
+    assert_eq!(evaluated.marker_problems.len(), 4);
+    let SavedQueryMarkerProblem::Orphaned {
+        name,
+        line,
+        message,
+    } = &evaluated.marker_problems[0]
+    else {
+        panic!("{:?}", evaluated.marker_problems);
+    };
+    assert_eq!((name.as_str(), *line), ("before-prose", 6));
+    assert!(message.contains("before-prose"), "{message}");
+}
+
+#[test]
+fn a_marker_with_an_unusable_name_is_reported_and_its_block_drawn_unnamed() {
+    let markdown = "<!-- hatchdoor-query: Active Subs -->\n```base\nfilters: 'price == 8'\n```\n";
+    let evaluated = evaluate_note(markdown, &subscriptions(), SavedQueryCeiling::ENFORCED);
+    assert_eq!(evaluated.queries[0].name, None);
+    assert_eq!(
+        titles(&table(evaluated.queries[0].outcome.clone())),
+        vec!["Newspaper"]
+    );
+    let [
+        SavedQueryMarkerProblem::UnusableName {
+            name,
+            query,
+            message,
+        },
+    ] = evaluated.marker_problems.as_slice()
+    else {
+        panic!("{:?}", evaluated.marker_problems);
+    };
+    assert_eq!((name.as_str(), *query), ("Active Subs", 0));
+    assert!(message.contains("Active Subs"), "{message}");
+}
+
+#[test]
+fn two_blocks_claiming_one_name_both_draw_and_the_collision_names_them_both() {
+    let markdown = "<!-- hatchdoor-query: same -->\n```base\nviews: []\n```\n<!-- hatchdoor-query: other -->\n```base\nviews: []\n```\n<!-- hatchdoor-query: same -->\n```base\nfilters: 'price == 8'\n```\n";
+    let evaluated = evaluate_note(markdown, &subscriptions(), SavedQueryCeiling::ENFORCED);
+    assert_eq!(evaluated.queries.len(), 3);
+    assert_eq!(table(evaluated.queries[0].outcome.clone()).rows.len(), 5);
+    assert_eq!(
+        titles(&table(evaluated.queries[2].outcome.clone())),
+        vec!["Newspaper"]
+    );
+    // Both keep the name they claim; the collision, not a silent winner, is
+    // what tells an addresser that it names neither.
+    assert_eq!(evaluated.queries[0].name.as_deref(), Some("same"));
+    assert_eq!(evaluated.queries[2].name.as_deref(), Some("same"));
+    let [
+        SavedQueryMarkerProblem::DuplicateName {
+            name,
+            queries,
+            message,
+        },
+    ] = evaluated.marker_problems.as_slice()
+    else {
+        panic!("{:?}", evaluated.marker_problems);
+    };
+    assert_eq!(name, "same");
+    assert_eq!(queries, &vec![0, 2]);
+    assert!(
+        message.contains("\"same\"") && message.contains("none of them"),
+        "{message}"
+    );
+}
+
+#[test]
+fn marker_problems_serialize_with_a_kind_a_reader_can_branch_on() {
+    let problem = SavedQueryMarkerProblem::Orphaned {
+        name: "n".to_string(),
+        line: 3,
+        message: "m".to_string(),
     };
     assert_eq!(
-        serde_json::to_value(&empty).expect("serialize"),
-        json!({"source": "", "notices": ["set aside"], "status": "table", "columns": [], "rows": []})
+        serde_json::to_value(&problem).expect("serialize"),
+        json!({"problem": "orphaned", "name": "n", "line": 3, "message": "m"})
     );
 }
