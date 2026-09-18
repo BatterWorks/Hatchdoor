@@ -27,6 +27,13 @@ pub struct LinkedNoteRef {
     pub backlink_count: i64,
 }
 
+/// One calendar month of the Writing Activity window, as a zero-padded
+/// `YYYY-MM` key and the number of Notes last modified in it.
+///
+/// `VaultStatsResponse::activity_by_month` carries these as a window rather
+/// than a list of findings (#298): exactly six entries, oldest first, one per
+/// calendar month ending at the current UTC month, with a count of zero for a
+/// month nobody wrote in. Notes outside the window are counted in no entry.
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct MonthActivity {
     pub month: String,

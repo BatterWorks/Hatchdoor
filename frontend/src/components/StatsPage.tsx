@@ -36,9 +36,21 @@ function fmtMonth(m: string): string {
   return date.toLocaleString("en", { month: "short" });
 }
 
+/**
+ * The largest value in `arr`, floored at 1 so it is always safe to divide a
+ * bar's value by. A window nobody wrote in has a maximum of zero, and scaling
+ * against that asks for a NaN height.
+ */
 function maxOf(arr: number[]): number {
-  return arr.length === 0 ? 1 : Math.max(...arr);
+  return Math.max(1, ...arr);
 }
+
+/**
+ * How many calendar months the Writing Activity window spans, matching the
+ * backend's window. The chart draws whatever the backend sends, but it
+ * averages over this and names it in the section heading.
+ */
+const ACTIVITY_WINDOW_MONTHS = 6;
 
 function SectionHead({ num, title }: { num: string; title: string }) {
   return (
@@ -103,7 +115,11 @@ function ActivityChart({ months }: { months: MonthActivity[] }) {
   const peak = months.reduce((a, b) =>
     a.modified_count >= b.modified_count ? a : b,
   );
-  const avg = months.reduce((s, m) => s + m.modified_count, 0) / months.length;
+  // Over the window, not over the bars that arrived. The backend guarantees
+  // one entry per month of the window, so the two are equal today; dividing by
+  // the window is what keeps the figure honest if they ever part.
+  const avg =
+    months.reduce((s, m) => s + m.modified_count, 0) / ACTIVITY_WINDOW_MONTHS;
 
   return (
     <>
@@ -440,7 +456,10 @@ function VaultStatsReport({
 
       {/* Row 2: Writing Activity */}
       <div className="stats-section" style={{ marginBottom: "2rem" }}>
-        <SectionHead num="03" title="Writing Activity — last 6 months" />
+        <SectionHead
+          num="03"
+          title={`Writing Activity — last ${ACTIVITY_WINDOW_MONTHS} months`}
+        />
         <ActivityChart months={stats.activity_by_month} />
       </div>
 

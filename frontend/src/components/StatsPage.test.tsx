@@ -5,13 +5,32 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { StatsPage } from "./StatsPage";
 import { VAULT_SCOPE_KEY } from "../app/constants";
 import { discoveryResponse, healthyVault } from "../test/fixtures/vaults";
-import type { VaultStats, VaultSummary } from "../types";
+import type { MonthActivity, VaultStats, VaultSummary } from "../types";
 
 const FIRST = healthyVault("Notes");
 const SECOND = healthyVault("Archive");
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
+}
+
+/**
+ * The six-entry activity window the backend now guarantees: oldest first, one
+ * entry per calendar month, zeros included.
+ */
+function activityWindow(counts: number[]): MonthActivity[] {
+  const months = [
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07",
+    "2026-08",
+    "2026-09",
+  ];
+  return months.map((month, index) => ({
+    month,
+    modified_count: counts[index],
+  }));
 }
 
 /** A complete `VaultStats` whose note count identifies which Vault answered. */
@@ -49,6 +68,7 @@ function mockInstance(
   vaults: VaultSummary[],
   counts: Record<string, number>,
   failing: string[] = [],
+  activity: MonthActivity[] = [],
 ) {
   return vi
     .spyOn(globalThis, "fetch")
@@ -78,7 +98,10 @@ function mockInstance(
         return jsonResponse({
           vault_id: vaultId,
           vault_name: vault?.name ?? "",
-          stats: statsWithNoteCount(counts[vaultId] ?? 0),
+          stats: {
+            ...statsWithNoteCount(counts[vaultId] ?? 0),
+            activity_by_month: activity,
+          },
         });
       }
 
@@ -92,6 +115,19 @@ function renderStats() {
       <StatsPage />
     </MemoryRouter>,
   );
+}
+
+/**
+ * Renders one Vault whose only distinguishing figure is its note count, with
+ * the supplied activity window, and waits for that count to appear.
+ */
+async function renderActivity(activity: MonthActivity[]) {
+  window.localStorage.setItem(VAULT_SCOPE_KEY, FIRST.vault_id);
+  mockInstance([FIRST], { [FIRST.vault_id]: 11 }, [], activity);
+
+  const rendered = renderStats();
+  await waitFor(() => expect(screen.getByText("11")).toBeTruthy());
+  return rendered;
 }
 
 afterEach(() => {
@@ -161,5 +197,54 @@ describe("StatsPage honours Vault scope (#102)", () => {
     await waitFor(() => expect(screen.getByText("11")).toBeTruthy());
     expect(screen.getByText(/This Vault is not available\./)).toBeTruthy();
     expect(screen.queryByText("22")).toBeNull();
+  });
+});
+
+describe("Writing Activity reads as a calendar (#298)", () => {
+  it("draws the supplied window in order and averages over six months", async () => {
+    const { container } = await renderActivity(
+      activityWindow([0, 0, 1, 0, 2, 3]),
+    );
+
+    const labels = Array.from(
+      container.querySelectorAll(".stats-act-month"),
+    ).map((node) => node.textContent);
+    expect(labels).toEqual(["Apr", "May", "Jun", "Jul", "Aug", "Sep"]);
+
+    // Three of the six months are empty and still hold a column of their own,
+    // so the axis stays a timeline rather than a list of months with notes.
+    const counts = Array.from(
+      container.querySelectorAll(".stats-act-count"),
+    ).map((node) => node.textContent);
+    expect(counts).toEqual(["0", "0", "1", "0", "2", "3"]);
+
+    expect(screen.getByText("Avg: 1.0 / month")).toBeTruthy();
+    expect(screen.getByText(/Peak: Sep · 3 notes/)).toBeTruthy();
+  });
+
+  it("draws finite bars and a peak for a window nobody wrote in", async () => {
+    const { container } = await renderActivity(
+      activityWindow([0, 0, 0, 0, 0, 0]),
+    );
+
+    const bars = Array.from(
+      container.querySelectorAll<HTMLElement>(".stats-act-bar"),
+    );
+    expect(bars).toHaveLength(6);
+    // Scaling against a zero maximum would ask for a NaN height.
+    expect(bars.map((bar) => bar.style.height)).toEqual(Array(6).fill("2px"));
+    expect(screen.getByText(/Peak: Apr · 0 notes/)).toBeTruthy();
+    expect(screen.getByText("Avg: 0.0 / month")).toBeTruthy();
+  });
+
+  it("averages over the window rather than over the bars it received", async () => {
+    const { container } = await renderActivity([
+      { month: "2026-08", modified_count: 6 },
+      { month: "2026-09", modified_count: 6 },
+    ]);
+
+    expect(container.querySelectorAll(".stats-act-col")).toHaveLength(2);
+    // Twelve notes over a six-month window is 2.0, not 6.0 over two bars.
+    expect(screen.getByText("Avg: 2.0 / month")).toBeTruthy();
   });
 });
