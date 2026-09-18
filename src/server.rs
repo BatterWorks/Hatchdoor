@@ -6760,19 +6760,21 @@ mod tests {
         let queries = body["data"]["queries"].as_array().expect("queries");
         assert_eq!(queries.len(), 2);
         assert_eq!(queries[0]["name"], "cheap");
-        assert_eq!(queries[0]["status"], "table");
+        assert_eq!(queries[0]["status"], "populated");
         assert_eq!(queries[0]["rows"][0]["slug"], "newspaper");
         assert_eq!(
             queries[0]["rows"][0]["cells"],
             serde_json::json!(["Newspaper.md", 8])
         );
         assert_eq!(queries[1]["status"], "refused");
+        assert_eq!(queries[1]["construct"], "formulas");
         assert!(
             queries[1]["message"]
                 .as_str()
                 .expect("message")
                 .contains("formulas")
         );
+        assert_eq!(body["data"]["marker_problems"], serde_json::json!([]));
 
         let missing = get(format!(
             "/api/v1/vaults/{vault_id}/notes/nowhere/saved-queries"

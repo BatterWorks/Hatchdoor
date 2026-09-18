@@ -13,7 +13,8 @@ import { markAsParagraph } from "./paragraphs";
 import { EditableBlock } from "./EditableBlock";
 import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
-import { SavedQueryBlock } from "./SavedQueryBlock";
+import { OrphanedMarkerNotice, SavedQueryBlock } from "./SavedQueryBlock";
+import { ORPHANED_MARKER_ELEMENT } from "./savedQueries";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 import type { VaultId } from "../../types";
@@ -190,6 +191,11 @@ export function createNoteMarkdownComponents(
       return (
         <CalloutOrQuote node={props.node}>{props.children}</CalloutOrQuote>
       );
+    },
+    // A `hatchdoor-query` marker naming no block (#276): see
+    // remarkHideQueryMarkers.
+    [ORPHANED_MARKER_ELEMENT](props: { "data-name"?: string }) {
+      return <OrphanedMarkerNotice name={props["data-name"]} />;
     },
     table(props: { children?: ReactNode }) {
       return (

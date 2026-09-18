@@ -92,11 +92,13 @@ If a search is what you want: search only considers the **default surface** unle
 
 A fenced `base` block is drawn as a table only when Hatchdoor understands all of it. It supports part of Obsidian's Bases syntax, listed in [[Supported Markdown reference]], and refuses the rest rather than guessing, because a filter applied halfway gives a wrong list that looks like a right one.
 
-- **"Not evaluated."** followed by a reason: the block uses something outside that list, such as a formula, a second view, a `cards` view or `groupBy`, or its YAML does not parse. The reason names the part to change.
+- **"Not evaluated."** followed by a reason: the block uses something outside that list that could change which notes appear, such as a formula, a second view, `sort` or a function Hatchdoor does not know, or its YAML does not parse. The reason names the part to change, down to the function or the line of YAML.
 - **"Stopped."** followed by a reason: the query is fine, but running it would pass one of Hatchdoor's limits. The saved queries in one note scan at most 20,000 notes between them, each one scanning the whole Vault once, and one note may hold at most 10 saved queries.
-- **A line about a name** under an otherwise normal table: the `<!-- hatchdoor-query: name -->` marker before that block names it with something other than lowercase letters, digits and hyphens, or repeats a name used earlier in the same note. The rows are unaffected; only the name is set aside.
-- **"No notes match this saved query."** is a real answer, not an error: the query ran and nothing qualified.
-- **"Showing the first N notes"** means rows were held back, either by the `limit` the block sets or by Hatchdoor's own ceiling of 500 rows.
+- **A line saying something is not supported** under a table that has rows: the block asks for grouping, summaries, or a view type other than a table. Hatchdoor draws the plain table instead. Every row is there; only that presentation was left out.
+- **A line about a name** under an otherwise normal table: the `<!-- hatchdoor-query: name -->` marker before that block names it with something other than lowercase letters, digits and hyphens, or another block in the same note uses the same name. The rows are unaffected. A shared name addresses neither block until one of them is renamed.
+- **A line about a marker that names nothing**, where the marker sits: a `<!-- hatchdoor-query: name -->` comment has no `base` block after it, or has something other than blank lines between it and the block. Nothing else in the note is affected.
+- **"No matches."** is a real answer, not an error: the query was read, checked against every note, and nothing qualified.
+- **"Showing the first N notes"** means rows were held back by the `limit` the block sets. **"Truncated:"** means Hatchdoor's own ceiling of 500 rows held them back and more notes qualify.
 
 If a table looks out of date right after you edit another note, the Vault's index may still be catching up (see the `search` status above). The saved query reads its rows from that index, and it is worked out again every time you open the note.
 

@@ -1097,8 +1097,12 @@ Bases syntax and compiles its filters into the same private
 `query::CompiledCondition` tree `query_notes` evaluates, which gained `All`,
 `Any` and `Not` combinators and a `Subject` (a property, or the file's name,
 basename, path or folder) for exactly that purpose, so there is one condition
-engine, not two. Anything outside the subset refuses that saved query by name
-rather than being partly applied. The rows come from the Vault's published
+engine, not two. A construct outside the subset that could change which rows
+appear refuses that saved query with a `SavedQueryRefusal` carrying the
+construct and a sentence naming it, rather than being partly applied; a
+presentation-only one (`groupBy`, `summaries`, a view type other than `table`)
+is set aside into the outcome's `ignored` list and every row is still drawn
+(#276). The rows come from the Vault's published
 snapshot, inside the usual projection envelope, and are never written anywhere:
 a result is recomputed on every call, so a filter against `now()` answers
 afresh with no file change, and search, backlinks, statistics and the graph
@@ -1108,10 +1112,16 @@ Rows are ordered by title, then path and slug, and held to
 view's own `limit`. The scan ceiling is one budget for the whole Note, spent by
 each evaluated query, so repeating a block cannot multiply the work of one read;
 a query past it answers `stopped` rather than a partial table, and a Note holds
-at most `MAX_SAVED_QUERIES_PER_NOTE`. `SavedQueryOutcome` keeps `table`,
-`refused` and `stopped` distinguishable on the wire; an unusable or repeated
-marker name never changes the rows, so it is set aside into the result's
-`notices` and the rows are still computed. Two strings that both read as a date
+at most `MAX_SAVED_QUERIES_PER_NOTE`. `SavedQueryOutcome` has separate
+`populated`, `empty`, `refused` and `stopped` variants, and only
+`SavedQueryOutcome::evaluated` builds the first two, choosing `empty` exactly
+when no row qualified, so zero rows never arrive without a state saying why.
+Marker problems belong to the Note, not to one query, so they are reported
+beside the results in `SavedQueriesResponse::marker_problems`: a marker with no
+`base` block after it (`orphaned`, with its file line), a name that is not a
+slug (`unusable_name`; that block is unnamed), and a name claimed by several
+blocks (`duplicate_name`; each keeps the name it claims, and the report is what
+tells an addresser it names none of them). None changes a row. Two strings that both read as a date
 or date-time compare as instants in the shared `compare`, which `query_notes`
 uses too, so `now()` orders correctly against `2026-09-18 10:00` or a zoned
 timestamp; any other pair compares byte-wise as before.
@@ -3190,11 +3200,18 @@ and hands the results down through `SavedQueryProvider`. Each block finds its
 result by its position among the note's `base` fences, cross-checked against
 its source text, so two identical blocks keep their own outcomes. Refused,
 stopped, empty, loading and failed states each render a distinct line inside
-the frame. The note read is untouched: it still returns only the Markdown. The
+the frame, and ignored presentation instructions and the block's own marker
+problems render as notes under it. Each column heading re-sorts that table
+alone, in component state only: nothing is written or sent, and a reload
+forgets it (#276). The note read is untouched: it still returns only the Markdown. The
 editor preview has no provider and shows the definition as code, because it
 renders unsaved text and only the file on disk is evaluated.
-`remarkHideQueryMarkers` drops a `<!-- hatchdoor-query: name -->` marker from
-the syntax tree on the note page and in the preview. Every other piece of raw
+`remarkHideQueryMarkers` drops a `<!-- hatchdoor-query: name -->` marker that
+names the `base` block after it from the syntax tree on the note page and in
+the preview, and turns one with no block after it into a
+`hatchdoor-orphaned-marker` element, which `OrphanedMarkerNotice` fills with the
+server's `orphaned` notice where the marker sits. `useSavedQueries` also fetches
+for a note holding only a marker, so that notice can arrive. Every other piece of raw
 HTML renders exactly as before, and no other node moves, so line-addressed
 inline editing is unaffected.
 

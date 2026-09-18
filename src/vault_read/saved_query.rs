@@ -18,15 +18,21 @@
 //!   `now()` or `today()`, with `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`,
 //!   `!` and parentheses.
 //! - `file.hasTag(...)`, `file.inFolder(...)` and `<property>.isEmpty()`.
-//! - Exactly one view, of type `table`, carrying an optional `name`, `limit`,
-//!   `order` (its columns, left to right) and `filters`.
+//! - Exactly one view, carrying an optional `name`, `limit`, `order` (its
+//!   columns, left to right) and `filters`.
+//!
+//! Refusal splits by effect (#276). A construct that could change which rows
+//! appear refuses the whole saved query, naming the construct. One that only
+//! changes how rows are drawn, `groupBy`, `summaries` or a view `type` other
+//! than `table`, is set aside and reported in `ignored`, and the rows are
+//! drawn in full. The outcome keeps refused, empty and populated apart.
 //!
 //! The conditions compile into the same [`CompiledCondition`] tree
 //! `query_notes` evaluates, so a saved query and a caller-supplied query cannot
 //! disagree about what a tag, a folder or a property comparison means.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,45 +102,69 @@ impl EvaluationClock {
 // Wire types
 // ---------------------------------------------------------------------------
 
-/// Every saved query one Note holds, in the order they appear in it.
+/// Every saved query one Note holds, in the order they appear in it, plus what
+/// is wrong with the Note's `hatchdoor-query` markers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedQueriesResponse {
     pub vault_id: VaultId,
     pub slug: String,
     pub queries: Vec<SavedQueryResult>,
+    /// Marker problems belong to the Note rather than to one saved query: an
+    /// orphaned marker names no saved query at all, and a repeated name
+    /// belongs to every saved query claiming it. None of them changes a row.
+    #[serde(default)]
+    pub marker_problems: Vec<SavedQueryMarkerProblem>,
 }
 
 /// One saved query and what evaluating it produced.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedQueryResult {
-    /// The name from a `hatchdoor-query` marker, when the block has one.
+    /// The name from a `hatchdoor-query` marker, when the block has a usable
+    /// one. Two saved queries in one Note may claim the same name; that is
+    /// reported in `marker_problems`, and such a name addresses neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The definition exactly as it sits inside its fence, so a reader can
     /// tell which block of the Note this result belongs to.
     pub source: String,
-    /// Problems that do not change which rows appear, such as a marker whose
-    /// name is unusable. The rows are still computed; these say what was set
-    /// aside (ADR-21 part 3).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notices: Vec<String>,
     #[serde(flatten)]
     pub outcome: SavedQueryOutcome,
 }
 
-/// The three ways a saved query can end, which every surface must keep
-/// distinguishable: broken never presents as empty (ADR-21).
+/// How a saved query ended. Refused, empty and populated are distinct
+/// variants rather than a row list plus a message, so no caller can present a
+/// broken definition as an empty answer by accident (ADR-21 part 3). A
+/// `Populated` outcome always holds at least one row; zero rows is `Empty`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SavedQueryOutcome {
-    /// Evaluated. `rows` may be empty, which is a real answer.
-    Table(SavedQueryTable),
-    /// The definition, or its name, is outside what Hatchdoor supports, so no
-    /// row was computed at all.
-    Refused { message: String },
+    /// Read and evaluated, and these Notes qualified.
+    Populated(SavedQueryTable),
+    /// Read and evaluated, and no Note qualified. A real answer.
+    Empty(SavedQueryEmpty),
+    /// The definition could not be read, or it uses something that would
+    /// change which rows appear and that Hatchdoor does not support, so no row
+    /// was computed at all.
+    Refused(SavedQueryRefusal),
     /// The definition is fine but evaluating it would pass Hatchdoor's
     /// ceiling, so evaluation stopped rather than returning part of an answer.
     Stopped { message: String },
+}
+
+impl SavedQueryOutcome {
+    /// The outcome for an evaluated saved query, which is `Empty` exactly
+    /// when no row qualified. Evaluation builds either variant only here.
+    fn evaluated(table: SavedQueryTable) -> Self {
+        if table.rows.is_empty() {
+            Self::Empty(SavedQueryEmpty {
+                view_name: table.view_name,
+                columns: table.columns,
+                ignored: table.ignored,
+            })
+        } else {
+            Self::Populated(table)
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -147,6 +177,78 @@ pub struct SavedQueryTable {
     /// Present when more Notes qualified than the table shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated: Option<SavedQueryTruncation>,
+    /// Presentation instructions the definition gives and Hatchdoor does not
+    /// carry out. The rows are complete and correct without them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<SavedQueryIgnored>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQueryEmpty {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_name: Option<String>,
+    pub columns: Vec<SavedQueryColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<SavedQueryIgnored>,
+}
+
+/// Why a saved query was not evaluated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQueryRefusal {
+    /// The piece of the definition Hatchdoor could not use, as the author
+    /// wrote it where that is possible: `daysUntil()`, `formulas`, `YAML`, a
+    /// whole filter expression.
+    pub construct: String,
+    /// A sentence for a person, naming the construct and what is wrong.
+    pub message: String,
+}
+
+fn refuse(construct: impl Into<String>, message: impl Into<String>) -> SavedQueryRefusal {
+    SavedQueryRefusal {
+        construct: construct.into(),
+        message: message.into(),
+    }
+}
+
+/// A presentation instruction that was not carried out. Only an instruction
+/// that cannot change which rows appear is ever ignored; anything else
+/// refuses the saved query.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQueryIgnored {
+    /// The instruction as the definition gives it: `groupBy`, `summaries`,
+    /// `type: cards`.
+    pub instruction: String,
+    pub message: String,
+}
+
+/// Something wrong with a `hatchdoor-query` marker. A marker only names a
+/// saved query, so none of these changes a row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "problem", rename_all = "snake_case")]
+pub enum SavedQueryMarkerProblem {
+    /// A marker with no `base` block after it, so it names nothing.
+    Orphaned {
+        /// The name as the marker writes it.
+        name: String,
+        /// The marker's line in the Note file, counting from 1.
+        line: usize,
+        message: String,
+    },
+    /// A marker whose name is not a slug. The block after it is unnamed.
+    UnusableName {
+        name: String,
+        /// The saved query's position in `queries`.
+        query: usize,
+        message: String,
+    },
+    /// Two or more saved queries claim one name, so the name addresses none
+    /// of them until only one does. Their rows are unaffected.
+    DuplicateName {
+        name: String,
+        /// The positions in `queries` of every saved query claiming it.
+        queries: Vec<usize>,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,23 +312,68 @@ pub(super) enum MarkerName {
     Unusable(String),
 }
 
+impl MarkerName {
+    /// The name as the marker writes it.
+    fn written(&self) -> &str {
+        match self {
+            Self::Absent => "",
+            Self::Named(name) | Self::Unusable(name) => name,
+        }
+    }
+}
+
+/// A `hatchdoor-query` marker with no `base` block after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OrphanedMarker {
+    /// The name as the marker writes it, usable or not.
+    name: String,
+    /// The marker's line in the Note file, counting from 1.
+    line: usize,
+}
+
+/// What a Note's Markdown holds for saved queries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NoteSavedQueries {
+    blocks: Vec<SavedQueryBlock>,
+    orphaned_markers: Vec<OrphanedMarker>,
+}
+
 /// Every fenced `base` block in `markdown`, in document order, each paired
-/// with the `hatchdoor-query` marker preceding it. Only blank lines may sit
-/// between a marker and its block; anything else detaches it.
+/// with the `hatchdoor-query` marker preceding it, and every marker that
+/// precedes no block. Only blank lines may sit between a marker and its
+/// block; anything else detaches it.
 ///
 /// The frontmatter is skipped: it is YAML, not Markdown, and a fence inside a
 /// multi-line string there is not a block anyone rendered.
-pub(super) fn saved_query_blocks(markdown: &str) -> Vec<SavedQueryBlock> {
-    let body = match frontmatter_span(markdown) {
-        Some((_, end)) => markdown.get(end + 4..).unwrap_or(""),
-        None => markdown,
+pub(super) fn saved_query_blocks(markdown: &str) -> NoteSavedQueries {
+    let (body, first_line) = match frontmatter_span(markdown) {
+        Some((_, end)) => {
+            let head = markdown.get(..end + 4).unwrap_or(markdown);
+            (
+                markdown.get(end + 4..).unwrap_or(""),
+                head.matches('\n').count() + 1,
+            )
+        }
+        None => (markdown, 1),
     };
 
-    let mut blocks = Vec::new();
-    let mut pending_marker = MarkerName::Absent;
+    let mut found = NoteSavedQueries {
+        blocks: Vec::new(),
+        orphaned_markers: Vec::new(),
+    };
+    let mut pending_marker: Option<(MarkerName, usize)> = None;
+    let mut orphan = |pending: Option<(MarkerName, usize)>| {
+        if let Some((name, line)) = pending {
+            found.orphaned_markers.push(OrphanedMarker {
+                name: name.written().to_string(),
+                line,
+            });
+        }
+    };
     let mut open: Option<OpenFence> = None;
+    let mut blocks = Vec::new();
 
-    for raw_line in body.split('\n') {
+    for (offset, raw_line) in body.split('\n').enumerate() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         let indent = leading_spaces(line);
         let trimmed = line.trim_start();
@@ -251,7 +398,14 @@ pub(super) fn saved_query_blocks(markdown: &str) -> Vec<SavedQueryBlock> {
                 .split_whitespace()
                 .next()
                 .is_some_and(|language| language == "base");
-            let name = std::mem::replace(&mut pending_marker, MarkerName::Absent);
+            let name = if is_base {
+                pending_marker
+                    .take()
+                    .map_or(MarkerName::Absent, |(name, _)| name)
+            } else {
+                orphan(pending_marker.take());
+                MarkerName::Absent
+            };
             open = Some(OpenFence {
                 marker,
                 len,
@@ -267,8 +421,10 @@ pub(super) fn saved_query_blocks(markdown: &str) -> Vec<SavedQueryBlock> {
         if trimmed.is_empty() {
             continue;
         }
-        pending_marker = query_marker(trimmed).unwrap_or(MarkerName::Absent);
+        orphan(pending_marker.take());
+        pending_marker = query_marker(trimmed).map(|name| (name, first_line + offset));
     }
+    orphan(pending_marker.take());
 
     // CommonMark runs an unclosed fence to the end of the document, and the
     // note page renders it that way, so it is still a block.
@@ -278,7 +434,8 @@ pub(super) fn saved_query_blocks(markdown: &str) -> Vec<SavedQueryBlock> {
     {
         blocks.push(block.finish());
     }
-    blocks
+    found.blocks = blocks;
+    found
 }
 
 struct OpenFence {
@@ -348,35 +505,49 @@ fn query_marker(trimmed: &str) -> Option<MarkerName> {
 /// Note rather than one per query, so repeating a block cannot multiply the
 /// work a single read does past what one saved query may do.
 ///
-/// A name never changes which rows appear, so an unusable or repeated one is
-/// set aside with a notice and the rows are still computed (ADR-21 part 3).
+/// A name never changes which rows appear, so a marker problem is reported
+/// beside the results and every row is still computed (ADR-21 part 3).
 pub(super) fn evaluate_saved_queries(
-    blocks: Vec<SavedQueryBlock>,
+    found: NoteSavedQueries,
     vault_id: VaultId,
     notes: &[VaultSnapshotNote],
     clock: &EvaluationClock,
     ceiling: SavedQueryCeiling,
-) -> Vec<SavedQueryResult> {
-    let mut seen_names = BTreeSet::new();
+) -> EvaluatedSavedQueries {
+    let mut marker_problems: Vec<SavedQueryMarkerProblem> = found
+        .orphaned_markers
+        .into_iter()
+        .map(|marker| SavedQueryMarkerProblem::Orphaned {
+            message: format!(
+                "The marker naming \"{}\" is not followed by a base block, so it names nothing.",
+                marker.name
+            ),
+            name: marker.name,
+            line: marker.line,
+        })
+        .collect();
+    let mut claims: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut scan_budget = ceiling.max_scanned_notes;
-    blocks
+
+    let queries = found
+        .blocks
         .into_iter()
         .enumerate()
         .map(|(position, block)| {
-            let mut notices = Vec::new();
             let name = match block.name {
                 MarkerName::Absent => None,
-                MarkerName::Named(name) if seen_names.insert(name.clone()) => Some(name),
                 MarkerName::Named(name) => {
-                    notices.push(format!(
-                        "The name \"{name}\" is already used by a saved query earlier in this note, so this one has no name."
-                    ));
-                    None
+                    claims.entry(name.clone()).or_default().push(position);
+                    Some(name)
                 }
                 MarkerName::Unusable(name) => {
-                    notices.push(format!(
-                        "The name \"{name}\" is not usable, so this saved query has no name. A name is lowercase letters, digits and hyphens."
-                    ));
+                    marker_problems.push(SavedQueryMarkerProblem::UnusableName {
+                        message: format!(
+                            "\"{name}\" is not a usable name, so this saved query has no name. A name is lowercase letters, digits and hyphens."
+                        ),
+                        name,
+                        query: position,
+                    });
                     None
                 }
             };
@@ -390,23 +561,48 @@ pub(super) fn evaluate_saved_queries(
             } else {
                 match parse_definition(&block.source, clock) {
                     Ok(definition) => {
-                        evaluate(&definition, vault_id, notes, ceiling, &mut scan_budget)
+                        evaluate(definition, vault_id, notes, ceiling, &mut scan_budget)
                     }
-                    Err(message) => SavedQueryOutcome::Refused { message },
+                    Err(refusal) => SavedQueryOutcome::Refused(refusal),
                 }
             };
             SavedQueryResult {
                 name,
                 source: block.source,
-                notices,
                 outcome,
             }
         })
-        .collect()
+        .collect();
+
+    marker_problems.extend(
+        claims
+            .into_iter()
+            .filter(|(_, queries)| queries.len() > 1)
+            .map(|(name, queries)| SavedQueryMarkerProblem::DuplicateName {
+                message: format!(
+                    "{} saved queries in this note are named \"{name}\", so none of them can be addressed by that name until only one is.",
+                    queries.len()
+                ),
+                name,
+                queries,
+            }),
+    );
+
+    EvaluatedSavedQueries {
+        queries,
+        marker_problems,
+    }
+}
+
+/// Every saved query in one Note, evaluated, with its marker problems.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct EvaluatedSavedQueries {
+    pub(super) queries: Vec<SavedQueryResult>,
+    pub(super) marker_problems: Vec<SavedQueryMarkerProblem>,
 }
 
 fn evaluate(
-    definition: &Definition,
+    definition: Definition,
     vault_id: VaultId,
     notes: &[VaultSnapshotNote],
     ceiling: SavedQueryCeiling,
@@ -447,13 +643,7 @@ fn evaluate(
     let truncated = (selected.len() > shown).then_some(SavedQueryTruncation { reason, shown });
     selected.truncate(shown);
 
-    SavedQueryOutcome::Table(SavedQueryTable {
-        view_name: definition.view_name.clone(),
-        columns: definition
-            .columns
-            .iter()
-            .map(|column| column.wire.clone())
-            .collect(),
+    SavedQueryOutcome::evaluated(SavedQueryTable {
         rows: selected
             .into_iter()
             .map(|note| SavedQueryRow {
@@ -468,7 +658,14 @@ fn evaluate(
                     .collect(),
             })
             .collect(),
+        view_name: definition.view_name,
+        columns: definition
+            .columns
+            .into_iter()
+            .map(|column| column.wire)
+            .collect(),
         truncated,
+        ignored: definition.ignored,
     })
 }
 
@@ -495,6 +692,7 @@ struct Definition {
     columns: Vec<Column>,
     view_name: Option<String>,
     limit: Option<usize>,
+    ignored: Vec<SavedQueryIgnored>,
 }
 
 #[derive(Debug)]
@@ -524,30 +722,72 @@ impl Column {
     }
 }
 
+/// Instructions that change only how rows are drawn, never which rows appear.
+/// A definition carrying one is still evaluated, and the instruction is
+/// reported as ignored rather than refusing the whole saved query.
+fn ignore_grouping() -> SavedQueryIgnored {
+    SavedQueryIgnored {
+        instruction: "groupBy".to_string(),
+        message: "Grouping is not supported, so the rows are shown ungrouped.".to_string(),
+    }
+}
+
+fn ignore_summaries() -> SavedQueryIgnored {
+    SavedQueryIgnored {
+        instruction: "summaries".to_string(),
+        message: "Summaries are not supported, so no summary row is shown.".to_string(),
+    }
+}
+
+fn ignore_view_type(view_type: &str) -> SavedQueryIgnored {
+    SavedQueryIgnored {
+        instruction: format!("type: {view_type}"),
+        message: format!(
+            "Hatchdoor draws table views only, so this {view_type} view is shown as a table."
+        ),
+    }
+}
+
 /// Parse and compile one definition, or say what in it Hatchdoor does not
-/// support. Nothing is partially applied: the first unsupported construct
-/// refuses the whole saved query.
-fn parse_definition(source: &str, clock: &EvaluationClock) -> Result<Definition, String> {
+/// support. Nothing that affects which rows appear is partially applied: the
+/// first such construct refuses the whole saved query. A construct affecting
+/// only presentation is set aside and named in `ignored`.
+fn parse_definition(
+    source: &str,
+    clock: &EvaluationClock,
+) -> Result<Definition, SavedQueryRefusal> {
     if source.len() > MAX_DEFINITION_BYTES {
-        return Err(format!(
-            "This saved query is longer than the {MAX_DEFINITION_BYTES} bytes Hatchdoor reads."
+        return Err(refuse(
+            "definition size",
+            format!(
+                "This saved query is longer than the {MAX_DEFINITION_BYTES} bytes Hatchdoor reads."
+            ),
         ));
     }
     if source.trim().is_empty() {
-        return Err("This saved query is empty.".to_string());
+        return Err(refuse("empty definition", "This saved query is empty."));
     }
-    let yaml: Yaml = serde_yaml_ng::from_str(source)
-        .map_err(|error| format!("This saved query is not valid YAML: {error}"))?;
+    let yaml: Yaml = serde_yaml_ng::from_str(source).map_err(|error| {
+        refuse(
+            "YAML",
+            format!("This saved query is not valid YAML: {error}"),
+        )
+    })?;
     let Yaml::Mapping(top) = yaml else {
-        return Err("A saved query must be a set of keys such as filters and views.".to_string());
+        return Err(refuse(
+            "definition",
+            "A saved query must be a set of keys such as filters and views.",
+        ));
     };
 
     let mut conditions = Vec::new();
     let mut view = None;
+    let mut ignored = Vec::new();
     for (key, value) in &top {
         match yaml_key(key)? {
             "filters" => conditions.push(filter(value, clock, 0)?),
             "views" => view = single_view(value)?,
+            "summaries" => ignored.push(ignore_summaries()),
             other => return Err(unsupported_key(other, "at the top of a saved query")),
         }
     }
@@ -557,6 +797,7 @@ fn parse_definition(source: &str, clock: &EvaluationClock) -> Result<Definition,
             if let Some(filters) = view.filters {
                 conditions.push(filter(filters, clock, 0)?);
             }
+            ignored.extend(view.ignored);
             (view.name, view.limit, view.columns)
         }
         None => (None, None, Vec::new()),
@@ -566,12 +807,16 @@ fn parse_definition(source: &str, clock: &EvaluationClock) -> Result<Definition,
     } else {
         columns
     };
+    // `summaries` may sit at the top and on the view; say it once.
+    let mut seen = BTreeSet::new();
+    ignored.retain(|instruction| seen.insert(instruction.instruction.clone()));
 
     Ok(Definition {
         condition: CompiledCondition::All(conditions),
         columns,
         view_name,
         limit,
+        ignored,
     })
 }
 
@@ -580,26 +825,35 @@ struct View<'a> {
     limit: Option<usize>,
     columns: Vec<Column>,
     filters: Option<&'a Yaml>,
+    ignored: Vec<SavedQueryIgnored>,
 }
 
 /// The one view a definition carries, or `None` for an empty list, which
 /// draws the same default table as a definition with no `views` at all.
-fn single_view(value: &Yaml) -> Result<Option<View<'_>>, String> {
+fn single_view(value: &Yaml) -> Result<Option<View<'_>>, SavedQueryRefusal> {
     let Yaml::Sequence(views) = value else {
-        return Err("views must be a list.".to_string());
+        return Err(refuse("views", "views must be a list."));
     };
     let view = match views.as_slice() {
         [] => return Ok(None),
         [view] => view,
+        // Which view a reader meant cannot be known, and two views may filter
+        // differently, so this is not a presentation choice to set aside.
         _ => {
-            return Err(format!(
-                "This saved query defines {} views, and Hatchdoor supports exactly one.",
-                views.len()
+            return Err(refuse(
+                "views",
+                format!(
+                    "This saved query defines {} views, and Hatchdoor supports exactly one.",
+                    views.len()
+                ),
             ));
         }
     };
     let Yaml::Mapping(view) = view else {
-        return Err("A view must be a set of keys such as type and order.".to_string());
+        return Err(refuse(
+            "views",
+            "A view must be a set of keys such as type and order.",
+        ));
     };
 
     let mut parsed = View {
@@ -607,23 +861,20 @@ fn single_view(value: &Yaml) -> Result<Option<View<'_>>, String> {
         limit: None,
         columns: Vec::new(),
         filters: None,
+        ignored: Vec::new(),
     };
     for (key, value) in view {
         match yaml_key(key)? {
             "type" => match value.as_str() {
                 Some("table") => {}
-                Some(other) => {
-                    return Err(format!(
-                        "A \"{other}\" view is not supported; Hatchdoor draws table views only."
-                    ));
-                }
-                None => return Err("A view's type must be text.".to_string()),
+                Some(other) => parsed.ignored.push(ignore_view_type(other)),
+                None => return Err(refuse("type", "A view's type must be text.")),
             },
             "name" => {
                 parsed.name = Some(
                     value
                         .as_str()
-                        .ok_or("A view's name must be text.")?
+                        .ok_or_else(|| refuse("name", "A view's name must be text."))?
                         .to_string(),
                 );
             }
@@ -633,36 +884,50 @@ fn single_view(value: &Yaml) -> Result<Option<View<'_>>, String> {
                         .as_u64()
                         .filter(|limit| *limit > 0)
                         .and_then(|limit| usize::try_from(limit).ok())
-                        .ok_or("A view's limit must be a whole number above zero.")?,
+                        .ok_or_else(|| {
+                            refuse("limit", "A view's limit must be a whole number above zero.")
+                        })?,
                 );
             }
             "order" => {
                 let Yaml::Sequence(ids) = value else {
-                    return Err("A view's order must be a list of properties.".to_string());
+                    return Err(refuse(
+                        "order",
+                        "A view's order must be a list of properties.",
+                    ));
                 };
-                parsed.columns = ids
-                    .iter()
-                    .map(|id| column(id.as_str().ok_or("Each column in order must be text.")?))
-                    .collect::<Result<_, String>>()?;
+                parsed.columns =
+                    ids.iter()
+                        .map(|id| {
+                            column(id.as_str().ok_or_else(|| {
+                                refuse("order", "Each column in order must be text.")
+                            })?)
+                        })
+                        .collect::<Result<_, _>>()?;
             }
             "filters" => parsed.filters = Some(value),
+            "groupBy" => parsed.ignored.push(ignore_grouping()),
+            "summaries" => parsed.ignored.push(ignore_summaries()),
             other => return Err(unsupported_key(other, "in a view")),
         }
     }
     Ok(Some(parsed))
 }
 
-fn yaml_key(key: &Yaml) -> Result<&str, String> {
+fn yaml_key(key: &Yaml) -> Result<&str, SavedQueryRefusal> {
     key.as_str()
-        .ok_or_else(|| "Every key in a saved query must be text.".to_string())
+        .ok_or_else(|| refuse("key", "Every key in a saved query must be text."))
 }
 
-fn unsupported_key(key: &str, place: &str) -> String {
-    format!("\"{key}\" {place} is not supported by Hatchdoor.")
+fn unsupported_key(key: &str, place: &str) -> SavedQueryRefusal {
+    refuse(
+        key,
+        format!("\"{key}\" {place} is not supported by Hatchdoor."),
+    )
 }
 
 /// One column the view's `order` names.
-fn column(id: &str) -> Result<Column, String> {
+fn column(id: &str) -> Result<Column, SavedQueryRefusal> {
     let id = id.trim();
     let (label, value) = if id == "file.tags" {
         ("tags".to_string(), ColumnValue::Tags)
@@ -671,9 +936,11 @@ fn column(id: &str) -> Result<Column, String> {
     {
         (member.to_string(), ColumnValue::Subject(subject))
     } else {
-        match property_reference(id)? {
+        match property_reference(id) {
             Some(name) => (name.clone(), ColumnValue::Subject(Subject::Property(name))),
-            None => return Err(format!("The column \"{id}\" is not supported.")),
+            None => {
+                return Err(refuse(id, format!("The column \"{id}\" is not supported.")));
+            }
         }
     };
     Ok(Column {
@@ -685,12 +952,12 @@ fn column(id: &str) -> Result<Column, String> {
     })
 }
 
-/// The frontmatter property a column id names, `Some(name)`, or `None` for an
-/// id that is not a property at all. `formula.` and `this.` are refused
-/// outright rather than read as a property of that name.
-fn property_reference(id: &str) -> Result<Option<String>, String> {
+/// The frontmatter property a column id names, or `None` for an id that is
+/// not a plain property. `formula.`, `this.` and unknown `file.` members are
+/// never read as a property of that name.
+fn property_reference(id: &str) -> Option<String> {
     if let Some(rest) = id.strip_prefix("note.") {
-        return Ok(Some(rest.to_string()).filter(|name| is_identifier(name)));
+        return Some(rest.to_string()).filter(|name| is_identifier(name));
     }
     if let Some(inner) = id
         .strip_prefix("note[")
@@ -705,16 +972,17 @@ fn property_reference(id: &str) -> Result<Option<String>, String> {
                     .strip_prefix('\'')
                     .and_then(|rest| rest.strip_suffix('\''))
             });
-        return Ok(unquoted
+        return unquoted
             .map(ToOwned::to_owned)
-            .filter(|name| !name.is_empty()));
+            .filter(|name| !name.is_empty());
     }
-    for namespace in ["formula.", "this.", "file."] {
-        if id.starts_with(namespace) {
-            return Err(format!("The column \"{id}\" is not supported."));
-        }
+    if ["formula.", "this.", "file."]
+        .iter()
+        .any(|namespace| id.starts_with(namespace))
+    {
+        return None;
     }
-    Ok(is_identifier(id).then(|| id.to_string()))
+    is_identifier(id).then(|| id.to_string())
 }
 
 fn is_identifier(text: &str) -> bool {
@@ -727,10 +995,15 @@ fn is_identifier(text: &str) -> bool {
 
 /// One entry of a `filters` tree: an expression string, or an `and` / `or` /
 /// `not` list of further entries.
-fn filter(node: &Yaml, clock: &EvaluationClock, depth: usize) -> Result<CompiledCondition, String> {
+fn filter(
+    node: &Yaml,
+    clock: &EvaluationClock,
+    depth: usize,
+) -> Result<CompiledCondition, SavedQueryRefusal> {
     if depth > MAX_NESTING {
-        return Err(format!(
-            "The filters nest more than {MAX_NESTING} levels deep."
+        return Err(refuse(
+            "filters",
+            format!("The filters nest more than {MAX_NESTING} levels deep."),
         ));
     }
     match node {
@@ -738,14 +1011,23 @@ fn filter(node: &Yaml, clock: &EvaluationClock, depth: usize) -> Result<Compiled
         Yaml::Mapping(mapping) => {
             let mut entries = mapping.iter();
             let (Some((key, value)), None) = (entries.next(), entries.next()) else {
-                return Err("Each filter group must have exactly one of and, or, not.".to_string());
+                return Err(refuse(
+                    "filters",
+                    "Each filter group must have exactly one of and, or, not.",
+                ));
             };
             let combinator = yaml_key(key)?;
             let Yaml::Sequence(items) = value else {
-                return Err(format!("The {combinator} filter group must hold a list."));
+                return Err(refuse(
+                    combinator,
+                    format!("The {combinator} filter group must hold a list."),
+                ));
             };
             if items.is_empty() {
-                return Err(format!("The {combinator} filter group is empty."));
+                return Err(refuse(
+                    combinator,
+                    format!("The {combinator} filter group is empty."),
+                ));
             }
             let inner = items
                 .iter()
@@ -758,14 +1040,16 @@ fn filter(node: &Yaml, clock: &EvaluationClock, depth: usize) -> Result<Compiled
                 "not" => Ok(CompiledCondition::Not(Box::new(CompiledCondition::Any(
                     inner,
                 )))),
-                other => Err(format!(
-                    "The filter group \"{other}\" is not supported; use and, or, not."
+                other => Err(refuse(
+                    other,
+                    format!("The filter group \"{other}\" is not supported; use and, or, not."),
                 )),
             }
         }
-        _ => {
-            Err("Each filter must be an expression in text, or an and, or, not group.".to_string())
-        }
+        _ => Err(refuse(
+            "filters",
+            "Each filter must be an expression in text, or an and, or, not group.",
+        )),
     }
 }
 
@@ -826,7 +1110,7 @@ impl Comparison {
     }
 }
 
-fn tokenize(expression: &str) -> Result<Vec<Token>, String> {
+fn tokenize(expression: &str) -> Result<Vec<Token>, SavedQueryRefusal> {
     let chars: Vec<char> = expression.chars().collect();
     let mut tokens = Vec::new();
     let mut at = 0;
@@ -859,14 +1143,20 @@ fn tokenize(expression: &str) -> Result<Vec<Token>, String> {
                 loop {
                     match chars.get(end) {
                         None => {
-                            return Err(format!(
-                                "The expression \"{expression}\" has an unclosed quote."
+                            return Err(refuse(
+                                expression,
+                                format!("The expression \"{expression}\" has an unclosed quote."),
                             ));
                         }
                         Some(&close) if close == ch => break,
                         Some('\\') => {
                             let escaped = chars.get(end + 1).ok_or_else(|| {
-                                format!("The expression \"{expression}\" has an unclosed quote.")
+                                refuse(
+                                    expression,
+                                    format!(
+                                        "The expression \"{expression}\" has an unclosed quote."
+                                    ),
+                                )
                             })?;
                             text.push(*escaped);
                             end += 2;
@@ -900,7 +1190,9 @@ fn tokenize(expression: &str) -> Result<Vec<Token>, String> {
                             .ok()
                             .and_then(serde_json::Number::from_f64)
                     })
-                    .ok_or_else(|| format!("\"{literal}\" is not a number."))?;
+                    .ok_or_else(|| {
+                        refuse(literal.clone(), format!("\"{literal}\" is not a number."))
+                    })?;
                 (Token::Number(number), end - at)
             }
             _ if ch.is_alphabetic() || ch == '_' => {
@@ -914,8 +1206,11 @@ fn tokenize(expression: &str) -> Result<Vec<Token>, String> {
                 (Token::Identifier(chars[at..end].iter().collect()), end - at)
             }
             other => {
-                return Err(format!(
-                    "The expression \"{expression}\" uses \"{other}\", which is not supported."
+                return Err(refuse(
+                    other.to_string(),
+                    format!(
+                        "The expression \"{expression}\" uses \"{other}\", which is not supported."
+                    ),
                 ));
             }
         };
@@ -946,7 +1241,10 @@ struct Expression<'a> {
 }
 
 impl<'a> Expression<'a> {
-    fn parse(source: &'a str, clock: &'a EvaluationClock) -> Result<CompiledCondition, String> {
+    fn parse(
+        source: &'a str,
+        clock: &'a EvaluationClock,
+    ) -> Result<CompiledCondition, SavedQueryRefusal> {
         let mut expression = Self {
             source,
             tokens: tokenize(source)?,
@@ -955,7 +1253,7 @@ impl<'a> Expression<'a> {
             depth: 0,
         };
         if expression.tokens.is_empty() {
-            return Err("A filter expression is empty.".to_string());
+            return Err(refuse("filters", "A filter expression is empty."));
         }
         let condition = expression.or()?;
         if expression.at != expression.tokens.len() {
@@ -977,7 +1275,7 @@ impl<'a> Expression<'a> {
         }
     }
 
-    fn expect(&mut self, token: &Token) -> Result<(), String> {
+    fn expect(&mut self, token: &Token) -> Result<(), SavedQueryRefusal> {
         if self.eat(token) {
             Ok(())
         } else {
@@ -985,30 +1283,36 @@ impl<'a> Expression<'a> {
         }
     }
 
-    fn unexpected(&self) -> String {
-        format!(
+    fn unexpected(&self) -> SavedQueryRefusal {
+        self.refuse(format!(
             "The expression \"{}\" is not in the syntax Hatchdoor supports.",
             self.source
-        )
+        ))
+    }
+
+    /// A refusal naming this whole expression, for a problem with its shape
+    /// rather than with one name inside it.
+    fn refuse(&self, message: String) -> SavedQueryRefusal {
+        refuse(self.source, message)
     }
 
     fn nested<T>(
         &mut self,
-        read: impl FnOnce(&mut Self) -> Result<T, String>,
-    ) -> Result<T, String> {
+        read: impl FnOnce(&mut Self) -> Result<T, SavedQueryRefusal>,
+    ) -> Result<T, SavedQueryRefusal> {
         self.depth += 1;
         if self.depth > MAX_NESTING {
-            return Err(format!(
+            return Err(self.refuse(format!(
                 "The expression \"{}\" nests more than {MAX_NESTING} levels deep.",
                 self.source
-            ));
+            )));
         }
         let result = read(self);
         self.depth -= 1;
         result
     }
 
-    fn or(&mut self) -> Result<CompiledCondition, String> {
+    fn or(&mut self) -> Result<CompiledCondition, SavedQueryRefusal> {
         let mut any = vec![self.and()?];
         while self.eat(&Token::Or) {
             any.push(self.and()?);
@@ -1020,7 +1324,7 @@ impl<'a> Expression<'a> {
         })
     }
 
-    fn and(&mut self) -> Result<CompiledCondition, String> {
+    fn and(&mut self) -> Result<CompiledCondition, SavedQueryRefusal> {
         let mut all = vec![self.unary()?];
         while self.eat(&Token::And) {
             all.push(self.unary()?);
@@ -1032,7 +1336,7 @@ impl<'a> Expression<'a> {
         })
     }
 
-    fn unary(&mut self) -> Result<CompiledCondition, String> {
+    fn unary(&mut self) -> Result<CompiledCondition, SavedQueryRefusal> {
         if self.eat(&Token::Not) {
             return self
                 .nested(|expression| Ok(CompiledCondition::Not(Box::new(expression.unary()?))));
@@ -1040,15 +1344,15 @@ impl<'a> Expression<'a> {
         self.comparison()
     }
 
-    fn comparison(&mut self) -> Result<CompiledCondition, String> {
+    fn comparison(&mut self) -> Result<CompiledCondition, SavedQueryRefusal> {
         let left = self.term()?;
         let Some(Token::Compare(comparison)) = self.peek().cloned() else {
             return match left {
                 Term::Condition(condition) => Ok(condition),
-                Term::Subject(_) | Term::Value(_) => Err(format!(
+                Term::Subject(_) | Term::Value(_) => Err(self.refuse(format!(
                     "The expression \"{}\" needs a comparison, such as == or >.",
                     self.source
-                )),
+                ))),
             };
         };
         self.at += 1;
@@ -1060,14 +1364,14 @@ impl<'a> Expression<'a> {
             (Term::Value(value), Term::Subject(subject)) => {
                 compare(subject, comparison.flipped(), value, self.source)
             }
-            _ => Err(format!(
+            _ => Err(self.refuse(format!(
                 "The expression \"{}\" must compare a property with a value.",
                 self.source
-            )),
+            ))),
         }
     }
 
-    fn term(&mut self) -> Result<Term, String> {
+    fn term(&mut self) -> Result<Term, SavedQueryRefusal> {
         match self.peek().cloned() {
             Some(Token::LeftParen) => {
                 self.at += 1;
@@ -1094,7 +1398,7 @@ impl<'a> Expression<'a> {
     /// Everything that starts with a name: a literal keyword, a function, a
     /// file fact or file function, or a property, each optionally followed by
     /// `.isEmpty()`.
-    fn reference(&mut self, identifier: String) -> Result<Term, String> {
+    fn reference(&mut self, identifier: String) -> Result<Term, SavedQueryRefusal> {
         let subject = match identifier.as_str() {
             "true" => return Ok(Term::Value(Value::Bool(true))),
             "false" => return Ok(Term::Value(Value::Bool(false))),
@@ -1119,7 +1423,10 @@ impl<'a> Expression<'a> {
                     "hasTag" => return self.has_tag().map(Term::Condition),
                     "inFolder" => return self.in_folder().map(Term::Condition),
                     other => Subject::file_member(other).ok_or_else(|| {
-                        format!("file.{other} is not supported in a saved query.")
+                        refuse(
+                            format!("file.{other}"),
+                            format!("file.{other} is not supported in a saved query."),
+                        )
                     })?,
                 }
             }
@@ -1141,11 +1448,15 @@ impl<'a> Expression<'a> {
                 self.property(name)?
             }
             "formula" | "this" => {
-                return Err(format!("{identifier} is not supported in a saved query."));
+                return Err(refuse(
+                    identifier.clone(),
+                    format!("{identifier} is not supported in a saved query."),
+                ));
             }
             _ if self.peek() == Some(&Token::LeftParen) => {
-                return Err(format!(
-                    "The function {identifier}() is not supported in a saved query."
+                return Err(refuse(
+                    format!("{identifier}()"),
+                    format!("The function {identifier}() is not supported in a saved query."),
                 ));
             }
             _ => self.property(identifier)?,
@@ -1156,35 +1467,45 @@ impl<'a> Expression<'a> {
                 return Err(self.unexpected());
             };
             self.at += 1;
+            // Named before its arguments are read, so the refusal points at
+            // the method rather than at whatever it was given.
+            if method != "isEmpty" {
+                return Err(refuse(
+                    format!("{method}()"),
+                    format!("The method {method}() is not supported in a saved query."),
+                ));
+            }
             self.expect(&Token::LeftParen)?;
             self.expect(&Token::RightParen)?;
-            return match method.as_str() {
-                "isEmpty" => Ok(Term::Condition(is_empty(subject))),
-                other => Err(format!(
-                    "The method {other}() is not supported in a saved query."
-                )),
-            };
+            return Ok(Term::Condition(is_empty(subject)));
         }
         Ok(Term::Subject(subject))
     }
 
-    fn property(&self, name: String) -> Result<Subject, String> {
+    fn property(&self, name: String) -> Result<Subject, SavedQueryRefusal> {
         match name.as_str() {
-            "tags" => Err(
-                "Select by tag with file.hasTag(...) rather than the tags property.".to_string(),
-            ),
-            "aliases" => Err("aliases cannot be compared in a saved query.".to_string()),
+            "tags" => Err(refuse(
+                "tags",
+                "Select by tag with file.hasTag(...) rather than the tags property.",
+            )),
+            "aliases" => Err(refuse(
+                "aliases",
+                "aliases cannot be compared in a saved query.",
+            )),
             _ => Ok(Subject::Property(name)),
         }
     }
 
     /// The text arguments of a function call, after its name.
-    fn text_arguments(&mut self, function: &str) -> Result<Vec<String>, String> {
+    fn text_arguments(&mut self, function: &str) -> Result<Vec<String>, SavedQueryRefusal> {
         self.expect(&Token::LeftParen)?;
         let mut arguments = Vec::new();
         loop {
             let Some(Token::Text(argument)) = self.peek().cloned() else {
-                return Err(format!("{function}(...) takes one or more quoted names."));
+                return Err(refuse(
+                    function,
+                    format!("{function}(...) takes one or more quoted names."),
+                ));
             };
             self.at += 1;
             arguments.push(argument);
@@ -1196,25 +1517,35 @@ impl<'a> Expression<'a> {
         Ok(arguments)
     }
 
-    fn has_tag(&mut self) -> Result<CompiledCondition, String> {
+    fn has_tag(&mut self) -> Result<CompiledCondition, SavedQueryRefusal> {
         let tags = self
             .text_arguments("file.hasTag")?
             .iter()
             .map(|tag| {
-                CompiledCondition::tag(tag)
-                    .ok_or_else(|| "file.hasTag(...) was given an empty tag.".to_string())
+                CompiledCondition::tag(tag).ok_or_else(|| {
+                    refuse("file.hasTag", "file.hasTag(...) was given an empty tag.")
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(CompiledCondition::Any(tags))
     }
 
-    fn in_folder(&mut self) -> Result<CompiledCondition, String> {
+    fn in_folder(&mut self) -> Result<CompiledCondition, SavedQueryRefusal> {
         let [folder] = self
             .text_arguments("file.inFolder")?
             .try_into()
-            .map_err(|_| "file.inFolder(...) takes exactly one folder.".to_string())?;
-        CompiledCondition::folder(&folder)
-            .ok_or_else(|| "file.inFolder(...) was given an empty folder.".to_string())
+            .map_err(|_| {
+                refuse(
+                    "file.inFolder",
+                    "file.inFolder(...) takes exactly one folder.",
+                )
+            })?;
+        CompiledCondition::folder(&folder).ok_or_else(|| {
+            refuse(
+                "file.inFolder",
+                "file.inFolder(...) was given an empty folder.",
+            )
+        })
     }
 }
 
@@ -1254,7 +1585,7 @@ fn compare(
     comparison: Comparison,
     value: Value,
     source: &str,
-) -> Result<CompiledCondition, String> {
+) -> Result<CompiledCondition, SavedQueryRefusal> {
     let equal = |subject: Subject, value: Value| {
         if value.is_null() {
             missing_or(subject, PropertyOperator::Eq, Some(Value::Null))
@@ -1268,9 +1599,12 @@ fn compare(
     };
     let ordered = |operator| {
         if value.is_null() {
-            return Err(format!(
-                "The expression \"{source}\" orders against null with {}, which has no answer.",
-                comparison.spelling()
+            return Err(refuse(
+                source,
+                format!(
+                    "The expression \"{source}\" orders against null with {}, which has no answer.",
+                    comparison.spelling()
+                ),
             ));
         }
         Ok(CompiledCondition::Compare {

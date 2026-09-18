@@ -1221,7 +1221,13 @@
     font-size: 0.92rem;
     color: var(--muted);
   }
-  .note-body table + .saved-query-note { border-top: 1px solid var(--rule); }
+  .note-body table + .saved-query-note,
+  .note-body .saved-query-note + .saved-query-note { border-top: 1px solid var(--rule); }
+  .note-body .saved-query-sort { all: inherit; display: inline-flex; gap: 0.35em; padding: 0; border: none; cursor: pointer; }
+  .note-body .saved-query-sort:hover { color: var(--ink); }
+  .note-body .saved-query-sort:focus-visible { outline: 2px solid var(--hot); outline-offset: 1px; }
+  .note-body th[aria-sort="ascending"], .note-body th[aria-sort="descending"] { color: var(--ink); }
+  .note-body .saved-query-orphan { font-family: var(--font-sans); font-size: 0.92rem; color: var(--muted); }
   .note-body td:first-child, .note-body th:first-child { padding-left: 0.7rem; }
   .note-body td:first-child { color: var(--muted); }
 
@@ -2356,27 +2362,33 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.table-wrap</span><span class="key">.note-body table</span><span class="key">th</span><span class="key">td</span></div>
 
       <h3 class="doc-sub">Saved query</h3>
-      <p class="blurb">A <code>base</code> block draws the table the server computed for it. It is this Table and nothing more: the same frame and cells, plus a caption row set in the <span class="key">th</span> type (the view's name, or &ldquo;Saved query&rdquo;) and a note line set in muted <span class="key">td</span> type. The note line carries every state that is not a table: refused, stopped, empty, loading, failed to load, rows held back, and a name set aside. Each reads differently, because broken must never look like empty. The name cell links to the row's note.</p>
+      <p class="blurb">A <code>base</code> block draws the table the server computed for it. It is this Table and nothing more: the same frame and cells, plus a caption row set in the <span class="key">th</span> type (the view's name, or &ldquo;Saved query&rdquo;) and a note line set in muted <span class="key">td</span> type. The note line carries every state that is not a table: refused, stopped, empty, loading, failed to load, rows held back, an ignored presentation instruction, and a problem with the block's name. Each state opens with a bold word of its own (<strong>Not evaluated.</strong>, <strong>Stopped.</strong>, <strong>No matches.</strong>), because broken must never look like empty. The name cell links to the row's note. Each heading is a bare button in the <span class="key">th</span> type that re-sorts that table on screen only; the sorted heading turns ink and gains an arrow. A name marker with no block after it draws its notice in the same muted type where the marker sits, as <span class="key">.saved-query-orphan</span>.</p>
       <div class="stage stage-note paper">
         <div class="note-body">
           <div class="table-wrap saved-query">
             <div class="saved-query-head"><span>Active subscriptions</span></div>
             <table>
-              <thead><tr><th>name</th><th>price</th><th>billing_period</th></tr></thead>
+              <thead><tr><th aria-sort="none"><button type="button" class="saved-query-sort">name</button></th><th aria-sort="ascending"><button type="button" class="saved-query-sort">price<span aria-hidden="true">&uarr;</span></button></th><th aria-sort="none"><button type="button" class="saved-query-sort">billing_period</button></th></tr></thead>
               <tbody>
-                <tr><td><a href="#">Netflix</a></td><td>13.99</td><td>monthly</td></tr>
                 <tr><td><a href="#">Newspaper</a></td><td>8</td><td>monthly</td></tr>
+                <tr><td><a href="#">Netflix</a></td><td>13.99</td><td>monthly</td></tr>
               </tbody>
             </table>
             <p class="saved-query-note">Showing the first 2 notes, the limit this saved query sets.</p>
+            <p class="saved-query-note">Grouping is not supported, so the rows are shown ungrouped.</p>
           </div>
           <div class="table-wrap saved-query">
             <div class="saved-query-head"><span>Saved query</span></div>
-            <p class="saved-query-note">Not evaluated. "formulas" at the top of a saved query is not supported by Hatchdoor.</p>
+            <p class="saved-query-note"><strong>Not evaluated.</strong> The function daysUntil() is not supported in a saved query.</p>
           </div>
+          <div class="table-wrap saved-query">
+            <div class="saved-query-head"><span>Saved query</span></div>
+            <p class="saved-query-note"><strong>No matches.</strong> This saved query was read and checked against every note in this Vault, and none qualifies right now.</p>
+          </div>
+          <p class="saved-query-orphan">The marker naming "renewals" is not followed by a base block, so it names nothing.</p>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.saved-query</span><span class="key">.saved-query-head</span><span class="key">.saved-query-note</span></div>
+      <div class="tag-row"><span class="key">.saved-query</span><span class="key">.saved-query-head</span><span class="key">.saved-query-note</span><span class="key">.saved-query-sort</span><span class="key">.saved-query-orphan</span></div>
     </section>
 
     <!-- ───────── MEDIA ───────── -->

@@ -1,4 +1,4 @@
-import { useContext, useMemo, type ReactNode } from "react";
+import { useContext, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { VaultId } from "../../types";
@@ -8,8 +8,14 @@ import {
   baseFenceLines,
   formatCell,
   linkText,
+  markerNoticesFor,
   matchResult,
+  nextSort,
+  sortRows,
+  type SavedQueryColumn,
+  type SavedQueryRow,
   type SavedQueryState,
+  type SortState,
 } from "./savedQueries";
 
 export function SavedQueryProvider({
@@ -70,7 +76,7 @@ export function SavedQueryBlock({
       ? undefined
       : matchResult(state.results, source, line, fenceLines);
 
-  if (!result) {
+  if (!result || state.status === "none") {
     return (
       <SavedQueryFrame>
         <p className="saved-query-note">
@@ -82,11 +88,16 @@ export function SavedQueryBlock({
     );
   }
 
+  const notices = markerNoticesFor(
+    state.markerProblems,
+    state.results.indexOf(result),
+  );
+
   if (result.status === "refused") {
     return (
-      <SavedQueryFrame notices={result.notices}>
+      <SavedQueryFrame notices={notices}>
         <p className="saved-query-note" role="status">
-          Not evaluated. {result.message}
+          <strong>Not evaluated.</strong> {result.message}
         </p>
       </SavedQueryFrame>
     );
@@ -94,63 +105,147 @@ export function SavedQueryBlock({
 
   if (result.status === "stopped") {
     return (
-      <SavedQueryFrame notices={result.notices}>
+      <SavedQueryFrame notices={notices}>
         <p className="saved-query-note" role="status">
-          Stopped. {result.message}
+          <strong>Stopped.</strong> {result.message}
         </p>
       </SavedQueryFrame>
     );
   }
 
+  const ignored = (result.ignored ?? []).map((gap) => gap.message);
+
+  if (result.status === "empty") {
+    return (
+      <SavedQueryFrame
+        caption={result.view_name}
+        notices={[...ignored, ...notices]}
+      >
+        <p className="saved-query-note" role="status">
+          <strong>No matches.</strong> This saved query was read and checked
+          against every note in this Vault, and none qualifies right now.
+        </p>
+      </SavedQueryFrame>
+    );
+  }
+
+  return (
+    <SavedQueryFrame
+      caption={result.view_name}
+      notices={[...ignored, ...notices]}
+    >
+      <SortableRows
+        columns={result.columns}
+        rows={result.rows}
+        vaultId={vaultId}
+      />
+      {result.truncated ? (
+        <p className="saved-query-note" role="status">
+          {result.truncated.reason === "definition_limit"
+            ? `Showing the first ${result.truncated.shown} notes, the limit this saved query sets.`
+            : `Truncated: showing the first ${result.truncated.shown} notes. Hatchdoor shows no more than that from one saved query, and more qualify.`}
+        </p>
+      ) : null}
+    </SavedQueryFrame>
+  );
+}
+
+/**
+ * The table itself. A click on a heading re-sorts the rows on screen and
+ * nowhere else: the choice lives in this component's state, so it is never
+ * written to the note and a reload forgets it, and each table sorts on its own.
+ */
+function SortableRows({
+  columns,
+  rows,
+  vaultId,
+}: {
+  columns: SavedQueryColumn[];
+  rows: SavedQueryRow[];
+  vaultId: VaultId;
+}) {
+  const [sort, setSort] = useState<SortState | null>(null);
+  const sorted = useMemo(() => sortRows(rows, sort), [rows, sort]);
   const linkColumn = Math.max(
-    result.columns.findIndex(
+    columns.findIndex(
       (column) => column.id === "file.name" || column.id === "file.basename",
     ),
     0,
   );
 
   return (
-    <SavedQueryFrame caption={result.view_name} notices={result.notices}>
-      {result.rows.length === 0 ? (
-        <p className="saved-query-note">No notes match this saved query.</p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              {result.columns.map((column) => (
-                <th key={column.id}>{column.label}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {result.rows.map((row) => (
-              <tr key={`${row.vault_id}:${row.slug}`}>
-                {result.columns.map((column, index) => (
-                  <td key={column.id}>
-                    {index === linkColumn ? (
-                      <Link
-                        to={`/v/${encodeURIComponent(vaultId)}/n/${encodeURIComponent(row.slug)}`}
-                      >
-                        {linkText(column.id, row.cells[index], row.title)}
-                      </Link>
-                    ) : (
-                      formatCell(row.cells[index])
-                    )}
-                  </td>
-                ))}
-              </tr>
+    <table>
+      <thead>
+        <tr>
+          {columns.map((column, index) => {
+            const direction =
+              sort?.column === index ? sort.direction : undefined;
+            return (
+              <th key={column.id} aria-sort={direction ?? "none"}>
+                <button
+                  type="button"
+                  className="saved-query-sort"
+                  onClick={() => setSort((current) => nextSort(current, index))}
+                >
+                  {column.label}
+                  <span aria-hidden="true">
+                    {direction === "ascending"
+                      ? "↑"
+                      : direction === "descending"
+                        ? "↓"
+                        : ""}
+                  </span>
+                </button>
+              </th>
+            );
+          })}
+        </tr>
+      </thead>
+      <tbody>
+        {sorted.map((row) => (
+          <tr key={`${row.vault_id}:${row.slug}`}>
+            {columns.map((column, index) => (
+              <td key={column.id}>
+                {index === linkColumn ? (
+                  <Link
+                    to={`/v/${encodeURIComponent(vaultId)}/n/${encodeURIComponent(row.slug)}`}
+                  >
+                    {linkText(column.id, row.cells[index], row.title)}
+                  </Link>
+                ) : (
+                  formatCell(row.cells[index])
+                )}
+              </td>
             ))}
-          </tbody>
-        </table>
-      )}
-      {result.truncated ? (
-        <p className="saved-query-note">
-          {result.truncated.reason === "definition_limit"
-            ? `Showing the first ${result.truncated.shown} notes, the limit this saved query sets.`
-            : `Showing the first ${result.truncated.shown} notes. Hatchdoor shows no more than that from one saved query.`}
-        </p>
-      ) : null}
-    </SavedQueryFrame>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * Where a `hatchdoor-query` marker with no `base` block after it sits. It
+ * shows the server's notice about that marker and nothing else; outside a
+ * provider, or before the server has answered, it shows nothing.
+ */
+export function OrphanedMarkerNotice({ name }: { name?: string }) {
+  const context = useContext(SavedQueryContext);
+  const state = context?.state;
+  if (!state || (state.status !== "ready" && state.status !== "loading")) {
+    return null;
+  }
+  const problem = state.markerProblems.find(
+    (candidate) =>
+      candidate.problem === "orphaned" && candidate.name === (name ?? ""),
+  );
+  if (!problem) {
+    return null;
+  }
+  return (
+    <p className="saved-query-orphan" role="status">
+      {problem.message}
+    </p>
   );
 }
 
@@ -160,7 +255,8 @@ function SavedQueryFrame({
   children,
 }: {
   caption?: string;
-  /** What the server set aside without changing the rows, such as a name. */
+  /** What the server set aside without changing the rows: an ignored
+   * presentation instruction, or a problem with the block's name. */
   notices?: string[];
   children: ReactNode;
 }) {
