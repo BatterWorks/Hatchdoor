@@ -357,6 +357,12 @@ export type TagStat = { tag: string; note_count: number };
 export type NoteRef = { title: string; slug: string };
 export type NoteWordRef = NoteRef & { word_count: number };
 export type LinkedNoteRef = NoteRef & { backlink_count: number };
+/**
+ * One calendar month of the Writing Activity window. `activity_by_month`
+ * carries exactly six of these, oldest first, one per calendar month ending at
+ * the current UTC month, zero-filled where nobody wrote (#298). Average over
+ * the window, not over the entries received.
+ */
 export type MonthActivity = { month: string; modified_count: number };
 export type FolderStat = { folder: string; note_count: number };
 export type NoteList = { count: number; notes: NoteRef[] };

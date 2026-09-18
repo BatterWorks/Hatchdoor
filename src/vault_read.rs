@@ -1621,8 +1621,7 @@ impl FolderBuilder {
 /// `restrict` drops both together.
 fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultStatsResponse {
     use crate::api_types::{
-        FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
-        VaultStatsResponse,
+        FolderStat, LinkedNoteRef, NoteList, NoteRef, NoteWordRef, TagStat, VaultStatsResponse,
     };
 
     let note_count = snapshot.notes.len() as i64;
@@ -1719,19 +1718,10 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     });
     most_linked.truncate(20);
 
-    let mut activity: BTreeMap<String, i64> = BTreeMap::new();
-    for note in &snapshot.notes {
-        *activity.entry(month_key(note.mtime_ns)).or_insert(0) += 1;
-    }
-    let mut activity_by_month: Vec<MonthActivity> = activity
-        .into_iter()
-        .map(|(month, modified_count)| MonthActivity {
-            month,
-            modified_count,
-        })
-        .collect();
-    activity_by_month.sort_by(|a, b| b.month.cmp(&a.month));
-    activity_by_month.truncate(6);
+    let activity_by_month = activity_window(
+        snapshot.notes.iter().map(|note| note.mtime_ns),
+        chrono::Utc::now(),
+    );
 
     let mut folder_counts: BTreeMap<String, i64> = BTreeMap::new();
     for note in &snapshot.notes {
@@ -1855,6 +1845,57 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
             notes: month_notes,
         },
     }
+}
+
+/// How many calendar months the Writing Activity window spans, counting the
+/// month it ends in. The Stats page names this number in its heading.
+const ACTIVITY_WINDOW_MONTHS: i32 = 6;
+
+/// The `ACTIVITY_WINDOW_MONTHS` UTC calendar months ending at the month `now`
+/// falls in, oldest first, each carrying how many of `mtimes_ns` land in it.
+///
+/// The window is generated from the calendar rather than harvested from the
+/// data, which is what makes the chart a timeline: a month nobody wrote in
+/// keeps its column with a count of zero instead of disappearing, and a Note
+/// older than the window is counted nowhere rather than folding into the
+/// oldest column. The result is always exactly `ACTIVITY_WINDOW_MONTHS`
+/// entries long, including for a Vault with no Notes at all, so a reader can
+/// divide by the window rather than by however many bars arrived.
+///
+/// Months are stepped through as `year * 12 + month`, which cannot fail the
+/// way subtracting months from a date near the proleptic year zero can, and
+/// the `YYYY-MM` keys sort chronologically, so collecting them into a
+/// `BTreeMap` puts the window in time order for free.
+fn activity_window(
+    mtimes_ns: impl Iterator<Item = i64>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<crate::api_types::MonthActivity> {
+    use chrono::Datelike;
+
+    let last = now.year() * 12 + now.month0() as i32;
+    let mut counts: BTreeMap<String, i64> = (0..ACTIVITY_WINDOW_MONTHS)
+        .map(|months_back| {
+            let month = last - months_back;
+            let key = format!(
+                "{:04}-{:02}",
+                month.div_euclid(12),
+                month.rem_euclid(12) + 1
+            );
+            (key, 0)
+        })
+        .collect();
+    for mtime_ns in mtimes_ns {
+        if let Some(count) = counts.get_mut(&month_key(mtime_ns)) {
+            *count += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(month, modified_count)| crate::api_types::MonthActivity {
+            month,
+            modified_count,
+        })
+        .collect()
 }
 
 /// The zero-padded `YYYY-MM` UTC month a nanosecond Unix timestamp falls in,
@@ -2038,6 +2079,97 @@ mod parsing_tests {
 
         let error = unavailable(vault_id, "vault_disabled", "off".to_string(), false);
         assert_eq!(error.into_operation_error().code, "vault_disabled");
+    }
+
+    /// Noon UTC on a date, as the `DateTime` the activity window reads its
+    /// calendar from.
+    fn utc(year: i32, month: u32, day: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .and_then(|date| date.and_hms_opt(12, 0, 0))
+            .expect("valid test date")
+            .and_utc()
+    }
+
+    /// Noon UTC on a date, as a Note's nanosecond modification time.
+    fn mtime(year: i32, month: u32, day: u32) -> i64 {
+        utc(year, month, day)
+            .timestamp_nanos_opt()
+            .expect("test date inside the nanosecond range")
+    }
+
+    fn months(window: &[crate::api_types::MonthActivity]) -> Vec<(&str, i64)> {
+        window
+            .iter()
+            .map(|entry| (entry.month.as_str(), entry.modified_count))
+            .collect()
+    }
+
+    /// The window is generated from the calendar, not harvested from the data
+    /// (#298). A month nobody wrote in keeps its column with a zero, and a Note
+    /// older than the window is counted nowhere rather than folding into the
+    /// oldest bar.
+    #[test]
+    fn activity_window_spans_six_calendar_months_oldest_first_with_zero_gaps() {
+        let mtimes = [
+            mtime(2026, 9, 18),
+            mtime(2026, 9, 1),
+            mtime(2026, 7, 30),
+            mtime(2026, 4, 1),
+            // Eighteen months before the window, which used to earn a bar of
+            // its own under a "last 6 months" heading.
+            mtime(2025, 2, 14),
+            mtime(2025, 2, 15),
+            // The day before the window opens.
+            mtime(2026, 3, 31),
+        ];
+
+        let window = activity_window(mtimes.into_iter(), utc(2026, 9, 18));
+
+        assert_eq!(
+            months(&window),
+            vec![
+                ("2026-04", 1),
+                ("2026-05", 0),
+                ("2026-06", 0),
+                ("2026-07", 1),
+                ("2026-08", 0),
+                ("2026-09", 2),
+            ]
+        );
+    }
+
+    /// The six keys walk backwards through the calendar, so the window's first
+    /// month is five months before its last across a year boundary too, and a
+    /// Vault untouched since before it renders six honest zeroes rather than
+    /// six old months wearing the heading.
+    #[test]
+    fn activity_window_crosses_a_year_boundary_and_zero_fills_an_untouched_vault() {
+        let mtimes = [mtime(2024, 11, 2), mtime(2025, 7, 31)];
+
+        let window = activity_window(mtimes.into_iter(), utc(2026, 1, 5));
+
+        assert_eq!(
+            months(&window),
+            vec![
+                ("2025-08", 0),
+                ("2025-09", 0),
+                ("2025-10", 0),
+                ("2025-11", 0),
+                ("2025-12", 0),
+                ("2026-01", 0),
+            ]
+        );
+    }
+
+    /// A Vault with nothing in it still has a calendar, so the chart still has
+    /// six columns to draw.
+    #[test]
+    fn activity_window_is_six_zero_entries_for_a_vault_with_no_notes() {
+        let window = activity_window(std::iter::empty(), utc(2026, 9, 18));
+
+        assert_eq!(window.len(), 6);
+        assert!(window.iter().all(|entry| entry.modified_count == 0));
+        assert_eq!(window.last().expect("six entries").month, "2026-09");
     }
 }
 
@@ -2999,6 +3131,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("long", 6), ("short", 4)]
         );
+    }
+
+    /// The report's activity window is generated from the calendar, not
+    /// harvested from the Vault, so a freshly written Vault reports six
+    /// ascending months ending at the current UTC one with every Note in that
+    /// last bucket (#298).
+    #[test]
+    fn statistics_detail_reports_six_ascending_calendar_months_of_activity() {
+        let workspace = workspace(&[(
+            "First",
+            &[("Home.md", "# Home\n"), ("Second.md", "# Second\n")],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        // The report reads the clock itself, so bracket the call rather than
+        // comparing against a second reading that a month rollover could have
+        // moved past.
+        let before = chrono::Utc::now().format("%Y-%m").to_string();
+        let stats = reads
+            .statistics_detail(workspace.vault_ids[0])
+            .expect("statistics detail succeeds");
+        let after = chrono::Utc::now().format("%Y-%m").to_string();
+        let stats = stats.stats;
+
+        let window: Vec<(&str, i64)> = stats
+            .activity_by_month
+            .iter()
+            .map(|entry| (entry.month.as_str(), entry.modified_count))
+            .collect();
+        assert_eq!(window.len(), 6);
+        let mut ascending: Vec<&str> = window.iter().map(|(month, _)| *month).collect();
+        ascending.sort_unstable();
+        assert_eq!(
+            ascending,
+            window.iter().map(|(month, _)| *month).collect::<Vec<_>>(),
+            "the chart reads left to right as time"
+        );
+        let last = window.last().expect("six entries").0;
+        assert!(
+            last == before || last == after,
+            "the window ends at the current month, got {last}"
+        );
+        // Both Notes were written moments ago, so they all land in that month
+        // and the five earlier columns are honest zeroes.
+        assert_eq!(window.last().expect("six entries").1, 2);
+        assert_eq!(window.iter().map(|(_, count)| count).sum::<i64>(), 2);
     }
 
     #[test]

@@ -1012,7 +1012,11 @@ directly (never wrapped in `VaultReadProjection`, like `exact_note`), scoped
 to exactly one Vault via `collection`'s `VaultScope::One` gating, computing
 every legacy `VaultStatsResponse` field from the same published snapshot
 `statistics`/`trees`/`graphs` read rather than the single-Vault-shaped SQL
-cache tables the retired scope-less statistics query read. `VaultScope`
+cache tables the retired scope-less statistics query read. Its
+`activity_by_month` is a window rather than a list of findings (#298): exactly
+six `MonthActivity` entries, oldest first, one per calendar month ending at the
+current UTC month, zero-filled where no Note was modified, and counting no Note
+from outside the window. `VaultScope`
 serializes as the flat scalar
 `docs/migrations/vault-scoped-clients.md`'s envelope documents — the Vault
 ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
@@ -3351,7 +3355,10 @@ smoke test if routing changes, and full frontend checks.
 
 **Public contract:** `StatsPage` and the
 `GET /api/v1/vaults/{vault_id}/stats/detail` payload (#137; the legacy
-unscoped `/api/stats` this section previously cited was retired in #101).
+unscoped `/api/stats` this section previously cited was retired in #101). The
+Writing Activity chart draws `activity_by_month` in the order supplied and
+averages over the six-month window rather than over the entries received
+(#298).
 
 **Consumed dependencies:** shared API/error/types/UI and router links.
 
