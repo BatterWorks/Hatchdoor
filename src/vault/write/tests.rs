@@ -3072,3 +3072,410 @@ fn delete_leaves_the_trashed_bodys_link_to_itself_as_written() {
     );
     assert_eq!(outcome.rewritten_notes, 1);
 }
+
+// ---------------------------------------------------------------------------
+// rename_tag (#242)
+// ---------------------------------------------------------------------------
+
+fn tag_vault(notes: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().expect("temp dir");
+    for (path, content) in notes {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().expect("parent")).expect("folders");
+        fs::write(path, content).expect("note");
+    }
+    dir
+}
+
+fn read(root: &Path, path: &str) -> String {
+    fs::read_to_string(root.join(path)).expect("read note")
+}
+
+fn plan_tag(root: &Path, old: &str, new: &str) -> Result<TagRename, TagRenameError> {
+    rename_tag(root, &build_catalog(root), old, new, None)
+}
+
+fn apply_tag(root: &Path, old: &str, new: &str) -> TagRename {
+    let plan = plan_tag(root, old, new).expect("plan");
+    let hash = plan
+        .plan_hash
+        .expect("a plan with changes has a fingerprint");
+    rename_tag(root, &build_catalog(root), old, new, Some(&hash)).expect("apply")
+}
+
+#[test]
+fn rename_tag_plans_without_writing_and_applies_only_its_own_fingerprint() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [domain/homelab, other]\n---\nBody\n")]);
+    let root = dir.path();
+    let before = read(root, "A.md");
+
+    let plan = plan_tag(root, "domain/homelab", "topic/homelab").expect("plan");
+    assert!(!plan.applied);
+    assert_eq!(plan.notes.len(), 1);
+    assert_eq!(plan.notes[0].relative_path, "A");
+    assert!(plan.plan_hash.is_some());
+    assert!(plan.affected_paths.is_empty());
+    assert_eq!(read(root, "A.md"), before, "a plan writes nothing");
+
+    let stale = rename_tag(
+        root,
+        &build_catalog(root),
+        "domain/homelab",
+        "topic/homelab",
+        Some("fnv1a64:0000000000000000"),
+    );
+    assert_eq!(stale, Err(TagRenameError::StalePlan));
+    assert_eq!(read(root, "A.md"), before, "a stale plan writes nothing");
+
+    let applied = rename_tag(
+        root,
+        &build_catalog(root),
+        "domain/homelab",
+        "topic/homelab",
+        plan.plan_hash.as_deref(),
+    )
+    .expect("apply");
+    assert!(applied.applied);
+    assert_eq!(applied.affected_paths, vec![root.join("A.md")]);
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [topic/homelab, other]\n---\nBody\n"
+    );
+    assert_eq!(
+        applied.notes[0].content_hash,
+        content_hash(&read(root, "A.md")),
+        "the reported hash is spendable on the next write"
+    );
+}
+
+#[test]
+fn rename_tag_refuses_a_fingerprint_the_vault_has_moved_past() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [domain/x]\n---\n")]);
+    let root = dir.path();
+    let plan = plan_tag(root, "domain", "topic").expect("plan");
+    fs::write(root.join("B.md"), "---\ntags: [domain/y]\n---\n").expect("new note");
+
+    let result = rename_tag(
+        root,
+        &build_catalog(root),
+        "domain",
+        "topic",
+        plan.plan_hash.as_deref(),
+    );
+    assert_eq!(result, Err(TagRenameError::StalePlan));
+    assert_eq!(read(root, "A.md"), "---\ntags: [domain/x]\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags: [domain/y]\n---\n");
+}
+
+#[test]
+fn renaming_a_namespace_nobody_carries_renames_everything_beneath_it() {
+    let dir = tag_vault(&[
+        (
+            "A.md",
+            "---\ntags: [domain/homelab, domain/plans/q3]\n---\n",
+        ),
+        ("B.md", "Body with #domain/homelab and #Domain/Plans.\n"),
+        ("C.md", "---\ntags: [domainish/x]\n---\n#domainish/y\n"),
+    ]);
+    let root = dir.path();
+    let applied = apply_tag(root, "#domain", "topic");
+    assert_eq!(applied.notes.len(), 2);
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [topic/homelab, topic/plans/q3]\n---\n"
+    );
+    assert_eq!(
+        read(root, "B.md"),
+        "Body with #topic/homelab and #topic/Plans.\n",
+        "the renamed part is written as asked; what sits beneath it keeps its spelling"
+    );
+    assert_eq!(
+        read(root, "C.md"),
+        "---\ntags: [domainish/x]\n---\n#domainish/y\n"
+    );
+}
+
+#[test]
+fn rename_tag_reports_frontmatter_and_body_changes_separately() {
+    let dir = tag_vault(&[
+        ("Both.md", "---\ntags: [a/b]\n---\nSee #a/b here.\n"),
+        ("Front.md", "---\ntags: [a/b]\n---\nNothing inline.\n"),
+        ("Body.md", "Only #a/b inline.\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan_tag(root, "a/b", "c/d").expect("plan");
+    assert_eq!(plan.notes.len(), 3);
+    assert_eq!(plan.frontmatter_notes, 2);
+    assert_eq!(plan.body_notes, 2);
+    let both = plan
+        .notes
+        .iter()
+        .find(|note| note.relative_path == "Both")
+        .expect("both");
+    assert!(both.frontmatter && both.body);
+
+    apply_tag(root, "a/b", "c/d");
+    assert_eq!(
+        read(root, "Both.md"),
+        "---\ntags: [c/d]\n---\nSee #c/d here.\n"
+    );
+    assert_eq!(read(root, "Body.md"), "Only #c/d inline.\n");
+}
+
+#[test]
+fn rename_tag_leaves_hashtags_in_code_alone() {
+    let content = concat!(
+        "Prose #a/b.\n",
+        "```\n",
+        "#a/b in a fence\n",
+        "```\n",
+        "~~~\n",
+        "#a/b in a tilde fence\n",
+        "~~~\n",
+        "Inline `#a/b` code and #a/b again.\n",
+    );
+    let dir = tag_vault(&[("A.md", content)]);
+    let root = dir.path();
+    apply_tag(root, "a/b", "x/y");
+    assert_eq!(
+        read(root, "A.md"),
+        content
+            .replace("Prose #a/b.", "Prose #x/y.")
+            .replace("code and #a/b again", "code and #x/y again")
+    );
+}
+
+#[test]
+fn renaming_into_a_tag_the_note_already_carries_leaves_it_once() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [topic/x, domain/x, keep]\n---\n"),
+        ("B.md", "---\ntags:\n  - domain/x\n  - topic/x\n---\n"),
+        ("C.md", "---\ntags: [dup, dup, domain/x]\n---\n"),
+        ("D.md", "---\ntags: [topic/unrelated]\n---\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan_tag(root, "domain", "topic").expect("plan");
+    assert_eq!(
+        plan.already_tagged_notes, 3,
+        "A, B and D already carry topic/*"
+    );
+    let applied = apply_tag(root, "domain", "topic");
+    assert_eq!(applied.already_tagged_notes, 3);
+    assert_eq!(read(root, "A.md"), "---\ntags: [topic/x, keep]\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags:\n  - topic/x\n---\n");
+    assert_eq!(
+        read(root, "C.md"),
+        "---\ntags: [dup, dup, topic/x]\n---\n",
+        "duplicates the rename did not make are not its business"
+    );
+}
+
+#[test]
+fn rename_tag_changes_only_the_renamed_characters_of_either_list_form() {
+    let one_line = "---\ntitle: \"Quoted: title\"\ntags: [alpha, domain/homelab, beta]\n# a comment\nstatus: draft\n---\n\n# Heading\nbody text\n";
+    let block = "---\nstatus: draft\ntags:\n    - alpha\n    - domain/homelab\ncreated: 2026-01-01\n---\nbody\n";
+    let dir = tag_vault(&[("One.md", one_line), ("Block.md", block)]);
+    let root = dir.path();
+    apply_tag(root, "domain/homelab", "topic/homelab");
+    assert_eq!(
+        read(root, "One.md"),
+        one_line.replace("domain/homelab", "topic/homelab")
+    );
+    assert_eq!(
+        read(root, "Block.md"),
+        block.replace("domain/homelab", "topic/homelab")
+    );
+}
+
+#[test]
+fn a_crlf_note_keeps_its_line_endings() {
+    let content = "---\r\ntags: [a/b]\r\n---\r\nSee #a/b\r\n";
+    let dir = tag_vault(&[("A.md", content)]);
+    let root = dir.path();
+    apply_tag(root, "a/b", "c/d");
+    assert_eq!(read(root, "A.md"), content.replace("a/b", "c/d"));
+}
+
+#[test]
+fn a_tag_list_the_editor_would_restyle_refuses_the_whole_rename() {
+    let dir = tag_vault(&[
+        ("Fine.md", "---\ntags: [domain/x]\n---\n"),
+        ("Quoted.md", "---\ntags: [\"domain/y\", other]\n---\n"),
+        ("Spaced.md", "---\ntags: [ domain/z ]\n---\n"),
+    ]);
+    let root = dir.path();
+    let error = plan_tag(root, "domain", "topic").expect_err("refused");
+    let TagRenameError::UnsupportedShape(notes) = error else {
+        panic!("expected an unsupported-shape refusal, got {error:?}");
+    };
+    let paths: Vec<&str> = notes
+        .iter()
+        .map(|note| note.relative_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["Quoted", "Spaced"]);
+    assert_eq!(
+        read(root, "Fine.md"),
+        "---\ntags: [domain/x]\n---\n",
+        "nothing written"
+    );
+}
+
+#[test]
+fn a_tag_the_rename_cannot_reach_refuses_rather_than_half_renaming() {
+    // Invalid YAML: the index still reads the tag through its fallback, but no
+    // editor can rewrite a block that does not parse.
+    let broken = "---\ntags: [domain/x\nbad: : :\n---\n";
+    // A code span inside an inline tag: indexed as `domain/y`, spelled by no
+    // single run of text.
+    let split = "See #domain/`x`y here.\n";
+    // An inline tag renamed into a name with no namespace stops being a tag.
+    let flat = "See #domain/z here.\n";
+    for (content, new) in [(broken, "topic"), (split, "topic"), (flat, "z")] {
+        let dir = tag_vault(&[("A.md", content)]);
+        let root = dir.path();
+        let old = if new == "z" { "domain/z" } else { "domain" };
+        let error = plan_tag(root, old, new).expect_err("refused");
+        assert!(
+            matches!(&error, TagRenameError::UnsupportedShape(notes) if notes[0].relative_path == "A"),
+            "{content:?}: {error:?}"
+        );
+        assert_eq!(read(root, "A.md"), content);
+    }
+}
+
+#[test]
+fn rename_tag_matches_any_case_and_writes_lowercase() {
+    let dir = tag_vault(&[(
+        "A.md",
+        "---\ntags: [Domain/HomeLab]\n---\n#DOMAIN/HomeLab\n",
+    )]);
+    let root = dir.path();
+    apply_tag(root, "domain", "topic");
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [topic/HomeLab]\n---\n#topic/HomeLab\n"
+    );
+}
+
+#[test]
+fn rename_tag_refuses_a_new_name_the_vault_could_not_hold() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [a/b]\n---\n")]);
+    let root = dir.path();
+    for bad in [
+        "Topic",
+        "has space",
+        "dot.ted",
+        "a//b",
+        "/lead",
+        "trail/",
+        "",
+        "#",
+        "a/b/c",
+    ] {
+        let old = if bad == "a/b/c" { "a/b" } else { "a" };
+        let result = plan_tag(root, old, bad);
+        assert!(
+            matches!(result, Err(TagRenameError::InvalidTagName(_))),
+            "{bad:?}: {result:?}"
+        );
+    }
+    assert!(plan_tag(root, "a", "#topic-1_x/sub").is_ok());
+    assert!(matches!(
+        plan_tag(root, "a", " c/d "),
+        Err(TagRenameError::InvalidTagName(_))
+    ));
+    assert!(
+        matches!(
+            plan_tag(root, "a", "\u{01C5}x"),
+            Err(TagRenameError::InvalidTagName(_))
+        ),
+        "a titlecase letter lowercases to something else, so it is not lowercase"
+    );
+    assert!(matches!(
+        plan_tag(root, "bad name", "topic"),
+        Err(TagRenameError::InvalidTagName(_))
+    ));
+}
+
+#[test]
+fn a_tag_nobody_carries_plans_zero_and_is_not_an_error() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [a/b]\n---\n")]);
+    let plan = plan_tag(dir.path(), "nothing/here", "x").expect("zero plan");
+    assert!(plan.notes.is_empty());
+    assert_eq!(plan.plan_hash, None);
+}
+
+#[test]
+fn a_failed_write_partway_restores_every_note_already_written() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [a/b]\n---\n"),
+        ("B.md", "#a/b\n"),
+        ("C.md", "---\ntags: [a/b]\n---\n"),
+    ]);
+    let root = dir.path();
+    let before: Vec<String> = ["A.md", "B.md", "C.md"]
+        .iter()
+        .map(|p| read(root, p))
+        .collect();
+    let plan = plan_tag(root, "a/b", "c/d").expect("plan");
+    let result = super::tags::rename_tag_with_failure(
+        root,
+        &build_catalog(root),
+        "a/b",
+        "c/d",
+        plan.plan_hash.as_deref(),
+        |position| {
+            if position == 1 {
+                Err(WriteError::Io("injected failure".to_string()))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(
+        matches!(result, Err(TagRenameError::Write(WriteError::Io(_)))),
+        "{result:?}"
+    );
+    let after: Vec<String> = ["A.md", "B.md", "C.md"]
+        .iter()
+        .map(|p| read(root, p))
+        .collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn running_the_same_rename_twice_changes_nothing_the_second_time() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [domain/x, topic/x]\n---\n#domain/y\n"),
+        ("B.md", "---\ntags:\n  - Domain\n---\n"),
+    ]);
+    let root = dir.path();
+    apply_tag(root, "domain", "topic");
+    let again = plan_tag(root, "domain", "topic").expect("second plan");
+    assert!(again.notes.is_empty(), "{again:?}");
+    assert_eq!(again.plan_hash, None);
+}
+
+#[test]
+fn a_rename_into_an_ancestor_that_would_not_settle_is_refused() {
+    // `domain/x/x` would become `domain/x`, still under `domain/x`.
+    let dir = tag_vault(&[("A.md", "---\ntags: [domain/x/x]\n---\n")]);
+    let root = dir.path();
+    assert!(matches!(
+        plan_tag(root, "domain/x", "domain"),
+        Err(TagRenameError::InvalidTagName(_))
+    ));
+    assert_eq!(read(root, "A.md"), "---\ntags: [domain/x/x]\n---\n");
+
+    // Without such a tag the same rename flattens and then settles.
+    let dir = tag_vault(&[("B.md", "---\ntags: [domain/x/y]\n---\n")]);
+    let root = dir.path();
+    apply_tag(root, "domain/x", "domain");
+    assert_eq!(read(root, "B.md"), "---\ntags: [domain/y]\n---\n");
+    assert!(
+        plan_tag(root, "domain/x", "domain")
+            .expect("second")
+            .notes
+            .is_empty()
+    );
+}

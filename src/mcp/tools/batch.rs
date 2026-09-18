@@ -64,6 +64,12 @@ const HASH_CHAINED_OPS: &[&str] = &[
     "delete_note",
 ];
 
+/// Write ops a batch refuses although they are write tools. `rename_tag`
+/// touches every note carrying a tag and has its own plan-then-apply
+/// handshake; inside a best-effort batch with no rollback between items, the
+/// all-or-nothing promise it makes would be one item's promise among many.
+const NOT_BATCHABLE_WRITE_OPS: &[&str] = &["rename_tag"];
+
 /// `(vault_id, slug) -> content_hash`, tracking each note's most recent
 /// resulting hash from an earlier item in this same batch call. Keyed by the
 /// raw `vault_id` string rather than a parsed `VaultId`: this is pure
@@ -111,6 +117,11 @@ pub(super) async fn batch_tool(
     for (index, item) in args.operations.iter().enumerate() {
         if READ_OPS.contains(&item.op.as_str()) {
             read_count += 1;
+        } else if NOT_BATCHABLE_WRITE_OPS.contains(&item.op.as_str()) {
+            return Err(JsonRpcFailure::invalid_params(format!(
+                "batch item {index}: op '{}' is not allowed inside batch; call it on its own",
+                item.op
+            )));
         } else if WRITE_OPS.contains(&item.op.as_str()) {
             write_count += 1;
         } else {
@@ -311,7 +322,7 @@ fn failure_to_error_value(failure: JsonRpcFailure) -> Value {
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag is not allowed inside a batch; call it on its own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -374,6 +385,17 @@ mod tests {
             assert!(
                 !READ_OPS.contains(&excluded) && !WRITE_OPS.contains(&excluded),
                 "{excluded} must not be an allowed batch op"
+            );
+        }
+    }
+
+    #[test]
+    fn not_batchable_write_ops_are_write_ops() {
+        for op in NOT_BATCHABLE_WRITE_OPS {
+            assert!(WRITE_OPS.contains(op), "{op} must also be a write op");
+            assert!(
+                !HASH_CHAINED_OPS.contains(op),
+                "{op} can never be chained into"
             );
         }
     }

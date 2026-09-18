@@ -230,6 +230,7 @@ A write is refused before it touches the file, so a rejected write has changed n
 | `move_rename_note` | `slug`, `target_relative_path`, `expected_content_hash` | Move and rename in one operation. |
 | `archive_note` | `slug`, `expected_content_hash` | Move to the configured archive folder (the Vault's own `archive_folder`, set via `create_vault`/`edit_vault` above, or the instance default). |
 | `delete_note` | `slug`, `expected_content_hash` | Trash a note under `.hatchdoor-trash`; removes backlinks to it and trashes the assets kept inside its own folder. |
+| `rename_tag` | `old_tag`, `new_tag` | Rename a tag, and every tag nested under it, across the whole Vault. Called without `expected_plan_hash` it only plans; called with the `plan_hash` that plan returned, it applies it. See [[#Renaming a tag across a Vault]]. |
 | `import_attachment` | `content` (base64), `target_relative_path` | Upload an attachment by sending its bytes base64-encoded. This is the **fallback** for clients that cannot make an out-of-band HTTP request — size-limited (`HATCHDOOR_MCP_MAX_BASE64_BYTES`, default 5 MiB decoded). Prefer `POST /api/v1/vaults/{vault_id}/attachments` when possible; call `get_attachment_import_config` first to see current limits. |
 | `move_attachment` | `source_relative_path`, `target_relative_path` | Move an attachment and rewrite every note reference to it. |
 | `rename_attachment` | `source_relative_path`, `new_filename` | Rename an attachment in place and rewrite every note reference to it. |
@@ -249,9 +250,28 @@ Every write tool accepts an optional `commit_summary`, a one-line string describ
 > [!warning]
 > No write tool can create, rename, or move a file named `.hatchdoor-layer` (the layer marker) — that call is rejected outright, since a marker silently changes how a whole folder is classified and is meant to be edited directly in the Vault. Writes are also rejected if the target path matches the Vault's own noise-exclusion patterns, since such a file would be written to disk but stay invisible to every read surface.
 
+### Renaming a tag across a Vault
+
+`rename_tag` changes a tag everywhere it appears: in frontmatter `tags` lists, and in namespaced `#hashtags` in note bodies. It always takes two calls.
+
+1. Call it with `old_tag` and `new_tag`. Nothing is written. The answer is the plan: `notes` lists every note that would change, with its `slug`, `relative_path`, and whether the change is in its `frontmatter`, its `body`, or both; `frontmatter_notes` and `body_notes` count each; and `plan_hash` is the plan's fingerprint.
+2. Call it again with the same tags and `expected_plan_hash` set to that `plan_hash`. Hatchdoor plans again and applies the plan only if it comes out identical. If any note changed in between, the call is refused with `tag_rename_plan_stale` and nothing is written; plan again and look at the new plan.
+
+The fingerprint is a hash of the edits themselves, not something the server remembers, so a plan never expires on its own. It stops working the moment the Vault stops producing it.
+
+Renaming a tag renames everything nested under it: `domain` renames `domain/homelab` to `topic/homelab`, even when no note carries `domain` itself. Matching ignores case, as tag search does, and `new_tag` has to be lowercase letters, digits, `-`, `_` and `/`, with no empty segment; a leading `#` is fine on either. A rename that would not settle is refused, because running it again would rename it again: a `new_tag` nested under `old_tag`, like `domain` to `domain/old`, and a rename into an ancestor that turns some note's tag into one still under `old_tag`, like `domain/x` to `domain` when a note carries `domain/x/x`. Any refusal of the names comes back as `invalid_tag_name`.
+
+Renaming into a tag that already exists is a merge, and is allowed. A note that would end up carrying the target twice keeps it once, in the earlier of the two places. `already_tagged_notes` counts the notes that carried `new_tag`, or a tag under it, before the rename; above zero means this is a merge.
+
+Only the renamed characters change. A one-line `tags: [a, b]` list stays on one line, a list written one item per line stays that way, and key order, quoting and every other byte of the note stay as they were. A hashtag inside a fenced code block or an inline code span is not a tag, so it is left alone, the same rule the index follows.
+
+It is all or nothing. When a note carries the tag in a way that cannot be changed without restyling or guessing, the plan is refused with `tag_shape_unsupported`, the message names every such note and why, and no note is written. The cases are a frontmatter list the editor would reformat (quoted items, extra spaces inside the brackets, a comment on the line), frontmatter that is not valid YAML, a body hashtag interrupted by a code span, and a body hashtag that would lose its `/` and so stop being a tag. Fix those notes in the Vault and plan again. If a write fails partway through applying, every note already rewritten is put back. Hatchdoor holds the Vault's write lock for the whole call, so a Vault with versioning enabled records the rename as a single write in its next commit.
+
+A tag no note carries is not an error: the plan lists no notes and has no `plan_hash`, since there is nothing to confirm. Run the same rename twice and the second plan is empty. Deleting a tag is not something this tool does.
+
 ### Response shape
 
-A successful note write returns `vault_id`, `slug`, `relative_path`, `content_hash` (use this for the next write), `layer`, `quality_warnings`, `rewritten_notes` (other notes whose backlinks were updated), `moved_assets`, and `trashed_path` (set only by `delete_note`). A successful attachment write returns `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, and `cleanup_warning`.
+A successful note write returns `vault_id`, `slug`, `relative_path`, `content_hash` (use this for the next write), `layer`, `quality_warnings`, `rewritten_notes` (other notes whose backlinks were updated), `moved_assets`, and `trashed_path` (set only by `delete_note`). A successful attachment write returns `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, and `cleanup_warning`. `rename_tag` returns `vault_id`, `applied` (false for a plan), `old_tag` and `new_tag` as it read them, `notes_affected`, `frontmatter_notes`, `body_notes`, `already_tagged_notes`, `plan_hash`, and `notes`, where each note's `content_hash` is its hash after the call: unchanged for a plan, the new one once applied.
 
 A write conflict (stale `expected_content_hash`, or a registry revision that moved under a Vault-management call) is reported as a retryable tool error — re-read the current state and retry rather than assuming the operation is unsafe to repeat.
 
@@ -271,7 +291,7 @@ Any read or write refused this way says so twice: `isError` is true on the resul
 }
 ```
 
-**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
+**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. `rename_tag` is the exception: it touches every note carrying a tag and promises all or nothing, which a best-effort batch cannot keep, so call it on its own. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
 
 **Best-effort, in order, no rollback.** Items run one after another; an item that fails never stops the ones after it, and nothing already written is undone. There is no mid-batch visibility either — an item sees the Vault, not the batch's own bookkeeping, apart from the hash chaining below.
 

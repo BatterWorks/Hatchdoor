@@ -879,21 +879,28 @@ watching, and application startup.
 - `src/vault/write/notes.rs`
 - `src/vault/write/paths.rs`
 - `src/vault/write/rewrites.rs`
+- `src/vault/write/tags.rs`
 - `src/vault/write/types.rs`
 - `src/vault/write/tests.rs`
 
 **Public contract:** write functions and result/error types re-exported from
 `src/vault.rs`, including note CRUD-by-move, section/edit primitives,
 shallow frontmatter merge (`update_note_frontmatter`), attachment
-operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
+operations, the Vault-wide tag rename (`rename_tag` with `TagRename`,
+`TagRenameNote`, `TagRenameError`, and `UnsupportedTagNote`), allowed
+attachment extensions, `WriteOutcome`, and `WriteError`.
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
-(ADR-13), and its second caller will be the vault-wide tag rename (#242).
+(ADR-13), and its second caller is the Vault-wide tag rename in `tags.rs`
+(#242).
 
 **Consumed dependencies:** vault index/types, the local filesystem, and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
 Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
-keeps every rewriter's idea of a code block identical to the indexer's. It
+keeps every rewriter's idea of a code block identical to the indexer's. The
+tag rename consumes `cache::parse::inline_tags`, the positional form of the
+indexer's own inline-tag recognition, and `extract_tags` to read each rewritten
+note back, plus `search::tag_matches` for what a tag and its namespace match. It
 also consumes the vault read model's wikilink body splits
 (`split_wikilink_note_body`, `split_wikilink_asset_body`), so a rewriter and
 the link graph can never disagree about where a target ends (#252).
@@ -932,6 +939,17 @@ write API/types, and configuration for archive or upload limits.
   call (#257). Whole-content writes
   (`update_note`) keep their line-ending and trailing-newline normalisation;
   ADR-22 constrains partial writes only.
+- A tag rename is all or nothing (#242). It plans every edit first and writes
+  only when `expected_plan_hash` equals the fingerprint of a plan made again
+  under the same lock; the fingerprint is a hash of the edits and of the text
+  they replace, never server state. A note it cannot edit in place refuses the
+  whole plan: a frontmatter `tags` list the shared editor would restyle (the
+  editor is first handed the list unchanged and must reproduce the block byte
+  for byte), an inline tag split by a code span, an inline tag renamed into a
+  name without a namespace, or any note whose rewritten text the indexer would
+  not read back as exactly the promised tags. The writes go through
+  `MutationJournal` one note at a time, and a failure restores every note
+  already written.
 - Delete is recoverable trash; archive is move-based (ADR-11).
 - A rewritten backlink keeps the form its author wrote, and a link that
   resolved before a move still resolves after it: the bare-title form is used
@@ -1184,15 +1202,21 @@ off the async runtime; recording what that write did in the Vault's
 `VaultOperationError`. `VaultMutation::with_commit_summary` carries the
 caller's one-line description of the change into that record; the private
 `RecordedWrite` trait is what lets `run_write` build the record once for all
-fifteen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
+sixteen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
 resolved from the `LayerMap` the write's own pre-write index build already
 holds rather than from a post-write rescan (#101). `VaultMutationCore` carries a one-shot form — gate, lock, write — for each of
-the fifteen primitives, which is what a standalone caller wants:
+the sixteen primitives, which is what a standalone caller wants:
 `create_note`, `update_note`, `append_to_note`, `edit_note`,
 `replace_section`, `update_frontmatter`, `rename_note`, `move_note`,
 `move_rename_note`, `archive_note`, `delete_note`, `import_attachment`,
-`move_attachment`, `rename_attachment`, and `delete_attachment`. It also
-answers `write_capabilities`, which deliberately does *not* gate on mutability:
+`move_attachment`, `rename_attachment`, `delete_attachment`, and
+`rename_tag`. `rename_tag` is the one Vault-wide mutation: without an expected
+plan hash it plans off the async runtime and records nothing; with one it
+records a single ledger entry for every note it rewrote, so a synced Vault
+commits the rename once. `tag_rename_error` maps its three refusals onto their
+own codes (`invalid_tag_name`, `tag_shape_unsupported`,
+`tag_rename_plan_stale`) and its write failures onto `write_operation_error`.
+It also answers `write_capabilities`, which deliberately does *not* gate on mutability:
 a Vault that refuses writes has to answer that question rather than fail it. A caller whose critical section spans several
 operations on one Vault builds a `VaultMutation` with `VaultMutation::gated`
 and takes the lock itself through its `acquire_mutation`: the MCP `batch` tool
@@ -1220,7 +1244,8 @@ authoritative index and mutation lock, `AppState::vault_archive_prefix`, and
 the live settings snapshot.
 
 **Consumers:** `handlers/vault_write.rs` (all eight routes) and
-`mcp/tools/write.rs` (all fifteen write tools, standalone and inside `batch`).
+`mcp/tools/write.rs` (all sixteen write tools, standalone, and every one
+except `rename_tag` inside `batch`).
 Each is a wire-shaping adapter: it parses transport input, calls this core
 once, and maps the typed outcome or the structured error onto a status code or
 a JSON-RPC failure. The core has no route or tool ownership.
@@ -1425,7 +1450,14 @@ counts as code: an indexer that reads a hashtag inside a fenced block as a tag
 while a rewrite refuses to touch it makes a Vault-wide tag rename look
 half-applied (#248, unblocking #242). The copies merged here were behaviorally
 identical, so consolidating them changed nothing; the point is that the next
-correction lands in one place instead of three. The crate-private
+correction lands in one place instead of three. Inline-tag recognition has
+two forms over one walk: `extract_tags` stores what the index calls a tag, and
+the crate-private `inline_tags` returns the same tags with the byte range each
+occupies in the note, for the Vault-wide tag rename (`vault/write/tags.rs`,
+#242) to edit. Both read prose through the same line walker as
+`for_non_code_line`, so the rename cannot touch a hashtag the index would not
+store, or miss one it would. A tag split by an inline code span is recognised
+but has no range, because no single run of text spells it. The crate-private
 `is_recognized_legacy_cache` inspection seam owns the supported legacy schema
 fingerprint and opens existing files read-only for the one-time migration.
 `ReadSnapshot` is the crate-private pinned-read seam used where participant
@@ -1531,7 +1563,8 @@ scope/envelope, and vault metadata/types.
 
 **Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
 `VaultSearchCore::search`), MCP search tools, offline evaluation runners,
-`vault_read/query.rs` (the two tag primitives only, never the retrieval path),
+`vault_read/query.rs` and the Vault-wide tag rename in `vault/write/tags.rs`
+(`tag_matches` only; neither reaches the retrieval path),
 and future Vault-scoped MCP adapters.
 
 **Coordination paths:** `src/handlers/vault_collection_reads.rs`,
@@ -2322,6 +2355,15 @@ history. It is rejected inside
 `is_collection_management_tool`: that exemption keeps discovery and Vault
 control reachable while model setup is pending, and an Index turn cannot run
 without a configured search model. Catalogue grows 39 → 40, purely additive.
+#242 adds `rename_tag`, the sixteenth write tool: a mapping onto the mutation
+core's `rename_tag`, dispatched under the Vault's mutation lock like every
+other write tool, answering a plan or an applied rename in `RenameTagResult`.
+It is listed in `WRITE_OPS` so the write gate and the catalogue drift guard
+cover it, and in `batch.rs`'s `NOT_BATCHABLE_WRITE_OPS`, which refuses it as a
+batch item before anything runs: its all-or-nothing promise cannot hold inside
+a best-effort batch. Its refusals reach the caller as structured tool errors
+with their own codes. Catalogue grows to 42 across all catalogues, purely
+additive.
 
 **Kind:** adapter/security surface.
 
@@ -2364,7 +2406,7 @@ requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
 window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
-40-tool catalogue.
+42-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
@@ -2469,7 +2511,7 @@ MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
 request, and attachment authorization never retains a rotated MCP token.
 
-Since #186 every one of the fifteen write tools has ADR-19's shape: it
+Since #186 every one of the write tools, sixteen since #242, has ADR-19's shape: it
 validates its own arguments and then calls the Vault-qualified mutation core
 once, mapping the typed outcome or the structured `VaultOperationError` onto a
 tool result or a JSON-RPC failure. Two meanings live only here — a target path

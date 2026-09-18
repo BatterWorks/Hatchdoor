@@ -96,12 +96,12 @@ pub fn extract_headings(content: &str) -> Vec<HeadingRow> {
 
 pub fn extract_tags(content: &str) -> HashSet<String> {
     let mut tags = HashSet::new();
-    let (frontmatter, body) = split_frontmatter(content);
+    let (frontmatter, _) = split_frontmatter(content);
     match parse_frontmatter_metadata(content) {
         Ok(metadata) => tags.extend(metadata.tags),
         Err(_) => extract_frontmatter_tags(frontmatter, &mut tags),
     }
-    extract_inline_tags(body, &mut tags);
+    extract_inline_tags(content, &mut tags);
     tags
 }
 
@@ -214,9 +214,14 @@ fn extract_frontmatter_tags(frontmatter: &str, tags: &mut HashSet<String>) {
 /// stored as a tag. Everything from the first character outside the tag
 /// charset onwards is dropped.
 fn tag_candidate(raw: &str) -> String {
-    raw.chars()
-        .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/'))
-        .collect()
+    raw.chars().take_while(|ch| is_tag_char(*ch)).collect()
+}
+
+/// Whether `ch` may appear in a tag: a letter, a digit, `-`, `_`, or the `/`
+/// that separates a tag's segments. The tag rename validates the names it is
+/// given with this, so it cannot accept a tag the index would cut short.
+pub(crate) fn is_tag_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/')
 }
 
 fn push_tag(raw: &str, tags: &mut HashSet<String>) {
@@ -226,9 +231,28 @@ fn push_tag(raw: &str, tags: &mut HashSet<String>) {
     }
 }
 
-fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
-    for_non_code_line(body, |line| {
-        for token in line.split_whitespace() {
+/// One inline tag in a note's body: its text as written, without the `#`, and
+/// the byte range that text occupies in the whole note.
+///
+/// `range` is `None` when no single run of the note spells the tag. The only
+/// way that happens is an inline code span inside the tag's characters: the
+/// indexer reads prose with code spans removed, so `#a/`x`b` is the tag `a/b`,
+/// but nothing in the file can be replaced to change it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InlineTag {
+    pub(crate) text: String,
+    pub(crate) range: Option<std::ops::Range<usize>>,
+}
+
+/// Every inline tag in `content`'s body, in order, by the rule the indexer
+/// stores tags with. The tag rename edits what this returns, so the two cannot
+/// disagree about what a tag is (#242).
+pub(crate) fn inline_tags(content: &str) -> Vec<InlineTag> {
+    let (_, body) = split_frontmatter(content);
+    let body_start = content.len() - body.len();
+    let mut found = Vec::new();
+    for_each_prose_line(body, |line| {
+        for token in line.text.split_whitespace() {
             let token = token.trim_matches(|ch: char| {
                 matches!(
                     ch,
@@ -250,9 +274,26 @@ fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
             if !slash.is_some_and(|pos| pos > 0 && pos < candidate.len() - 1) {
                 continue;
             }
-            tags.insert(candidate.to_lowercase());
+            // `tag` is a slice of `line.text`, so its address says where it starts.
+            let start = tag.as_ptr() as usize - line.text.as_ptr() as usize;
+            let end = start + candidate.len();
+            let first = line.origins[start];
+            let last = line.origins[end - 1];
+            let range = (last + 1 - first == end - start)
+                .then(|| body_start + first..body_start + last + 1);
+            found.push(InlineTag {
+                text: candidate,
+                range,
+            });
         }
     });
+    found
+}
+
+fn extract_inline_tags(content: &str, tags: &mut HashSet<String>) {
+    for tag in inline_tags(content) {
+        tags.insert(tag.text.to_lowercase());
+    }
 }
 
 /// Visit every line of `content` that Markdown renders as prose: fenced code
@@ -266,8 +307,32 @@ pub(crate) fn for_non_code_line<F>(content: &str, mut visit: F)
 where
     F: FnMut(&str),
 {
+    for_each_prose_line(content, |line| visit(&line.text));
+}
+
+/// One prose line with its inline code spans removed, and, for every byte of
+/// `text`, the offset in the scanned content that byte was copied from.
+struct ProseLine {
+    text: String,
+    origins: Vec<usize>,
+}
+
+/// The walk behind [`for_non_code_line`], keeping track of where each
+/// surviving byte came from so a caller can edit what it found. Lines split as
+/// `str::lines` splits them.
+fn for_each_prose_line<F>(content: &str, mut visit: F)
+where
+    F: FnMut(&ProseLine),
+{
     let mut fenced_marker: Option<(u8, usize)> = None;
-    for line in content.lines() {
+    let mut line_start = 0usize;
+    for raw in content.split_inclusive('\n') {
+        let offset = line_start;
+        line_start += raw.len();
+        let line = match raw.strip_suffix('\n') {
+            Some(line) => line.strip_suffix('\r').unwrap_or(line),
+            None => raw,
+        };
         let trimmed = line.trim_start();
         if let Some((marker, min_len)) = fenced_marker {
             if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
@@ -282,21 +347,24 @@ where
             fenced_marker = Some(marker);
             continue;
         }
-        let no_inline_code = strip_inline_code_segments(line);
-        visit(&no_inline_code);
+        visit(&strip_inline_code_segments(line, offset));
     }
 }
 
-/// `line` with every inline code span removed, backticks included.
-fn strip_inline_code_segments(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
+/// `line` with every inline code span removed, backticks included. `offset` is
+/// where `line` starts in the content being scanned.
+fn strip_inline_code_segments(line: &str, offset: usize) -> ProseLine {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut out = ProseLine {
+        text: String::with_capacity(line.len()),
+        origins: Vec::with_capacity(line.len()),
+    };
     let mut idx = 0usize;
     let mut inline_marker_len = 0usize;
     while idx < chars.len() {
-        if chars[idx] == '`' {
+        if chars[idx].1 == '`' {
             let mut marker_len = 1usize;
-            while idx + marker_len < chars.len() && chars[idx + marker_len] == '`' {
+            while idx + marker_len < chars.len() && chars[idx + marker_len].1 == '`' {
                 marker_len += 1;
             }
             if inline_marker_len == 0 {
@@ -308,7 +376,10 @@ fn strip_inline_code_segments(line: &str) -> String {
             continue;
         }
         if inline_marker_len == 0 {
-            out.push(chars[idx]);
+            let (at, ch) = chars[idx];
+            out.text.push(ch);
+            out.origins
+                .extend((0..ch.len_utf8()).map(|byte| offset + at + byte));
         }
         idx += 1;
     }
@@ -505,6 +576,38 @@ mod tests {
         assert!(!tags.contains("fenced/tag"), "backtick-fenced tag skipped");
         assert!(!tags.contains("tilde/tag"), "tilde-fenced tag skipped");
         assert!(!tags.contains("inline/tag"), "inline code span skipped");
+    }
+
+    #[test]
+    fn inline_tags_report_where_each_one_sits_in_the_whole_note() {
+        let content = "---\ntags: [a]\n---\nSee #Area/Health, and `#code/tag` then #x/y.\r\n```\n#fenced/tag\n```\n#last/one";
+        let found: Vec<(String, Option<&str>)> = inline_tags(content)
+            .into_iter()
+            .map(|tag| {
+                let text = tag.range.map(|range| &content[range]);
+                (tag.text, text)
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("Area/Health".to_string(), Some("Area/Health")),
+                ("x/y".to_string(), Some("x/y")),
+                ("last/one".to_string(), Some("last/one")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inline_tag_split_by_a_code_span_is_recognised_but_has_no_range() {
+        // The indexer reads prose with code spans removed, so these characters
+        // join into one tag. No single run of the note's text spells it, so
+        // there is nothing an edit could replace.
+        let tags = inline_tags("before #a/`code`b after");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].text, "a/b");
+        assert_eq!(tags[0].range, None);
+        assert!(extract_tags("before #a/`code`b after").contains("a/b"));
     }
 
     #[test]

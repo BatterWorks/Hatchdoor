@@ -27,10 +27,11 @@ use crate::cache::SqliteCache;
 use crate::git::WriteRecord;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
-    AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, VaultIndex, WriteError,
-    WriteOutcome, append_note, archive_note, create_note, delete_attachment, delete_note,
-    edit_note, import_attachment_bytes, move_attachment, move_or_rename_note, rename_attachment,
-    replace_section, update_note, update_note_frontmatter,
+    AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagRename, TagRenameError,
+    VaultIndex, WriteError, WriteOutcome, append_note, archive_note, create_note,
+    delete_attachment, delete_note, edit_note, import_attachment_bytes, move_attachment,
+    move_or_rename_note, rename_attachment, rename_tag, replace_section, update_note,
+    update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
 use crate::vault_read::VaultReadCore;
@@ -407,6 +408,21 @@ impl<'a> VaultMutationCore<'a> {
         let _guard = target.acquire_mutation().await?;
         target.delete_attachment(source_relative_path).await
     }
+    /// Plan, or plan and apply, one Vault-wide tag rename. The lock is held
+    /// for the whole call, so an applied rename is one write in the ledger.
+    pub async fn rename_tag(
+        &self,
+        vault_id: VaultId,
+        old_tag: &str,
+        new_tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagRename, VaultOperationError> {
+        let target = self.open(vault_id)?;
+        let _guard = target.acquire_mutation().await?;
+        target
+            .rename_tag(old_tag, new_tag, expected_plan_hash)
+            .await
+    }
 }
 
 /// This Vault's current source/lifecycle capability: a pull-only managed Git
@@ -504,6 +520,56 @@ impl RecordedWrite for AttachmentOutcome {
             return None;
         }
         Some(&self.attachment.relative_path)
+    }
+}
+
+impl RecordedWrite for TagRename {
+    fn affected_paths(&self) -> &[std::path::PathBuf] {
+        &self.affected_paths
+    }
+
+    fn written_path(&self) -> Option<&str> {
+        // A rename touches many notes and names none of them; the commit title
+        // carries the tags instead, from what the caller addressed.
+        None
+    }
+}
+
+/// The structured error for a tag rename that did not run. A write failure
+/// takes the same mapping as every other mutation; the three refusals only a
+/// tag rename can give have codes of their own, so a caller can tell "fix
+/// your arguments", "fix these notes" and "plan again" apart without reading
+/// the message.
+pub fn tag_rename_error(vault_id: VaultId, error: TagRenameError) -> VaultOperationError {
+    match error {
+        TagRenameError::InvalidTagName(message) => {
+            VaultOperationError::new("invalid_tag_name", message, Some(vault_id), false)
+        }
+        TagRenameError::UnsupportedShape(notes) => {
+            let listed = notes
+                .iter()
+                .map(|note| format!("'{}' ({})", note.relative_path, note.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_shape_unsupported",
+                format!(
+                    "Nothing was renamed: {} note(s) carry the tag in a form this rename cannot edit in place. \
+                     Fix them in the vault, then plan again: {listed}",
+                    notes.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagRenameError::StalePlan => VaultOperationError::new(
+            "tag_rename_plan_stale",
+            "Nothing was renamed: the Vault changed since this plan was made, so \
+             expected_plan_hash no longer matches. Call rename_tag without it to see the current plan.",
+            Some(vault_id),
+            false,
+        ),
+        TagRenameError::Write(error) => write_operation_error(vault_id, error),
     }
 }
 
@@ -938,6 +1004,45 @@ impl VaultMutation {
     }
 
     // -----------------------------------------------------------------
+    // Vault-wide mutations
+    // -----------------------------------------------------------------
+
+    /// Rename a tag across the whole Vault. Without `expected_plan_hash` this
+    /// only plans, writes nothing, and records nothing; with it, the plan is
+    /// made again and applied only if its fingerprint still matches.
+    pub async fn rename_tag(
+        &self,
+        old_tag: &str,
+        new_tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagRename, VaultOperationError> {
+        let catalog = self.authoritative_catalog().await?;
+        let vault_path = self.control.vault_path().to_path_buf();
+        let old_tag = old_tag.to_string();
+        let new_tag = new_tag.to_string();
+        let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
+            return offload(move || rename_tag(&vault_path, &catalog, &old_tag, &new_tag, None))
+                .await
+                .map_err(|error| tag_rename_error(self.vault_id, error));
+        };
+        let addressed = format!(
+            "#{} -> #{}",
+            old_tag.trim_start_matches('#'),
+            new_tag.trim_start_matches('#')
+        );
+        self.run_recorded("rename tag", &addressed, tag_rename_error, move || {
+            rename_tag(
+                &vault_path,
+                &catalog,
+                &old_tag,
+                &new_tag,
+                Some(&expected_plan_hash),
+            )
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------
     // Shared steps
     // -----------------------------------------------------------------
 
@@ -1083,12 +1188,26 @@ impl VaultMutation {
         addressed: &str,
         op: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
     ) -> Result<T, VaultOperationError> {
-        let result = tokio::task::spawn_blocking(op)
+        self.run_recorded(label, addressed, write_operation_error, op)
             .await
-            .unwrap_or_else(|join_error| {
-                Err(WriteError::Io(format!("write task panicked: {join_error}")))
-            });
-        let outcome = result.map_err(|error| write_operation_error(self.vault_id, error))?;
+    }
+
+    /// [`VaultMutation::run_write`] for a primitive with an error type of its
+    /// own, which `translate` maps onto the structured error. A panic still
+    /// reaches the caller as `write_failed`.
+    async fn run_recorded<
+        T: RecordedWrite + Send + 'static,
+        E: From<WriteError> + Send + 'static,
+    >(
+        &self,
+        label: &'static str,
+        addressed: &str,
+        translate: fn(VaultId, E) -> VaultOperationError,
+        op: impl FnOnce() -> Result<T, E> + Send + 'static,
+    ) -> Result<T, VaultOperationError> {
+        let outcome = offload(op)
+            .await
+            .map_err(|error| translate(self.vault_id, error))?;
         self.control.write_ledger().record(WriteRecord {
             op: label.to_string(),
             target: outcome.written_path().unwrap_or(addressed).to_string(),
@@ -1101,6 +1220,18 @@ impl VaultMutation {
     fn internal(&self, message: impl Into<String>) -> VaultOperationError {
         VaultOperationError::new("internal_error", message, Some(self.vault_id), false)
     }
+}
+
+/// Run a blocking `vault/write` call on the blocking pool, turning a panic
+/// into a `write_failed` rather than letting it unwind through the adapter.
+async fn offload<T: Send + 'static, E: From<WriteError> + Send + 'static>(
+    op: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E> {
+    tokio::task::spawn_blocking(op)
+        .await
+        .unwrap_or_else(|join_error| {
+            Err(WriteError::Io(format!("write task panicked: {join_error}")).into())
+        })
 }
 
 /// The filename of a Vault-relative path, or the whole path when it names no
