@@ -141,6 +141,9 @@ impl From<&crate::vault_migration::LegacyMigrationRecovery> for LegacyMigrationR
 pub struct VaultDiscoveryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_revision: Option<u64>,
+    /// Counts Vault collection status changes, not note content: a note
+    /// write does not advance it, so it cannot say whether a collection read
+    /// includes a write. That read's participants can.
     pub collection_revision: u64,
     pub vaults: Vec<VaultSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +165,9 @@ pub struct VaultMutationResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<VaultSummary>,
     pub registry_revision: u64,
+    /// Counts Vault collection status changes, not note content: a note
+    /// write does not advance it, so it cannot say whether a collection read
+    /// includes a write. That read's participants can.
     pub collection_revision: u64,
 }
 

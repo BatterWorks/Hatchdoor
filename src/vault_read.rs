@@ -200,7 +200,12 @@ impl VaultReadError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultParticipantState {
+    /// Read from the Vault's latest published Index generation.
     Fresh,
+    /// Served, but possibly behind the Vault's Markdown: usually a prior
+    /// generation read while an Index turn catches up, sometimes the latest
+    /// one published while a write landed, or one left by a failed turn.
+    /// Writes since it was built may be missing.
     Stale,
     /// The Vault's rows are current, but this generation carries no vectors,
     /// so it contributed nothing to a semantic search. Only semantic search
@@ -211,6 +216,8 @@ pub enum VaultParticipantState {
     /// all. Collapsing the two would tell a caller its Notes are missing when
     /// they are merely not yet embedded.
     NotSearchable,
+    /// Nothing could be read from this Vault; `error` says why. Under a
+    /// one-Vault scope the read fails with that error instead.
     Unavailable,
 }
 
@@ -227,8 +234,17 @@ pub struct VaultParticipant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultReadProjection<T> {
     pub scope: VaultScope,
+    /// Counts Vault collection status changes: Vaults added, edited, enabled,
+    /// disabled or disconnected, and each Vault's search, Git, watcher or
+    /// local-file status moving. It
+    /// does not track note content and a note write does not advance it, so
+    /// it cannot say whether this result is current. `participants` can.
     pub collection_revision: u64,
+    /// True when any participant's state is anything other than `fresh`.
     pub partial: bool,
+    /// One entry per Vault the scope selected, each saying whether its part
+    /// of `data` is current. `stale` means that Vault's part may be behind its
+    /// Markdown, usually a prior Index generation while a turn catches up.
     pub participants: Vec<VaultParticipant>,
     pub data: T,
 }
