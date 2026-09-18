@@ -166,6 +166,30 @@ pub async fn vault_scoped_note_links_handler(
     }
 }
 
+/// `GET /api/v1/vaults/{vault_id}/notes/{slug}/saved-queries` — every saved
+/// query in the Note, evaluated against its own Vault now (#275). A separate
+/// read from the Note itself on purpose: the Note read returns the
+/// authoritative Markdown and its content hash, and pairing that hash with
+/// computed rows would let a writer commit them into the file (ADR-21).
+pub async fn vault_scoped_note_saved_queries_handler(
+    State(state): State<AppState>,
+    Path((raw_vault_id, slug)): Path<(String, String)>,
+) -> Response {
+    let vault_id = match parse_vault_id(&raw_vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(error) => return bad_request(error),
+    };
+    let lookup_slug = slug.clone();
+    let result = VaultReads::new(&state)
+        .read(move |core| core.saved_queries(vault_id, &lookup_slug))
+        .await;
+    match result {
+        Ok(Some(saved)) => (StatusCode::OK, Json(saved)).into_response(),
+        Ok(None) => note_not_found_response(vault_id, &slug),
+        Err(error) => read_error_response(error),
+    }
+}
+
 /// `GET /api/v1/vaults/{vault_id}/stats/detail` — the rich, exact single-Vault
 /// statistics report `handlers/vault_collection_reads.rs`'s lean
 /// `{scope}/stats` collection projection cannot back. Never `all`: a distinct

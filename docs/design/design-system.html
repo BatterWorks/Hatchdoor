@@ -1194,7 +1194,7 @@
     background: var(--paper);
   }
   .table-wrap table { margin: 0; }
-  .note-body th {
+  .note-body th, .saved-query-head {
     text-align: left;
     font-family: var(--font-sans);
     font-weight: 600;
@@ -1213,6 +1213,15 @@
     font-variant-numeric: tabular-nums;
   }
   .note-body tr:last-child td { border-bottom: none; }
+  .saved-query-head { padding: 0.55rem 0.7rem; }
+  .note-body .saved-query-note {
+    margin: 0;
+    padding: 0.55rem 0.7rem;
+    font-family: var(--font-sans);
+    font-size: 0.92rem;
+    color: var(--muted);
+  }
+  .note-body table + .saved-query-note { border-top: 1px solid var(--rule); }
   .note-body td:first-child, .note-body th:first-child { padding-left: 0.7rem; }
   .note-body td:first-child { color: var(--muted); }
 
@@ -2345,6 +2354,29 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.table-wrap</span><span class="key">.note-body table</span><span class="key">th</span><span class="key">td</span></div>
+
+      <h3 class="doc-sub">Saved query</h3>
+      <p class="blurb">A <code>base</code> block draws the table the server computed for it. It is this Table and nothing more: the same frame and cells, plus a caption row set in the <span class="key">th</span> type (the view's name, or &ldquo;Saved query&rdquo;) and a note line set in muted <span class="key">td</span> type. The note line carries every state that is not a table: refused, stopped, empty, loading, failed to load, rows held back, and a name set aside. Each reads differently, because broken must never look like empty. The name cell links to the row's note.</p>
+      <div class="stage stage-note paper">
+        <div class="note-body">
+          <div class="table-wrap saved-query">
+            <div class="saved-query-head"><span>Active subscriptions</span></div>
+            <table>
+              <thead><tr><th>name</th><th>price</th><th>billing_period</th></tr></thead>
+              <tbody>
+                <tr><td><a href="#">Netflix</a></td><td>13.99</td><td>monthly</td></tr>
+                <tr><td><a href="#">Newspaper</a></td><td>8</td><td>monthly</td></tr>
+              </tbody>
+            </table>
+            <p class="saved-query-note">Showing the first 2 notes, the limit this saved query sets.</p>
+          </div>
+          <div class="table-wrap saved-query">
+            <div class="saved-query-head"><span>Saved query</span></div>
+            <p class="saved-query-note">Not evaluated. "formulas" at the top of a saved query is not supported by Hatchdoor.</p>
+          </div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.saved-query</span><span class="key">.saved-query-head</span><span class="key">.saved-query-note</span></div>
     </section>
 
     <!-- ───────── MEDIA ───────── -->

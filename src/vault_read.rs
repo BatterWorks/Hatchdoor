@@ -20,9 +20,14 @@ use crate::vault_runtime::{VaultCapabilities, VaultCollectionRuntime};
 
 mod assets;
 mod query;
+mod saved_query;
 
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
+pub use saved_query::{
+    SavedQueriesResponse, SavedQueryColumn, SavedQueryOutcome, SavedQueryResult, SavedQueryRow,
+    SavedQueryTable, SavedQueryTruncation, SavedQueryTruncationReason,
+};
 
 /// An explicit collection read target. There is deliberately no selected,
 /// default, or sole-Vault variant.
@@ -924,6 +929,59 @@ impl<'a> VaultReadCore<'a> {
             participants: projection.participants,
             data: NoteQueryResponse { notes, truncated },
         })
+    }
+
+    /// Every saved query in one Note, each evaluated against that Note's own
+    /// Vault at this moment (#275, ADR-21).
+    ///
+    /// The definitions come from the Note's authoritative Markdown, like any
+    /// exact read, so an edit to one is honoured on the next read; the rows
+    /// come from the Vault's published snapshot, and the envelope reports
+    /// whether that snapshot is current. Nothing computed here is written
+    /// anywhere or reaches the index: a result is derived state, recomputed on
+    /// every call, and a filter comparing against the current time is why it
+    /// cannot be stored.
+    ///
+    /// The Vault is fixed by the Note. There is no scope argument, so neither
+    /// the definition nor the caller can widen what a saved query sees.
+    /// `Ok(None)` is a Note this surface does not have, indistinguishable from
+    /// an absent one as every other exact read is.
+    pub fn saved_queries(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<VaultReadProjection<saved_query::SavedQueriesResponse>>, VaultReadError>
+    {
+        let Some(note) = self.exact_note(vault_id, slug)? else {
+            return Ok(None);
+        };
+        let blocks = saved_query::saved_query_blocks(&note.note.content);
+        let clock = saved_query::EvaluationClock::current();
+        let projection = self.collection(VaultScope::One(vault_id), |vault_id, _, snapshot| {
+            saved_query::evaluate_saved_queries(
+                blocks.clone(),
+                vault_id,
+                &snapshot.notes,
+                &clock,
+                saved_query::SavedQueryCeiling::ENFORCED,
+            )
+        })?;
+        let queries = projection
+            .data
+            .into_iter()
+            .next()
+            .expect("VaultScope::One yields exactly one participant on success");
+        Ok(Some(VaultReadProjection {
+            scope: projection.scope,
+            collection_revision: projection.collection_revision,
+            partial: projection.partial,
+            participants: projection.participants,
+            data: saved_query::SavedQueriesResponse {
+                vault_id,
+                slug: note.note.slug,
+                queries,
+            },
+        }))
     }
 
     /// The rich per-Vault statistics report, scoped to exactly one Vault —
@@ -3650,5 +3708,206 @@ mod tests {
         // root expanded and its children listed instead.
         assert_eq!(note_titles(&clamped), ["Home"]);
         assert!(child(&clamped, "40-reference").truncated);
+    }
+
+    // -----------------------------------------------------------------------
+    // Saved queries (#275)
+    // -----------------------------------------------------------------------
+
+    const SUBSCRIPTION_VAULT: &[(&str, &str)] = &[
+        (
+            "subscriptions/Netflix.md",
+            "---\ntags: [type/entity/subscription]\nprice: 13.99\nbilling_period: monthly\nnext_payment: 2026-10-01\n---\n# Netflix",
+        ),
+        (
+            "subscriptions/Gym.md",
+            "---\ntags: [type/entity/subscription]\nprice: 30\nbilling_period: zebraquarterly\nfinished: 2020-06-30\n---\n# Gym\n\nBilled zebraquarterly.",
+        ),
+        (
+            "subscriptions/Newspaper.md",
+            "---\ntags: [type/entity/subscription]\nprice: 8\nbilling_period: monthly\nfinished: 2999-01-01\n---\n# Newspaper",
+        ),
+        (
+            "Active subscriptions.md",
+            "---\ntags: [type/aggregator]\n---\n# Active subscriptions\n\nWhat I pay for now.\n\n<!-- hatchdoor-query: active-subscriptions -->\n```base\nfilters:\n  and:\n    - file.hasTag(\"type/entity/subscription\")\n    - 'finished == null || finished > now()'\nviews:\n  - type: table\n    name: Active subscriptions\n    order:\n      - file.name\n      - price\n      - billing_period\n      - next_payment\n      - finished\n```\n\nAnd the finished ones:\n\n```base\nfilters: 'finished < now()'\n```\n",
+        ),
+    ];
+
+    fn saved(reads: &VaultReadCore<'_>, vault_id: VaultId) -> super::SavedQueriesResponse {
+        reads
+            .saved_queries(vault_id, "active-subscriptions")
+            .expect("saved queries")
+            .expect("the aggregator note exists")
+            .data
+    }
+
+    fn table_titles(result: &super::SavedQueryResult) -> Vec<String> {
+        match &result.outcome {
+            super::SavedQueryOutcome::Table(table) => {
+                table.rows.iter().map(|row| row.title.clone()).collect()
+            }
+            other => panic!("expected a table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_notes_saved_queries_evaluate_against_its_own_vault_in_document_order() {
+        let workspace = workspace(&[
+            ("Home", SUBSCRIPTION_VAULT),
+            // A second Vault holding a namesake subscription the saved query
+            // must never see: it is fixed to the Vault its note lives in.
+            (
+                "Elsewhere",
+                &[(
+                    "Spotify.md",
+                    "---\ntags: [type/entity/subscription]\nprice: 11\n---\n# Spotify",
+                )],
+            ),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+
+        let response = saved(&reads, vault_id);
+        assert_eq!(response.vault_id, vault_id);
+        assert_eq!(response.queries.len(), 2);
+
+        let active = &response.queries[0];
+        assert_eq!(active.name.as_deref(), Some("active-subscriptions"));
+        assert!(active.source.starts_with("filters:\n  and:"));
+        assert_eq!(table_titles(active), ["Netflix", "Newspaper"]);
+        let super::SavedQueryOutcome::Table(table) = &active.outcome else {
+            unreachable!()
+        };
+        assert!(table.rows.iter().all(|row| row.vault_id == vault_id));
+        assert_eq!(table.rows[0].slug, "netflix");
+        assert_eq!(
+            table.rows[0].cells,
+            vec![
+                serde_json::json!("Netflix.md"),
+                serde_json::json!(13.99),
+                serde_json::json!("monthly"),
+                serde_json::json!("2026-10-01"),
+                serde_json::Value::Null,
+            ]
+        );
+
+        let finished = &response.queries[1];
+        assert_eq!(finished.name, None);
+        assert_eq!(table_titles(finished), ["Gym"]);
+    }
+
+    #[test]
+    fn evaluating_saved_queries_never_changes_the_note_or_what_the_index_holds() {
+        let workspace = workspace(&[("Home", SUBSCRIPTION_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+        let path = workspace.vault_paths[0].join("Active subscriptions.md");
+        let before = std::fs::read(&path).expect("read note");
+
+        let first = saved(&reads, vault_id);
+        for _ in 0..5 {
+            assert_eq!(
+                saved(&reads, vault_id),
+                first,
+                "identical state, identical answer"
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("read note"), before);
+
+        // The note read itself stays the authoritative Markdown.
+        let note = reads
+            .exact_note(vault_id, "active-subscriptions")
+            .expect("read")
+            .expect("note");
+        assert_eq!(note.note.content.as_bytes(), before.as_slice());
+
+        // "zebraquarterly" is Gym's billing period, and it reaches the
+        // aggregator only as a computed row. Search finds Gym, where the word
+        // is written, and never the note displaying it.
+        let embedder = StubEmbedder::new(384);
+        let search = crate::search::vault_scoped::VaultSearchCore::new(
+            &workspace.cache,
+            &workspace.vaults,
+            &embedder,
+        );
+        let hits = search
+            .search(crate::search::vault_scoped::VaultSearchRequest {
+                scope: VaultScope::One(vault_id),
+                query: "zebraquarterly".to_string(),
+                mode: crate::search::SearchMode::Keyword,
+                limit: 10,
+                per_note_cap: 2,
+                layers: crate::search::LayerSelection::All,
+            })
+            .expect("search")
+            .data
+            .results;
+        let slugs: BTreeSet<_> = hits.iter().map(|hit| hit.note_slug.as_str()).collect();
+        assert!(slugs.contains("gym"), "{slugs:?}");
+        assert!(!slugs.contains("active-subscriptions"), "{slugs:?}");
+
+        // The rows link to their notes on the page, but they are not links the
+        // index knows about: no backlink, no graph edge.
+        let links = reads
+            .exact_note_links(vault_id, "active-subscriptions")
+            .expect("links")
+            .expect("note");
+        assert!(links.outgoing.is_empty(), "{:?}", links.outgoing);
+        let netflix = reads
+            .exact_note_links(vault_id, "netflix")
+            .expect("links")
+            .expect("note");
+        assert!(netflix.backlinks.is_empty(), "{:?}", netflix.backlinks);
+        let graph = reads.graphs(VaultScope::One(vault_id)).expect("graph");
+        assert!(graph.data[0].edges.is_empty(), "{:?}", graph.data[0].edges);
+    }
+
+    #[test]
+    fn a_note_without_saved_queries_answers_an_empty_list_and_a_missing_note_answers_none() {
+        let workspace = workspace(&[("Home", SUBSCRIPTION_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+        let plain = reads
+            .saved_queries(vault_id, "netflix")
+            .expect("read")
+            .expect("note");
+        assert!(plain.data.queries.is_empty());
+        assert!(
+            reads
+                .saved_queries(vault_id, "no-such-note")
+                .expect("read")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_demoted_note_withholds_its_saved_queries_and_its_rows_on_the_demo_surface() {
+        let workspace = workspace(&[(
+            "Home",
+            &[
+                (
+                    "Dashboard.md",
+                    "# Dashboard\n\n```base\nfilters: 'file.hasTag(\"topic\")'\n```\n",
+                ),
+                ("Visible.md", "---\ntags: [topic]\n---\n# Visible"),
+                ("private/Hidden.md", "---\ntags: [topic]\n---\n# Hidden"),
+                ("private/.hatchdoor-layer", "private"),
+            ],
+        )]);
+        let vault_id = workspace.vault_ids[0];
+        let everything = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let demo = VaultReadCore::new(&workspace.cache, &workspace.vaults)
+            .on_surface(super::BrowseSurface::DefaultOnly);
+
+        let rows = |reads: &VaultReadCore<'_>| {
+            let response = reads
+                .saved_queries(vault_id, "dashboard")
+                .expect("read")
+                .expect("note")
+                .data;
+            table_titles(&response.queries[0])
+        };
+        assert_eq!(rows(&everything), ["Hidden", "Visible"]);
+        assert_eq!(rows(&demo), ["Visible"]);
     }
 }

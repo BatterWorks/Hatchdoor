@@ -88,6 +88,18 @@ First, check you want a search at all. `search_notes` finds notes by meaning and
 
 If a search is what you want: search only considers the **default surface** unless you explicitly ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search — see [[How to organize a Vault with layers]] for how to search across layers deliberately. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
 
+## A saved query shows a message instead of a table
+
+A fenced `base` block is drawn as a table only when Hatchdoor understands all of it. It supports part of Obsidian's Bases syntax, listed in [[Supported Markdown reference]], and refuses the rest rather than guessing, because a filter applied halfway gives a wrong list that looks like a right one.
+
+- **"Not evaluated."** followed by a reason: the block uses something outside that list, such as a formula, a second view, a `cards` view or `groupBy`, or its YAML does not parse. The reason names the part to change.
+- **"Stopped."** followed by a reason: the query is fine, but running it would pass one of Hatchdoor's limits. The saved queries in one note scan at most 20,000 notes between them, each one scanning the whole Vault once, and one note may hold at most 10 saved queries.
+- **A line about a name** under an otherwise normal table: the `<!-- hatchdoor-query: name -->` marker before that block names it with something other than lowercase letters, digits and hyphens, or repeats a name used earlier in the same note. The rows are unaffected; only the name is set aside.
+- **"No notes match this saved query."** is a real answer, not an error: the query ran and nothing qualified.
+- **"Showing the first N notes"** means rows were held back, either by the `limit` the block sets or by Hatchdoor's own ceiling of 500 rows.
+
+If a table looks out of date right after you edit another note, the Vault's index may still be catching up (see the `search` status above). The saved query reads its rows from that index, and it is worked out again every time you open the note.
+
 ---
 
 Related: [[Connect your agent]] · [[How to set up a Git-backed Vault]] · [[Install Hatchdoor with Docker Compose]] · [[HTTP API reference]]

@@ -9,11 +9,12 @@ import { parseFrontmatter, stripBlockIds } from "../../lib/markdown";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import { NoteProperties } from "./sections";
 import { createNoteMarkdownComponents } from "./renderers";
+import { remarkHideQueryMarkers } from "./savedQueries";
 import { useResolvedWikilinks } from "./wikilinks";
 import type { VaultId } from "../../types";
 
 const PREVIEW_REHYPE_PLUGINS = [rehypeKatex];
-const PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkMath];
+const PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
 
 /**
  * Render draft markdown exactly as the read view would, so the editor preview

@@ -38,10 +38,10 @@ use crate::handlers::{
     vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
-    vault_scoped_rename_note_handler, vault_scoped_resolve_batch_handler,
-    vault_scoped_resolve_handler, vault_scoped_stats_detail_handler,
-    vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
-    vault_scoped_write_capabilities_handler,
+    vault_scoped_note_saved_queries_handler, vault_scoped_rename_note_handler,
+    vault_scoped_resolve_batch_handler, vault_scoped_resolve_handler,
+    vault_scoped_stats_detail_handler, vault_scoped_update_note_handler,
+    vault_scoped_upload_attachment_handler, vault_scoped_write_capabilities_handler,
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -415,6 +415,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/download",
                 get(vault_scoped_note_download_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/saved-queries",
+                get(vault_scoped_note_saved_queries_handler),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/resolve",
@@ -5019,6 +5023,7 @@ mod tests {
             format!("/api/v1/vaults/{vault_id}/notes/clipping"),
             format!("/api/v1/vaults/{vault_id}/notes/clipping/links"),
             format!("/api/v1/vaults/{vault_id}/notes/clipping/download"),
+            format!("/api/v1/vaults/{vault_id}/notes/clipping/saved-queries"),
         ] {
             let response = get(uri.clone()).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
@@ -6710,6 +6715,71 @@ mod tests {
             .expect("response");
         assert_eq!(disabled_read.status(), StatusCode::CONFLICT);
         assert_eq!(json_body(disabled_read).await["code"], "vault_disabled");
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_saved_queries_evaluate_the_notes_blocks_and_map_not_found() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("saved-queries");
+        std::fs::create_dir_all(vault_root.join("subscriptions")).expect("create folder");
+        std::fs::write(
+            vault_root.join("Dashboard.md"),
+            "# Dashboard\n\n<!-- hatchdoor-query: cheap -->\n```base\nfilters: 'price < 10'\nviews:\n  - type: table\n    order: [file.name, price]\n```\n\n```base\nformulas:\n  x: 'price * 2'\n```\n",
+        )
+        .expect("write dashboard");
+        std::fs::write(
+            vault_root.join("subscriptions/Newspaper.md"),
+            "---\nprice: 8\n---\n# Newspaper\n",
+        )
+        .expect("write subscription");
+        let vault_id = register_vaults_directly(&state, &[("Home", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        publish_vault_snapshot(&state, &vault_id, &vault_root);
+
+        let get = async |uri: String| {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+        };
+
+        let response = get(format!(
+            "/api/v1/vaults/{vault_id}/notes/dashboard/saved-queries"
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["scope"], vault_id);
+        assert_eq!(body["data"]["vault_id"], vault_id);
+        let queries = body["data"]["queries"].as_array().expect("queries");
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0]["name"], "cheap");
+        assert_eq!(queries[0]["status"], "table");
+        assert_eq!(queries[0]["rows"][0]["slug"], "newspaper");
+        assert_eq!(
+            queries[0]["rows"][0]["cells"],
+            serde_json::json!(["Newspaper.md", 8])
+        );
+        assert_eq!(queries[1]["status"], "refused");
+        assert!(
+            queries[1]["message"]
+                .as_str()
+                .expect("message")
+                .contains("formulas")
+        );
+
+        let missing = get(format!(
+            "/api/v1/vaults/{vault_id}/notes/nowhere/saved-queries"
+        ))
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(missing).await["code"], "note_not_found");
     }
 
     #[tokio::test]

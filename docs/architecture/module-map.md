@@ -1003,12 +1003,15 @@ the full backend checks.
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, explicit `VaultScope`,
 the common `VaultReadProjection` envelope, participant state/error types, and
 Vault-qualified exact-note, tree, statistics, graph, and recent-note
-projections. `BrowseSurface` names which layer surface a caller may read.
+projections, plus `VaultReadCore::saved_queries` and its wire types
+(`SavedQueriesResponse`, `SavedQueryResult`, `SavedQueryOutcome`,
+`SavedQueryTable`, `SavedQueryColumn`, `SavedQueryRow`, `SavedQueryTruncation`,
+`SavedQueryTruncationReason`). `BrowseSurface` names which layer surface a caller may read.
 `Everything` is the established behavior and stays the default: a layer demotes
 a Note from the default *search* surface only, and an operator still reaches it
 by slug, in the explorer, and on the graph. `DefaultOnly` is demo mode's clamp
@@ -1086,6 +1089,32 @@ search vocabulary so a query and the `#tag` search shorthand cannot disagree
 about what a nested tag is. The `limit` is clamped inside `compile` rather than by each adapter, so a
 caller cannot reach the core with a zero limit and be told its complete answer
 was truncated.
+`saved_queries` (#275, ADR-21) evaluates every saved query in one Note: each
+fenced `base` block in its authoritative Markdown, optionally named by a
+`<!-- hatchdoor-query: name -->` marker separated from it by blank lines only.
+`src/vault_read/saved_query.rs` parses a documented subset of the Obsidian
+Bases syntax and compiles its filters into the same private
+`query::CompiledCondition` tree `query_notes` evaluates, which gained `All`,
+`Any` and `Not` combinators and a `Subject` (a property, or the file's name,
+basename, path or folder) for exactly that purpose, so there is one condition
+engine, not two. Anything outside the subset refuses that saved query by name
+rather than being partly applied. The rows come from the Vault's published
+snapshot, inside the usual projection envelope, and are never written anywhere:
+a result is recomputed on every call, so a filter against `now()` answers
+afresh with no file change, and search, backlinks, statistics and the graph
+never see it. The Vault is the Note's own and there is no scope argument.
+Rows are ordered by title, then path and slug, and held to
+`SavedQueryCeiling::ENFORCED` (notes scanned, rows returned) as well as the
+view's own `limit`. The scan ceiling is one budget for the whole Note, spent by
+each evaluated query, so repeating a block cannot multiply the work of one read;
+a query past it answers `stopped` rather than a partial table, and a Note holds
+at most `MAX_SAVED_QUERIES_PER_NOTE`. `SavedQueryOutcome` keeps `table`,
+`refused` and `stopped` distinguishable on the wire; an unusable or repeated
+marker name never changes the rows, so it is set aside into the result's
+`notices` and the rows are still computed. Two strings that both read as a date
+or date-time compare as instants in the shared `compare`, which `query_notes`
+uses too, so `now()` orders correctly against `2026-09-18 10:00` or a zoned
+timestamp; any other pair compares byte-wise as before.
 `exact_note_frontmatter` and `note_attachments` are the surface-gated
 counterparts of the frontmatter and attachment-listing reads the MCP tools used
 to answer from a raw index build of their own (#188); both return `Ok(None)`
@@ -1150,6 +1179,7 @@ the shared search *vocabulary*, not on retrieval: nothing here calls
 `VaultSearchCore`.
 
 **Consumers:** `handlers/vault_content.rs` (exact note/link/resolve reads,
+`saved_queries`,
 `vault_directory`, and the contained-asset route),
 `handlers/vault_collection_reads.rs` (the collection-read projections `trees`,
 `statistics`, `graphs`, `recently_modified`), and — since #188 — `mcp/tools/read.rs`
@@ -2176,7 +2206,11 @@ its `new`/`respond` constructors, widened to `pub(crate)`), and
 rejection-mapping helpers (`parse_vault_id`, `json_rejection_response`,
 `query_rejection_response`, `internal_error_response`, widened to
 `pub(crate)` for this reuse): `GET .../notes/{slug}`, `GET
-.../notes/{slug}/links`, `GET .../notes/{slug}/download`, `GET .../resolve`,
+.../notes/{slug}/links`, `GET .../notes/{slug}/download`, `GET
+.../notes/{slug}/saved-queries` (#275: the Note's saved queries evaluated now,
+in the projection envelope; its definitions come from the authoritative
+Markdown and its rows from the published snapshot, so its participant state
+reports the rows' freshness), `GET .../resolve`,
 `POST .../resolve-batch` (whose request additionally takes optional
 `asset_targets` and `note_path`, answered by an `asset_results` array of
 `{target, path}`, `path` null when nothing matched — additive, so a client
@@ -3104,9 +3138,11 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/components/note-page/NotePreview.tsx`
 - `frontend/src/components/note-page/PdfPreview.tsx`
 - `frontend/src/components/note-page/RendererComponents.tsx`
+- `frontend/src/components/note-page/SavedQueryBlock.tsx`
 - `frontend/src/components/note-page/dom.ts`
 - `frontend/src/components/note-page/paragraphs.ts`
 - `frontend/src/components/note-page/renderers.tsx`
+- `frontend/src/components/note-page/savedQueries.ts`
 - `frontend/src/components/note-page/sections.tsx`
 - `frontend/src/components/note-page/text.ts`
 - `frontend/src/components/note-page/wikilinks.ts`
@@ -3142,6 +3178,25 @@ That last check runs on every commit rather than on a dependency list: the
 order in which the note's fetch, its wikilink resolution and its render land
 differs between a cold visit and a warm one, and a subset of them named as
 deps makes the jump stop happening whenever the order shifts.
+
+A fenced `base` block is a saved query (#275, ADR-21). `createNoteMarkdownComponents`
+renders it as `SavedQueryBlock` (`note-page/SavedQueryBlock.tsx`), which draws
+the table the server computed, inside the Table section's `.table-wrap`, with
+the first `file.name` or `file.basename` cell (else the first cell) linking to
+the row's note. `NotePage` fetches `GET .../notes/{slug}/saved-queries` through
+`useSavedQueries` (`note-page/savedQueries.ts`) only when the note holds a
+`base` fence, again whenever its content hash or the collection revision moves,
+and hands the results down through `SavedQueryProvider`. Each block finds its
+result by its position among the note's `base` fences, cross-checked against
+its source text, so two identical blocks keep their own outcomes. Refused,
+stopped, empty, loading and failed states each render a distinct line inside
+the frame. The note read is untouched: it still returns only the Markdown. The
+editor preview has no provider and shows the definition as code, because it
+renders unsaved text and only the file on disk is evaluated.
+`remarkHideQueryMarkers` drops a `<!-- hatchdoor-query: name -->` marker from
+the syntax tree on the note page and in the preview. Every other piece of raw
+HTML renders exactly as before, and no other node moves, so line-addressed
+inline editing is unaffected.
 
 A TOC click, mobile heading jump, or search deep link arms `NotePage`'s
 `tailArmed` state, rendered as `data-tail` on the article; `styles/note-content.css`
