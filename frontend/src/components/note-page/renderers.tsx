@@ -13,6 +13,7 @@ import { markAsParagraph } from "./paragraphs";
 import { EditableBlock } from "./EditableBlock";
 import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
+import { SavedQueryBlock } from "./SavedQueryBlock";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 import type { VaultId } from "../../types";
@@ -34,13 +35,26 @@ export function createNoteMarkdownComponents(
       }
       return <pre>{props.children}</pre>;
     },
-    code(props: { children?: ReactNode; className?: string }) {
+    code(props: {
+      children?: ReactNode;
+      className?: string;
+      node?: { position?: { start?: { line?: number } } };
+    }) {
       const { children, className } = props;
       const content = String(children ?? "").replace(/\n$/, "");
       const match = /language-(\w+)/.exec(className || "");
 
       if (match?.[1] === "mermaid") {
         return <MermaidDiagram chart={content} />;
+      }
+
+      if (match?.[1] === "base") {
+        return (
+          <SavedQueryBlock
+            source={content}
+            line={props.node?.position?.start?.line}
+          />
+        );
       }
 
       if (!match) {

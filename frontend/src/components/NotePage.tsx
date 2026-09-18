@@ -71,6 +71,11 @@ import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
+import { SavedQueryProvider } from "./note-page/SavedQueryBlock";
+import {
+  remarkHideQueryMarkers,
+  useSavedQueries,
+} from "./note-page/savedQueries";
 import {
   NoteLinksPanel,
   NoteProperties,
@@ -101,6 +106,7 @@ function unwrapLinks(wire: VaultQualifiedLinks): NoteLinks {
   };
 }
 
+const NOTE_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
 export function NotePage({
   onActiveNoteChange,
   onTagSelect,
@@ -534,6 +540,13 @@ export function NotePage({
           : null,
       ),
     [markdown, activeRange, frontmatterOffset],
+  );
+
+  const savedQueries = useSavedQueries(
+    notePath,
+    note?.content,
+    note?.content_hash,
+    vaultRevision,
   );
 
   const markdownComponents = useMemo(
@@ -1265,13 +1278,19 @@ export function NotePage({
                 onActiveRangeChange={handleActiveRangeChange}
               >
                 <BlockGap>
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={rehypePlugins}
-                    components={markdownComponents}
+                  <SavedQueryProvider
+                    state={savedQueries}
+                    vaultId={vaultId}
+                    markdown={renderedMarkdown}
                   >
-                    {renderedMarkdown}
-                  </ReactMarkdown>
+                    <ReactMarkdown
+                      remarkPlugins={NOTE_REMARK_PLUGINS}
+                      rehypePlugins={rehypePlugins}
+                      components={markdownComponents}
+                    >
+                      {renderedMarkdown}
+                    </ReactMarkdown>
+                  </SavedQueryProvider>
                 </BlockGap>
               </InlineEditorProvider>
             </div>
