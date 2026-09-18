@@ -632,7 +632,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "create_note",
-            "description": "Create a Markdown note at a vault-relative path. Parent folders are created automatically. Fails if the note exists unless overwrite is true.",
+            "description": "Create a Markdown note at a vault-relative path. Parent folders are created automatically. Fails if the note exists unless overwrite is true. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -648,7 +648,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "update_note",
-            "description": "Replace the full Markdown content of an existing note. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Replace the full Markdown content of an existing note. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -664,7 +664,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "append_to_note",
-            "description": "Append Markdown content to an existing note. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Append Markdown content to an existing note. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -680,7 +680,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "edit_note",
-            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -698,7 +698,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "replace_section",
-            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1182,6 +1182,33 @@ mod finalize_tests {
             advertised, declared,
             "WRITE_OPS and write_tools_list() must name exactly the same tools"
         );
+    }
+
+    /// The five tools whose note passes through the core's preparation step
+    /// say so in their own description, since the hash they return can
+    /// differ from a hash of what the caller sent (#260). update_frontmatter
+    /// skips that step and must not claim otherwise.
+    #[test]
+    fn content_writing_tools_say_the_note_is_normalised() {
+        let normalising = [
+            "create_note",
+            "update_note",
+            "append_to_note",
+            "edit_note",
+            "replace_section",
+        ];
+        for tool in write_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            let description = tool["description"].as_str().expect("description");
+            let says_so = description.contains("normalised on write")
+                && description.contains("quality_warnings")
+                && description.contains("content_hash is the hash of the file as written");
+            assert_eq!(
+                says_so,
+                normalising.contains(&name),
+                "{name}: normalisation sentence present = {says_so}"
+            );
+        }
     }
 
     #[test]
