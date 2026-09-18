@@ -79,6 +79,10 @@ _Avoid_: Reindex, rebuild, refresh (when meant instance-wide)
 One unit of background Git work for exactly one vault, requested through the same work coordinator by the managed-Git scheduler, a manual sync or retry, or activation, and run under that vault's mutation lock. The vault source and Git mode select the operation: acquire or reuse and synchronise a managed checkout, synchronise an existing checkout with its remote, or commit local history.
 _Avoid_: Sync task, git sync, debounce (when meant instance-wide)
 
+**Slug**:
+A note's address within one vault: a short lowercase form of its name, unique in that vault, by which browsers and agents ask for the note. Unlike a Vault ID it is derived rather than assigned, so renaming a note moves its address.
+_Avoid_: Note ID, permalink, handle, key
+
 **Note property**:
 A labelled fact in one note's frontmatter, such as a price or a renewal date. Distinct from the frontmatter block itself, which is where properties live; a query tests properties, not the block.
 _Avoid_: Field, attribute, metadata

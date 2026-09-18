@@ -19,6 +19,45 @@ fn slugify_reduces_symbols_to_clean_slug() {
 }
 
 #[test]
+fn slugify_folds_accents_to_their_base_letter() {
+    // #306: the accent used to be discarded, so correcting the spelling of a
+    // title moved the note's address.
+    assert_eq!(
+        slugify("Olives & More - Gerard Veá Arbequina olive oil"),
+        "olives-more-gerard-vea-arbequina-olive-oil"
+    );
+    assert_eq!(slugify("Café"), "cafe");
+}
+
+#[test]
+fn slugify_reads_a_combining_accent_as_the_letter_it_sits_on() {
+    // Same word, spelled precomposed and decomposed. Both address one note.
+    assert_eq!(slugify("Cafe\u{301}"), slugify("Caf\u{e9}"));
+}
+
+#[test]
+fn slugify_spells_european_letters_the_way_their_languages_do() {
+    assert_eq!(slugify("Straße"), "strasse");
+    assert_eq!(slugify("Æon"), "aeon");
+    assert_eq!(slugify("œuf"), "oeuf");
+    assert_eq!(slugify("Łódź"), "lodz");
+    assert_eq!(slugify("Þing"), "thing");
+    assert_eq!(slugify("Søren"), "soren");
+}
+
+#[test]
+fn slugify_keeps_other_scripts_rather_than_romanising_them() {
+    assert_eq!(slugify("資料 Обзор"), "資料-обзор");
+    assert_eq!(slugify("हिन्दी"), "हिन्दी");
+}
+
+#[test]
+fn slugify_still_empties_a_name_with_no_letters_in_it() {
+    // The `untitled` fallback lives in the indexer and this is what reaches it.
+    assert_eq!(slugify("!!! ??? ---"), "");
+}
+
+#[test]
 fn normalize_link_target_strips_md_and_normalizes_separators() {
     assert_eq!(
         normalize_link_target(r"Folder\My Note.md"),

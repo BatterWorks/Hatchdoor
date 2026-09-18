@@ -31,6 +31,19 @@ describe("noteHeadings", () => {
     expect(slugifyHeading("**API** [Guide](x) / v1")).toBe("api-guide-v1");
   });
 
+  it("slugifyHeading folds accents and keeps other scripts", () => {
+    expect(slugifyHeading("Gerard Veá")).toBe("gerard-vea");
+    expect(slugifyHeading("Cafe\u0301")).toBe(slugifyHeading("Caf\u00e9"));
+    expect(slugifyHeading("Straße")).toBe("strasse");
+    expect(slugifyHeading("Łódź")).toBe("lodz");
+    expect(slugifyHeading("資料 Обзор")).toBe("資料-обзор");
+    expect(slugifyHeading("हिन्दी")).toBe("हिन्दी");
+  });
+
+  it("slugifyHeading falls back when nothing addressable is left", () => {
+    expect(slugifyHeading("!!! ???")).toBe("section");
+  });
+
   it("extracts obsidian wikilink heading labels for toc ids", () => {
     const headings = extractMarkdownHeadings("## [[Project/Plan|Plan Home]]");
 

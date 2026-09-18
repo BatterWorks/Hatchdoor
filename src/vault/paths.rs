@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
+
 use super::types::NoteEntry;
 
 pub fn unique_slug(base: &str, by_slug: &HashMap<String, NoteEntry>) -> String {
@@ -76,26 +79,64 @@ fn split_at_target_end(body: &str, is_delimiter: impl Fn(char) -> bool) -> (&str
     (body[..end].trim(), &body[end..])
 }
 
+/// Fold a note's name into the slug that addresses it.
+///
+/// European languages give a plain ASCII address and every other script keeps
+/// its own letters (ADR-24). An accented Latin letter decomposes to its base
+/// letter and loses its marks, so `Veá` and `Vea` are addressed alike and a
+/// combining accent spells the same slug as a precomposed one (#306). The
+/// European letters that decompose to nothing useful go through
+/// [`fold_european_letter`]. A letter or digit from any other writing system
+/// is kept as it is, lowercased, and never romanised, and so is a mark that
+/// belongs to one. What gets dropped is punctuation, symbols and the marks
+/// that sit on ASCII; whitespace, `-` and `_` separate words.
+///
+/// `frontend/src/lib/noteHeadings.ts` carries the same rule for the heading
+/// anchors the browser clicks. The two have to change together, or a note's
+/// address and its own headings' addresses split apart.
 pub fn slugify(input: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
 
     for c in input.trim().chars() {
-        let mapped = if c.is_ascii_alphanumeric() {
-            c.to_ascii_lowercase()
-        } else if c == ' ' || c == '-' || c == '_' {
-            '-'
-        } else {
+        if let Some(folded) = fold_european_letter(c) {
+            out.push_str(folded);
+            prev_dash = false;
             continue;
-        };
+        }
 
-        if mapped == '-' {
+        if c.is_whitespace() || c == '-' || c == '_' {
             if !prev_dash && !out.is_empty() {
                 out.push('-');
             }
             prev_dash = true;
-        } else {
-            out.push(mapped);
+            continue;
+        }
+
+        // A mark that arrived on its own belongs to whatever it follows. On an
+        // ASCII letter it is an accent this rule exists to remove; on a letter
+        // kept in its own script it is part of the word, and dropping it
+        // rewrites that word — a Devanagari virama is the difference between
+        // हिन्दी and हिनदी.
+        if is_combining_mark(c) {
+            if out.chars().last().is_some_and(|last| !last.is_ascii()) {
+                out.push(c);
+                prev_dash = false;
+            }
+            continue;
+        }
+
+        // The first character of the decomposition is the base letter; the
+        // marks that follow it are what an accent is made of. A base that is
+        // already ASCII is the whole answer, and anything else keeps the
+        // character it arrived as, so Devanagari and Hangul are not taken
+        // apart by a rule written for European accents.
+        let base = c.nfd().next().unwrap_or(c);
+        if base.is_ascii_alphanumeric() {
+            out.push(base.to_ascii_lowercase());
+            prev_dash = false;
+        } else if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
             prev_dash = false;
         }
     }
@@ -105,6 +146,26 @@ pub fn slugify(input: &str) -> String {
     }
 
     out
+}
+
+/// The European letters that no decomposition reaches, each with the spelling
+/// its own language already uses when it has to write ASCII (ADR-24).
+///
+/// Stripping marks turns `é` into `e` because `é` is `e` plus a mark, but `ß`,
+/// `ø` and `æ` are letters in their own right and decompose to themselves. A
+/// German keyboard-less spelling of `Straße` is `Strasse`, not `Strae`, and
+/// that convention is the whole content of this table.
+fn fold_european_letter(c: char) -> Option<&'static str> {
+    Some(match c {
+        'ß' | 'ẞ' => "ss",
+        'ø' | 'Ø' => "o",
+        'æ' | 'Æ' => "ae",
+        'œ' | 'Œ' => "oe",
+        'ł' | 'Ł' => "l",
+        'đ' | 'Đ' | 'ð' | 'Ð' => "d",
+        'þ' | 'Þ' => "th",
+        _ => return None,
+    })
 }
 
 /// Extensions the Vault asset route will serve. The asset index and
