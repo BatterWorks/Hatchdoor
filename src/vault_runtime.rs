@@ -408,6 +408,8 @@ pub struct CollectionVaultSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultCollectionSnapshot {
     pub registry_revision: u64,
+    /// See `VaultCollectionState::collection_revision`: collection status,
+    /// never note content.
     pub collection_revision: u64,
     pub vaults: BTreeMap<VaultId, CollectionVaultSnapshot>,
 }
@@ -921,6 +923,14 @@ struct WatcherContext {
 
 struct VaultCollectionState {
     registry_revision: u64,
+    /// Counts changes to the Vault collection: a Vault added, edited,
+    /// enabled, disabled or disconnected, or one Vault's search, Git,
+    /// watcher or local-file status moving. It does not count note
+    /// content. A note write never advances it; the Index turn that write
+    /// arms usually does, twice, but only because the Vault's search status
+    /// passes through `indexing` and back. Neither its moving nor its
+    /// holding still says whether a read includes a given write: that is
+    /// what a collection read's `participants[].state` answers (#259).
     collection_revision: u64,
     vaults: BTreeMap<VaultId, VaultCollectionEntry>,
 }

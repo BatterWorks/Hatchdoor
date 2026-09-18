@@ -1030,8 +1030,8 @@ fn exclude_patterns_schema() -> Value {
 
 pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
-        json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"search_notes", "description":"Search one Vault or all enabled Vaults. Results use the shared partial-participant envelope and every hit is Vault-qualified.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
@@ -1049,7 +1049,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an HTTP download_url resolved against this MCP endpoint's scheme, host, and port; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
-        json!({"name":"recently_modified", "description":"List recently modified Notes for one Vault or all enabled Vaults.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
     ]
 }
 
@@ -1122,7 +1122,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         ),
         json!({"name":"sync_vault","description":"Request immediate managed-Git synchronization for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
-        json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified and search_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified, search_notes and query_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
 }
 
@@ -1133,7 +1133,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
 fn query_notes_tool_schema() -> Value {
     json!({
         "name": "query_notes",
-        "description": "Select the Notes in one Vault, or all enabled Vaults, whose tags, path, or frontmatter properties satisfy stated conditions. This selects rather than searches: a Note either qualifies or it does not, results are unranked and in a stable order, and no embedding is involved, so a Vault that is still being indexed answers in full. Use it when the answer is decided by what a Note is - every note tagged project/active, everything under 40-reference, notes whose review-date is before today. Use search_notes when the answer is decided by what a Note says. Unlike search_notes this reads every layer, so it selects demoted Notes that a default search would not return, and it takes no layers argument.",
+        "description": collection_description("Select the Notes in one Vault, or all enabled Vaults, whose tags, path, or frontmatter properties satisfy stated conditions. This selects rather than searches: a Note either qualifies or it does not, results are unranked and in a stable order, and no embedding is involved, so a Vault that is still being indexed answers in full. Use it when the answer is decided by what a Note is - every note tagged project/active, everything under 40-reference, notes whose review-date is before today. Use search_notes when the answer is decided by what a Note says. Unlike search_notes this reads every layer, so it selects demoted Notes that a default search would not return, and it takes no layers argument."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1197,8 +1197,20 @@ fn query_notes_tool_schema() -> Value {
     })
 }
 
+/// Appended to every collection read's description (#259), so a caller
+/// reading any one of these tools learns from it alone whether a result is
+/// current and what to do when it is not. `refresh_vault`, which it points
+/// at, is not advertised in read-only mode, hence the reread advice beside
+/// it. The `collection_revision` sentence follows
+/// `VaultCollectionState::collection_revision`.
+const COLLECTION_FRESHNESS: &str = "Every result says whether it is current, in participants[].state, one entry per Vault read: fresh, stale, not_searchable (semantic search only: indexed but not yet embedded) or unavailable (nothing read; see its error; under a one-Vault scope the read fails with that error instead). partial is true when any participant is not fresh. A stale participant is still answered, but its part may be behind its Markdown: usually it is a prior index generation served while a turn catches up. When a participant reports stale, call refresh_vault for that Vault (write mode only; read-only callers read again in a few seconds, since a turn is usually already queued). A write can take up to about five seconds to reach the index, so a read straight after one can report fresh without it. collection_revision does not answer any of this. It counts Vault collection status changes (a Vault added, edited, enabled, disabled or disconnected, or its index, Git, watcher or local-file status moving) and does not track note content: a note write does not advance it, and the index turn that follows moves it only through the Vault's index status.";
+
+fn collection_description(summary: &str) -> String {
+    format!("{summary} {COLLECTION_FRESHNESS}")
+}
+
 fn collection_tool(name: &str, description: &str) -> Value {
-    json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{"scope":scope_schema()},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()})
+    json!({"name":name,"description":collection_description(description),"inputSchema":{"type":"object","properties":{"scope":scope_schema()},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()})
 }
 
 /// `get_tree` no longer shares [`collection_tool`]'s scope-only schema: it takes
@@ -1211,7 +1223,7 @@ fn collection_tool(name: &str, description: &str) -> Value {
 fn tree_tool() -> Value {
     json!({
         "name": "get_tree",
-        "description": "Return grouped explorer trees for one Vault or all enabled Vaults. With no folder, max_depth or include_notes the entire Vault is returned, which is large. To see a Vault's shape cheaply, call with include_notes false: that returns every folder at every level with its note count and no notes. Use folder to read one subtree, and max_depth to stop descending. Every folder reports note_count, the notes directly inside it; a folder held back by max_depth is marked truncated.",
+        "description": collection_description("Return grouped explorer trees for one Vault or all enabled Vaults. With no folder, max_depth or include_notes the entire Vault is returned, which is large. To see a Vault's shape cheaply, call with include_notes false: that returns every folder at every level with its note count and no notes. Use folder to read one subtree, and max_depth to stop descending. Every folder reports note_count, the notes directly inside it; a folder held back by max_depth is marked truncated."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1331,6 +1343,77 @@ mod tests {
                 "{name} takes scope alone"
             );
         }
+    }
+
+    /// Every tool whose result is the shared envelope says, in its own
+    /// description, how to read the envelope's freshness (#259). The set is
+    /// discovered from the advertised output schemas, so a new collection
+    /// read without the paragraph fails here, and then pinned, so one that
+    /// stops returning the envelope is noticed too.
+    #[test]
+    fn every_collection_read_describes_its_own_freshness() {
+        let mut checked = Vec::new();
+        for tool in read_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            let schema = serde_json::to_value(
+                results::output_schema_for(name).unwrap_or_else(|| panic!("{name} has a schema")),
+            )
+            .expect("schema serializes");
+            if schema["properties"]["participants"].is_null() {
+                continue;
+            }
+            let description = tool["description"].as_str().expect("description");
+            assert!(
+                description.ends_with(COLLECTION_FRESHNESS),
+                "{name} must carry the freshness paragraph"
+            );
+            checked.push(name.to_owned());
+        }
+        checked.sort();
+        assert_eq!(
+            checked,
+            [
+                "get_graph",
+                "get_stats",
+                "get_tree",
+                "query_notes",
+                "recently_modified",
+                "search_notes",
+            ]
+        );
+    }
+
+    /// A caller arriving at `collection_revision` from `list_vaults` or from
+    /// an output schema meets the same statement as one reading a
+    /// collection read's description.
+    #[test]
+    fn collection_revision_is_described_wherever_a_caller_meets_it() {
+        let tools = read_tools_list();
+        let list_vaults = tools
+            .iter()
+            .find(|tool| tool["name"] == "list_vaults")
+            .expect("list_vaults is advertised");
+        assert!(
+            list_vaults["description"]
+                .as_str()
+                .expect("description")
+                .contains("does not advance on note writes")
+        );
+        for name in ["get_tree", "list_vaults"] {
+            let schema = serde_json::to_value(results::output_schema_for(name).expect("schema"))
+                .expect("schema serializes");
+            let described = schema["properties"]["collection_revision"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} describes collection_revision"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                described.contains("note write does not advance it"),
+                "{name}: {described}"
+            );
+        }
+        assert!(crate::mcp::config::SERVER_INSTRUCTIONS.contains("not note content"));
     }
 
     #[test]
