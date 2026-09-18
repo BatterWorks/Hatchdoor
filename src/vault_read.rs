@@ -25,9 +25,10 @@ mod saved_query;
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
 pub use saved_query::{
-    SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryIgnored,
-    SavedQueryMarkerProblem, SavedQueryOutcome, SavedQueryRefusal, SavedQueryResult, SavedQueryRow,
-    SavedQueryTable, SavedQueryTruncation, SavedQueryTruncationReason,
+    SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryEvaluation,
+    SavedQueryIgnored, SavedQueryMarkerProblem, SavedQueryOutcome, SavedQueryRefusal,
+    SavedQueryResult, SavedQueryRow, SavedQueryRows, SavedQuerySummary, SavedQueryTable,
+    SavedQueryTruncation, SavedQueryTruncationReason,
 };
 
 /// An explicit collection read target. There is deliberately no selected,
@@ -183,6 +184,14 @@ impl VaultReadError {
             | "note_not_found"
             | "note_unreadable"
             | "invalid_frontmatter"
+            // One addressed saved query (#277), reported by MCP's
+            // `evaluate_saved_query`; no HTTP route evaluates a single one.
+            | "no_saved_queries"
+            | "saved_query_name_required"
+            | "saved_query_not_found"
+            | "saved_query_name_ambiguous"
+            | "saved_query_refused"
+            | "saved_query_stopped"
             // `note_attachments` reads the Note through the write module's
             // attachment lister, whose only failure on a read is I/O.
             | "write_failed" => self.code.as_str(),
@@ -255,10 +264,55 @@ pub struct VaultReadProjection<T> {
     pub data: T,
 }
 
+impl<T> VaultReadProjection<T> {
+    /// The same envelope around `f(data)`, so a projection's freshness
+    /// travels with whatever its data becomes.
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> VaultReadProjection<U> {
+        VaultReadProjection {
+            scope: self.scope,
+            collection_revision: self.collection_revision,
+            partial: self.partial,
+            participants: self.participants,
+            data: f(self.data),
+        }
+    }
+
+    /// [`Self::map`] for a conversion that can refuse the data.
+    fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<VaultReadProjection<U>, E> {
+        Ok(VaultReadProjection {
+            scope: self.scope,
+            collection_revision: self.collection_revision,
+            partial: self.partial,
+            participants: self.participants,
+            data: f(self.data)?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultQualifiedNote {
     pub vault_id: VaultId,
+    /// The Note exactly as its file holds it. `content` is the authoritative
+    /// Markdown, saved query definitions included, and never anything
+    /// computed from them.
     pub note: Note,
+    /// Every saved query (fenced `base` block) the Note holds, in document
+    /// order, with the name each is addressed by (#277). Nothing here is
+    /// evaluated: rows come only from [`VaultReadCore::saved_query`], so no
+    /// exact read pairs computed content with the `content_hash` a write
+    /// accepts (ADR-21 part 4).
+    #[serde(default)]
+    pub saved_queries: Vec<SavedQuerySummary>,
+}
+
+impl VaultQualifiedNote {
+    fn new(vault_id: VaultId, note: Note) -> Self {
+        Self {
+            vault_id,
+            saved_queries: saved_query::saved_query_summaries(&note.content),
+            note,
+        }
+    }
 }
 
 /// The rich, exact single-Vault statistics report — every field the legacy
@@ -670,7 +724,7 @@ impl<'a> VaultReadCore<'a> {
             .read_note_by_slug(slug)
             .map(|note| {
                 note.filter(|note| !self.surface.hides(note.layer.as_deref()))
-                    .map(|note| VaultQualifiedNote { vault_id, note })
+                    .map(|note| VaultQualifiedNote::new(vault_id, note))
             })
             .map_err(|error| {
                 unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
@@ -958,7 +1012,7 @@ impl<'a> VaultReadCore<'a> {
         };
         let blocks = saved_query::saved_query_blocks(&note.note.content);
         let clock = saved_query::EvaluationClock::current();
-        let projection = self.collection(VaultScope::One(vault_id), |vault_id, _, snapshot| {
+        let projection = self.one_vault(vault_id, |vault_id, snapshot| {
             saved_query::evaluate_saved_queries(
                 blocks.clone(),
                 vault_id,
@@ -967,23 +1021,63 @@ impl<'a> VaultReadCore<'a> {
                 saved_query::SavedQueryCeiling::ENFORCED,
             )
         })?;
-        let evaluated = projection
-            .data
-            .into_iter()
-            .next()
-            .expect("VaultScope::One yields exactly one participant on success");
-        Ok(Some(VaultReadProjection {
-            scope: projection.scope,
-            collection_revision: projection.collection_revision,
-            partial: projection.partial,
-            participants: projection.participants,
-            data: saved_query::SavedQueriesResponse {
+        Ok(Some(projection.map(|evaluated| {
+            saved_query::SavedQueriesResponse {
                 vault_id,
                 slug: note.note.slug,
                 queries: evaluated.queries,
                 marker_problems: evaluated.marker_problems,
-            },
-        }))
+            }
+        })))
+    }
+
+    /// One saved query in one Note, addressed by name and evaluated against
+    /// that Note's own Vault at this moment (#277, ADR-21).
+    ///
+    /// `name` may be `None` only when the Note holds exactly one saved query.
+    /// Every way a request can fail to reach an answer is an error with its
+    /// own code, never an empty row set: a Note with no saved query, a missing
+    /// name among several, a name matching none or more than one, a definition
+    /// Hatchdoor refuses, and one stopped at the ceiling. Only the addressed
+    /// saved query is evaluated, and like [`Self::saved_queries`] there is no
+    /// scope argument, so the Vault is always the Note's own. `Ok(None)` is a
+    /// Note this surface does not have.
+    pub fn saved_query(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+        name: Option<&str>,
+    ) -> Result<Option<VaultReadProjection<SavedQueryEvaluation>>, VaultReadError> {
+        let Some(note) = self.exact_note(vault_id, slug)? else {
+            return Ok(None);
+        };
+        let selected = saved_query::select_saved_query(
+            saved_query::saved_query_blocks(&note.note.content),
+            name,
+        )
+        .map_err(|refusal| saved_query_error(vault_id, refusal.code(), refusal.message()))?;
+        let clock = saved_query::EvaluationClock::current();
+        let projection = self.one_vault(vault_id, |vault_id, snapshot| {
+            selected.evaluate(
+                vault_id,
+                &snapshot.notes,
+                &clock,
+                saved_query::SavedQueryCeiling::ENFORCED,
+            )
+        })?;
+        projection
+            .try_map(|outcome| {
+                let rows = outcome.into_rows().map_err(|reason| {
+                    saved_query_error(vault_id, reason.code(), reason.message())
+                })?;
+                Ok(SavedQueryEvaluation {
+                    vault_id,
+                    slug: note.note.slug,
+                    name: selected.name,
+                    rows,
+                })
+            })
+            .map(Some)
     }
 
     /// The rich per-Vault statistics report, scoped to exactly one Vault —
@@ -1201,7 +1295,7 @@ impl<'a> VaultReadCore<'a> {
                 note.filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(|note| {
                         (
-                            VaultQualifiedNote { vault_id, note },
+                            VaultQualifiedNote::new(vault_id, note),
                             control.vault_path().to_path_buf(),
                         )
                     })
@@ -1289,6 +1383,24 @@ impl<'a> VaultReadCore<'a> {
     /// [`Self::try_collection`], and keeping that the narrower door is what
     /// stops one projection's refusal from becoming every projection's
     /// concern.
+    /// [`Self::collection`] over exactly one Vault, whose one datum becomes
+    /// the envelope's `data`. For the exact reads that still report their
+    /// Vault's freshness, such as a Note's saved queries.
+    fn one_vault<T>(
+        &self,
+        vault_id: VaultId,
+        map: impl Fn(VaultId, &VaultSnapshotRead) -> T,
+    ) -> Result<VaultReadProjection<T>, VaultReadError> {
+        let projection = self.collection(VaultScope::One(vault_id), |vault_id, _, snapshot| {
+            map(vault_id, snapshot)
+        })?;
+        Ok(projection.map(|data| {
+            data.into_iter()
+                .next()
+                .expect("VaultScope::One yields exactly one participant on success")
+        }))
+    }
+
     fn collection<T>(
         &self,
         scope: VaultScope,
@@ -1447,6 +1559,17 @@ fn unavailable_participant(
         vault_name,
         state: VaultParticipantState::Unavailable,
         error: Some(unavailable(vault_id, "vault_unavailable", message, true)),
+    }
+}
+
+/// A request for one saved query that reached no answer. Retrying the same
+/// request against the same Note gives the same refusal.
+fn saved_query_error(vault_id: VaultId, code: &str, message: String) -> VaultReadError {
+    VaultReadError {
+        code: code.to_string(),
+        message,
+        vault_id: Some(vault_id),
+        retryable: false,
     }
 }
 
@@ -3911,5 +4034,64 @@ mod tests {
         };
         assert_eq!(rows(&everything), ["Hidden", "Visible"]);
         assert_eq!(rows(&demo), ["Visible"]);
+    }
+
+    #[test]
+    fn one_named_saved_query_evaluates_against_its_own_vault_alone() {
+        let workspace = workspace(&[
+            ("Home", SUBSCRIPTION_VAULT),
+            (
+                "Elsewhere",
+                &[(
+                    "Spotify.md",
+                    "---\ntags: [type/entity/subscription]\nprice: 11\n---\n# Spotify",
+                )],
+            ),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+
+        let evaluation = reads
+            .saved_query(
+                vault_id,
+                "active-subscriptions",
+                Some("active-subscriptions"),
+            )
+            .expect("evaluated")
+            .expect("the aggregator note exists");
+        assert_eq!(evaluation.scope, VaultScope::One(vault_id));
+        assert_eq!(evaluation.data.vault_id, vault_id);
+        assert_eq!(evaluation.data.slug, "active-subscriptions");
+        assert_eq!(
+            evaluation.data.name.as_deref(),
+            Some("active-subscriptions")
+        );
+        let super::SavedQueryRows::Populated(table) = &evaluation.data.rows else {
+            panic!("expected rows, got {:?}", evaluation.data.rows);
+        };
+        let titles: Vec<_> = table.rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["Netflix", "Newspaper"]);
+        assert!(table.rows.iter().all(|row| row.vault_id == vault_id));
+
+        // The note holds two saved queries, so leaving the name out is refused
+        // rather than resolved to the first.
+        let error = reads
+            .saved_query(vault_id, "active-subscriptions", None)
+            .expect_err("two saved queries and no name");
+        assert_eq!(error.public_code(), "saved_query_name_required");
+        assert_eq!(error.vault_id, Some(vault_id));
+        assert!(!error.retryable);
+
+        let error = reads
+            .saved_query(vault_id, "netflix", None)
+            .expect_err("no saved query");
+        assert_eq!(error.public_code(), "no_saved_queries");
+
+        assert!(
+            reads
+                .saved_query(vault_id, "no-such-note", None)
+                .expect("read")
+                .is_none()
+        );
     }
 }

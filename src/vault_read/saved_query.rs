@@ -34,6 +34,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_yaml_ng::Value as Yaml;
@@ -167,7 +168,7 @@ impl SavedQueryOutcome {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedQueryTable {
     /// The view's `name`, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,7 +184,7 @@ pub struct SavedQueryTable {
     pub ignored: Vec<SavedQueryIgnored>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedQueryEmpty {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_name: Option<String>,
@@ -213,7 +214,7 @@ fn refuse(construct: impl Into<String>, message: impl Into<String>) -> SavedQuer
 /// A presentation instruction that was not carried out. Only an instruction
 /// that cannot change which rows appear is ever ignored; anything else
 /// refuses the saved query.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedQueryIgnored {
     /// The instruction as the definition gives it: `groupBy`, `summaries`,
     /// `type: cards`.
@@ -251,7 +252,7 @@ pub enum SavedQueryMarkerProblem {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedQueryColumn {
     /// The property as the definition's `order` names it, `file.name` or
     /// `note.price`.
@@ -262,7 +263,7 @@ pub struct SavedQueryColumn {
 }
 
 /// One qualifying Note, Vault-qualified, with one cell per column.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedQueryRow {
     pub vault_id: VaultId,
     pub title: String,
@@ -273,20 +274,57 @@ pub struct SavedQueryRow {
     pub cells: Vec<Value>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedQueryTruncation {
     pub reason: SavedQueryTruncationReason,
     /// How many rows the table holds.
     pub shown: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SavedQueryTruncationReason {
     /// The view's own `limit` held rows back, as its author asked.
     DefinitionLimit,
     /// Hatchdoor's row ceiling held rows back, whatever the definition asked.
     Ceiling,
+}
+
+/// One saved query a Note holds, as an exact read of the Note reports it
+/// (#277). Nothing is evaluated to produce it: it tells a caller what it may
+/// address, so it never has to read a definition to find out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedQuerySummary {
+    /// The name its `hatchdoor-query` marker gives it, and the one to pass
+    /// back to address it. `null` when it has no marker or an unusable one:
+    /// such a saved query can be addressed only while it is the Note's only
+    /// one. Two entries carrying one name collide, and that name addresses
+    /// neither of them.
+    pub name: Option<String>,
+}
+
+/// One saved query, addressed by name and evaluated against its Note's own
+/// Vault (#277). Only an answer is ever built into this: a definition that
+/// could not be evaluated is a refusal, never a row set.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedQueryEvaluation {
+    pub vault_id: VaultId,
+    /// The Note holding the saved query.
+    pub slug: String,
+    /// The saved query's name, or `null` for a Note's only, unnamed one.
+    pub name: Option<String>,
+    #[serde(flatten)]
+    pub rows: SavedQueryRows,
+}
+
+/// The two answers a saved query can give. `populated` always holds at least
+/// one row; `empty` means every Note in the Vault was checked and none
+/// qualified.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SavedQueryRows {
+    Populated(SavedQueryTable),
+    Empty(SavedQueryEmpty),
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +351,14 @@ pub(super) enum MarkerName {
 }
 
 impl MarkerName {
+    /// The name this block may be addressed by: a usable one, or none.
+    fn addressable(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name),
+            Self::Absent | Self::Unusable(_) => None,
+        }
+    }
+
     /// The name as the marker writes it.
     fn written(&self) -> &str {
         match self {
@@ -551,21 +597,15 @@ pub(super) fn evaluate_saved_queries(
                     None
                 }
             };
-            let outcome = if position >= MAX_SAVED_QUERIES_PER_NOTE {
-                SavedQueryOutcome::Stopped {
-                    message: format!(
-                        "A note may hold at most {MAX_SAVED_QUERIES_PER_NOTE} saved queries, and this is number {}.",
-                        position + 1
-                    ),
-                }
-            } else {
-                match parse_definition(&block.source, clock) {
-                    Ok(definition) => {
-                        evaluate(definition, vault_id, notes, ceiling, &mut scan_budget)
-                    }
-                    Err(refusal) => SavedQueryOutcome::Refused(refusal),
-                }
-            };
+            let outcome = evaluate_at(
+                position,
+                &block.source,
+                vault_id,
+                notes,
+                clock,
+                ceiling,
+                &mut scan_budget,
+            );
             SavedQueryResult {
                 name,
                 source: block.source,
@@ -599,6 +639,269 @@ pub(super) fn evaluate_saved_queries(
 pub(super) struct EvaluatedSavedQueries {
     pub(super) queries: Vec<SavedQueryResult>,
     pub(super) marker_problems: Vec<SavedQueryMarkerProblem>,
+}
+
+/// The outcome for the saved query at `position` in its Note. The page and an
+/// addressed read both go through here, so the per-Note limit and the
+/// definition's parse cannot differ between them.
+fn evaluate_at(
+    position: usize,
+    source: &str,
+    vault_id: VaultId,
+    notes: &[VaultSnapshotNote],
+    clock: &EvaluationClock,
+    ceiling: SavedQueryCeiling,
+    scan_budget: &mut usize,
+) -> SavedQueryOutcome {
+    if position >= MAX_SAVED_QUERIES_PER_NOTE {
+        return SavedQueryOutcome::Stopped {
+            message: format!(
+                "A note may hold at most {MAX_SAVED_QUERIES_PER_NOTE} saved queries, and this is number {}.",
+                position + 1
+            ),
+        };
+    }
+    match parse_definition(source, clock) {
+        Ok(definition) => evaluate(definition, vault_id, notes, ceiling, scan_budget),
+        Err(refusal) => SavedQueryOutcome::Refused(refusal),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Addressing one saved query (#277)
+// ---------------------------------------------------------------------------
+
+/// Every saved query `markdown` holds, in document order, with the name each
+/// may be addressed by.
+pub(super) fn saved_query_summaries(markdown: &str) -> Vec<SavedQuerySummary> {
+    saved_query_blocks(markdown)
+        .blocks
+        .into_iter()
+        .map(|block| SavedQuerySummary {
+            name: block.name.addressable().map(str::to_string),
+        })
+        .collect()
+}
+
+/// The one saved query a request addressed, not yet evaluated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SelectedSavedQuery {
+    /// Its place in the Note, which the per-Note limit counts.
+    position: usize,
+    pub(super) name: Option<String>,
+    pub(super) source: String,
+}
+
+impl SelectedSavedQuery {
+    /// Evaluate this saved query alone. It has the whole scan budget: the
+    /// budget bounds the work one read does, and this read evaluates one
+    /// saved query.
+    pub(super) fn evaluate(
+        &self,
+        vault_id: VaultId,
+        notes: &[VaultSnapshotNote],
+        clock: &EvaluationClock,
+        ceiling: SavedQueryCeiling,
+    ) -> SavedQueryOutcome {
+        let mut scan_budget = ceiling.max_scanned_notes;
+        evaluate_at(
+            self.position,
+            &self.source,
+            vault_id,
+            notes,
+            clock,
+            ceiling,
+            &mut scan_budget,
+        )
+    }
+}
+
+/// Why a request for one saved query named none of a Note's saved queries.
+/// A request is never resolved by position or by a guess, so reordering a
+/// Note cannot change what a name answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SelectionRefusal {
+    NoSavedQueries,
+    /// No name was given and the Note holds more than one saved query.
+    NameRequired(Addressable),
+    UnknownName {
+        requested: String,
+        addressable: Addressable,
+    },
+    /// Two or more saved queries claim the name.
+    AmbiguousName {
+        name: String,
+        claimants: usize,
+    },
+}
+
+/// What a Note offers to address, for a refusal to list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Addressable {
+    total: usize,
+    /// Each distinct name, in document order.
+    names: Vec<String>,
+    unnamed: usize,
+}
+
+impl Addressable {
+    fn describe(&self) -> String {
+        let named = if self.names.is_empty() {
+            "None of them has a name.".to_string()
+        } else {
+            let quoted: Vec<String> = self
+                .names
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect();
+            format!("Names: {}.", quoted.join(", "))
+        };
+        let unnamed = match self.unnamed {
+            0 => String::new(),
+            1 => " 1 has no name, so it can only be evaluated while it is the note's only saved query.".to_string(),
+            count => format!(" {count} have no name, so they can only be evaluated while one is the note's only saved query."),
+        };
+        format!("{named}{unnamed}")
+    }
+}
+
+impl SelectionRefusal {
+    /// The stable code a caller branches on.
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::NoSavedQueries => "no_saved_queries",
+            Self::NameRequired(_) => "saved_query_name_required",
+            Self::UnknownName { .. } => "saved_query_not_found",
+            Self::AmbiguousName { .. } => "saved_query_name_ambiguous",
+        }
+    }
+
+    pub(super) fn message(&self) -> String {
+        match self {
+            Self::NoSavedQueries => {
+                "This note holds no saved query, so there is nothing to evaluate. A saved query is a fenced base block in the note.".to_string()
+            }
+            Self::NameRequired(addressable) => format!(
+                "This note holds {} saved queries, so name the one to evaluate. {}",
+                addressable.total,
+                addressable.describe()
+            ),
+            Self::UnknownName {
+                requested,
+                addressable,
+            } => format!(
+                "No saved query in this note is named \"{requested}\". {}",
+                addressable.describe()
+            ),
+            Self::AmbiguousName { name, claimants } => format!(
+                "{claimants} saved queries in this note are named \"{name}\", so the name addresses none of them until only one is."
+            ),
+        }
+    }
+}
+
+/// The saved query `name` addresses in a Note, or the one saved query the
+/// Note holds when no name is given.
+pub(super) fn select_saved_query(
+    found: NoteSavedQueries,
+    name: Option<&str>,
+) -> Result<SelectedSavedQuery, SelectionRefusal> {
+    let blocks = found.blocks;
+    if blocks.is_empty() {
+        return Err(SelectionRefusal::NoSavedQueries);
+    }
+    let addressable = || {
+        let mut names: Vec<String> = Vec::new();
+        let mut unnamed = 0;
+        for block in &blocks {
+            match block.name.addressable() {
+                Some(name) if !names.iter().any(|known| known == name) => {
+                    names.push(name.to_string())
+                }
+                Some(_) => {}
+                None => unnamed += 1,
+            }
+        }
+        Addressable {
+            total: blocks.len(),
+            names,
+            unnamed,
+        }
+    };
+    let selected = |position: usize| {
+        let block = &blocks[position];
+        SelectedSavedQuery {
+            position,
+            name: block.name.addressable().map(str::to_string),
+            source: block.source.clone(),
+        }
+    };
+
+    let Some(requested) = name else {
+        return if blocks.len() == 1 {
+            Ok(selected(0))
+        } else {
+            Err(SelectionRefusal::NameRequired(addressable()))
+        };
+    };
+    let claimants: Vec<usize> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.name.addressable() == Some(requested))
+        .map(|(position, _)| position)
+        .collect();
+    match claimants.as_slice() {
+        [position] => Ok(selected(*position)),
+        [] => Err(SelectionRefusal::UnknownName {
+            requested: requested.to_string(),
+            addressable: addressable(),
+        }),
+        _ => Err(SelectionRefusal::AmbiguousName {
+            name: requested.to_string(),
+            claimants: claimants.len(),
+        }),
+    }
+}
+
+/// Why an addressed saved query produced no answer: its definition was
+/// refused, or evaluating it would pass Hatchdoor's ceiling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum NotEvaluated {
+    Refused(SavedQueryRefusal),
+    Stopped(String),
+}
+
+impl NotEvaluated {
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::Refused(_) => "saved_query_refused",
+            Self::Stopped(_) => "saved_query_stopped",
+        }
+    }
+
+    pub(super) fn message(&self) -> String {
+        match self {
+            Self::Refused(refusal) => format!(
+                "Hatchdoor cannot evaluate this saved query because of {}: {} No row was computed, so this is not an empty result.",
+                refusal.construct, refusal.message
+            ),
+            Self::Stopped(message) => {
+                format!("{message} No row was returned, so this is not an empty result.")
+            }
+        }
+    }
+}
+
+impl SavedQueryOutcome {
+    /// The answer this outcome holds, or why there is none.
+    pub(super) fn into_rows(self) -> Result<SavedQueryRows, NotEvaluated> {
+        match self {
+            Self::Populated(table) => Ok(SavedQueryRows::Populated(table)),
+            Self::Empty(empty) => Ok(SavedQueryRows::Empty(empty)),
+            Self::Refused(refusal) => Err(NotEvaluated::Refused(refusal)),
+            Self::Stopped { message } => Err(NotEvaluated::Stopped(message)),
+        }
+    }
 }
 
 fn evaluate(

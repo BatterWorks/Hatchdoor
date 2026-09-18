@@ -1067,3 +1067,215 @@ fn marker_problems_serialize_with_a_kind_a_reader_can_branch_on() {
         json!({"problem": "orphaned", "name": "n", "line": 3, "message": "m"})
     );
 }
+
+// ---------------------------------------------------------------------------
+// Addressing one saved query (#277)
+// ---------------------------------------------------------------------------
+
+const THREE_QUERIES: &str = "<!-- hatchdoor-query: active -->\n```base\nfilters: 'finished == null'\n```\n\n```base\nfilters: 'price == 8'\n```\n\n<!-- hatchdoor-query: finished -->\n```base\nfilters: 'finished < now()'\n```\n";
+
+fn select(markdown: &str, name: Option<&str>) -> Result<SelectedSavedQuery, SelectionRefusal> {
+    select_saved_query(saved_query_blocks(markdown), name)
+}
+
+#[test]
+fn a_notes_saved_queries_are_listed_by_name_and_an_unnamed_one_as_present() {
+    let summaries = saved_query_summaries(THREE_QUERIES);
+    assert_eq!(
+        summaries,
+        vec![
+            SavedQuerySummary {
+                name: Some("active".to_string())
+            },
+            SavedQuerySummary { name: None },
+            SavedQuerySummary {
+                name: Some("finished".to_string())
+            },
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(&summaries[1]).expect("serialize"),
+        json!({"name": null}),
+        "an unnamed saved query is reported present, with its name explicitly null"
+    );
+    assert!(saved_query_summaries("# Plain\n\n```yaml\na: 1\n```\n").is_empty());
+}
+
+#[test]
+fn a_name_picks_its_saved_query_wherever_it_sits_in_the_note() {
+    let selected = select(THREE_QUERIES, Some("finished")).expect("selected");
+    assert_eq!(selected.name.as_deref(), Some("finished"));
+    assert_eq!(selected.source, "filters: 'finished < now()'");
+
+    // Reordering the note changes nothing about what the name answers.
+    let reordered = "<!-- hatchdoor-query: finished -->\n```base\nfilters: 'finished < now()'\n```\n\n<!-- hatchdoor-query: active -->\n```base\nfilters: 'finished == null'\n```\n";
+    let again = select(reordered, Some("finished")).expect("selected");
+    assert_eq!(again.source, selected.source);
+}
+
+#[test]
+fn the_name_may_be_left_out_only_when_the_note_holds_exactly_one_saved_query() {
+    let one = "# One\n\n```base\nfilters: 'price == 8'\n```\n";
+    let selected = select(one, None).expect("the only saved query");
+    assert_eq!(selected.name, None);
+    assert_eq!(selected.source, "filters: 'price == 8'");
+
+    let refusal = select(THREE_QUERIES, None).expect_err("ambiguous without a name");
+    assert_eq!(refusal.code(), "saved_query_name_required");
+    let message = refusal.message();
+    assert!(
+        message.contains("3 saved queries")
+            && message.contains("\"active\"")
+            && message.contains("\"finished\"")
+            && message.contains("1 has no name"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_unknown_name_is_refused_and_lists_the_names_there_are() {
+    let refusal = select(THREE_QUERIES, Some("activ")).expect_err("no such name");
+    assert_eq!(refusal.code(), "saved_query_not_found");
+    let message = refusal.message();
+    assert!(
+        message.contains("\"activ\"") && message.contains("\"active\""),
+        "{message}"
+    );
+
+    // A name never reaches an unnamed saved query, even the only one.
+    let one = "```base\nfilters: 'price == 8'\n```\n";
+    assert_eq!(
+        select(one, Some("anything")).expect_err("unnamed").code(),
+        "saved_query_not_found"
+    );
+}
+
+#[test]
+fn a_name_two_saved_queries_share_is_refused_rather_than_resolved_to_either() {
+    let markdown = "<!-- hatchdoor-query: same -->\n```base\nviews: []\n```\n<!-- hatchdoor-query: same -->\n```base\nfilters: 'price == 8'\n```\n";
+    let refusal = select(markdown, Some("same")).expect_err("collision");
+    assert_eq!(refusal.code(), "saved_query_name_ambiguous");
+    assert!(
+        refusal.message().contains("\"same\""),
+        "{}",
+        refusal.message()
+    );
+}
+
+#[test]
+fn an_unusable_marker_leaves_its_saved_query_unnamed_for_addressing_too() {
+    let markdown = "<!-- hatchdoor-query: Active Subs -->\n```base\nviews: []\n```\n";
+    assert_eq!(
+        saved_query_summaries(markdown),
+        vec![SavedQuerySummary { name: None }]
+    );
+    assert_eq!(
+        select(markdown, Some("Active Subs"))
+            .expect_err("unusable")
+            .code(),
+        "saved_query_not_found"
+    );
+    assert!(select(markdown, None).is_ok());
+}
+
+#[test]
+fn a_note_with_no_saved_query_is_refused_whatever_is_asked() {
+    for name in [None, Some("active")] {
+        let refusal = select("# Plain\n\nNo queries.\n", name).expect_err("nothing to evaluate");
+        assert_eq!(refusal.code(), "no_saved_queries");
+        assert!(
+            refusal.message().contains("no saved query"),
+            "{}",
+            refusal.message()
+        );
+    }
+}
+
+#[test]
+fn one_addressed_saved_query_is_evaluated_alone_to_rows_or_a_refusal() {
+    let at = clock("2026-09-06T12:00:00");
+    let vault = vault_id();
+    let populated = select(THREE_QUERIES, Some("finished"))
+        .expect("selected")
+        .evaluate(vault, &subscriptions(), &at, SavedQueryCeiling::ENFORCED)
+        .into_rows()
+        .expect("evaluated");
+    let SavedQueryRows::Populated(table) = populated else {
+        panic!("expected rows, got {populated:?}");
+    };
+    assert!(table.rows.iter().all(|row| row.vault_id == vault));
+    assert!(!table.rows.is_empty());
+
+    let empty = select("```base\nfilters: 'price == 12345'\n```\n", None)
+        .expect("selected")
+        .evaluate(vault, &subscriptions(), &at, SavedQueryCeiling::ENFORCED)
+        .into_rows()
+        .expect("evaluated");
+    assert!(matches!(empty, SavedQueryRows::Empty(_)), "{empty:?}");
+
+    let refused = select("```base\nfilters: 'daysUntil(renewal) < 7'\n```\n", None)
+        .expect("selected")
+        .evaluate(vault, &subscriptions(), &at, SavedQueryCeiling::ENFORCED)
+        .into_rows()
+        .expect_err("a broken definition is never rows");
+    assert_eq!(refused.code(), "saved_query_refused");
+    assert!(
+        refused.message().contains("daysUntil()"),
+        "{}",
+        refused.message()
+    );
+
+    let tight = SavedQueryCeiling {
+        max_scanned_notes: 2,
+        max_rows: 500,
+    };
+    let stopped = select(THREE_QUERIES, Some("active"))
+        .expect("selected")
+        .evaluate(vault, &subscriptions(), &at, tight)
+        .into_rows()
+        .expect_err("past the scan ceiling");
+    assert_eq!(stopped.code(), "saved_query_stopped");
+}
+
+#[test]
+fn an_addressed_saved_query_past_the_per_note_limit_is_stopped_as_it_is_on_the_page() {
+    let mut markdown = String::new();
+    for index in 0..=MAX_SAVED_QUERIES_PER_NOTE {
+        markdown.push_str(&format!(
+            "<!-- hatchdoor-query: q{index} -->\n```base\nviews: []\n```\n\n"
+        ));
+    }
+    let last = format!("q{MAX_SAVED_QUERIES_PER_NOTE}");
+    let stopped = select(&markdown, Some(&last))
+        .expect("selected")
+        .evaluate(
+            vault_id(),
+            &subscriptions(),
+            &clock("2026-09-06T12:00:00"),
+            SavedQueryCeiling::ENFORCED,
+        )
+        .into_rows()
+        .expect_err("past the per-note limit");
+    assert_eq!(stopped.code(), "saved_query_stopped");
+}
+
+#[test]
+fn an_evaluation_serializes_its_status_beside_the_rows() {
+    let evaluation = SavedQueryEvaluation {
+        vault_id: vault_id(),
+        slug: "dashboard".to_string(),
+        name: None,
+        rows: SavedQueryRows::Empty(SavedQueryEmpty {
+            view_name: None,
+            columns: vec![],
+            ignored: vec![],
+        }),
+    };
+    let value = serde_json::to_value(&evaluation).expect("serialize");
+    assert_eq!(value["status"], "empty");
+    assert_eq!(value["name"], serde_json::Value::Null);
+    assert!(
+        value.get("rows").is_none(),
+        "an empty answer carries no row list: {value}"
+    );
+}

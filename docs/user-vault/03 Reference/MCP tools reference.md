@@ -159,7 +159,7 @@ Available whenever MCP is enabled, independent of write mode.
 | Tool | Required parameters | Purpose |
 | --- | --- | --- |
 | `search_notes` | `scope`, `query` | Search one Vault or all enabled Vaults. Optional: `mode` (`semantic` default or `keyword`), `limit` (1–50, default 10), `per_note_cap` (1–10, default 2), `layers` (array of layer names to include). |
-| `get_note` | `vault_id`, `slug` | Read one exact note's authoritative Markdown. |
+| `get_note` | `vault_id`, `slug` | Read one exact note's authoritative Markdown. Also lists the note's saved queries under `saved_queries`, by name, without evaluating them. |
 | `get_note_links` | `vault_id`, `slug` | Outgoing links and backlinks for one exact note. |
 | `resolve_wikilink` | `vault_id`, `target` | Resolve a wikilink target within one Vault. |
 | `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. Optional: `folder` (a Vault-relative folder to return as the root), `max_depth` (how far below it to descend, minimum 1), `include_notes` (default `true`). |
@@ -168,6 +168,7 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter metadata — `tags`, `aliases`, and every remaining top-level key under `properties` — without returning the Markdown body. A note with no frontmatter block answers `has_frontmatter: false` with empty collections rather than an error. It also returns the note's `content_hash` — the same string `get_note` reports for that note at that instant, and covering the whole file, so a note with no frontmatter block still has one — which means the metadata can be written straight back without pulling the body over the wire first. |
 | `recently_modified` | `scope` | Recently modified notes. Optional `limit` (1–25, default 5). |
 | `query_notes` | `scope`, `conditions` | Select the notes whose tags, path, or frontmatter properties satisfy stated conditions. Optional: `properties` (names to return on each row), `limit` (1–200, default 50). See [[#Selecting notes by tag, path or property]]. |
+| `evaluate_saved_query` | `vault_id`, `slug` | Evaluate one saved query in a note and return the notes it selects as rows. Optional `name`, required when the note holds more than one. See [[#Reading a note's saved queries]]. |
 | `list_note_attachments` | `vault_id`, `slug` | List the attachments one note references, without the note's full content. Every non-Markdown file the note points at counts, not only the ones Hatchdoor can display. |
 | `get_attachment` | `vault_id`, `relative_path` | Fetch one attachment's bytes, addressed by the same `relative_path` `list_note_attachments` reports. Fetchable types are narrower than the managed set — `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`, `pdf` — so a video or data file is listed but refused here. Optional `encoding`: `url` (the default) returns a `download_url`, `base64` returns the bytes inline. |
 | `get_attachment_import_config` | `vault_id` | Report whether uploads are currently possible for this Vault, the available methods, their byte limits, and the allowed file extensions. Call this before uploading. |
@@ -204,6 +205,33 @@ Ten operators. `eq`, `ne`, `lt`, `lte`, `gt` and `gte` each need a `value`; `exi
 `properties` names the frontmatter to return on each row. A name a note does not carry is left off that row rather than returned as null, so "no value" and "the value is null" stay apart. Rows are ordered by path, then Vault, then slug, and `limit` is applied to that order across the whole collection, so two identical calls return identical rows. When more notes qualified than `limit` allowed through, the result says `truncated: true` rather than leaving a full page to read as a complete answer.
 
 A query Hatchdoor cannot answer — no conditions, a comparison with no value, an operator handed one it does not take — is refused with the structured error `invalid_query` naming what is wrong, before any Vault is touched.
+
+### Reading a note's saved queries
+
+A note can hold saved queries, fenced `base` blocks that describe which notes to list (see [[Supported Markdown reference]]). The note page draws each one as a table. An agent gets the same rows as data in two steps.
+
+`get_note` returns the note exactly as its file holds it, `base` blocks and name markers included, and never anything computed. Beside the note it returns `saved_queries`, one entry per block in the order they appear, each with the `name` its `<!-- hatchdoor-query: name -->` marker gives it, or `null` when it has none. That is how an agent learns what it can ask for without reading the definitions.
+
+`evaluate_saved_query` then evaluates one of them and returns the notes it selects. Pass the note's `vault_id` and `slug`, plus `name`. You can leave `name` out only when the note holds exactly one saved query. The agent never reads or rewrites the definition, so it cannot drop one of its conditions along the way. That is why this tool exists instead of leaving agents to rebuild the definition as a `query_notes` call.
+
+A saved query always reads the Vault its note lives in. The tool takes no `scope`, and a call that passes one is refused as an invalid argument.
+
+The answer sits inside the usual `scope`, `partial` and `participants` envelope, because the rows come from the Vault's index. Its `data` has a `status` of `populated` or `empty`. `populated` always carries at least one row. `empty` means every note was checked and none qualified, which is a real answer. `columns` lists the definition's columns, and each row carries the matched note's `vault_id`, `title`, `slug` and `relative_path`, plus `cells` with one value per column in the same order. A property the note does not have is `null`. When more notes qualified than the rows hold, `truncated` says why: `definition_limit` when the view's own `limit` held them back, `ceiling` when Hatchdoor's cap of 500 rows did. `ignored` names presentation instructions such as `groupBy` that were not carried out. The rows are complete without them.
+
+If the call cannot produce an answer, it fails with a structured error. It never returns an empty table instead:
+
+| `code` | Meaning |
+| --- | --- |
+| `no_saved_queries` | The note holds no saved query. |
+| `saved_query_name_required` | `name` was left out and the note holds several. The message lists the names. |
+| `saved_query_not_found` | No saved query in the note has that name. An unnamed saved query cannot be reached by any name. |
+| `saved_query_name_ambiguous` | Two or more saved queries in the note share the name, so it picks neither. Rename one. |
+| `saved_query_refused` | The definition uses something Hatchdoor cannot evaluate. The message names it, as the note page does. |
+| `saved_query_stopped` | Evaluating it would pass one of Hatchdoor's limits: 20,000 notes scanned, or more than 10 saved queries in the note. |
+
+The tool evaluates only the saved query you name, so it gets the whole 20,000-note scan budget to itself. The note page evaluates all of a note's saved queries together and splits that budget between them. On a large Vault, where a note's saved queries cannot all scan it within 20,000 notes between them, a later one can show **Stopped.** on the page and still return rows here. With two saved queries that happens past 10,000 notes, with three past about 6,700.
+
+A saved query is never picked by its position in the note. Moving blocks around changes nothing an agent gets back for a given name.
 
 > [!note]
 > `get_attachment_import_config`'s `enabled` field is the AND of two independent gates: `HATCHDOOR_MCP_WRITE_ENABLED` (instance-wide) and the target Vault's own `capabilities.mutate` (source mode and lifecycle phase). The response explains which one is currently false when `enabled` is `false`.

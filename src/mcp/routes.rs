@@ -922,6 +922,7 @@ mod tests {
                 "get_attachment",
                 "get_attachment_import_config",
                 "query_notes",
+                "evaluate_saved_query",
                 "recently_modified",
                 "batch",
             ]
@@ -2233,6 +2234,343 @@ mod tests {
                 "{body:#}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Saved queries reach an agent as data (#277)
+    // ---------------------------------------------------------------------------
+
+    const DASHBOARD: &str = "# Dashboard\n\n<!-- hatchdoor-query: topics -->\n```base\nfilters: 'file.hasTag(\"topic\")'\nviews:\n  - type: table\n    order: [file.name, status]\n```\n\n```base\nfilters: 'status == \"done\"'\n```\n\n<!-- hatchdoor-query: first -->\n```base\nfilters: 'file.hasTag(\"topic\")'\nviews:\n  - type: table\n    limit: 1\n```\n\n<!-- hatchdoor-query: nothing -->\n```base\nfilters: 'status == \"never\"'\n```\n\n<!-- hatchdoor-query: broken -->\n```base\nfilters: 'daysUntil(due) < 7'\n```\n\n<!-- hatchdoor-query: twice -->\n```base\nviews: []\n```\n\n<!-- hatchdoor-query: twice -->\n```base\nviews: []\n```\n";
+
+    fn saved_query_test_state() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        for (path, content) in [
+            ("Dashboard.md", DASHBOARD),
+            (
+                "Single.md",
+                "# Single\n\n```base\nfilters: 'file.hasTag(\"topic\")'\n```\n",
+            ),
+            ("Alpha.md", "---\ntags: [topic]\nstatus: open\n---\n# Alpha"),
+            ("Beta.md", "---\ntags: [topic]\nstatus: done\n---\n# Beta"),
+            ("Plain.md", "# Plain\n\nNo saved query here."),
+        ] {
+            std::fs::write(vault_root.join(path), content).expect("write fixture");
+        }
+        let state = base_state(&tmp);
+        (scoped_test_state(state, vault_root), tmp)
+    }
+
+    fn saved_query_error_code(body: &Value) -> &str {
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        body["result"]["structuredContent"]["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a structured error: {body:#}"))
+    }
+
+    #[tokio::test]
+    async fn get_note_returns_the_markdown_verbatim_and_lists_saved_queries_by_name() {
+        let (state, tmp) = saved_query_test_state();
+        let body = call_tool(&state, "get_note", json!({"slug": "dashboard"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(
+            content["note"]["content"].as_str(),
+            Some(DASHBOARD),
+            "every base block and marker survives untouched"
+        );
+        let on_disk = std::fs::read_to_string(tmp.path().join("vault/Dashboard.md")).unwrap();
+        assert_eq!(content["note"]["content"].as_str(), Some(on_disk.as_str()));
+        assert_eq!(
+            content["saved_queries"],
+            json!([
+                {"name": "topics"},
+                {"name": null},
+                {"name": "first"},
+                {"name": "nothing"},
+                {"name": "broken"},
+                {"name": "twice"},
+                {"name": "twice"},
+            ])
+        );
+        assert!(
+            content.get("rows").is_none() && content["note"].get("rows").is_none(),
+            "a note read carries no computed rows: {content:#}"
+        );
+
+        let plain = call_tool(&state, "get_note", json!({"slug": "plain"})).await;
+        assert_eq!(
+            plain["result"]["structuredContent"]["saved_queries"],
+            json!([])
+        );
+
+        // No argument turns a note read into a rendered one.
+        for extra in [json!({"render": true}), json!({"evaluate": true})] {
+            let mut arguments = json!({"slug": "dashboard"});
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let refused = call_tool(&state, "get_note", arguments).await;
+            assert_eq!(refused["error"]["code"], -32602, "{refused:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluate_saved_query_returns_structured_rows_that_validate_against_its_schema() {
+        let (state, _tmp) = saved_query_test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let body = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "topics"}),
+        )
+        .await;
+        assert_ne!(body["result"]["isError"], true, "{body:#}");
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["scope"], json!(vault_id));
+        assert!(content["participants"].is_array());
+        let data = &content["data"];
+        assert_eq!(data["status"], "populated");
+        assert_eq!(data["slug"], "dashboard");
+        assert_eq!(data["name"], "topics");
+        assert_eq!(
+            data["columns"],
+            json!([{"id": "file.name", "label": "name"}, {"id": "status", "label": "status"}])
+        );
+        let rows = data["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["vault_id"], json!(vault_id));
+        assert_eq!(rows[0]["slug"], "alpha");
+        assert_eq!(rows[0]["relative_path"], "Alpha");
+        assert_eq!(rows[0]["cells"], json!(["Alpha.md", "open"]));
+        assert!(data.get("truncated").is_none());
+
+        let schema = serde_json::to_value(
+            crate::mcp::results::output_schema_for("evaluate_saved_query").expect("schema"),
+        )
+        .expect("schema value");
+        let validator = jsonschema::validator_for(&schema).expect("valid schema");
+        assert!(validator.is_valid(content), "{content:#}");
+
+        // The view's own limit truncates, and says so rather than silently
+        // shortening the rows.
+        let first = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "first"}),
+        )
+        .await;
+        let data = &first["result"]["structuredContent"]["data"];
+        assert_eq!(data["rows"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            data["truncated"],
+            json!({"reason": "definition_limit", "shown": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_query_that_matches_nothing_is_empty_and_a_broken_one_is_an_error() {
+        let (state, _tmp) = saved_query_test_state();
+        let empty = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "nothing"}),
+        )
+        .await;
+        assert_ne!(empty["result"]["isError"], true, "{empty:#}");
+        let data = &empty["result"]["structuredContent"]["data"];
+        assert_eq!(data["status"], "empty");
+        assert!(data.get("rows").is_none(), "{data:#}");
+
+        let broken = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "broken"}),
+        )
+        .await;
+        assert_eq!(saved_query_error_code(&broken), "saved_query_refused");
+        let message = broken["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap();
+        assert!(message.contains("daysUntil()"), "{message}");
+        assert!(broken["result"]["structuredContent"].get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn evaluate_saved_query_addresses_by_name_and_never_by_position() {
+        let (state, _tmp) = saved_query_test_state();
+
+        let single = call_tool(&state, "evaluate_saved_query", json!({"slug": "single"})).await;
+        let data = &single["result"]["structuredContent"]["data"];
+        assert_eq!(data["status"], "populated", "{single:#}");
+        assert_eq!(data["name"], Value::Null);
+
+        let unnamed = call_tool(&state, "evaluate_saved_query", json!({"slug": "dashboard"})).await;
+        assert_eq!(
+            saved_query_error_code(&unnamed),
+            "saved_query_name_required"
+        );
+        let message = unnamed["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap();
+        for name in ["topics", "first", "nothing", "broken", "twice"] {
+            assert!(message.contains(&format!("\"{name}\"")), "{message}");
+        }
+
+        let unknown = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "topic"}),
+        )
+        .await;
+        assert_eq!(saved_query_error_code(&unknown), "saved_query_not_found");
+
+        let twice = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "twice"}),
+        )
+        .await;
+        assert_eq!(saved_query_error_code(&twice), "saved_query_name_ambiguous");
+
+        let none = call_tool(&state, "evaluate_saved_query", json!({"slug": "plain"})).await;
+        assert_eq!(saved_query_error_code(&none), "no_saved_queries");
+
+        let missing = call_tool(&state, "evaluate_saved_query", json!({"slug": "absent"})).await;
+        assert_eq!(saved_query_error_code(&missing), "note_not_found");
+    }
+
+    /// `evaluate_saved_query` is a read op like any other, so `batch` carries
+    /// it, and a refusal inside a batch is that item's structured error.
+    #[tokio::test]
+    async fn batch_carries_evaluate_saved_query_and_its_refusals() {
+        let (state, _tmp) = saved_query_test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "evaluate_saved_query", "arguments": {"vault_id": vault_id, "slug": "dashboard", "name": "topics"}},
+                {"op": "evaluate_saved_query", "arguments": {"vault_id": vault_id, "slug": "dashboard", "name": "broken"}},
+            ]}),
+        )
+        .await;
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], true, "{body:#}");
+        assert_eq!(items[0]["result"]["data"]["status"], "populated");
+        assert_eq!(items[1]["ok"], false, "{body:#}");
+        assert_eq!(items[1]["error"]["code"], "saved_query_refused");
+    }
+
+    /// Hatchdoor's 500-row cap holds rows back whatever the definition asks,
+    /// and the answer says so rather than passing a short table off as whole.
+    #[tokio::test]
+    async fn evaluate_saved_query_reports_the_row_ceiling_rather_than_shortening_silently() {
+        let (state, tmp) = saved_query_test_state();
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_root.join("bulk")).expect("bulk folder");
+        for index in 0..501 {
+            std::fs::write(
+                vault_root.join(format!("bulk/Item {index:03}.md")),
+                format!("---\ntags: [bulk]\n---\n# Item {index:03}"),
+            )
+            .expect("write bulk note");
+        }
+        std::fs::write(
+            vault_root.join("Bulk.md"),
+            "# Bulk\n\n```base\nfilters: 'file.hasTag(\"bulk\")'\n```\n",
+        )
+        .expect("write bulk dashboard");
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let index = crate::vault::VaultIndex::build(&vault_root).expect("rebuild index");
+        state
+            .startup_sqlite
+            .replace_vault_snapshot(vault_id, &index, state.embedder.as_ref())
+            .expect("republish snapshot");
+
+        let body = call_tool(&state, "evaluate_saved_query", json!({"slug": "bulk"})).await;
+        let data = &body["result"]["structuredContent"]["data"];
+        assert_eq!(data["status"], "populated", "{body:#}");
+        assert_eq!(data["rows"].as_array().map(Vec::len), Some(500));
+        assert_eq!(
+            data["truncated"],
+            json!({"reason": "ceiling", "shown": 500})
+        );
+    }
+
+    /// A saved query reads its Note's own Vault whoever asks, so the tool has
+    /// no scope to widen or narrow: a caller supplying one is refused rather
+    /// than answered from a Vault it named.
+    #[tokio::test]
+    async fn evaluate_saved_query_takes_no_scope_from_the_caller() {
+        let (state, _tmp) = saved_query_test_state();
+        for scope in [
+            json!("all"),
+            json!(crate::vault_registry::VaultId::generate().unwrap()),
+        ] {
+            let body = call_tool(
+                &state,
+                "evaluate_saved_query",
+                json!({"slug": "single", "scope": scope}),
+            )
+            .await;
+            assert_eq!(body["error"]["code"], -32602, "{body:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_mcp_refuses_an_evaluate_saved_query_call() {
+        let (state, _tmp) = saved_query_test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        state
+            .runtime_config
+            .save([("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string())])
+            .expect("disable MCP");
+        let response = send(
+            transport(&state),
+            "POST",
+            [("content-type", "application/json".into())].to_vec(),
+            Some(
+                json!({
+                    "jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"evaluate_saved_query","arguments":{"vault_id":vault_id,"slug":"single"}}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

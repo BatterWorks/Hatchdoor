@@ -6782,6 +6782,22 @@ mod tests {
         .await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_eq!(json_body(missing).await["code"], "note_not_found");
+
+        // The note read lists the saved queries by name (#277) and still
+        // returns the file verbatim, never a computed row.
+        let note = json_body(get(format!("/api/v1/vaults/{vault_id}/notes/dashboard")).await).await;
+        assert_eq!(
+            note["saved_queries"],
+            serde_json::json!([{"name": "cheap"}, {"name": null}])
+        );
+        assert_eq!(
+            note["note"]["content"].as_str(),
+            Some(
+                std::fs::read_to_string(vault_root.join("Dashboard.md"))
+                    .expect("read dashboard")
+                    .as_str()
+            )
+        );
     }
 
     #[tokio::test]

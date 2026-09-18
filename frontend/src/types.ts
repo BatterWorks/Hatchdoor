@@ -237,6 +237,15 @@ export type NoteMetadata = {
 export type VaultQualifiedNote = {
   vault_id: VaultId;
   note: Note;
+  /** The note's saved queries by name, never evaluated (#277). The page
+   * fetches rows from `.../saved-queries` instead. */
+  saved_queries: SavedQuerySummary[];
+};
+
+/** One fenced `base` block in a note; `name` is null when it has no usable
+ * `hatchdoor-query` marker. */
+export type SavedQuerySummary = {
+  name: string | null;
 };
 
 export type NoteLink = {

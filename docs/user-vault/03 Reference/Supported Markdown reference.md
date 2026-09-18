@@ -104,6 +104,8 @@ A block that is fine but matches no note shows **No matches.** and says it check
 
 An HTML comment of the form `<!-- hatchdoor-query: name -->` on the line before the block, with nothing but blank lines between them, gives the saved query a name. The name is lowercase letters, digits and hyphens and must be unique within the note. It is never shown on the page. A name that is not usable, or that two blocks share, gets a note under the table and the rows still appear, since a name never changes which rows qualify. A marker with no block after it gets a note where it sits. The marker sits outside the block on purpose, so the block stays exactly what Obsidian expects to read.
 
+An agent connected over MCP reads the same rows as data. `get_note` lists a note's saved queries by name, and `evaluate_saved_query` returns one query's rows. The name is how an agent picks a saved query when a note holds more than one. See [[MCP tools reference#Reading a note's saved queries]].
+
 ## Math
 
 Inline math uses single `$...$`; block math uses `$$...$$` on its own lines. Both render with KaTeX.
