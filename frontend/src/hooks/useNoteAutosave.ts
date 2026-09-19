@@ -19,11 +19,20 @@ export function useNoteAutosave({
   baseHash,
   enabled,
   save,
+  flushSave,
   onSaved,
 }: {
   baseHash: string;
   enabled: boolean;
   save: (content: string, expectedHash: string) => Promise<SaveResult>;
+  /**
+   * The unload send. `save` awaits a response, which a document being torn
+   * down never delivers, so the page supplies a fire-and-forget send with
+   * keepalive semantics for the `pagehide`/`visibilitychange` flush (#330).
+   * Without one the flush falls back to `save`, which is fine on a tab
+   * switch and lossy on a close.
+   */
+  flushSave?: (content: string, expectedHash: string) => void;
   onSaved?: (result: SaveResult) => void;
 }) {
   const [status, setStatus] = useState<AutosaveStatus>("idle");
@@ -145,12 +154,25 @@ export function useNoteAutosave({
   // Leaving the page must not drop an unflushed pause.
   useEffect(() => {
     const flush = () => {
-      const value = pendingRef.current;
-      if (value !== null) {
-        pendingRef.current = null;
-        clearTimer();
-        void write(value);
+      // `pendingRef` first, then `queuedRef`: `commit` clears the pending
+      // pause, so whenever both hold something the pending one is the later
+      // snapshot of the whole document and already contains the queued edit.
+      // Taking only `pendingRef`, as this used to, dropped an edit that
+      // `write` had parked behind an in-flight save (#330).
+      const value = pendingRef.current ?? queuedRef.current;
+      if (value === null) {
+        return;
       }
+      pendingRef.current = null;
+      queuedRef.current = null;
+      clearTimer();
+      if (flushSave) {
+        if (enabled && !stoppedRef.current) {
+          flushSave(value, hashRef.current);
+        }
+        return;
+      }
+      void write(value);
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
@@ -164,7 +186,7 @@ export function useNoteAutosave({
       window.removeEventListener("pagehide", flush);
       clearTimer();
     };
-  }, [write]);
+  }, [write, flushSave, enabled]);
 
   return { status, savedAt, commit, touch, isOwnWrite, resume };
 }

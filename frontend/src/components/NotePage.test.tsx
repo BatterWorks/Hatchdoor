@@ -5,11 +5,13 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { act } from "react";
+import { EditorView } from "@codemirror/view";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
-import { saveNoteDraft } from "../lib/writeDrafts";
+import { loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
 import { staleVault, syncStoppedVault } from "../test/fixtures/vaults";
 import { NotePage } from "./NotePage";
 
@@ -416,5 +418,185 @@ describe("NotePage held-draft recovery (#151)", () => {
       await screen.findByDisplayValue("recovered draft text"),
     ).toBeInTheDocument();
     expect(screen.queryByText("Body on disk")).not.toBeInTheDocument();
+  });
+});
+
+describe("NotePage crash-safe inline editing (#330)", () => {
+  type Sent = { url: string; init: RequestInit };
+
+  /**
+   * The note read, the wikilink resolve, and a recording PUT handler — the
+   * three requests the note page makes while an edit is in flight.
+   */
+  function mockVault(content: string, hash = "hash"): Sent[] {
+    const sent: Sent[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "PUT") {
+          sent.push({ url, init });
+          return jsonResponse({
+            vault_id: "vault-1",
+            ok: true,
+            slug: "home",
+            relative_path: "Home.md",
+            content_hash: "hash-2",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: "vault-1", results: [] });
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home.md",
+              content,
+              content_hash: hash,
+              layer: null,
+            },
+          });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+    return sent;
+  }
+
+  /** The open block is a CodeMirror editor, so its text lives in editor state
+   * rather than in a DOM value. */
+  function typeInOpenBlock(text: string): void {
+    const view = EditorView.findFromDOM(screen.getByRole("textbox"));
+    if (!view) {
+      throw new Error("no CodeMirror view is mounted on the active block");
+    }
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+      });
+    });
+  }
+
+  it("restores an unsaved inline edit from its draft after a reload", async () => {
+    saveNoteDraft("vault-1", "home", {
+      vaultId: "vault-1",
+      slug: "home",
+      content: "Body with the sentence that never saved.",
+      baseContentHash: "hash",
+      savedAt: Date.now(),
+    });
+    const sent = mockVault("Body on disk.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    expect(
+      await screen.findByText("Body with the sentence that never saved."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Restored an edit that had not reached the vault yet/),
+    ).toBeInTheDocument();
+    // The interrupted write is finished rather than left sitting in the draft.
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(JSON.parse(String(sent[0].init.body)).content).toBe(
+      "Body with the sentence that never saved.",
+    );
+  });
+
+  it("leaves the body alone and points at source mode when the note moved under the draft", async () => {
+    saveNoteDraft("vault-1", "home", {
+      vaultId: "vault-1",
+      slug: "home",
+      content: "An edit based on an older version.",
+      baseContentHash: "older-hash",
+      savedAt: Date.now(),
+    });
+    const sent = mockVault("Body on disk.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    expect(await screen.findByText("Body on disk.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/the note has changed since. Use Edit to review it/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("An edit based on an older version."),
+    ).not.toBeInTheDocument();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("persists text typed into an open block and delivers it with keepalive when the tab closes", async () => {
+    const sent = mockVault("First paragraph.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, still being typed.");
+
+    // Inside the idle-flush window: nothing has gone out yet, which is the
+    // window a closing tab falls into.
+    expect(sent).toHaveLength(0);
+
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].init.keepalive).toBe(true);
+    expect(JSON.parse(String(sent[0].init.body)).content).toContain(
+      "First paragraph, still being typed.",
+    );
+    expect(loadNoteDraft("vault-1", "home")?.content).toContain(
+      "First paragraph, still being typed.",
+    );
+  });
+
+  it("does not write a draft per keystroke, and flushes the pending one on the way out", async () => {
+    mockVault("Body on disk.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Body being typed." } });
+
+    // The write is debounced off the typing path rather than running a
+    // JSON.stringify plus a synchronous setItem on every keystroke.
+    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(loadNoteDraft("vault-1", "home")?.content).toBe("Body being typed.");
+  });
+
+  it("says so when the browser refuses to store the draft", async () => {
+    mockVault("Body on disk.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Body being typed." } });
+
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota exceeded", "QuotaExceededError");
+    });
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(
+      await screen.findByText(
+        /Your browser isn’t storing drafts, so saving is the only way to keep this edit\./,
+      ),
+    ).toBeInTheDocument();
   });
 });

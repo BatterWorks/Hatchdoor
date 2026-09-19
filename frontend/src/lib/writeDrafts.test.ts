@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   clearNoteDraft,
@@ -232,5 +232,117 @@ describe("writeDrafts", () => {
 
     discardHeldDraft("note:b");
     expect(listHeldDrafts().map((draft) => draft.id)).toEqual(["note:a"]);
+  });
+});
+
+describe("saveNoteDraft reports storage failures (#330)", () => {
+  it("returns true when the draft lands and false when the store refuses it", () => {
+    expect(
+      saveNoteDraft("vault-1", "home", {
+        vaultId: "vault-1",
+        slug: "home",
+        content: "kept",
+        baseContentHash: "abc",
+        savedAt: 1,
+      }),
+    ).toBe(true);
+
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("quota exceeded", "QuotaExceededError");
+      });
+    try {
+      expect(
+        saveNoteDraft("vault-1", "home", {
+          vaultId: "vault-1",
+          slug: "home",
+          content: "lost",
+          baseContentHash: "abc",
+          savedAt: 2,
+        }),
+      ).toBe(false);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+});
+
+describe("collectLegacyHeldDrafts migrates completely (#330)", () => {
+  function seedLegacy(slug: string, savedAt: number): void {
+    window.localStorage.setItem(
+      `hatchdoor:draft:note:${slug}`,
+      JSON.stringify({
+        slug,
+        content: `draft for ${slug}`,
+        baseContentHash: `hash-${slug}`,
+        savedAt,
+      }),
+    );
+  }
+
+  // The regression: the migration used to call `saveHeldDraft` from inside the
+  // `key(i)` loop, inserting a key into the very storage area it was
+  // enumerating. A storage area is a hash map with an implementation-defined
+  // `key(i)` order, so a write mid-enumeration can shift entries behind the
+  // cursor and legacy drafts go unseen — and unseen means not deleted either,
+  // so `listHeldDrafts()` under-reports on the one run that mattered. jsdom's
+  // Storage is insertion-ordered and will not reproduce that reordering, so
+  // the guarantee is asserted directly: nothing is written until the last key
+  // has been read.
+  it("does not write to localStorage while enumerating it", () => {
+    seedLegacy("alpha", 1000);
+    seedLegacy("beta", 2000);
+    seedLegacy("gamma", 3000);
+
+    const events: string[] = [];
+    const originalKey = Storage.prototype.key;
+    const originalSetItem = Storage.prototype.setItem;
+    const key = vi
+      .spyOn(Storage.prototype, "key")
+      .mockImplementation(function (this: Storage, index: number) {
+        events.push("key");
+        return originalKey.call(this, index);
+      });
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(function (this: Storage, name: string, value: string) {
+        events.push("setItem");
+        originalSetItem.call(this, name, value);
+      });
+
+    try {
+      collectLegacyHeldDrafts();
+    } finally {
+      key.mockRestore();
+      setItem.mockRestore();
+    }
+
+    // Every key of the three seeded drafts is read before the first write. The
+    // unfixed version wrote after reading exactly one.
+    const readsBeforeFirstWrite = events
+      .slice(0, events.indexOf("setItem"))
+      .filter((event) => event === "key").length;
+    expect(events).toContain("setItem");
+    expect(readsBeforeFirstWrite).toBeGreaterThanOrEqual(3);
+  });
+
+  it("holds every legacy draft regardless of how many there are", () => {
+    seedLegacy("alpha", 1000);
+    seedLegacy("beta", 2000);
+    seedLegacy("gamma", 3000);
+
+    const held = collectLegacyHeldDrafts();
+
+    expect(held.map((draft) => draft.id).sort()).toEqual([
+      "note:alpha",
+      "note:beta",
+      "note:gamma",
+    ]);
+    for (const slug of ["alpha", "beta", "gamma"]) {
+      expect(
+        window.localStorage.getItem(`hatchdoor:draft:note:${slug}`),
+      ).toBeNull();
+    }
   });
 });

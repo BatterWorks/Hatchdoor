@@ -202,6 +202,71 @@ describe("overlapping writes", () => {
     expect(calls[1].content).toBe("C");
   });
 
+  // An ordinary fetch started from `pagehide` is cancelled when the document
+  // is torn down, so the last seconds of typing die with the page. The unload
+  // send is a separate, fire-and-forget path with keepalive semantics (#330).
+  it("hands the unload flush to flushSave rather than the awaited save", () => {
+    const save = vi.fn().mockResolvedValue({ content_hash: "h1" });
+    const flushSave = vi.fn();
+    const hook = renderHook(() =>
+      useNoteAutosave({ baseHash: "h0", enabled: true, save, flushSave }),
+    );
+
+    act(() => {
+      hook.result.current.touch("still typing");
+    });
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(flushSave).toHaveBeenCalledExactlyOnceWith("still typing", "h0");
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("flushes an edit parked behind an in-flight save, not just the idle pause", async () => {
+    const { save, calls } = deferredSave();
+    const flushSave = vi.fn();
+    const hook = renderHook(() =>
+      useNoteAutosave({ baseHash: "h0", enabled: true, save, flushSave }),
+    );
+
+    act(() => {
+      hook.result.current.commit("edit-A");
+    });
+    act(() => {
+      // Queued behind the in-flight write, and nothing else holds it.
+      hook.result.current.commit("edit-B");
+    });
+    expect(calls).toHaveLength(1);
+
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(flushSave).toHaveBeenCalledExactlyOnceWith("edit-B", "h0");
+  });
+
+  it("sends nothing on unload once autosave has stopped", async () => {
+    const failure = new Error("vault unreachable");
+    const save = vi.fn().mockRejectedValue(failure);
+    const flushSave = vi.fn();
+    const hook = renderHook(() =>
+      useNoteAutosave({ baseHash: "h0", enabled: true, save, flushSave }),
+    );
+
+    await act(async () => {
+      hook.result.current.commit("one");
+    });
+    act(() => {
+      hook.result.current.touch("two");
+    });
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(flushSave).not.toHaveBeenCalled();
+  });
+
   it("does not report saved while an edit is still queued", async () => {
     const { save, calls } = deferredSave();
     const hook = renderHook(() =>

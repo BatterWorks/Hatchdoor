@@ -97,18 +97,28 @@ export function loadNoteDraft(vaultId: string, slug: string): NoteDraft | null {
   }
 }
 
+/**
+ * Write a note draft, reporting whether it actually landed.
+ *
+ * The boolean is the point (#330): with site data blocked, storage full, or a
+ * browser set to clear on exit, a swallowed failure looks exactly like a
+ * working store, and the editor goes on promising a safety net that does not
+ * exist. Callers surface a persistent `false` rather than discarding it.
+ */
 export function saveNoteDraft(
   vaultId: string,
   slug: string,
   draft: NoteDraft,
-): void {
+): boolean {
   try {
     window.localStorage.setItem(
       noteDraftKey(vaultId, slug),
       JSON.stringify({ ...draft, vaultId, slug }),
     );
+    return true;
   } catch {
     // Storage can fail in private browsing or when quota is exceeded.
+    return false;
   }
 }
 
@@ -280,10 +290,17 @@ export function discardHeldDraft(id: string): void {
  * deleted as part of the move, so a second call finds nothing left to do.
  * Called once, synchronously, before the app ever renders (`main.tsx`), so
  * every component's first read of `listHeldDrafts` already reflects it.
+ *
+ * Two-phase, like `pruneNoteDrafts` above, and for the same reason (#330): a
+ * storage area is enumerated by index over an implementation-defined order,
+ * and writing a new key into it mid-loop can reorder or shift the entries
+ * behind the cursor. Nothing is written until every key has been read, so the
+ * count of legacy drafts cannot change what is found.
  */
 export function collectLegacyHeldDrafts(): HeldDraft[] {
   try {
     const staleKeys: string[] = [];
+    const legacyRaw: string[] = [];
     for (let i = 0; i < window.localStorage.length; i += 1) {
       const key = window.localStorage.key(i);
       if (!key || !key.startsWith(NOTE_DRAFT_PREFIX)) {
@@ -295,9 +312,11 @@ export function collectLegacyHeldDrafts(): HeldDraft[] {
       }
       staleKeys.push(key);
       const raw = window.localStorage.getItem(key);
-      if (!raw) {
-        continue;
+      if (raw) {
+        legacyRaw.push(raw);
       }
+    }
+    for (const raw of legacyRaw) {
       try {
         const parsed = JSON.parse(raw) as {
           slug?: unknown;

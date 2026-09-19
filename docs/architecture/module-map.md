@@ -3306,7 +3306,22 @@ ordinary post-#137 per-note draft recovery is unaffected. That notice is
 additionally suppressed whenever `demoMode` is true (#152), regardless of
 `listHeldDrafts`: it names and links to a Settings surface withheld from a
 demo visitor entirely, and a pre-#137 held draft could in principle exist in
-any browser profile a demo instance happens to be served from. `NotePage`'s
+any browser profile a demo instance happens to be served from. The
+`lib/writeDrafts.ts` draft now covers the inline write surface too (#330),
+not source mode alone: one debounced writer takes `handleInlineChange`,
+`handleInProgressChange` (text living only inside an open block) and source
+mode's `draftContent`, captures which note a scheduled write belongs to so a
+pending one cannot follow the page onto the next note, and forces the write out
+synchronously on `pagehide`, on `visibilitychange` to hidden, and on unmount —
+the window a closing tab or a service-worker auto-reload falls into. Because
+the inline editor has no open/close moment to read a draft at, recovery happens
+when the note lands: a draft naming the hash now on disk is the interrupted
+write, so it goes back into the body and is handed to autosave to finish once
+inline editing is actually enabled (not on the commit the note arrives on,
+where wikilink resolution has not settled and autosave would swallow it); one
+naming an older hash is not replayed, and a notice points at source mode, which
+already knows how to show a stale draft against the current version. A refused
+draft write raises its own `write-notice`. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp on
 `deriveVaultSlot` has nothing to touch there; the one other `deriveVaultSlot`
@@ -3396,7 +3411,19 @@ insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 for drafts that predate Vault qualification, consumed by Settings'
 `UnsavedDrafts.tsx`; ordinary per-note and create drafts
 (`saveNoteDraft`/`loadNoteDraft`/`clearNoteDraft`/`saveCreateDraft`/
-`loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) are unchanged.
+`loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) keep their shape, with
+one change: `saveNoteDraft` returns whether the write actually landed (#330),
+so a blocked or full store is surfaced rather than swallowed — a silent failure
+there is indistinguishable from a working one while the UI goes on promising a
+draft. `collectLegacyHeldDrafts` reads every key before it writes any, the same
+two-phase shape `pruneNoteDrafts` uses, because writing into a storage area
+mid-enumeration can shift entries behind the `key(i)` cursor and skip drafts.
+`api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive }` (#330) for
+the unload send, and `hooks/useNoteAutosave.ts` takes an optional `flushSave`
+the `pagehide`/`visibilitychange` flush uses in place of the awaited `save`:
+an ordinary fetch started while the document is being torn down is cancelled
+with it. That flush now takes `pendingRef ?? queuedRef`, so an edit parked
+behind an in-flight save leaves with the page too.
 `hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding
