@@ -1173,15 +1173,25 @@ async fn an_older_reconciliation_cannot_readmit_work_after_a_newer_snapshot_appl
     drop(mutation);
     older.await;
 
-    collection
-        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
-        .await;
-
+    // Assert on the older lifecycle's own resumption, before anything else
+    // reconciles: a trailing full lifecycle would retire the Vault again and
+    // so would hide a re-admission this test exists to catch.
     assert!(collection.runtime(vault_id).is_none());
     assert_eq!(
         coordinator.request(vault_id, VaultWorkKind::Index),
         ScheduleResult::Rejected,
         "the resumed older reconciliation cannot re-admit retired work"
+    );
+
+    // The newer snapshot's own full lifecycle can now run; it must agree.
+    collection
+        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+        .await;
+    assert!(collection.runtime(vault_id).is_none());
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Index),
+        ScheduleResult::Rejected,
+        "the newer snapshot's lifecycle leaves the Vault retired"
     );
 }
 
