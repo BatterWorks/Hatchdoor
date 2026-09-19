@@ -5,6 +5,7 @@ import { registerSW } from "virtual:pwa-register";
 import "katex/dist/katex.min.css";
 import "./index.css";
 import App from "./App";
+import { isAppReloadHeld, whenAppReloadReleased } from "./lib/reloadGuard";
 import { clearLegacyNoteScopedBrowserState } from "./lib/storage";
 import { collectLegacyHeldDrafts } from "./lib/writeDrafts";
 
@@ -24,6 +25,13 @@ registerSW({
     }
 
     const update = () => {
+      // An update found now is an update activated now: the worker calls
+      // `skipWaiting`/`clientsClaim`, so checking mid-edit is what schedules
+      // the reload (#330). Coming back to the tab is one of the triggers, and
+      // that is exactly the moment an unsaved block is sitting open.
+      if (isAppReloadHeld()) {
+        return;
+      }
       void registration.update();
     };
 
@@ -35,8 +43,12 @@ registerSW({
     });
     window.addEventListener("focus", update);
   },
-  onNeedRefresh() {
-    window.location.reload();
+  // `autoUpdate` reloads the page itself the moment a new worker activates,
+  // unless this hook takes the decision over. It does, so the reload waits for
+  // the editor to let go (#330): a worker discovered by another tab, or
+  // installed just before the hold was taken, still gets here.
+  onNeedReload() {
+    whenAppReloadReleased(() => window.location.reload());
   },
 });
 

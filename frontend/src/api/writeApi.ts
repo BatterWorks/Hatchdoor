@@ -187,14 +187,25 @@ export async function uploadAttachment(
   return (await res.json()) as AttachmentOutcome;
 }
 
+/**
+ * `keepalive` is what lets a save started while the page is being torn down
+ * finish anyway (#330): an ordinary fetch issued from `pagehide` is cancelled
+ * with the document, taking the last seconds of typing with it. The browser
+ * caps a keepalive body at 64KB and rejects the request outright above that,
+ * so callers check the size first and keep the local draft as the fallback.
+ */
+export type UpdateNoteOptions = { keepalive?: boolean };
+
 export function updateNote(
   vaultId: VaultId,
   slug: string,
   content: string,
   expectedContentHash: string,
+  options: UpdateNoteOptions = {},
 ): Promise<WriteOutcome> {
   return requestJson(vaultNoteUrl(vaultId, slug), {
     method: "PUT",
+    keepalive: options.keepalive,
     body: JSON.stringify({
       content,
       expected_content_hash: expectedContentHash,

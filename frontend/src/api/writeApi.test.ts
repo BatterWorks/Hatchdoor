@@ -208,6 +208,20 @@ describe("writeApi", () => {
     expect(MUTATION_FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
   });
 
+  // An ordinary fetch issued while the page is being torn down is cancelled
+  // with the document; `keepalive` is what lets the last save finish (#330).
+  it("forwards keepalive on an unload save and leaves it off otherwise", async () => {
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote(VAULT_ID, "home", "# Updated", "hash-1", {
+      keepalive: true,
+    });
+    expect(mockedApiFetch.mock.calls[0]?.[1]?.keepalive).toBe(true);
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote(VAULT_ID, "home", "# Updated", "hash-1");
+    expect(mockedApiFetch.mock.calls[1]?.[1]?.keepalive).toBeUndefined();
+  });
+
   it("summarizes write outcome side effects", () => {
     expect(describeWriteOutcome(outcome())).toBeNull();
     expect(

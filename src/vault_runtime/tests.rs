@@ -852,13 +852,12 @@ async fn disable_enable_and_disconnect_only_replace_the_target_runtime() {
     let collection = VaultCollectionRuntime::with_watching(directory.path().join("cache.sqlite3"));
     collection.reconcile(&registry, &two);
     let first_runtime = collection.runtime(first_id).expect("first runtime");
-    let first_lock = first_runtime.mutation_lock.clone();
+    let first_lock = first_runtime.write_exclusion();
     let second_lock = collection
         .runtime(second_id)
         .expect("second runtime")
-        .mutation_lock
-        .clone();
-    assert!(!Arc::ptr_eq(&first_lock, &second_lock));
+        .write_exclusion();
+    assert!(!first_lock.is_same(&second_lock));
     assert_eq!(
         first_runtime.snapshot().watcher,
         VaultWatcherStatus::Running
@@ -870,13 +869,14 @@ async fn disable_enable_and_disconnect_only_replace_the_target_runtime() {
     collection.reconcile(&registry, &disabled);
     assert!(collection.runtime(first_id).is_none());
     assert!(first_runtime.watcher_cancelled());
-    assert!(Arc::ptr_eq(
-        &second_lock,
-        &collection
-            .runtime(second_id)
-            .expect("second runtime retained")
-            .mutation_lock
-    ));
+    assert!(
+        second_lock.is_same(
+            &collection
+                .runtime(second_id)
+                .expect("second runtime retained")
+                .write_exclusion()
+        )
+    );
     let disabled_status = &collection.snapshot().vaults[&first_id];
     assert_eq!(disabled_status.activation, VaultActivationStatus::Disabled);
     assert_eq!(disabled_status.watcher, VaultWatcherStatus::Disabled);
@@ -887,26 +887,28 @@ async fn disable_enable_and_disconnect_only_replace_the_target_runtime() {
         .expect("enable first Vault");
     collection.reconcile(&registry, &enabled);
     assert!(collection.runtime(first_id).is_some());
-    assert!(Arc::ptr_eq(
-        &second_lock,
-        &collection
-            .runtime(second_id)
-            .expect("second runtime still retained")
-            .mutation_lock
-    ));
+    assert!(
+        second_lock.is_same(
+            &collection
+                .runtime(second_id)
+                .expect("second runtime still retained")
+                .write_exclusion()
+        )
+    );
 
     let disconnected = registry
         .disconnect(enabled.revision(), first_id)
         .expect("disconnect first Vault");
     collection.reconcile(&registry, &disconnected);
     assert!(!collection.snapshot().vaults.contains_key(&first_id));
-    assert!(Arc::ptr_eq(
-        &second_lock,
-        &collection
-            .runtime(second_id)
-            .expect("second runtime survives disconnect")
-            .mutation_lock
-    ));
+    assert!(
+        second_lock.is_same(
+            &collection
+                .runtime(second_id)
+                .expect("second runtime survives disconnect")
+                .write_exclusion()
+        )
+    );
 }
 
 #[tokio::test]
@@ -1158,18 +1160,38 @@ async fn an_older_reconciliation_cannot_readmit_work_after_a_newer_snapshot_appl
     let disabled = registry
         .disable(replacement.revision(), vault_id)
         .expect("disable replacement Vault");
-    collection
-        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
-        .await;
+    // The newer snapshot's collection state is applied while the older
+    // lifecycle is still parked; its own full lifecycle runs once the older
+    // one has resumed and bailed. The two cannot be interleaved the other way
+    // round any more: since #321 the replacement block shares the retiring
+    // block's write exclusion, so both lifecycles wait at one lock, and a
+    // suspended future that is handed that lock and never polled would hold
+    // it. In the process both are polled tasks, so they serialize; here the
+    // fence being tested is `registry_revision`, which this advances.
+    collection.reconcile(&registry, &disabled);
 
     drop(mutation);
     older.await;
 
+    // Assert on the older lifecycle's own resumption, before anything else
+    // reconciles: a trailing full lifecycle would retire the Vault again and
+    // so would hide a re-admission this test exists to catch.
     assert!(collection.runtime(vault_id).is_none());
     assert_eq!(
         coordinator.request(vault_id, VaultWorkKind::Index),
         ScheduleResult::Rejected,
         "the resumed older reconciliation cannot re-admit retired work"
+    );
+
+    // The newer snapshot's own full lifecycle can now run; it must agree.
+    collection
+        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+        .await;
+    assert!(collection.runtime(vault_id).is_none());
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Index),
+        ScheduleResult::Rejected,
+        "the newer snapshot's lifecycle leaves the Vault retired"
     );
 }
 
@@ -2863,4 +2885,145 @@ fn read_only_filesystem_is_a_read_only_vault_not_an_unavailable_one() {
             "errno {genuinely_unavailable} must keep surfacing as an unavailable Vault"
         );
     }
+}
+
+/// Issue #321, acceptance 2: a Vault definition edit publishes a replacement
+/// control block before the retiring one's in-flight work has finished, and
+/// that replacement must not be a second way into the same Vault directory.
+///
+/// The write exclusion is carried across the rotation, so the guard an
+/// in-flight write, Git turn or Index read phase already holds still excludes
+/// a writer arriving through the replacement. The old behaviour minted a
+/// fresh mutex here and the acquisition below returned immediately.
+#[tokio::test]
+async fn a_definition_edit_cannot_admit_a_second_writer_to_the_same_vault() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path.clone());
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &enabled);
+    let original = collection.runtime(vault_id).expect("enabled runtime");
+    // An in-flight foreground write, holding the Vault the whole way through.
+    let writing = original
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation acquires its Vault lock");
+
+    // The most benign edit there is: one new exclude pattern, same path, same
+    // source, Vault stays enabled. It still constructs a replacement block.
+    let edited = registry
+        .edit(
+            enabled.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Vault".to_string(),
+                source: RegistryVaultSource::Local {
+                    path: vault_path.clone(),
+                },
+                exclude_patterns: vec!["ignored/**".to_string()],
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("edit the enabled Vault definition");
+    collection.reconcile(&registry, &edited);
+    let replacement = collection.runtime(vault_id).expect("replacement runtime");
+
+    assert!(
+        !Arc::ptr_eq(&original.snapshot, &replacement.snapshot),
+        "the edit must actually have replaced the control block"
+    );
+    assert!(
+        original
+            .write_exclusion()
+            .is_same(&replacement.write_exclusion()),
+        "the replacement must inherit the retiring block's write exclusion"
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            replacement.acquire_mutation(),
+        )
+        .await
+        .is_err(),
+        "a writer arriving through the replacement must wait for the in-flight write"
+    );
+
+    drop(writing);
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        replacement.acquire_mutation(),
+    )
+    .await
+    .expect("the replacement admits a writer once the in-flight write finishes")
+    .expect("the replacement is accepting operations");
+}
+
+/// The generation counter travels with the lock for the same reason: an Index
+/// turn that reads it before a definition edit and compares after must be
+/// comparing two readings of one counter, or every turn spanning an edit
+/// would conclude a mutation had intervened and report itself stale (#223).
+#[tokio::test]
+async fn the_mutation_generation_survives_a_definition_edit() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path.clone());
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &enabled);
+    let original = collection.runtime(vault_id).expect("enabled runtime");
+    drop(
+        original
+            .acquire_mutation()
+            .await
+            .expect("one foreground mutation"),
+    );
+    let (guard, generation) = original
+        .acquire_mutation_for_index_reads()
+        .await
+        .expect("index read phase");
+    drop(guard);
+    assert_eq!(generation, 1);
+
+    let edited = registry
+        .edit(
+            enabled.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Renamed".to_string(),
+                source: RegistryVaultSource::Local { path: vault_path },
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("rename the Vault");
+    collection.reconcile(&registry, &edited);
+    let replacement = collection.runtime(vault_id).expect("replacement runtime");
+    let (_, after_edit) = replacement
+        .acquire_mutation_for_index_reads()
+        .await
+        .expect("index read phase after the edit");
+
+    assert_eq!(
+        after_edit, generation,
+        "a rename is not a mutation and must not look like one"
+    );
 }

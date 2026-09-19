@@ -12,9 +12,40 @@
 //!
 //! Chaining trusts this batch's own prior write, not the caller's own value,
 //! so it must never be checked against a Vault an external writer could have
-//! touched in between: [`batch_tool`] acquires each touched Vault's mutation
-//! lock once and holds it for the rest of the call, rather than per item like
-//! a standalone write does, closing that window instead of narrowing it.
+//! touched in between: [`batch_tool`] acquires every touched Vault's mutation
+//! lock before the first item runs and holds them for the rest of the call,
+//! rather than per item like a standalone write does, closing that window
+//! instead of narrowing it.
+//!
+//! **Acquisition is ordered, not lazy** (issue #321). A batch is the only
+//! thing in the instance that holds more than one Vault's mutation lock at a
+//! time, so it is the only place a lock cycle can form — and it formed
+//! trivially, because locks used to be taken lazily in whatever order the
+//! caller's items happened to name Vaults. Two concurrent calls whose items
+//! named Vaults A and B in opposite orders deadlocked each other for the life
+//! of the process. [`lock_touched_vaults`] instead pre-scans the items,
+//! collects the distinct Vault IDs, **sorts them**, and acquires in that one
+//! canonical order. A total order over the only multi-lock holder makes a
+//! cycle impossible, which is why there is no acquisition timeout here: a
+//! batch may legitimately wait minutes behind a Git turn's network work
+//! (ADR-18), and a timeout would turn that wait into a spurious failure while
+//! buying nothing the ordering has not already bought.
+//!
+//! The pre-scan also resolves each Vault's control block for the whole call,
+//! and every item against that Vault runs on that one block. The lock lives
+//! on the control block, so re-resolving per item could hand a later item a
+//! *replacement* block published by a mid-batch definition edit — a different
+//! mutex, i.e. a write with no live exclusion.
+//!
+//! Since #321 a replacement block inherits the retiring one's exclusion, so a
+//! definition edit is survivable rather than fatal, and both halves of the
+//! call handle it. [`lock_one_vault`] re-resolves when the block it queued on
+//! is retired before its turn at the lock arrives, and [`dispatch_one`]
+//! re-resolves when the edit lands after the lock was taken, continuing only
+//! against a live block that shares the exclusion this call holds. A Vault
+//! that comes back without it, or does not come back at all, is refused with
+//! a structured error rather than written unlocked, and every item naming a
+//! Vault the pre-scan could not lock reports the reason it recorded.
 //!
 //! Note what the caller pays for that: while a batch runs, every other writer
 //! to a Vault it has already written — the Web UI, the V1 HTTP adapter, another
@@ -78,12 +109,48 @@ const NOT_BATCHABLE_WRITE_OPS: &[&str] = &["rename_tag"];
 /// carries no `Hash` impl to key a map with.
 type HashChain = HashMap<(String, String), String>;
 
-/// One mutation guard per Vault this batch call has touched, held from the
-/// first write item against that Vault through the end of the whole call — see
-/// the module doc comment for why. A `Vec` rather than a map: `VaultId` has no
-/// `Hash` impl, and a batch touches at most a handful of distinct Vaults, so a
-/// linear scan against `BATCH_MAX_WRITE_ITEMS` (20) entries is cheap.
-type VaultLocks = Vec<(VaultId, tokio::sync::OwnedMutexGuard<()>)>;
+/// One Vault this batch call writes to: the guard it holds on that Vault for
+/// the whole call, and the control block that guard was taken from, resolved
+/// once so every item against the Vault runs on one generation of it — see
+/// the module doc comment for both.
+struct LockedVault {
+    vault_id: VaultId,
+    vault: write::McpVault,
+    /// Dropped when the batch returns, which is what releases the Vault.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Why a Vault this batch's items name could not be locked, kept so every
+/// item naming it reports the reason it would have reported standing alone,
+/// rather than a generic refusal. Stored field by field because
+/// [`JsonRpcFailure`] is not `Clone` and several items may name one Vault.
+struct UnlockedVault {
+    vault_id: VaultId,
+    code: i64,
+    message: String,
+    tool_level: bool,
+}
+
+impl UnlockedVault {
+    fn failure(&self) -> JsonRpcFailure {
+        JsonRpcFailure {
+            code: self.code,
+            message: self.message.clone(),
+            tool_level: self.tool_level,
+        }
+    }
+}
+
+/// What the pre-scan settled for this call: the Vaults it locked, in canonical
+/// acquisition order, and the ones it could not lock with the reason. `Vec`s
+/// rather than maps: `VaultId` has no `Hash` impl, and a batch touches at most
+/// a handful of distinct Vaults, so a linear scan against
+/// `BATCH_MAX_WRITE_ITEMS` (20) entries is cheap.
+#[derive(Default)]
+struct VaultLocks {
+    held: Vec<LockedVault>,
+    unlocked: Vec<UnlockedVault>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -144,12 +211,12 @@ pub(super) async fn batch_tool(
     }
 
     let mut chain: HashChain = HashMap::new();
-    // Held across the whole loop below (dropped only when `batch_tool`
-    // returns): once a Vault has been written to by this batch, its mutation
-    // lock stays held until the call finishes, so nothing outside this call
-    // can land a write that a later chained item's substituted hash would
-    // then silently overwrite.
-    let mut locks: VaultLocks = Vec::new();
+    // Taken before the first item runs, in one canonical order, and held
+    // across the whole loop below (dropped only when `batch_tool` returns):
+    // nothing outside this call can land a write that a later chained item's
+    // substituted hash would then silently overwrite, and no two concurrent
+    // batches can take two Vaults in opposite orders.
+    let mut locks = lock_touched_vaults(&state, config, &args.operations).await;
     let mut items = Vec::with_capacity(args.operations.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
@@ -204,10 +271,89 @@ pub(super) async fn batch_tool(
     })))
 }
 
+/// Take every Vault mutation lock this batch's write items will need, in one
+/// canonical order, before any item runs.
+///
+/// The order is the Vault IDs sorted, which is what makes a lock cycle
+/// between two concurrent batches impossible — see the module doc comment. A
+/// Vault this cannot lock is recorded with the reason instead, and
+/// [`dispatch_one`] hands that reason to every item naming it rather than
+/// writing to a Vault this call does not hold.
+async fn lock_touched_vaults(
+    state: &AppState,
+    config: &McpConfig,
+    operations: &[BatchOperation],
+) -> VaultLocks {
+    let mut locks = VaultLocks::default();
+    if !config.write_enabled {
+        return locks;
+    }
+    let mut vault_ids: Vec<VaultId> = Vec::new();
+    for item in operations {
+        if !WRITE_OPS.contains(&item.op.as_str()) {
+            continue;
+        }
+        let Ok(vault_id) = write::parse_vault_id(&item.arguments) else {
+            continue;
+        };
+        if !vault_ids.contains(&vault_id) {
+            vault_ids.push(vault_id);
+        }
+    }
+    vault_ids.sort();
+
+    locks.held.reserve(vault_ids.len());
+    for vault_id in vault_ids {
+        match lock_one_vault(state, vault_id).await {
+            Ok(locked) => locks.held.push(locked),
+            Err(failure) => locks.unlocked.push(UnlockedVault {
+                vault_id,
+                code: failure.code,
+                message: failure.message,
+                tool_level: failure.tool_level,
+            }),
+        }
+    }
+    locks
+}
+
+/// How many times acquisition may lose its control block to a reconcile before
+/// the Vault is given up on. A definition edit revokes the block a waiter is
+/// queued on, and the waiter learns that only once the lock is granted, so the
+/// replacement has to be resolved and taken instead. Bounded because retrying
+/// is only ever right for a *finite* burst of edits.
+const MUTATION_ACQUIRE_ATTEMPTS: usize = 4;
+
+/// Resolve one Vault and take its mutation lock, following a definition edit
+/// that retires the control block while this is queued behind it.
+async fn lock_one_vault(
+    state: &AppState,
+    vault_id: VaultId,
+) -> Result<LockedVault, JsonRpcFailure> {
+    let mut last = None;
+    for _ in 0..MUTATION_ACQUIRE_ATTEMPTS {
+        // Resolved inside the loop: after a retirement the live block is a
+        // different one, and it is the live block this call must run on.
+        let vault = write::scoped_vault_by_id(state, vault_id)?;
+        match write::acquire_mutation(&vault).await {
+            Ok(guard) => {
+                return Ok(LockedVault {
+                    vault_id,
+                    vault,
+                    _guard: guard,
+                });
+            }
+            Err(failure) => last = Some(failure),
+        }
+    }
+    Err(last.unwrap_or_else(|| write::exclusion_lost_error(vault_id)))
+}
+
 /// Dispatches one batch item to the same tool function a standalone call to
 /// `op` would use. Mirrors `mod.rs`'s own dispatch match, restricted to the
 /// note/attachment allowlist above. `locks` carries every Vault mutation
-/// guard this batch call has acquired so far — see [`VaultLocks`].
+/// guard this batch call holds — see [`VaultLocks`] and
+/// [`lock_touched_vaults`].
 async fn dispatch_one(
     state: AppState,
     config: &McpConfig,
@@ -221,17 +367,38 @@ async fn dispatch_one(
             if !config.write_enabled {
                 return Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE));
             }
-            let vault = write::scoped_vault(&state, &arguments)?;
-            // Acquire this Vault's mutation lock only the first time the
-            // batch touches it, and hold the guard in `locks` for the rest
-            // of the call rather than dropping it at the end of this item —
-            // see the module doc comment. `tokio::sync::Mutex` is not
-            // reentrant, so re-acquiring an already-held guard here would
-            // deadlock; the linear scan below is what prevents that.
-            if !locks.iter().any(|(id, _)| *id == vault.vault_id) {
-                locks.push((vault.vault_id, write::acquire_mutation(&vault).await?));
+            let vault_id = write::parse_vault_id(&arguments)?;
+            let Some(locked) = locks
+                .held
+                .iter_mut()
+                .find(|locked| locked.vault_id == vault_id)
+            else {
+                // Not locked, so the pre-scan could not resolve, gate or take
+                // this Vault. Report the reason it recorded — the same one a
+                // standalone call would have given — rather than writing to a
+                // Vault this call does not hold.
+                return Err(locks
+                    .unlocked
+                    .iter()
+                    .find(|unlocked| unlocked.vault_id == vault_id)
+                    .map(UnlockedVault::failure)
+                    .unwrap_or_else(|| write::exclusion_lost_error(vault_id)));
+            };
+            if !locked.vault.still_admits_operations() {
+                // The Vault was reconciled mid-batch. A definition edit
+                // publishes a replacement block that inherits the exclusion
+                // (#321), so the guard held here still serializes against it
+                // and the item runs on the live block. A Vault that is gone,
+                // disabled, or now refuses writes reports that for itself,
+                // and one whose replacement does *not* share the exclusion is
+                // refused outright — running it would be an unlocked write.
+                let fresh = write::scoped_vault_by_id(&state, vault_id)?;
+                if !fresh.shares_write_exclusion(&locked.vault) {
+                    return Err(write::exclusion_lost_error(vault_id));
+                }
+                locked.vault = fresh;
             }
-            write::dispatch_write_tool(state, &vault, op, arguments, config).await
+            write::dispatch_write_tool(state, &locked.vault, op, arguments, config).await
         }
         _ => Err(JsonRpcFailure::invalid_params(format!(
             "batch op '{op}' is not a valid batch operation"

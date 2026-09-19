@@ -449,19 +449,74 @@ impl VaultCollectionRevisionEvent {
     }
 }
 
+/// One Vault's write exclusion, as the set of handles that *are* its
+/// identity: the mutation mutex every foreground write, Git turn and Index
+/// read phase serializes on, the generation counter read under it, and the
+/// refresh mutex.
+///
+/// It is a value of its own because its lifetime is not the control block's.
+/// A control block is rebuilt on every definition edit — a renamed Vault, a
+/// new poll interval, a re-entered credential — and a fresh mutex there would
+/// admit a second writer to a directory an in-flight write, sync or index
+/// turn still holds the old one for. So the exclusion travels across the
+/// rotation and the edit rotates the definition only (issue #321, ADR-25).
+#[derive(Clone)]
+pub(crate) struct VaultWriteExclusion {
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// How many foreground mutations have taken `mutation_lock`. Written once
+    /// per acquisition, by the acquirer, while it holds that lock — and read
+    /// only by the two accessors on the control block, each of which also
+    /// holds it. A holder therefore reads a value that cannot move until it
+    /// releases, which is the only way to read it honestly. It travels with
+    /// the lock: a generation taken before an edit must stay comparable with
+    /// one taken after it, or an Index turn spanning the edit would conclude
+    /// nothing had changed.
+    mutations_taken: Arc<AtomicU64>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl VaultWriteExclusion {
+    fn fresh() -> Self {
+        Self {
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            mutations_taken: Arc::new(AtomicU64::new(0)),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// Whether these two handles are the same exclusion, rather than two
+    /// mutexes that merely guard the same directory. A caller holding a guard
+    /// taken from one of them is excluded from the other only when this is
+    /// `true`.
+    pub(crate) fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.mutation_lock, &other.mutation_lock)
+    }
+}
+
+/// What a replacement control block inherits from the block it replaces. All
+/// three are `None` for a genuinely new or re-enabled Vault, which has no
+/// predecessor to inherit from.
+#[derive(Default)]
+struct CarriedOverState {
+    /// The retiring block's Git status, so an in-place edit does not force a
+    /// mid-backoff Vault back to `Pending`. See `activation_snapshot`.
+    git: Option<(VaultGitStatus, Option<VaultRuntimeError>)>,
+    /// The retiring block's write ledger, so writes already on disk and still
+    /// waiting for a commit keep their summaries across the rotation (#249).
+    writes: Option<Arc<crate::git::WriteLedger>>,
+    /// The retiring block's write exclusion, so an edit can never put two
+    /// live mutexes on one Vault directory (#321).
+    exclusion: Option<VaultWriteExclusion>,
+}
+
 #[derive(Clone)]
 pub struct VaultControlBlock {
     definition: Arc<VaultDefinition>,
     vault_path: Arc<PathBuf>,
     snapshot: Arc<RwLock<CollectionVaultSnapshot>>,
-    mutation_lock: Arc<tokio::sync::Mutex<()>>,
-    /// How many foreground mutations have taken `mutation_lock`. Written once
-    /// per acquisition, by the acquirer, while it holds that lock — and read
-    /// only by the two accessors below, each of which also holds it. A holder
-    /// therefore reads a value that cannot move until it releases, which is
-    /// the only way to read it honestly.
-    mutations_taken: Arc<AtomicU64>,
-    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// This Vault's write exclusion. Outlives this block whenever a
+    /// definition edit replaces it — see [`VaultWriteExclusion`].
+    exclusion: VaultWriteExclusion,
     accepting_operations: Arc<AtomicBool>,
     cancellation: tokio::sync::watch::Sender<bool>,
     revisions: CollectionRevisionPublisher,
@@ -481,13 +536,15 @@ impl VaultControlBlock {
         watching: Option<&WatcherContext>,
         snapshot_cache: Option<&SqliteCache>,
         revisions: CollectionRevisionPublisher,
-        prior_git: Option<(VaultGitStatus, Option<VaultRuntimeError>)>,
-        // The retiring block's write ledger when this activation replaces a
-        // live control block, so writes already on disk and still waiting for
-        // a commit keep their summaries across the rotation (#249). `None`
-        // for a genuinely new or re-enabled Vault, which has none.
-        prior_writes: Option<Arc<crate::git::WriteLedger>>,
+        // What this activation inherits when it replaces a live control
+        // block, rather than starting a genuinely new or re-enabled Vault.
+        carried_over: CarriedOverState,
     ) -> Self {
+        let CarriedOverState {
+            git: prior_git,
+            writes: prior_writes,
+            exclusion: prior_exclusion,
+        } = carried_over;
         let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache, prior_git);
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
             watching.and_then(|watching| {
@@ -537,9 +594,7 @@ impl VaultControlBlock {
             definition: Arc::new(definition),
             vault_path: Arc::new(vault_path),
             snapshot: Arc::new(RwLock::new(snapshot)),
-            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
-            mutations_taken: Arc::new(AtomicU64::new(0)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            exclusion: prior_exclusion.unwrap_or_else(VaultWriteExclusion::fresh),
             accepting_operations: Arc::new(AtomicBool::new(true)),
             cancellation,
             revisions,
@@ -554,6 +609,14 @@ impl VaultControlBlock {
 
     pub fn vault_path(&self) -> &Path {
         &self.vault_path
+    }
+
+    /// This Vault's write exclusion, so a caller holding a guard across a
+    /// window in which the collection may reconcile can check that a freshly
+    /// resolved control block still serializes against the guard it holds
+    /// (the MCP `batch` tool does — issue #321).
+    pub(crate) fn write_exclusion(&self) -> VaultWriteExclusion {
+        self.exclusion.clone()
     }
 
     /// This Vault's pending write records. Cloned rather than borrowed so a
@@ -637,7 +700,9 @@ impl VaultControlBlock {
         // while one holder can see it move. Counted on acquisition rather than
         // release: by the time any other holder can read it, this mutation's
         // filesystem work has finished and its guard is gone.
-        self.mutations_taken.fetch_add(1, Ordering::Relaxed);
+        self.exclusion
+            .mutations_taken
+            .fetch_add(1, Ordering::Relaxed);
         Ok(guard)
     }
 
@@ -657,7 +722,7 @@ impl VaultControlBlock {
         &self,
     ) -> Result<(tokio::sync::OwnedMutexGuard<()>, u64), VaultRuntimeError> {
         let guard = self.acquire_mutation_exclusion().await?;
-        let generation = self.mutations_taken.load(Ordering::Relaxed);
+        let generation = self.exclusion.mutations_taken.load(Ordering::Relaxed);
         Ok((guard, generation))
     }
 
@@ -667,7 +732,7 @@ impl VaultControlBlock {
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let guard = self.mutation_lock.clone().lock_owned().await;
+        let guard = self.exclusion.mutation_lock.clone().lock_owned().await;
         self.ensure_accepting_operations()?;
         Ok(guard)
     }
@@ -693,8 +758,8 @@ impl VaultControlBlock {
         &self,
         since: u64,
     ) -> (bool, tokio::sync::OwnedMutexGuard<()>) {
-        let guard = self.mutation_lock.clone().blocking_lock_owned();
-        let mutated = self.mutations_taken.load(Ordering::Relaxed) != since;
+        let guard = self.exclusion.mutation_lock.clone().blocking_lock_owned();
+        let mutated = self.exclusion.mutations_taken.load(Ordering::Relaxed) != since;
         (mutated, guard)
     }
 
@@ -702,14 +767,14 @@ impl VaultControlBlock {
     /// retired has completed. Callers must revoke operation admission first,
     /// so a queued mutation re-checks that state and cannot begin afterwards.
     async fn wait_for_mutation_safe_boundary(&self) {
-        let _guard = self.mutation_lock.clone().lock_owned().await;
+        let _guard = self.exclusion.mutation_lock.clone().lock_owned().await;
     }
 
     pub async fn acquire_refresh(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let guard = self.refresh_lock.clone().lock_owned().await;
+        let guard = self.exclusion.refresh_lock.clone().lock_owned().await;
         self.ensure_accepting_operations()?;
         Ok(guard)
     }
@@ -1082,24 +1147,39 @@ impl VaultCollectionRuntime {
                         // already on disk and still uncommitted, so dropping
                         // them here would lose exactly the commit-message
                         // lines #249 exists to deliver.
-                        let (prior_git, prior_writes) =
-                            if let Some(VaultCollectionEntry::Active(runtime)) = previous_entry {
-                                let prior_snapshot = runtime.snapshot();
-                                (
-                                    Some((prior_snapshot.git, prior_snapshot.git_error.clone())),
-                                    Some(runtime.write_ledger()),
-                                )
-                            } else {
-                                (None, None)
-                            };
+                        //
+                        // So does its write exclusion, and that one is a
+                        // correctness requirement rather than a convenience.
+                        // This replacement becomes visible to `open()` the
+                        // moment the state lock below is dropped, while the
+                        // retiring block's in-flight write, Git turn or Index
+                        // read phase still holds its guard and is only waited
+                        // for afterwards. A fresh mutex here would admit a
+                        // second writer to the same directory for the whole
+                        // of that window — issue #96's defect, reintroduced
+                        // by every benign edit (name, interval, exclude
+                        // patterns, credentials). Carrying the exclusion
+                        // across makes an edit rotate the definition and
+                        // nothing else (#321, ADR-25).
+                        let carried_over = if let Some(VaultCollectionEntry::Active(runtime)) =
+                            previous_entry
+                        {
+                            let prior_snapshot = runtime.snapshot();
+                            CarriedOverState {
+                                git: Some((prior_snapshot.git, prior_snapshot.git_error.clone())),
+                                writes: Some(runtime.write_ledger()),
+                                exclusion: Some(runtime.write_exclusion()),
+                            }
+                        } else {
+                            CarriedOverState::default()
+                        };
                         VaultCollectionEntry::Active(VaultControlBlock::activate(
                             definition,
                             vault_path,
                             self.watching.as_ref(),
                             self.snapshot_cache.as_deref(),
                             revision_publisher.clone(),
-                            prior_git,
-                            prior_writes,
+                            carried_over,
                         ))
                     }
                 }

@@ -71,18 +71,34 @@ impl McpVault {
         )
         .with_commit_summary(commit_summary)
     }
+
+    /// Whether the control block this target was resolved from is still the
+    /// live one. A Vault definition edit reconciles a replacement block and
+    /// revokes this one, so a caller holding a guard across that window —
+    /// `batch`, for the length of a whole call — asks here before running
+    /// another operation on it.
+    pub(super) fn still_admits_operations(&self) -> bool {
+        self.control.is_accepting_operations()
+    }
+
+    /// Whether `self` serializes against a guard taken from `other`. True for
+    /// a replacement block that inherited the retiring one's write exclusion,
+    /// which is what a definition edit produces (issue #321).
+    pub(super) fn shares_write_exclusion(&self, other: &Self) -> bool {
+        self.control
+            .write_exclusion()
+            .is_same(&other.control.write_exclusion())
+    }
 }
 
 /// Resolve the explicit `vault_id` without asserting anything about the
 /// Vault's write posture, so [`scoped_vault`] can apply the capability check
 /// separately and report it as its own outcome.
 fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonRpcFailure> {
-    let raw = arguments
-        .get("vault_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| JsonRpcFailure::invalid_params("vault_id is required"))?;
-    let vault_id = VaultId::from_str(raw)
-        .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))?;
+    readable_vault_by_id(state, parse_vault_id(arguments)?)
+}
+
+fn readable_vault_by_id(state: &AppState, vault_id: VaultId) -> Result<McpVault, JsonRpcFailure> {
     let core = VaultReadCore::new(&state.startup_sqlite, &state.vaults);
     let control = core.control_block(vault_id).map_err(vault_error)?;
     Ok(McpVault {
@@ -92,14 +108,48 @@ fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonR
     })
 }
 
+/// The `vault_id` a write item addresses, parsed but not resolved. `batch`
+/// reads it out of every write item up front, before anything is resolved or
+/// locked, to put its lock acquisitions in a canonical order.
+pub(super) fn parse_vault_id(arguments: &Value) -> Result<VaultId, JsonRpcFailure> {
+    let raw = arguments
+        .get("vault_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| JsonRpcFailure::invalid_params("vault_id is required"))?;
+    VaultId::from_str(raw)
+        .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))
+}
+
 pub(super) fn scoped_vault(
     state: &AppState,
     arguments: &Value,
 ) -> Result<McpVault, JsonRpcFailure> {
-    let vault = readable_vault(state, arguments)?;
+    scoped_vault_by_id(state, parse_vault_id(arguments)?)
+}
+
+pub(super) fn scoped_vault_by_id(
+    state: &AppState,
+    vault_id: VaultId,
+) -> Result<McpVault, JsonRpcFailure> {
+    let vault = readable_vault_by_id(state, vault_id)?;
     crate::vault_mutation::ensure_mutable(vault.vault_id, &vault.control)
         .map_err(mutation_error)?;
     Ok(vault)
+}
+
+/// A batch write item that can no longer run under the exclusion its call
+/// acquired: the Vault was reconciled mid-batch onto a control block that
+/// does not share it. Retryable, because the batch's own locks are released
+/// when it returns and a fresh call resolves the live block.
+pub(super) fn exclusion_lost_error(vault_id: VaultId) -> JsonRpcFailure {
+    mutation_error(VaultOperationError::new(
+        "vault_write_exclusion_lost",
+        "Nothing was written: this Vault's definition changed while the batch was running, so \
+         this item would have run outside the write lock the batch holds. Retry the remaining \
+         items in a new call.",
+        Some(vault_id),
+        true,
+    ))
 }
 
 pub(super) async fn acquire_mutation(

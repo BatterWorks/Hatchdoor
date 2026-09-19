@@ -87,6 +87,16 @@ impl MutationJournal {
         self.apply_rewrites_with_before_commit(rewrites, |_| {})
     }
 
+    /// Commit each planned rewrite against the hash its plan was built from.
+    ///
+    /// The expectation is [`TextRewrite::original_hash`], carried from plan
+    /// time, not a hash of the read below: the read exists to retain the text
+    /// a rollback would restore, and using it as the CAS expectation would
+    /// only detect a concurrent save that landed in the microseconds between
+    /// the read and the rename, not one that landed while earlier notes in
+    /// the same loop were being written. A note that moved on since the plan
+    /// read it is refused with [`WriteError::Conflict`] and nothing is
+    /// written to it (#321).
     fn apply_rewrites_with_before_commit(
         &mut self,
         rewrites: Vec<TextRewrite>,
@@ -100,9 +110,18 @@ impl MutationJournal {
                     rewrite.path.display()
                 ))
             })?;
-            let original_hash = content_hash(&original);
+            if content_hash(&original) != rewrite.original_hash {
+                // Vault-relative, because this message reaches an MCP client
+                // verbatim and the absolute host path is nobody's business
+                // there.
+                return Err(WriteError::Conflict(format!(
+                    "Note '{}' changed after this change was planned; nothing was rewritten in it",
+                    bounded_vault_path(&self.vault_root, &rewrite.path)
+                )));
+            }
             before_commit(&rewrite.path);
-            let result = atomic_write_if_unchanged(&rewrite.path, &rewrite.content, &original_hash);
+            let result =
+                atomic_write_if_unchanged(&rewrite.path, &rewrite.content, &rewrite.original_hash);
             let committed_despite_error = result.is_err()
                 && fs::read_to_string(&rewrite.path)
                     .is_ok_and(|current| current == rewrite.content);
@@ -1367,10 +1386,12 @@ mod tests {
         let rewrites = vec![
             TextRewrite {
                 path: first.clone(),
+                original_hash: content_hash("original first\n"),
                 content: "rewritten first\n".to_string(),
             },
             TextRewrite {
                 path: missing,
+                original_hash: content_hash(""),
                 content: "rewritten second\n".to_string(),
             },
         ];
@@ -1413,6 +1434,7 @@ mod tests {
         journal
             .apply_rewrites(vec![TextRewrite {
                 path: backlink.clone(),
+                original_hash: content_hash("original backlink"),
                 content: "rewritten backlink".to_string(),
             }])
             .expect("rewrite");
@@ -1442,6 +1464,59 @@ mod tests {
         assert!(!asset_destination.exists());
     }
 
+    /// Issue #321: the CAS expectation is the plan's hash, so a note edited
+    /// at any point between the plan reading it and the loop reaching it is
+    /// refused — not just one edited in the microseconds between the
+    /// journal's own re-read and its rename. The loop below writes the first
+    /// note, and the manual save to the *second* one lands while it does.
+    #[test]
+    fn mutation_journal_refuses_a_rewrite_whose_note_changed_since_the_plan_read_it() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let first = root.join("First.md");
+        let second = root.join("Second.md");
+        fs::write(&first, "original first\n").expect("first");
+        fs::write(&second, "original second\n").expect("second");
+        let rewrites = vec![
+            TextRewrite {
+                path: first.clone(),
+                original_hash: content_hash("original first\n"),
+                content: "rewritten first\n".to_string(),
+            },
+            TextRewrite {
+                path: second.clone(),
+                original_hash: content_hash("original second\n"),
+                content: "rewritten second\n".to_string(),
+            },
+        ];
+        let mut journal = MutationJournal::new(root);
+
+        let cause = journal
+            .apply_rewrites_with_before_commit(rewrites, |path| {
+                // A concurrent save to the note the loop has not reached yet.
+                if path == first {
+                    fs::write(&second, "saved by hand\n").expect("manual save");
+                }
+            })
+            .expect_err("the second rewrite must be refused");
+        let error = journal.rollback(cause);
+
+        let WriteError::Conflict(message) = error else {
+            panic!("expected rewrite conflict, got {error:?}");
+        };
+        assert!(message.contains("rollback succeeded"), "{message}");
+        assert_eq!(
+            fs::read_to_string(&second).expect("second"),
+            "saved by hand\n",
+            "the concurrent save must survive untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(&first).expect("first"),
+            "original first\n",
+            "the rewrite already applied must be rolled back"
+        );
+    }
+
     #[test]
     fn mutation_journal_preserves_a_manual_edit_before_forward_rewrite_commit() {
         let dir = tempdir().expect("tempdir");
@@ -1460,6 +1535,7 @@ mod tests {
             .apply_rewrites_with_before_commit(
                 vec![TextRewrite {
                     path: backlink.clone(),
+                    original_hash: content_hash("original backlink"),
                     content: "rewritten backlink".to_string(),
                 }],
                 |path| fs::write(path, "manual edit").expect("manual edit"),

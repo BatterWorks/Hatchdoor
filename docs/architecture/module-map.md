@@ -188,9 +188,18 @@ that production inventory are still checked for stale paths and duplicates.
   and answers whether a mutation intervened, under that one acquisition, so the
   caller decides and acts without a window in between (issue #223, following the
   `request_if_idle` rule of issue #127). The count is never readable outside a
-  holder of that lock, which is the only place its value means anything. Unchanged Vaults retain their control blocks when another
+  holder of that lock, which is the only place its value means anything.
+  Unchanged Vaults retain their control blocks when another
   definition changes; disabled definitions remain visible with no capabilities
-  and no active runtime.
+  and no active runtime. A Vault whose definition *did* change gets a
+  replacement control block, and that block inherits the retiring one's
+  `VaultWriteExclusion` — the mutation lock, its generation counter, and the
+  refresh lock — so the exclusion's lifetime is the Vault's, not the block's,
+  and an edit can never put two live mutexes on one Vault directory (issue
+  #321, [ADR-25](../adr/README.md)). Only a genuinely new or re-enabled Vault
+  gets a fresh exclusion. `write_exclusion()` exposes it so a caller holding a
+  guard across a reconcile can check, by pointer, that a freshly resolved
+  block still serializes against what it holds.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records. Once the embedder is installed, startup queues
   each active Vault through the collection Index coordinator; it does not run a
@@ -1324,7 +1333,13 @@ a JSON-RPC failure. The core has no route or tool ownership.
 - No trait seam formalises the core; it is a plain struct (ADR-13).
 - Blocking work is offloaded here, so every surface offloads it.
 - A caller holding the mutation lock is what serializes writes to one Vault;
-  the core never re-takes a lock a caller already holds.
+  the core never re-takes a lock a caller already holds. A caller needing more
+  than one Vault's lock at once takes them sorted by Vault ID, before any work
+  runs (ADR-25); `batch` is the only such caller.
+- A planned text rewrite commits against the content hash read when the plan
+  was built (`TextRewrite::original_hash`), never against the journal's own
+  re-read, so a concurrent save landing part-way through a multi-note apply is
+  a `Conflict` rather than a silent overwrite (#321).
 - Wire shapes stay adapter-owned: HTTP sanitizes a `write_failed` message,
   MCP reports it, MCP reports `noise_excluded_write` and `layer_marker_write`
   at the protocol level as invalid parameters while HTTP answers `400`, and
@@ -2401,7 +2416,16 @@ hash as the batch runs and substitutes it for a later item's own
 `expected_content_hash`, so a caller can create or edit a note earlier in the
 batch and reference it again later without an intermediate read; a note not
 otherwise touched in the batch still validates its `expected_content_hash`
-normally. No Git-specific handling exists in the tool: it writes Markdown
+normally. #321 makes the locking behind that chain ordered rather than lazy:
+`lock_touched_vaults` pre-scans the write items, sorts the distinct Vault IDs,
+and acquires every mutation lock in that one canonical order before the first
+item runs, which is what stops two concurrent batches naming two Vaults in
+opposite orders deadlocking each other permanently. It also resolves each
+Vault's control block for the whole call; a reconcile mid-call — before the
+lock is granted or after it is taken — re-resolves and continues only against
+a live block sharing the exclusion the call holds (which a definition edit's
+replacement does, since #321 — see ADR-25), and is otherwise refused with a
+structured error rather than written unlocked. No Git-specific handling exists in the tool: it writes Markdown
 files exactly as the standalone tools do, and the existing per-Vault Git
 turn (`commit_vault_drift`, `src/git/managed_sync.rs`) already commits
 whatever is dirty at that turn in one commit — a batch's writes therefore
@@ -2717,6 +2741,11 @@ cannot be trusted to mean the same one after — guarded by the persisted
 returning user has legitimately rebuilt since; six Vault-agnostic
 preferences (theme, sidebar width, drawer open state, Recent notes'
 collapsed state, the touch-edit hint, the stored bearer token) are untouched.
+`main.tsx` also owns when the app may reload itself for a new service worker
+(#330). Registration stays `autoUpdate`, but the reload runs through
+`onNeedReload`, and both that and every `registration.update()` ask
+`lib/reloadGuard.ts` first, so a nightly build cannot activate and reload
+across an unsaved edit. The editor takes the hold; nothing else does.
 `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137) and the Vault-less-action
 default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
@@ -3282,7 +3311,29 @@ ordinary post-#137 per-note draft recovery is unaffected. That notice is
 additionally suppressed whenever `demoMode` is true (#152), regardless of
 `listHeldDrafts`: it names and links to a Settings surface withheld from a
 demo visitor entirely, and a pre-#137 held draft could in principle exist in
-any browser profile a demo instance happens to be served from. `NotePage`'s
+any browser profile a demo instance happens to be served from. The
+`lib/writeDrafts.ts` draft now covers the inline write surface too (#330),
+not source mode alone: one debounced writer takes `handleInlineChange`,
+`handleInProgressChange` (text living only inside an open block) and source
+mode's `draftContent`, captures which note a scheduled write belongs to so a
+pending one cannot follow the page onto the next note, and forces the write out
+synchronously on `pagehide`, on `visibilitychange` to hidden, and on unmount —
+the window a closing tab or a service-worker auto-reload falls into. Because
+the inline editor has no open/close moment to read a draft at, recovery happens
+when the note lands: a draft naming the hash now on disk is the interrupted
+write, so it goes back into the body and is handed to autosave to finish once
+inline editing is actually enabled (not on the commit the note arrives on,
+where wikilink resolution has not settled and autosave would swallow it); one
+naming an older hash is not replayed, and a notice points at source mode, which
+already knows how to show a stale draft against the current version. A refused
+draft write raises its own `write-notice`. The same issue closes the revision
+effect's blind spot: `inlineDirty` is cleared only by a save landing, so on a
+Vault whose writes are blocked, or once autosave has stopped, the effect's
+"probably our own write, wait for quiet" skip never ended and the page ignored
+every later revision for the session. When no write of ours can be in flight
+the bump is someone else's, so it sets `noteChangedOnDisk` — flagged, with its
+own reading-view notice, rather than refetched, because refetching is what
+would replace the unsaved text. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp on
 `deriveVaultSlot` has nothing to touch there; the one other `deriveVaultSlot`
@@ -3344,6 +3395,7 @@ fragment jump), Markdown/heading/search/state tests,
 - `frontend/src/lib/imageUpload.ts`
 - `frontend/src/lib/linePrefix.ts`
 - `frontend/src/lib/sourceMap.ts`
+- `frontend/src/lib/reloadGuard.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
 - `frontend/src/components/note-page/BlockGap.tsx`
@@ -3372,7 +3424,28 @@ insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 for drafts that predate Vault qualification, consumed by Settings'
 `UnsavedDrafts.tsx`; ordinary per-note and create drafts
 (`saveNoteDraft`/`loadNoteDraft`/`clearNoteDraft`/`saveCreateDraft`/
-`loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) are unchanged.
+`loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) keep their shape, with
+one change: `saveNoteDraft` returns whether the write actually landed (#330).
+`NotePage`'s debounced editor draft writer — the one behind the promise the UI
+makes while the user types — raises a notice on a `false`; the reload-latest,
+conflict-resolution and held-draft-restore call sites still discard it, so a
+blocked store stays silent on those paths and surfacing it there is unfinished.
+`collectLegacyHeldDrafts` reads every key before it writes any, the same
+two-phase shape `pruneNoteDrafts` uses, because writing into a storage area
+mid-enumeration can shift entries behind the `key(i)` cursor and skip drafts.
+`api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive }` (#330) for
+the unload send, and `hooks/useNoteAutosave.ts` takes an optional `flushSave`
+the `pagehide`/`visibilitychange` flush hands to `write` in place of the
+ordinary sender: a fetch started while the document is being torn down is
+cancelled with it. It is one send, not a side channel — the hook books its
+outcome like any other save, so a tab that was only hidden comes back with a
+current hash rather than conflicting on the next keystroke. That flush now
+takes `pendingRef ?? queuedRef`, so an edit parked behind an in-flight save
+leaves with the page too. `lib/reloadGuard.ts` is the seam that keeps the
+service worker from reloading over all of this: `NotePage` holds it while an
+edit is unsaved, a block is open, or a save is in flight, and `main.tsx`
+(coordination path) asks it before pulling an update and before acting on one
+that has already activated.
 `hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding

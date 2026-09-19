@@ -3538,6 +3538,56 @@ fn a_failed_write_partway_restores_every_note_already_written() {
     assert_eq!(after, before);
 }
 
+/// Issue #321, acceptance 3: `rename_tag` reads every matching note under the
+/// Vault's mutation lock, but a person editing the Vault in Obsidian is not
+/// bound by it. A save that lands after the front-loaded staleness pass, while
+/// earlier notes in the same apply loop are being written, must be refused at
+/// the note it hit rather than replaced by text built from the copy the plan
+/// read.
+#[test]
+fn a_manual_save_partway_through_a_tag_rename_is_refused_not_overwritten() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [a/b]\n---\n"),
+        ("B.md", "---\ntags: [a/b]\n---\n"),
+        ("C.md", "---\ntags: [a/b]\n---\n"),
+    ]);
+    let root = dir.path();
+    let manual = "---\ntags: [a/b]\n---\n\nSaved in Obsidian while the rename ran.\n";
+    let plan = plan_tag(root, "a/b", "c/d").expect("plan");
+
+    let result = super::tags::rename_tag_with_failure(
+        root,
+        &build_catalog(root),
+        "a/b",
+        "c/d",
+        plan.plan_hash.as_deref(),
+        |position| {
+            // A concurrent save to a note this rename has not reached yet,
+            // landing after the plan read it and after the pre-check passed.
+            if position == 0 {
+                fs::write(root.join("C.md"), manual).expect("manual save");
+            }
+            Ok(())
+        },
+    );
+
+    assert!(
+        matches!(result, Err(TagRenameError::Write(WriteError::Conflict(_)))),
+        "{result:?}"
+    );
+    assert_eq!(
+        read(root, "C.md"),
+        manual,
+        "the concurrent save must survive untouched"
+    );
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [a/b]\n---\n",
+        "the notes already written must be rolled back"
+    );
+    assert_eq!(read(root, "B.md"), "---\ntags: [a/b]\n---\n");
+}
+
 #[test]
 fn running_the_same_rename_twice_changes_nothing_the_second_time() {
     let dir = tag_vault(&[

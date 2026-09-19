@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::cache::parse::parse_fence_marker;
+use crate::cache::parse::{content_hash, parse_fence_marker};
 use crate::vault::paths::{normalize_link_target, normalize_title, split_wikilink_note_body};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
@@ -77,6 +77,11 @@ pub(super) fn backlink_rewrite_plan(
         if rewritten != content {
             rewrites.push(TextRewrite {
                 path: rewrite_path,
+                // The hash of what is on disk now, for the note this rewrite
+                // lands on. For the moved note's own self-link rewrite that
+                // path is the destination, which the move puts these exact
+                // bytes at before any rewrite is applied.
+                original_hash: content_hash(&content),
                 content: rewritten,
             });
         }
@@ -223,6 +228,12 @@ where
     transform_target(target).map(|new_target| format!("{new_target}{suffix}"))
 }
 
+/// Fold two plans into one rewrite per path, keeping the later content.
+///
+/// The *earlier* entry's `original_hash` is kept, because the later planner
+/// composed its content onto the earlier plan's text rather than onto disk:
+/// the one thing both are derived from is what was on disk when the first of
+/// them read it, and that is the hash the commit must check against.
 pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) -> Vec<TextRewrite> {
     let mut merged: Vec<TextRewrite> = Vec::new();
     for rewrite in left.into_iter().chain(right) {
@@ -238,25 +249,58 @@ pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) ->
     merged
 }
 
-/// The content a plan already holds for `path`, if any rewrite targets it.
+/// The text a later planner composes onto for `path`, and the on-disk hash
+/// whatever it plans must still commit against.
+///
+/// The two travel together because they come apart in exactly the case that
+/// matters: `content` may be an earlier plan's output, while `original_hash`
+/// always describes what is on disk. A rewrite built from this must carry
+/// this hash forward, never one taken of `content`.
+pub(super) struct RewriteBase {
+    pub(super) content: String,
+    pub(super) original_hash: String,
+}
+
+/// The base a plan already holds for `path`, if any rewrite targets it.
 ///
 /// A later planner composes onto this rather than appending a second rewrite,
 /// because [`merge_rewrites`] keeps only the last entry per path and a second
 /// one would discard the first.
-pub(super) fn planned_content(path: &Path, rewrites: &[TextRewrite]) -> Option<String> {
-    rewrites
+pub(super) fn planned_base(path: &Path, rewrites: &[TextRewrite]) -> Option<RewriteBase> {
+    // Content from the last entry for the path, because that is what a later
+    // planner must compose onto. Hash from the *first*, because that is the
+    // one taken from disk; a later entry only inherited it, and taking it
+    // from the first keeps the rule true however the slice was assembled.
+    let content = rewrites
         .iter()
         .rev()
-        .find(|rewrite| rewrite.path == path)
-        .map(|rewrite| rewrite.content.clone())
+        .find(|rewrite| rewrite.path == path)?
+        .content
+        .clone();
+    let original_hash = rewrites
+        .iter()
+        .find(|rewrite| rewrite.path == path)?
+        .original_hash
+        .clone();
+    Some(RewriteBase {
+        content,
+        original_hash,
+    })
 }
 
-pub(super) fn rewrite_content_or_read(
+pub(super) fn rewrite_base_or_read(
     path: &Path,
     rewrites: &[TextRewrite],
-) -> Result<String, io::Error> {
-    match planned_content(path, rewrites) {
-        Some(content) => Ok(content),
-        None => fs::read_to_string(path),
+) -> Result<RewriteBase, io::Error> {
+    match planned_base(path, rewrites) {
+        Some(base) => Ok(base),
+        None => {
+            let content = fs::read_to_string(path)?;
+            let original_hash = content_hash(&content);
+            Ok(RewriteBase {
+                content,
+                original_hash,
+            })
+        }
     }
 }

@@ -540,6 +540,13 @@ fn apply(
     // The plan was read under the same lock this write holds, but a person
     // editing the Vault directly is not bound by it. A note that moved on
     // since it was read is not overwritten with text built from the old copy.
+    //
+    // This front-loaded pass answers "is the whole plan still current?" once,
+    // so a rename that is going to be refused is refused before anything is
+    // written. It is not the protection: its verdict is a moment old by the
+    // time the last note in the loop below is written. Each rewrite carries
+    // its own `original_hash` into the commit, and the journal checks that
+    // one per note at the moment it writes it (#321).
     for rewrite in &plan.rewrites {
         let current = fs::read_to_string(&rewrite.path).map_err(|error| {
             WriteError::Io(format!(
@@ -558,6 +565,7 @@ fn apply(
         let written = journal
             .apply_rewrites(vec![TextRewrite {
                 path: rewrite.path.clone(),
+                original_hash: rewrite.original_hash.clone(),
                 content: rewrite.content.clone(),
             }])
             .and_then(|written| after_write(position).map(|()| written));
