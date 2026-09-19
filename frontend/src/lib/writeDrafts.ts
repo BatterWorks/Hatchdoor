@@ -103,7 +103,15 @@ export function loadNoteDraft(vaultId: string, slug: string): NoteDraft | null {
  * The boolean is the point (#330): with site data blocked, storage full, or a
  * browser set to clear on exit, a swallowed failure looks exactly like a
  * working store, and the editor goes on promising a safety net that does not
- * exist. Callers surface a persistent `false` rather than discarding it.
+ * exist.
+ *
+ * Only `NotePage`'s debounced editor draft writer reads it today, and it is the
+ * one that matters: it is the writer behind the promise the UI makes while the
+ * user types. The other callers — reload-latest, the two conflict resolutions,
+ * and Settings' held-draft restore — still discard the result, so a blocked
+ * store is silent on those paths. Surfacing it there is unfinished work, and
+ * the held-draft restore is the one to start with: it discards the held draft
+ * straight after writing the per-note one.
  */
 export function saveNoteDraft(
   vaultId: string,

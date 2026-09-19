@@ -11,6 +11,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
+import { isAppReloadHeld, resetAppReloadHolds } from "../lib/reloadGuard";
 import { loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
 import { staleVault, syncStoppedVault } from "../test/fixtures/vaults";
 import { NotePage } from "./NotePage";
@@ -43,10 +44,44 @@ function renderNote(
   );
 }
 
+/** Like `renderNote`, with the Vault revision under the test's control. */
+function renderNoteAtRevision(
+  vaultId: string,
+  vaults: Parameters<typeof NotePage>[0]["vaults"],
+  revision: number,
+) {
+  const tree = (vaultRevision: number) => (
+    <MemoryRouter initialEntries={[`/v/${vaultId}/n/home`]}>
+      <Routes>
+        <Route
+          path="/v/:vaultId/n/:slug"
+          element={
+            <NotePage
+              onActiveNoteChange={vi.fn()}
+              onTagSelect={vi.fn()}
+              propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
+              vaultRevision={vaultRevision}
+              writeEnabled={true}
+              editRequestId={0}
+              vaults={vaults}
+            />
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+  const view = render(tree(revision));
+  return {
+    view,
+    setRevision: (next: number) => view.rerender(tree(next)),
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   window.localStorage.clear();
+  resetAppReloadHolds();
 });
 
 describe("NotePage write escalation (#141)", () => {
@@ -428,7 +463,11 @@ describe("NotePage crash-safe inline editing (#330)", () => {
    * The note read, the wikilink resolve, and a recording PUT handler — the
    * three requests the note page makes while an edit is in flight.
    */
-  function mockVault(content: string, hash = "hash"): Sent[] {
+  function mockVault(
+    content: string,
+    hash = "hash",
+    vaultId = "vault-1",
+  ): Sent[] {
     const sent: Sent[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -436,7 +475,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
         if (init?.method === "PUT") {
           sent.push({ url, init });
           return jsonResponse({
-            vault_id: "vault-1",
+            vault_id: vaultId,
             ok: true,
             slug: "home",
             relative_path: "Home.md",
@@ -449,11 +488,11 @@ describe("NotePage crash-safe inline editing (#330)", () => {
           });
         }
         if (url.includes("/resolve-batch")) {
-          return jsonResponse({ vault_id: "vault-1", results: [] });
+          return jsonResponse({ vault_id: vaultId, results: [] });
         }
         if (url.includes("/notes/home")) {
           return jsonResponse({
-            vault_id: "vault-1",
+            vault_id: vaultId,
             note: {
               title: "Home",
               slug: "home",
@@ -543,18 +582,27 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     // window a closing tab falls into.
     expect(sent).toHaveLength(0);
 
-    act(() => {
-      window.dispatchEvent(new Event("pagehide"));
-    });
+    const draftAtPageHide = (() => {
+      let seen: string | null = null;
+      act(() => {
+        window.dispatchEvent(new Event("pagehide"));
+        seen = loadNoteDraft("vault-1", "home")?.content ?? null;
+      });
+      return seen as string | null;
+    })();
+
+    // Written synchronously inside the handler, before the send goes out:
+    // nothing the send reports can reach a page that is already gone.
+    expect(draftAtPageHide).toContain("First paragraph, still being typed.");
 
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0].init.keepalive).toBe(true);
     expect(JSON.parse(String(sent[0].init.body)).content).toContain(
       "First paragraph, still being typed.",
     );
-    expect(loadNoteDraft("vault-1", "home")?.content).toContain(
-      "First paragraph, still being typed.",
-    );
+    // This page happens to survive its own pagehide, and the send is booked
+    // like any other save, so the draft it no longer needs is cleared.
+    await waitFor(() => expect(loadNoteDraft("vault-1", "home")).toBeNull());
   });
 
   it("does not write a draft per keystroke, and flushes the pending one on the way out", async () => {
@@ -598,5 +646,95 @@ describe("NotePage crash-safe inline editing (#330)", () => {
         /Your browser isn’t storing drafts, so saving is the only way to keep this edit\./,
       ),
     ).toBeInTheDocument();
+  });
+
+  // Undo is the third way the document changes, and it was the one that did
+  // not write a draft. On a Vault that refuses the commit, the draft left on
+  // disk held the pre-undo text, so the page going away restored the edit the
+  // user had just taken back.
+  it("writes the draft for an undo the Vault will not take", async () => {
+    const vault = syncStoppedVault("Beta");
+    const sent = mockVault("First paragraph.\n", "hash", vault.vault_id);
+
+    renderNote(vault.vault_id, { vaults: [vault] });
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, edited.");
+    fireEvent.blur(screen.getByRole("textbox"));
+    await screen.findByText("First paragraph, edited.");
+
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    await screen.findByText("First paragraph.");
+
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    // Nothing was ever sent, so the draft is the only copy of what the user is
+    // looking at.
+    expect(sent).toHaveLength(0);
+    const draft = loadNoteDraft(vault.vault_id, "home");
+    expect(draft?.content).toContain("First paragraph.");
+    expect(draft?.content).not.toContain("edited");
+  });
+
+  it("does not put the draft back after the save that cleared it", async () => {
+    const sent = mockVault("First paragraph.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, edited.");
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await waitFor(() => expect(loadNoteDraft("vault-1", "home")).toBeNull());
+
+    // The debounced write scheduled by that edit fires after the save landed.
+    // Recreating the draft there leaves text the vault already holds sitting
+    // under a hash that has moved on, and the next visit reports a held edit
+    // that was in fact saved.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+  });
+
+  it("notices the note changed on disk even while a stopped Vault holds the edit", async () => {
+    const vault = syncStoppedVault("Beta");
+    mockVault("First paragraph.\n", "hash", vault.vault_id);
+    const { setRevision } = renderNoteAtRevision(vault.vault_id, [vault], 1);
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, edited.");
+    fireEvent.blur(screen.getByRole("textbox"));
+    await screen.findByText("First paragraph, edited.");
+
+    // `inlineDirty` never clears on a Vault that refuses the write, so without
+    // this the page would ignore every later revision for the rest of the
+    // session. The edit itself is not written over: the change is flagged.
+    setRevision(2);
+
+    expect(
+      await screen.findByText(
+        /This note changed on disk while your edit was waiting to save/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("First paragraph, edited.")).toBeInTheDocument();
+  });
+
+  it("holds off the service-worker reload until the edit is saved", async () => {
+    const sent = mockVault("First paragraph.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    await screen.findByText("First paragraph.");
+    expect(isAppReloadHeld()).toBe(false);
+
+    fireEvent.click(screen.getByText("First paragraph."));
+    typeInOpenBlock("First paragraph, edited.");
+    expect(isAppReloadHeld()).toBe(true);
+
+    fireEvent.blur(screen.getByRole("textbox"));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await waitFor(() => expect(isAppReloadHeld()).toBe(false));
   });
 });

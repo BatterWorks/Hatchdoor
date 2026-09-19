@@ -53,10 +53,13 @@ Reopen the note and the unsaved text is back, above a notice saying so, and the 
 
 If your browser will not store that local copy at all (private browsing, a full disk, site data blocked), a notice says so, because then saving really is the only thing keeping your edit.
 
+Hatchdoor also waits before updating itself. A new version installs in the background and normally takes effect on a reload; while you have an unsaved edit or an open block, that reload is held back until the edit is saved or you leave the note.
+
 ## When editing stops or isn't available
 
 - **"Edits aren't saving. This note changed somewhere else."** — someone or something else (an agent, Obsidian, a git sync) wrote to this note while you were editing. Your local changes are kept; click **Review** to compare your draft against the version on disk and choose which to keep.
 - **"Edits aren't saving. Hatchdoor could not reach the vault."** — a connectivity problem. It retries once the connection is back.
+- **"This note changed on disk while your edit was waiting to save."** — the note moved somewhere else while your edit was stuck (a Vault that has stopped syncing, a connection that is down). Nothing of yours is written over: open **Edit** to put the two versions side by side and decide.
 - **"This note's source and rendered lines don't line up, so inline editing is off here."** — a rare safety guard that disables inline editing for that specific note rather than risk misplacing an edit. Use **Edit** to open Source mode instead.
 - If the Vault is read-only, or you're on a demo deployment, no block is clickable at all — the note behaves as a plain reader.
 

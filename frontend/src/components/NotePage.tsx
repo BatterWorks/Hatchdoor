@@ -30,6 +30,7 @@ import {
 } from "../lib/sourceMap";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import { createEditHistory } from "../lib/editHistory";
+import { holdAppReload } from "../lib/reloadGuard";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -295,6 +296,12 @@ export function NotePage({
     content: string;
   } | null>(null);
   const draftTimerRef = useRef<number | null>(null);
+  // The last document the vault confirmed it holds. A debounced write can be
+  // scheduled before a save and fire after it, and recreating the draft then
+  // would leave text the vault already has sitting in the store under a hash
+  // that has moved on: `onSaved` cleared it a moment earlier, and the next
+  // visit to the note would report a held edit that was in fact saved (#330).
+  const savedContentRef = useRef<string | null>(null);
   // Latched once a draft write is refused: with site data blocked, storage
   // full, or a browser set to clear on exit, a silent failure is
   // indistinguishable from a working store, and the editor goes on promising a
@@ -324,6 +331,10 @@ export function NotePage({
         : draftTargetRef.current;
     const content = override ?? pending?.content ?? null;
     if (content === null || !target) {
+      return;
+    }
+    // Nothing to rescue: this is the document on disk.
+    if (content === savedContentRef.current) {
       return;
     }
     const stored = saveNoteDraft(target.vaultId, target.slug, {
@@ -453,6 +464,7 @@ export function NotePage({
     setInlineDirty(false);
     setRecoveredDraftNotice(null);
     setRestoredCommit(null);
+    savedContentRef.current = null;
   }, [noteKey]);
 
   useEffect(() => {
@@ -498,12 +510,33 @@ export function NotePage({
       activeUnitRef.current !== null ||
       autosaveStatusRef.current === "saving"
     ) {
+      // Unless no write of ours can be in flight at all. `inlineDirty` is only
+      // ever cleared by a save landing, so on a Vault whose writes are blocked,
+      // or once autosave has stopped, "quiet again" never arrives and the page
+      // would ignore every later revision for the rest of the session (#330).
+      // The bump is therefore someone else's. It is flagged rather than
+      // followed: refetching here would replace unsaved inline text with the
+      // version on disk, which is the loss this issue exists to prevent.
+      if (
+        writeBlockReason !== null ||
+        autosaveStatusRef.current === "error" ||
+        autosaveStatusRef.current === "conflict"
+      ) {
+        setNoteChangedOnDisk(true);
+      }
       return;
     }
 
     void loadNote(false);
     void loadNoteLinks();
-  }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
+  }, [
+    loadNote,
+    loadNoteLinks,
+    vaultRevision,
+    isEditing,
+    inlineDirty,
+    writeBlockReason,
+  ]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -756,18 +789,30 @@ export function NotePage({
   // an ordinary fetch does not: it is cancelled with the document (#330). The
   // draft is written first and synchronously, because the send can still be
   // refused and nothing it reports can reach a page that is already gone.
+  // Hiding a tab is not the same as closing it, so the outcome is returned
+  // rather than dropped: autosave books it exactly like an ordinary save, and
+  // a page that comes back has a current hash instead of conflicting on the
+  // next keystroke. A page that is really gone never sees it resolve, which is
+  // what the draft above covers.
   const flushSave = useCallback(
-    (content: string, expectedHash: string) => {
+    async (content: string, expectedHash: string) => {
       writeDraftNow(content);
       const keepalive =
         new TextEncoder().encode(content).length < KEEPALIVE_BODY_LIMIT_BYTES;
-      void updateNote(vaultId, slug, content, expectedHash, {
-        keepalive,
-      }).catch(() => {
-        // The draft above is the recovery path.
-      });
+      try {
+        const outcome = await updateNote(vaultId, slug, content, expectedHash, {
+          keepalive,
+        });
+        savedContentRef.current = content;
+        return outcome;
+      } catch (error) {
+        if (onDemoRefusal?.(error)) {
+          setAutosaveDemoRefusal(true);
+        }
+        throw error;
+      }
     },
-    [slug, vaultId, writeDraftNow],
+    [onDemoRefusal, slug, vaultId, writeDraftNow],
   );
 
   const autosave = useNoteAutosave({
@@ -779,7 +824,14 @@ export function NotePage({
     enabled: inlineEditingEnabled && !writeBlockReason,
     save: async (nextContent, expectedHash) => {
       try {
-        return await updateNote(vaultId, slug, nextContent, expectedHash);
+        const outcome = await updateNote(
+          vaultId,
+          slug,
+          nextContent,
+          expectedHash,
+        );
+        savedContentRef.current = nextContent;
+        return outcome;
       } catch (error) {
         // Same defense-in-depth backstop as every other write path (#152):
         // the hook's own catch still stops autosave for this session either
@@ -801,7 +853,9 @@ export function NotePage({
       setInlineDirty(false);
       // The vault holds this text now, so the local copy has nothing left to
       // rescue. A debounced write scheduled since carries newer text and
-      // legitimately recreates it a moment later.
+      // legitimately recreates it a moment later; one carrying the text that
+      // was just saved is skipped by `writeDraftNow` instead of resurrecting
+      // this key against a hash that has already moved.
       clearNoteDraft(vaultId, note?.slug ?? slug);
     },
   });
@@ -810,6 +864,24 @@ export function NotePage({
     autosaveRef.current = autosave;
     autosaveStatusRef.current = autosave.status;
   }, [autosave]);
+
+  // Hold off the service worker's own reload while an edit is in the air
+  // (#330). A nightly build activates and reloads the page with no prompt, and
+  // the triggers for pulling it — tab focus, the tab becoming visible — are
+  // exactly the moments an open block is sitting there unsaved. The draft now
+  // survives that reload, but not causing it is better than recovering from it.
+  // The hold is released the moment the save lands, the block closes, or this
+  // note is left.
+  const reloadHeld =
+    writeEnabled &&
+    (inlineDirty ||
+      activeUnit !== null ||
+      autosave.status === "saving" ||
+      saving);
+  useEffect(() => {
+    holdAppReload(`note:${noteKey}`, reloadHeld);
+    return () => holdAppReload(`note:${noteKey}`, false);
+  }, [noteKey, reloadHeld]);
 
   // Seed once per note. Without this, undo before the first edit would restore
   // the empty string the history was constructed with and blank the note.
@@ -897,18 +969,28 @@ export function NotePage({
 
   const [externalChange, setExternalChange] = useState(0);
 
-  const applyHistory = useCallback((next: string | null) => {
-    if (next === null) {
-      return;
-    }
-    // The open block, if any, is seeded from the pre-undo document.
-    setExternalChange((n) => n + 1);
-    latestContentRef.current = next;
-    setNote((prev) => (prev ? { ...prev, content: next } : prev));
-    setDraftContent(next);
-    setInlineDirty(true);
-    autosaveRef.current?.commit(next);
-  }, []);
+  const applyHistory = useCallback(
+    (next: string | null) => {
+      if (next === null) {
+        return;
+      }
+      // The open block, if any, is seeded from the pre-undo document.
+      setExternalChange((n) => n + 1);
+      latestContentRef.current = next;
+      setNote((prev) => (prev ? { ...prev, content: next } : prev));
+      setDraftContent(next);
+      setInlineDirty(true);
+      // The user has moved past any restored document, the same as typing.
+      setRestoredCommit(null);
+      // Undo is a document change like the other two, so it takes the same
+      // draft write before the commit (#330). Without it a commit the vault
+      // refuses leaves the draft holding the pre-undo text, and the page going
+      // away then restores the edit the user had just undone.
+      scheduleDraftWrite(next);
+      autosaveRef.current?.commit(next);
+    },
+    [scheduleDraftWrite],
+  );
 
   useEffect(() => {
     if (!inlineEditingEnabled) {
@@ -1379,6 +1461,14 @@ export function NotePage({
             <div className="write-notice-messages">
               Your browser isn&rsquo;t storing drafts, so saving is the only way
               to keep this edit.
+            </div>
+          </div>
+        ) : null}
+        {noteChangedOnDisk && !isEditing ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              This note changed on disk while your edit was waiting to save.
+              Open Edit to compare the two before writing over it.
             </div>
           </div>
         ) : null}

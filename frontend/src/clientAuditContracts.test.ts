@@ -43,6 +43,20 @@ describe("client audit launch contracts", () => {
     expect(mainSource).toContain("focus");
   });
 
+  // `autoUpdate` activates a new worker the moment it installs and reloads the
+  // page with no prompt, between keystrokes (#330). Both the check for an
+  // update and the reload itself go through the editor's hold.
+  it("does not reload for a service-worker update while an edit is unsaved", () => {
+    expect(mainSource).toContain("isAppReloadHeld");
+    expect(mainSource).toContain("onNeedReload");
+    expect(mainSource).toMatch(
+      /onNeedReload\(\)\s*{\s*whenAppReloadReleased\(\(\)\s*=>\s*window\.location\.reload\(\)\)/s,
+    );
+    expect(mainSource).not.toMatch(
+      /onNeedRefresh\(\)\s*{\s*window\.location\.reload\(\)/s,
+    );
+  });
+
   it("does not runtime-cache authenticated API data in the service worker", () => {
     expect(viteConfig).not.toContain("hatchdoor-api-tree");
     expect(viteConfig).not.toContain("hatchdoor-api-note");

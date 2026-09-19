@@ -2741,6 +2741,11 @@ cannot be trusted to mean the same one after — guarded by the persisted
 returning user has legitimately rebuilt since; six Vault-agnostic
 preferences (theme, sidebar width, drawer open state, Recent notes'
 collapsed state, the touch-edit hint, the stored bearer token) are untouched.
+`main.tsx` also owns when the app may reload itself for a new service worker
+(#330). Registration stays `autoUpdate`, but the reload runs through
+`onNeedReload`, and both that and every `registration.update()` ask
+`lib/reloadGuard.ts` first, so a nightly build cannot activate and reload
+across an unsaved edit. The editor takes the hold; nothing else does.
 `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137) and the Vault-less-action
 default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
@@ -3321,7 +3326,14 @@ inline editing is actually enabled (not on the commit the note arrives on,
 where wikilink resolution has not settled and autosave would swallow it); one
 naming an older hash is not replayed, and a notice points at source mode, which
 already knows how to show a stale draft against the current version. A refused
-draft write raises its own `write-notice`. `NotePage`'s
+draft write raises its own `write-notice`. The same issue closes the revision
+effect's blind spot: `inlineDirty` is cleared only by a save landing, so on a
+Vault whose writes are blocked, or once autosave has stopped, the effect's
+"probably our own write, wait for quiet" skip never ended and the page ignored
+every later revision for the session. When no write of ours can be in flight
+the bump is someone else's, so it sets `noteChangedOnDisk` — flagged, with its
+own reading-view notice, rather than refetched, because refetching is what
+would replace the unsaved text. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp on
 `deriveVaultSlot` has nothing to touch there; the one other `deriveVaultSlot`
@@ -3383,6 +3395,7 @@ fragment jump), Markdown/heading/search/state tests,
 - `frontend/src/lib/imageUpload.ts`
 - `frontend/src/lib/linePrefix.ts`
 - `frontend/src/lib/sourceMap.ts`
+- `frontend/src/lib/reloadGuard.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
 - `frontend/src/components/note-page/BlockGap.tsx`
@@ -3412,18 +3425,27 @@ for drafts that predate Vault qualification, consumed by Settings'
 `UnsavedDrafts.tsx`; ordinary per-note and create drafts
 (`saveNoteDraft`/`loadNoteDraft`/`clearNoteDraft`/`saveCreateDraft`/
 `loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) keep their shape, with
-one change: `saveNoteDraft` returns whether the write actually landed (#330),
-so a blocked or full store is surfaced rather than swallowed — a silent failure
-there is indistinguishable from a working one while the UI goes on promising a
-draft. `collectLegacyHeldDrafts` reads every key before it writes any, the same
+one change: `saveNoteDraft` returns whether the write actually landed (#330).
+`NotePage`'s debounced editor draft writer — the one behind the promise the UI
+makes while the user types — raises a notice on a `false`; the reload-latest,
+conflict-resolution and held-draft-restore call sites still discard it, so a
+blocked store stays silent on those paths and surfacing it there is unfinished.
+`collectLegacyHeldDrafts` reads every key before it writes any, the same
 two-phase shape `pruneNoteDrafts` uses, because writing into a storage area
 mid-enumeration can shift entries behind the `key(i)` cursor and skip drafts.
 `api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive }` (#330) for
 the unload send, and `hooks/useNoteAutosave.ts` takes an optional `flushSave`
-the `pagehide`/`visibilitychange` flush uses in place of the awaited `save`:
-an ordinary fetch started while the document is being torn down is cancelled
-with it. That flush now takes `pendingRef ?? queuedRef`, so an edit parked
-behind an in-flight save leaves with the page too.
+the `pagehide`/`visibilitychange` flush hands to `write` in place of the
+ordinary sender: a fetch started while the document is being torn down is
+cancelled with it. It is one send, not a side channel — the hook books its
+outcome like any other save, so a tab that was only hidden comes back with a
+current hash rather than conflicting on the next keystroke. That flush now
+takes `pendingRef ?? queuedRef`, so an edit parked behind an in-flight save
+leaves with the page too. `lib/reloadGuard.ts` is the seam that keeps the
+service worker from reloading over all of this: `NotePage` holds it while an
+edit is unsaved, a block is open, or a save is in flight, and `main.tsx`
+(coordination path) asks it before pulling an update and before acting on one
+that has already activated.
 `hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding
