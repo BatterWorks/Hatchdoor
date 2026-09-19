@@ -30,8 +30,8 @@ use crate::vault_management::{
     VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
 };
 use crate::vault_read::{
-    NoteQueryResponse, VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote,
-    VaultResolveResponse, VaultStatistics, VaultTree,
+    NoteQueryResponse, SavedQueryEvaluation, VaultGraph, VaultQualifiedLinks, VaultReadProjection,
+    VaultRecentNote, VaultResolveResponse, VaultStatistics, VaultTree,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ use crate::vault_read::{
 
 pub type ListVaultsResult = VaultDiscoveryResponse;
 pub type SearchNotesResult = VaultReadProjection<VaultSearchResponse>;
+
 pub type GetNoteResult = crate::vault_read::VaultQualifiedNote;
 pub type GetNoteLinksResult = VaultQualifiedLinks;
 pub type ResolveWikilinkResult = VaultResolveResponse;
@@ -58,6 +59,7 @@ pub struct StampedStatsResult {
 pub type GetGraphResult = VaultReadProjection<Vec<VaultGraph>>;
 pub type RecentlyModifiedResult = VaultReadProjection<Vec<VaultRecentNote>>;
 pub type QueryNotesResult = VaultReadProjection<NoteQueryResponse>;
+pub type EvaluateSavedQueryResult = VaultReadProjection<SavedQueryEvaluation>;
 pub type CreateVaultResult = VaultMutationResponse;
 pub type EditVaultResult = VaultMutationResponse;
 pub type EnableVaultResult = VaultMutationResponse;
@@ -342,6 +344,7 @@ output_schemas! {
     "get_graph" => GetGraphResult,
     "recently_modified" => RecentlyModifiedResult,
     "query_notes" => QueryNotesResult,
+    "evaluate_saved_query" => EvaluateSavedQueryResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
     "get_attachment" => GetAttachmentResult,
@@ -422,12 +425,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 42,
-            "3 setup + 14 read + 1 batch + 8 management + 16 write tools"
+            total, 43,
+            "3 setup + 15 read + 1 batch + 8 management + 16 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 42, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 43, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

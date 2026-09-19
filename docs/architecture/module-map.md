@@ -1011,7 +1011,9 @@ Vault-qualified exact-note, tree, statistics, graph, and recent-note
 projections, plus `VaultReadCore::saved_queries` and its wire types
 (`SavedQueriesResponse`, `SavedQueryResult`, `SavedQueryOutcome`,
 `SavedQueryTable`, `SavedQueryColumn`, `SavedQueryRow`, `SavedQueryTruncation`,
-`SavedQueryTruncationReason`). `BrowseSurface` names which layer surface a caller may read.
+`SavedQueryTruncationReason`), and `VaultReadCore::saved_query` with its
+wire types (`SavedQueryEvaluation`, `SavedQueryRows`). `VaultQualifiedNote`
+carries `saved_queries: Vec<SavedQuerySummary>` (#277). `BrowseSurface` names which layer surface a caller may read.
 `Everything` is the established behavior and stays the default: a layer demotes
 a Note from the default *search* surface only, and an operator still reaches it
 by slug, in the explorer, and on the graph. `DefaultOnly` is demo mode's clamp
@@ -1125,6 +1127,24 @@ tells an addresser it names none of them). None changes a row. Two strings that 
 or date-time compare as instants in the shared `compare`, which `query_notes`
 uses too, so `now()` orders correctly against `2026-09-18 10:00` or a zoned
 timestamp; any other pair compares byte-wise as before.
+`saved_query` (#277) addresses one saved query in a Note by its marker name and
+evaluates only that one, with the whole scan budget, against the Note's own
+Vault. The name may be omitted only when the Note holds exactly one. Selection
+never falls back to position, so reordering a Note cannot change what a name
+answers, and each way a request misses is its own `VaultReadError` code, all
+listed in `public_code` and none retryable: `no_saved_queries`,
+`saved_query_name_required` (the message lists the names),
+`saved_query_not_found`, `saved_query_name_ambiguous` (the `duplicate_name`
+collision), and, from the evaluation itself, `saved_query_refused` (naming the
+construct) and `saved_query_stopped`. Only `populated` and `empty` reach
+`SavedQueryRows`, so a refused or stopped definition cannot arrive as rows.
+`VaultQualifiedNote::new`, used by every exact Note read, fills
+`saved_queries` with the Note's saved queries by the name each may be addressed
+by, `null` for none or an unusable one, parsed from the Markdown and never
+evaluated, so both the HTTP note read and `get_note` report them while
+`note.content` stays the authoritative file (ADR-21 part 4).
+`VaultReadProjection::map` / `try_map` and the private `one_vault` carry an
+envelope's freshness onto a single-Vault datum.
 `exact_note_frontmatter` and `note_attachments` are the surface-gated
 counterparts of the frontmatter and attachment-listing reads the MCP tools used
 to answer from a raw index build of their own (#188); both return `Ok(None)`
@@ -2409,7 +2429,15 @@ cover it, and in `batch.rs`'s `NOT_BATCHABLE_WRITE_OPS`, which refuses it as a
 batch item before anything runs: its all-or-nothing promise cannot hold inside
 a best-effort batch. Its refusals reach the caller as structured tool errors
 with their own codes. Catalogue grows to 42 across all catalogues, purely
-additive.
+additive. #277 adds `evaluate_saved_query`, the fifteenth read tool and a
+`READ_OPS` entry (so `batch` may carry it): a mapping onto
+`VaultReadCore::saved_query` answering `EvaluateSavedQueryResult`, the shared
+projection envelope around `SavedQueryEvaluation`. Its arguments have no
+`scope` by design, so a caller-supplied one is an invalid-params refusal, and
+every request that reaches no answer is a structured tool error rather than a
+success with zero rows. `get_note` reports the Note's `saved_queries` through
+`VaultQualifiedNote` itself, so the adapter adds nothing. Catalogue grows to
+43, purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -2452,7 +2480,7 @@ requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
 window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
-42-tool catalogue.
+43-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport

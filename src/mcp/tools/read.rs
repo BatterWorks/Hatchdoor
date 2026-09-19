@@ -164,6 +164,18 @@ struct ExactSlugArgs {
     slug: String,
 }
 
+/// `evaluate_saved_query`'s arguments. There is deliberately no `scope`: a
+/// saved query reads its Note's own Vault whoever asks (ADR-21 part 2), so a
+/// caller sending one is refused like any other unknown argument.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedQueryArgs {
+    vault_id: String,
+    slug: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolveArgs {
@@ -264,6 +276,28 @@ pub(super) async fn get_note_tool(
         .await
     {
         Ok(Some(note)) => Ok(tool_result::<results::GetNoteResult>(&note)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn evaluate_saved_query_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: SavedQueryArgs = parse("evaluate_saved_query", arguments)?;
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.saved_query(vault_id, &slug, args.name.as_deref()))
+        .await
+    {
+        Ok(Some(evaluation)) => Ok(tool_result::<results::EvaluateSavedQueryResult>(
+            &evaluation,
+        )),
         Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
         Err(error) => read_failure(error),
     }
@@ -1032,7 +1066,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
         json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         tree_tool(),
@@ -1049,6 +1083,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an HTTP download_url resolved against this MCP endpoint's scheme, host, and port; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
+        evaluate_saved_query_tool_schema(),
         json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
     ]
 }
@@ -1124,6 +1159,27 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified, search_notes and query_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
+}
+
+/// The description does the steering here. An agent that reads a definition
+/// and rebuilds it as a `query_notes` call can drop or reinterpret a
+/// condition, which is what this tool exists to prevent (#277).
+fn evaluate_saved_query_tool_schema() -> Value {
+    json!({
+        "name": "evaluate_saved_query",
+        "description": collection_description("Evaluate one saved query stored in a Note and return the Notes it selects as structured rows. Use this rather than reading the definition in get_note and rebuilding it as a query_notes call: the definition is evaluated exactly as its author wrote it. get_note's saved_queries lists what a Note holds and the names to pass. The saved query always reads the Vault its Note lives in; there is no scope argument. status is populated (rows holds at least one row) or empty (every Note was checked and none qualified). Each row carries the matched Note's vault_id, title, slug and relative_path, and cells, one value per entry in columns, in the same order; a property the Note does not carry is null. truncated is present when more Notes qualified than rows holds, with reason definition_limit (the view's own limit) or ceiling (Hatchdoor's cap of 500 rows). ignored names presentation instructions such as groupBy that were not carried out; the rows are complete without them. Every request that reaches no answer is a structured error, never an empty result: no_saved_queries (the Note holds none), saved_query_name_required (name omitted while the Note holds several; the message lists the names), saved_query_not_found (no saved query has that name), saved_query_name_ambiguous (several share it), saved_query_refused (the definition uses something Hatchdoor cannot evaluate; the message names it), saved_query_stopped (evaluating it would pass Hatchdoor's ceiling). The rows come from the Vault's published index, like a collection read's."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "slug": {"type": "string", "minLength": 1, "description": "The Note holding the saved query."},
+                "name": {"type": "string", "minLength": 1, "description": "The saved query's name, as get_note's saved_queries reports it. Omit it only when the Note holds exactly one saved query."}
+            },
+            "required": ["vault_id", "slug"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations(),
+    })
 }
 
 /// `query_notes` gets its own builder rather than a one-line entry: the tool is
@@ -1373,6 +1429,7 @@ mod tests {
         assert_eq!(
             checked,
             [
+                "evaluate_saved_query",
                 "get_graph",
                 "get_stats",
                 "get_tree",

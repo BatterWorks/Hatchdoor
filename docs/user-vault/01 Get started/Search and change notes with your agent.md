@@ -37,6 +37,7 @@ The expected agent workflow is compact:
 | Find a note | `list_vaults` → `search_notes` |
 | Find every note with a tag, in a folder, or with a property | `list_vaults` → `query_notes` |
 | Inspect it | `get_note` |
+| Get the rows a note's saved query lists | `get_note` to see its `saved_queries`, then `evaluate_saved_query` with the name |
 | Add one item under a heading | `edit_note` or `replace_section`, with the returned content hash |
 | Change its tags or other metadata | `get_frontmatter` to see what's there, then `update_frontmatter` with the content hash `get_frontmatter` returned alongside it |
 | Rename a tag in every note that carries it | `rename_tag` once to see the plan, then again with the `plan_hash` it returned |
