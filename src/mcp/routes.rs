@@ -4339,4 +4339,281 @@ mod tests {
                 .contains("write tools are disabled")
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Per-Vault write exclusion across a whole batch call (#321)
+    // ---------------------------------------------------------------------------
+
+    use crate::vault_registry::VaultId;
+
+    /// A write-enabled state with two Local Vaults, returned with their IDs in
+    /// ascending order — which is the order `batch` acquires their mutation
+    /// locks in, whatever order a caller's items name them.
+    fn two_vault_write_state() -> (AppState, VaultId, VaultId, TempDir) {
+        use crate::vault_registry::{NewVaultDefinition, VaultRegistryState, VaultSource};
+
+        let tmp = TempDir::new().expect("temp dir");
+        let mut state = base_state(&tmp);
+        state.runtime_config = mcp_runtime_config(true);
+        let mut revision = 0;
+        for name in ["Vault one", "Vault two"] {
+            let root = tmp.path().join(name.replace(' ', "-"));
+            std::fs::create_dir_all(&root).expect("create vault");
+            std::fs::write(root.join("Home.md"), "# Home\n").expect("seed note");
+            let snapshot = state
+                .vault_registry
+                .add(
+                    revision,
+                    NewVaultDefinition {
+                        name: name.to_string(),
+                        enabled: true,
+                        source: VaultSource::Local { path: root },
+                        exclude_patterns: Vec::new(),
+                        https_credentials: None,
+                        archive_folder: None,
+                        commit_identity: None,
+                    },
+                )
+                .expect("register test Vault");
+            revision = snapshot.revision();
+        }
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            VaultRegistryState::Ready(snapshot) => snapshot,
+            VaultRegistryState::Recovery(_) => panic!("test registry recovery"),
+        };
+        state.vaults.reconcile(&state.vault_registry, &snapshot);
+        let mut ids: Vec<VaultId> = snapshot
+            .definitions()
+            .map(|definition| definition.vault_id())
+            .collect();
+        ids.sort();
+        assert_eq!(ids.len(), 2);
+        (state, ids[0], ids[1], tmp)
+    }
+
+    /// The one edit that reconciles a replacement control block for `vault_id`
+    /// while leaving it enabled at the same path: one added exclude pattern.
+    fn edit_vault_in_place(state: &AppState, vault_id: VaultId) {
+        use crate::vault_registry::{
+            HttpsCredentialUpdate, VaultDefinitionEdit, VaultRegistryState, VaultSource,
+        };
+
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            VaultRegistryState::Ready(snapshot) => snapshot,
+            VaultRegistryState::Recovery(_) => panic!("test registry recovery"),
+        };
+        let definition = snapshot.definition(vault_id).expect("registered Vault");
+        let VaultSource::Local { path } = definition.source().clone() else {
+            panic!("test Vault is not Local");
+        };
+        let edited = state
+            .vault_registry
+            .edit(
+                snapshot.revision(),
+                vault_id,
+                VaultDefinitionEdit {
+                    name: definition.name().to_string(),
+                    source: VaultSource::Local { path },
+                    exclude_patterns: vec!["ignored/**".to_string()],
+                    https_credentials: HttpsCredentialUpdate::Keep,
+                    confirm_identity_change: false,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("edit the Vault definition");
+        state.vaults.reconcile(&state.vault_registry, &edited);
+    }
+
+    fn batch_write_pair(first: VaultId, second: VaultId, tag: &str) -> Value {
+        json!({"operations": [
+            {"op": "create_note", "arguments": {
+                "vault_id": first.to_string(),
+                "relative_path": format!("{tag}-first.md"),
+                "content": "# first\n"
+            }},
+            {"op": "create_note", "arguments": {
+                "vault_id": second.to_string(),
+                "relative_path": format!("{tag}-second.md"),
+                "content": "# second\n"
+            }},
+        ]})
+    }
+
+    /// Issue #321, acceptance 1: two concurrent batches naming the same two
+    /// Vaults in opposite orders both complete.
+    ///
+    /// Locks used to be taken lazily in caller order and held to the end of
+    /// the call, so this interleaving wedged both Vaults' write paths until
+    /// the process restarted. The externally held guard on the higher Vault
+    /// is what makes the interleaving deterministic rather than a race: it
+    /// parks the first call where the second can overtake it.
+    #[tokio::test]
+    async fn two_opposed_batches_over_the_same_two_vaults_both_complete() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        let blocking = state
+            .vaults
+            .runtime(high)
+            .expect("higher Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the higher Vault");
+
+        let descending = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(high, low, "descending")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let ascending = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "ascending")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(blocking);
+
+        let (descending, ascending) =
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                (descending.await, ascending.await)
+            })
+            .await
+            .expect("neither batch may deadlock the other");
+
+        for body in [
+            descending.expect("descending batch task"),
+            ascending.expect("ascending batch task"),
+        ] {
+            let content = &body["result"]["structuredContent"];
+            assert_eq!(content["failed"], 0, "{body:#}");
+            assert_eq!(content["succeeded"], 2, "{body:#}");
+        }
+    }
+
+    /// Issue #321, acceptance 4: a Vault definition edit lands while a batch
+    /// holds that Vault's lock. The replacement control block inherits the
+    /// exclusion, so the item still runs under the lock the batch holds — on
+    /// the live block, not the revoked one.
+    #[tokio::test]
+    async fn a_batch_item_after_a_mid_batch_definition_edit_runs_on_the_live_block() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        let before = state.vaults.runtime(low).expect("lower Vault runtime");
+        let blocking = state
+            .vaults
+            .runtime(high)
+            .expect("higher Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the higher Vault");
+        let running = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "edited")).await }
+        });
+        // The batch has taken the lower Vault and is parked on the higher one.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        edit_vault_in_place(&state, low);
+        let after = state.vaults.runtime(low).expect("replacement runtime");
+        assert!(
+            before.write_exclusion().is_same(&after.write_exclusion()),
+            "the replacement block must inherit the exclusion the batch holds"
+        );
+        drop(blocking);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), running)
+            .await
+            .expect("the batch must finish")
+            .expect("batch task");
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["failed"], 0, "{body:#}");
+        assert_eq!(content["succeeded"], 2, "{body:#}");
+    }
+
+    /// The same edit, landing while the batch is still *queued* for the lock
+    /// rather than holding it. Acquisition learns its control block was
+    /// retired only once the lock is granted, so it has to resolve the
+    /// replacement and take that — otherwise an ordinary settings change made
+    /// while a batch waited behind a slow write failed the whole batch.
+    #[tokio::test]
+    async fn a_batch_edited_before_it_gets_the_lock_runs_on_the_replacement() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        // The lower Vault is the first this batch acquires, so holding it
+        // parks the batch inside acquisition rather than after it.
+        let blocking = state
+            .vaults
+            .runtime(low)
+            .expect("lower Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the lower Vault");
+        let running = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "queued")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        edit_vault_in_place(&state, low);
+        drop(blocking);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), running)
+            .await
+            .expect("the batch must finish")
+            .expect("batch task");
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["failed"], 0, "{body:#}");
+        assert_eq!(content["succeeded"], 2, "{body:#}");
+    }
+
+    /// The other half of acceptance 4: when the Vault does not come back with
+    /// the same exclusion — here because it was disabled mid-batch — the item
+    /// is refused with a structured error rather than written unlocked.
+    #[tokio::test]
+    async fn a_batch_item_whose_vault_is_retired_mid_batch_fails_structurally() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        let blocking = state
+            .vaults
+            .runtime(high)
+            .expect("higher Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the higher Vault");
+        let running = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "retired")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => {
+                panic!("test registry recovery")
+            }
+        };
+        let disabled = state
+            .vault_registry
+            .disable(snapshot.revision(), low)
+            .expect("disable the lower Vault");
+        let vault_root = match snapshot.definition(low).expect("definition").source() {
+            crate::vault_registry::VaultSource::Local { path } => path.clone(),
+            other => panic!("test Vault is not Local: {other:?}"),
+        };
+        state.vaults.reconcile(&state.vault_registry, &disabled);
+        drop(blocking);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), running)
+            .await
+            .expect("the batch must finish")
+            .expect("batch task");
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], false, "{body:#}");
+        assert!(
+            items[0]["error"]["code"].is_string(),
+            "a structured error, not bare text: {body:#}"
+        );
+        assert_eq!(items[1]["ok"], true, "{body:#}");
+        assert!(
+            !vault_root.join("retired-first.md").exists(),
+            "nothing may be written to a Vault the batch no longer holds"
+        );
+    }
 }

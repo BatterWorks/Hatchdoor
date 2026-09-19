@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::cache::parse::{for_non_code_line, parse_fence_marker};
+use crate::cache::parse::{content_hash, for_non_code_line, parse_fence_marker};
 use crate::vault::paths::split_wikilink_asset_body;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
@@ -11,7 +11,7 @@ use super::paths::{
     is_trashed_path, relative_link_target, resolve_reference_inside_root, same_existing_path,
     unique_trash_attachment_relative_path, vault_relative_dir,
 };
-use super::rewrites::{planned_content, rewrite_content_or_read};
+use super::rewrites::{RewriteBase, planned_base, rewrite_base_or_read};
 use super::types::{AssetMove, TextRewrite, WriteError};
 
 pub(super) fn asset_move_plan(
@@ -151,18 +151,26 @@ pub(super) fn asset_move_plan(
         // for the note instead of appending a rewrite that would discard it.
         // The locally accumulated rewrites are consulted first, because they
         // are applied after the baseline.
-        let planned = planned_content(destination_note, &rewrites)
-            .or_else(|| planned_content(destination_note, baseline_rewrites));
-        let note_body_so_far = planned.as_deref().unwrap_or(content.as_str());
-        let rewritten = transform_asset_references(note_body_so_far, |target| {
+        let planned = planned_base(destination_note, &rewrites)
+            .or_else(|| planned_base(destination_note, baseline_rewrites));
+        // No plan yet for the note: its body is the one already read above,
+        // from the source path the move will carry to `destination_note`
+        // untouched, so that read is also the on-disk original this rewrite
+        // must commit against.
+        let base = planned.unwrap_or_else(|| RewriteBase {
+            original_hash: content_hash(&content),
+            content: content.clone(),
+        });
+        let rewritten = transform_asset_references(&base.content, |target| {
             stationary
                 .get(target)
                 .cloned()
                 .unwrap_or_else(|| target.to_string_lossy().into_owned())
         });
-        if rewritten != note_body_so_far {
+        if rewritten != base.content {
             rewrites.push(TextRewrite {
                 path: destination_note.to_path_buf(),
+                original_hash: base.original_hash,
                 content: rewritten,
             });
         }
@@ -192,12 +200,13 @@ pub(super) fn asset_reference_rewrite_plan(
         if entry.slug == moved_slug {
             continue;
         }
-        let content = rewrite_content_or_read(&entry.path, baseline_rewrites).map_err(|error| {
+        let base = rewrite_base_or_read(&entry.path, baseline_rewrites).map_err(|error| {
             WriteError::Io(format!(
                 "failed to read note '{}' for asset reference rewrite: {error}",
                 entry.relative_path
             ))
         })?;
+        let content = base.content;
         let rewritten = transform_asset_references(&content, |target| {
             let note_dir = entry.path.parent().unwrap_or(vault_root);
             let resolved = note_dir.join(target);
@@ -210,6 +219,7 @@ pub(super) fn asset_reference_rewrite_plan(
         if rewritten != content {
             rewrites.push(TextRewrite {
                 path: entry.path,
+                original_hash: base.original_hash,
                 content: rewritten,
             });
         }

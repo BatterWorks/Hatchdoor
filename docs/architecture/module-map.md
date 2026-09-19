@@ -188,9 +188,18 @@ that production inventory are still checked for stale paths and duplicates.
   and answers whether a mutation intervened, under that one acquisition, so the
   caller decides and acts without a window in between (issue #223, following the
   `request_if_idle` rule of issue #127). The count is never readable outside a
-  holder of that lock, which is the only place its value means anything. Unchanged Vaults retain their control blocks when another
+  holder of that lock, which is the only place its value means anything.
+  Unchanged Vaults retain their control blocks when another
   definition changes; disabled definitions remain visible with no capabilities
-  and no active runtime.
+  and no active runtime. A Vault whose definition *did* change gets a
+  replacement control block, and that block inherits the retiring one's
+  `VaultWriteExclusion` — the mutation lock, its generation counter, and the
+  refresh lock — so the exclusion's lifetime is the Vault's, not the block's,
+  and an edit can never put two live mutexes on one Vault directory (issue
+  #321, [ADR-25](../adr/README.md)). Only a genuinely new or re-enabled Vault
+  gets a fresh exclusion. `write_exclusion()` exposes it so a caller holding a
+  guard across a reconcile can check, by pointer, that a freshly resolved
+  block still serializes against what it holds.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records. Once the embedder is installed, startup queues
   each active Vault through the collection Index coordinator; it does not run a
@@ -1324,7 +1333,13 @@ a JSON-RPC failure. The core has no route or tool ownership.
 - No trait seam formalises the core; it is a plain struct (ADR-13).
 - Blocking work is offloaded here, so every surface offloads it.
 - A caller holding the mutation lock is what serializes writes to one Vault;
-  the core never re-takes a lock a caller already holds.
+  the core never re-takes a lock a caller already holds. A caller needing more
+  than one Vault's lock at once takes them sorted by Vault ID, before any work
+  runs (ADR-25); `batch` is the only such caller.
+- A planned text rewrite commits against the content hash read when the plan
+  was built (`TextRewrite::original_hash`), never against the journal's own
+  re-read, so a concurrent save landing part-way through a multi-note apply is
+  a `Conflict` rather than a silent overwrite (#321).
 - Wire shapes stay adapter-owned: HTTP sanitizes a `write_failed` message,
   MCP reports it, MCP reports `noise_excluded_write` and `layer_marker_write`
   at the protocol level as invalid parameters while HTTP answers `400`, and
@@ -2401,7 +2416,16 @@ hash as the batch runs and substitutes it for a later item's own
 `expected_content_hash`, so a caller can create or edit a note earlier in the
 batch and reference it again later without an intermediate read; a note not
 otherwise touched in the batch still validates its `expected_content_hash`
-normally. No Git-specific handling exists in the tool: it writes Markdown
+normally. #321 makes the locking behind that chain ordered rather than lazy:
+`lock_touched_vaults` pre-scans the write items, sorts the distinct Vault IDs,
+and acquires every mutation lock in that one canonical order before the first
+item runs, which is what stops two concurrent batches naming two Vaults in
+opposite orders deadlocking each other permanently. It also resolves each
+Vault's control block for the whole call; a reconcile mid-call — before the
+lock is granted or after it is taken — re-resolves and continues only against
+a live block sharing the exclusion the call holds (which a definition edit's
+replacement does, since #321 — see ADR-25), and is otherwise refused with a
+structured error rather than written unlocked. No Git-specific handling exists in the tool: it writes Markdown
 files exactly as the standalone tools do, and the existing per-Vault Git
 turn (`commit_vault_drift`, `src/git/managed_sync.rs`) already commits
 whatever is dirty at that turn in one commit — a batch's writes therefore

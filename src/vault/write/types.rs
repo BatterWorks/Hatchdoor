@@ -63,6 +63,16 @@ impl WriteError {
 #[derive(Debug, Clone)]
 pub(super) struct TextRewrite {
     pub(super) path: PathBuf,
+    /// The content hash of what was on disk at `path` when the plan first
+    /// read it, which is the text `content` was derived from.
+    ///
+    /// It is the CAS expectation the rewrite commits against, so the check
+    /// covers the whole span from plan to commit rather than the microsecond
+    /// between the journal's own re-read and its rename. Without it a
+    /// concurrent manual save landing part-way through a multi-note apply
+    /// loop is read back as the "original" and silently replaced by text
+    /// derived from the stale copy (#321).
+    pub(super) original_hash: String,
     pub(super) content: String,
 }
 
