@@ -528,6 +528,49 @@ schemas fail with recovery guidance and are never overwritten.
 **Validation:** `cargo test runtime_config`, followed by the full backend
 checks.
 
+### Filesystem rename-flag capability
+
+**Kind:** infrastructure/filesystem foundation.
+
+**Owned paths:** `src/rename_flags.rs`.
+
+**Public contract:** `RenameFlag`, `FlagSupport`, `support`,
+`flag_unavailable`, `is_unsupported_errno`, `rename_flagged_at`,
+`rename_flagged_paths`, and the test-only `force_unsupported_for_tests`.
+`support` answers whether one `renameat2` flag works on the filesystem holding
+a directory, by performing the real operation on dot-prefixed scratch names
+there and caching the verdict per filesystem. `flag_unavailable` is the
+question a failed flagged rename asks: it combines the errno with that probe,
+so misuse of the syscall stays an error while a filesystem that does not
+implement the flag earns a fallback.
+
+**Consumed dependencies:** `libc` and the local filesystem only. Nothing here
+knows about Vaults, notes, or Git.
+
+**Consumers:** the Vault mutation write layer (`src/vault/write/fs_ops.rs`) for
+its conditional-write and move commits, the Vault-qualified mutation core
+(`src/vault_mutation.rs`) for the reported write capability, Vault runtime
+activation (`src/vault_runtime.rs`) for the one-line-per-Vault report, and the
+managed Git checkout install (`src/git/managed_checkout.rs`).
+
+**Coordination paths:** `src/lib.rs` exports the boundary.
+
+**Invariants:**
+
+- The verdict comes from performing the operation, never from a filesystem's
+  name or version (ADR-26).
+- `Undetermined` is a distinct answer from `Unsupported` and is what a
+  read-only, missing, or otherwise unusable directory reports; only a definite
+  verdict is cached, so a directory that later becomes usable is re-probed.
+- A probe leaves nothing behind: its scratch names are dot-prefixed, which the
+  Vault already excludes as noise, and it unlinks them on every path.
+- A bare `EINVAL` is never on its own proof that a flag is missing, because it
+  is equally the errno for misusing the call.
+
+**Validation:** `cargo test rename_flags`, plus `cargo test vault::write` and
+`cargo test vault_mutation` for the callers, followed by the full backend
+checks.
+
 ### Vault collection registry
 
 **Kind:** infrastructure/persistent domain state.

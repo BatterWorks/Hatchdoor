@@ -280,6 +280,11 @@ export type NoteLinks = {
 export type WriteCapabilities = {
   vault_id: VaultId;
   enabled: boolean;
+  /** Whether this Vault's filesystem can commit a note save as one atomic
+   * swap. `false` means saves work but through a check-then-replace path an
+   * outside editor can race; `null` means the backend could not tell, which
+   * is what a Vault that is not writable at all reports. */
+  atomic_compare_and_swap: boolean | null;
   warnings: string[];
 };
 

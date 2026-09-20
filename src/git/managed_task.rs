@@ -448,7 +448,7 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
         CloneFailed => ("managed_git_remote_unreachable", true),
         AuthenticationFailed => ("managed_git_authentication_failed", false),
         ValidationFailed => ("managed_git_validation_failed", false),
-        AtomicInstallFailed => ("managed_git_install_failed", false),
+        AtomicInstallFailed(_) => ("managed_git_install_failed", false),
     };
     VaultWorkError::new(code, error.to_string(), retryable)
 }
@@ -1420,7 +1420,7 @@ mod tests {
             ManagedCheckoutError::DestinationInvalid,
             ManagedCheckoutError::AuthenticationFailed,
             ManagedCheckoutError::ValidationFailed,
-            ManagedCheckoutError::AtomicInstallFailed,
+            ManagedCheckoutError::AtomicInstallFailed("install refused".to_string()),
         ];
         for error in non_retryable {
             assert!(

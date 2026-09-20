@@ -107,6 +107,11 @@ pub struct VaultDeleteNoteRequest {
 pub struct VaultWriteCapabilitiesResponse {
     pub vault_id: VaultId,
     pub enabled: bool,
+    /// Whether this Vault's filesystem can commit a conditional write as one
+    /// atomic exchange. `false` means writes work but through the weaker
+    /// check-then-rename path; `null` means the question was not answered,
+    /// which is what a Vault that is not writable reports (#345).
+    pub atomic_compare_and_swap: Option<bool>,
     pub warnings: Vec<String>,
 }
 
@@ -656,12 +661,19 @@ pub async fn vault_scoped_write_capabilities_handler(
         warnings
             .push("This Vault's current source and lifecycle do not allow mutation.".to_string());
     }
+    if capabilities.enabled() && capabilities.atomic_compare_and_swap == Some(false) {
+        warnings.push(
+            "This Vault's filesystem cannot swap two files in one step, so a save checks the note and then replaces it as two operations. A change made in another editor in between is overwritten instead of refused."
+                .to_string(),
+        );
+    }
 
     (
         StatusCode::OK,
         Json(VaultWriteCapabilitiesResponse {
             vault_id,
             enabled: capabilities.enabled(),
+            atomic_compare_and_swap: capabilities.atomic_compare_and_swap,
             warnings,
         }),
     )

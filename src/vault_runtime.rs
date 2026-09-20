@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::VaultSnapshotFreshness;
@@ -529,6 +529,28 @@ pub struct VaultControlBlock {
     write_ledger: Arc<crate::git::WriteLedger>,
 }
 
+/// Say once, when a Vault's runtime is established, that its filesystem cannot
+/// commit a write as one atomic exchange.
+///
+/// A Vault there is still writable, through the check-then-rename path the
+/// write layer falls back to, so this is not an error and does not stop
+/// anything. It is said here rather than per write because the answer belongs
+/// to the filesystem and does not change between saves, and because a line per
+/// write would bury it (#345, ADR-26).
+fn report_compare_and_swap_support(vault_id: VaultId, vault_path: &Path) {
+    use crate::rename_flags::{FlagSupport, RenameFlag, support};
+
+    if support(vault_path, RenameFlag::Exchange) == FlagSupport::Unsupported {
+        warn!(
+            vault_id = %vault_id,
+            path = %vault_path.display(),
+            "compare-and-swap is unavailable on this Vault's filesystem (renameat2 does not \
+             support RENAME_EXCHANGE here); writes fall back to a non-atomic check-then-rename \
+             and are not protected against a note being changed outside Hatchdoor"
+        );
+    }
+}
+
 impl VaultControlBlock {
     fn activate(
         definition: VaultDefinition,
@@ -589,6 +611,9 @@ impl VaultControlBlock {
             None
         };
         snapshot.capabilities = collection_capabilities(&definition, &snapshot);
+        if snapshot.activation == VaultActivationStatus::Active {
+            report_compare_and_swap_support(definition.vault_id(), &vault_path);
+        }
         let (cancellation, _) = tokio::sync::watch::channel(false);
         Self {
             definition: Arc::new(definition),
