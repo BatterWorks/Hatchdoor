@@ -537,19 +537,24 @@ pub struct VaultControlBlock {
 /// anything. It is said here rather than per write because the answer belongs
 /// to the filesystem and does not change between saves, and because a line per
 /// write would bury it (#345, ADR-26).
-fn report_compare_and_swap_support(vault_id: VaultId, vault_path: &Path) {
+///
+/// Returns whether it had anything to say, which is what its tests assert:
+/// the message itself goes to `tracing` and only an operator reads it.
+fn report_compare_and_swap_support(vault_id: VaultId, vault_path: &Path) -> bool {
     use crate::rename_flags::{FlagSupport, RenameFlag, support};
 
-    if support(vault_path, RenameFlag::Exchange) == FlagSupport::Unsupported {
-        warn!(
-            vault_id = %vault_id,
-            path = %vault_path.display(),
-            "compare-and-swap is unavailable on this Vault's filesystem (renameat2 does not \
-             support {} here); writes fall back to a non-atomic check-then-rename and are not \
-             protected against a note being changed outside Hatchdoor",
-            RenameFlag::Exchange.name()
-        );
+    if support(vault_path, RenameFlag::Exchange) != FlagSupport::Unsupported {
+        return false;
     }
+    warn!(
+        vault_id = %vault_id,
+        path = %vault_path.display(),
+        "compare-and-swap is unavailable on this Vault's filesystem (renameat2 does not \
+         support {} here); writes fall back to a non-atomic check-then-rename and are not \
+         protected against a note being changed outside Hatchdoor",
+        RenameFlag::Exchange.name()
+    );
+    true
 }
 
 impl VaultControlBlock {
@@ -613,7 +618,7 @@ impl VaultControlBlock {
         };
         snapshot.capabilities = collection_capabilities(&definition, &snapshot);
         if snapshot.activation == VaultActivationStatus::Active {
-            report_compare_and_swap_support(definition.vault_id(), &vault_path);
+            let _ = report_compare_and_swap_support(definition.vault_id(), &vault_path);
         }
         let (cancellation, _) = tokio::sync::watch::channel(false);
         Self {
@@ -903,7 +908,17 @@ impl VaultControlBlock {
         snapshot.activation_error = error;
         snapshot.capabilities = collection_capabilities(&self.definition, &snapshot);
         let changed = *snapshot != previous;
+        // A managed Git Vault has no directory to probe when its runtime is
+        // established, because its checkout has not landed yet. This seam is
+        // where it becomes Active, so it is the second place the filesystem
+        // report can first be made, and the transition is what keeps it to
+        // one line rather than one per status publish (#345).
+        let became_active = snapshot.activation == VaultActivationStatus::Active
+            && previous.activation != VaultActivationStatus::Active;
         drop(snapshot);
+        if became_active {
+            let _ = report_compare_and_swap_support(self.definition.vault_id(), &self.vault_path);
+        }
         if changed {
             self.revisions
                 .bump(self.definition.vault_id(), VaultChangeCategory::Status);

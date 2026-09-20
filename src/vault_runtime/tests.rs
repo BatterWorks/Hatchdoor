@@ -3027,3 +3027,33 @@ async fn the_mutation_generation_survives_a_definition_edit() {
         "a rename is not a mutation and must not look like one"
     );
 }
+
+/// A managed Git Vault has no directory to probe when its runtime is first
+/// established, because the checkout lands later. The report has to be made
+/// again when the Vault becomes active, or a Vault provisioned from Git would
+/// never say that its filesystem cannot compare-and-swap (#345).
+#[test]
+fn the_filesystem_report_speaks_only_for_a_directory_that_cannot_compare_and_swap() {
+    let vault_id = VaultId::generate().expect("Vault ID");
+
+    let ordinary = tempdir().expect("tempdir");
+    assert!(
+        !report_compare_and_swap_support(vault_id, ordinary.path()),
+        "a filesystem that can exchange two names has nothing to report"
+    );
+
+    let absent = ordinary.path().join("not-yet-cloned");
+    assert!(
+        !report_compare_and_swap_support(vault_id, &absent),
+        "a directory that does not exist yet is not a filesystem that cannot \
+         compare-and-swap; a managed Git Vault looks exactly like this until \
+         its checkout lands"
+    );
+
+    let hostile = tempdir().expect("tempdir");
+    crate::rename_flags::force_unsupported_for_tests(hostile.path());
+    assert!(
+        report_compare_and_swap_support(vault_id, hostile.path()),
+        "a filesystem that rejects the flag is reported"
+    );
+}
