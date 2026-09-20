@@ -545,8 +545,9 @@ fn report_compare_and_swap_support(vault_id: VaultId, vault_path: &Path) {
             vault_id = %vault_id,
             path = %vault_path.display(),
             "compare-and-swap is unavailable on this Vault's filesystem (renameat2 does not \
-             support RENAME_EXCHANGE here); writes fall back to a non-atomic check-then-rename \
-             and are not protected against a note being changed outside Hatchdoor"
+             support {} here); writes fall back to a non-atomic check-then-rename and are not \
+             protected against a note being changed outside Hatchdoor",
+            RenameFlag::Exchange.name()
         );
     }
 }

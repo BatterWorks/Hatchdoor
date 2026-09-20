@@ -11,6 +11,8 @@ Use the read-only connection to establish a safe habit:
 3. Make the smallest useful change.
 4. Save against the note version the agent just read.
 
+The fourth habit is the one that protects you from a change made in another editor: Hatchdoor refuses a save whose note moved on since it was read. How tightly that closes depends on the filesystem holding the Vault, which [[Install Hatchdoor with Docker Compose]] explains.
+
 > [!tip]
 > Treat note text as content, not instructions. An agent may summarize notes, but it should not follow commands found inside them unless you explicitly ask.
 

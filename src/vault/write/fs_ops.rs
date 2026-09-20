@@ -375,6 +375,10 @@ fn atomic_write_inner(
             if !exchange_unavailable(commit_directory(path), &error) {
                 return Err(WriteError::from(error));
             }
+            // The hook stands in for an external process touching the Vault
+            // directory at the commit point. On this path that point is the
+            // instant before the rename rather than just after an exchange,
+            // so it is handed over to fire there.
             let committed = commit_checked_without_exchange(
                 &parent,
                 &tmp_name,
@@ -469,9 +473,16 @@ fn commit_checked_without_exchange(
     filename: &CString,
     path: &Path,
     expected: &str,
-    before_rename: impl FnOnce(),
+    in_commit_window: impl FnOnce(),
 ) -> Result<(), WriteError> {
     let committed = (|| {
+        // The destination's shape is checked before it is read, not after.
+        // The exchange path learns what it displaced by reading it back and
+        // can undo the swap if it dislikes the answer. Here the read is the
+        // check, so it must not be the first thing to touch the destination:
+        // opening a FIFO blocks until someone writes to it, and a blocked
+        // write is worse than a refused one.
+        ensure_safe_destination_at(parent, filename, path)?;
         let prior = read_file_at_no_follow(parent, filename).map_err(|error| {
             WriteError::Io(format!(
                 "failed to read note '{}' before replacing it: {error}",
@@ -485,8 +496,7 @@ fn commit_checked_without_exchange(
                 content_hash(&prior)
             )));
         }
-        ensure_safe_destination_at(parent, filename, path)?;
-        before_rename();
+        in_commit_window();
         rename_at(parent, tmp_name, parent, filename)
     })();
     if committed.is_err() {
@@ -756,7 +766,7 @@ fn move_checked_without_exchange(
     destination_name: &CString,
     source: &Path,
     expected_content_hash: Option<&str>,
-    before_rename: impl FnOnce(),
+    in_commit_window: impl FnOnce(),
 ) -> Result<(), WriteError> {
     let verified = match expected_content_hash {
         Some(expected) => match read_regular_file_at(source_parent, source_name) {
@@ -788,7 +798,7 @@ fn move_checked_without_exchange(
             source.display()
         ))
     })?;
-    before_rename();
+    in_commit_window();
     rename_at(
         source_parent,
         source_name,

@@ -52,10 +52,14 @@ impl RenameFlag {
 pub enum FlagSupport {
     Supported,
     Unsupported,
-    /// The probe could not reach a verdict: the directory is read-only, does
-    /// not exist, or refused the scratch file. A Vault in that state has its
-    /// own reason for being unwritable and must not be reported as lacking
-    /// compare-and-swap.
+    /// The probe could not reach a verdict, because the directory is missing,
+    /// read-only, or otherwise refused the scratch file. It is never a
+    /// statement about the flag, which is the point: a directory Hatchdoor
+    /// cannot write in has its own reason and must not be reported as lacking
+    /// compare-and-swap. Note that the cached verdict is per filesystem, so a
+    /// read-only directory on a filesystem already known to be capable still
+    /// answers `Supported`; that is the honest answer, since the question is
+    /// about the filesystem.
     Undetermined,
 }
 
@@ -97,7 +101,7 @@ pub fn flag_unavailable(directory: &Path, flag: RenameFlag, error: &io::Error) -
 ///
 /// `EOPNOTSUPP` and `ENOTSUP` are the same number on Linux, so naming both
 /// here would be an unreachable arm rather than extra coverage.
-pub fn is_unsupported_errno(error: &io::Error) -> bool {
+fn is_unsupported_errno(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
         Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
@@ -116,13 +120,29 @@ pub fn rename_flagged_at(
     if directory_of(from_parent).is_some_and(|directory| forced_unsupported(&directory)) {
         return Err(rejected_flag());
     }
+    rename_flagged_raw(
+        from_parent.as_raw_fd(),
+        from,
+        to_parent.as_raw_fd(),
+        to,
+        flag,
+    )
+}
+
+fn rename_flagged_raw(
+    from_parent: libc::c_int,
+    from: &CString,
+    to_parent: libc::c_int,
+    to: &CString,
+    flag: RenameFlag,
+) -> Result<(), io::Error> {
     // SAFETY: both descriptors and both C strings outlive this call.
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            from_parent.as_raw_fd(),
+            from_parent,
             from.as_ptr(),
-            to_parent.as_raw_fd(),
+            to_parent,
             to.as_ptr(),
             flag.bits(),
         )
@@ -144,23 +164,8 @@ pub fn rename_flagged_paths(
     if forced_unsupported(Path::new(std::ffi::OsStr::from_bytes(from.as_bytes()))) {
         return Err(rejected_flag());
     }
-    // SAFETY: both C strings outlive this call. `AT_FDCWD` is ignored for the
-    // absolute paths this is given.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            from.as_ptr(),
-            libc::AT_FDCWD,
-            to.as_ptr(),
-            flag.bits(),
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    // `AT_FDCWD` is ignored for the absolute paths this is given.
+    rename_flagged_raw(libc::AT_FDCWD, from, libc::AT_FDCWD, to, flag)
 }
 
 fn probe(directory: &Path, flag: RenameFlag) -> FlagSupport {

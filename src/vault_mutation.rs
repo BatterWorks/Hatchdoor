@@ -96,9 +96,14 @@ pub struct WriteCapabilities {
     /// Whether this Vault's filesystem can commit a conditional write as one
     /// atomic exchange. `Some(false)` means writes still work but through the
     /// weaker check-then-rename path, which an editor outside Hatchdoor can
-    /// race (ADR-26). `None` means the question could not be answered, which
-    /// is what a Vault that is not writable at all reports: it already has its
-    /// own reason and must not be blamed on the filesystem (#345).
+    /// race (ADR-26).
+    ///
+    /// This answers for the filesystem, not for the Vault's permissions, so a
+    /// read-only Vault on a capable filesystem still answers `Some(true)`.
+    /// `None` is for a filesystem that could not be asked at all, a missing
+    /// path being the case that occurs. What must never happen is a Vault
+    /// blamed on its filesystem for being unwritable for its own reasons
+    /// (#345).
     pub atomic_compare_and_swap: Option<bool>,
 }
 
@@ -476,6 +481,12 @@ pub fn ensure_mutable(
 /// of it.
 pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOperationError {
     if let Some(message) = error.recovery_message() {
+        // The failure that most needs a person is also the one an operator is
+        // least likely to have captured from their client (#345).
+        tracing::error!(
+            vault_id = %vault_id,
+            "Vault write needs manual recovery: {message}"
+        );
         return VaultOperationError::new(
             "write_recovery_required",
             message.to_string(),
@@ -2255,8 +2266,9 @@ mod tests {
         assert_ne!(
             capabilities.atomic_compare_and_swap,
             Some(false),
-            "a Vault that is not writable has its own reason and must not be \
-             reported as a filesystem that cannot compare-and-swap (#345)"
+            "a read-only Vault has its own reason to report and must never be \
+             blamed on its filesystem; the answer here is about the filesystem, \
+             which has not changed (#345)"
         );
     }
 

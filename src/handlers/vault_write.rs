@@ -109,8 +109,9 @@ pub struct VaultWriteCapabilitiesResponse {
     pub enabled: bool,
     /// Whether this Vault's filesystem can commit a conditional write as one
     /// atomic exchange. `false` means writes work but through the weaker
-    /// check-then-rename path; `null` means the question was not answered,
-    /// which is what a Vault that is not writable reports (#345).
+    /// check-then-rename path; `null` means the filesystem could not be asked
+    /// at all. It answers for the filesystem, not for the Vault's
+    /// permissions (#345).
     pub atomic_compare_and_swap: Option<bool>,
     pub warnings: Vec<String>,
 }

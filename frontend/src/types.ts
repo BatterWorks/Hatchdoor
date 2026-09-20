@@ -282,8 +282,8 @@ export type WriteCapabilities = {
   enabled: boolean;
   /** Whether this Vault's filesystem can commit a note save as one atomic
    * swap. `false` means saves work but through a check-then-replace path an
-   * outside editor can race; `null` means the backend could not tell, which
-   * is what a Vault that is not writable at all reports. */
+   * outside editor can race; `null` means the filesystem could not be asked.
+   * It answers for the filesystem, not for whether this Vault is writable. */
   atomic_compare_and_swap: boolean | null;
   warnings: string[];
 };

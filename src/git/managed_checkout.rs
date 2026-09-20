@@ -550,8 +550,11 @@ fn atomic_install(temporary: &Path, destination: &Path) -> Result<(), ManagedChe
 }
 
 #[cfg(not(target_os = "linux"))]
-fn atomic_install(temporary: &Path, destination: &Path) -> Result<(), ManagedCheckoutError> {
-    install_without_noreplace(temporary, destination)
+fn atomic_install(_temporary: &Path, destination: &Path) -> Result<(), ManagedCheckoutError> {
+    Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+        "installing '{}' needs renameat2, which this platform does not provide",
+        destination.display()
+    )))
 }
 
 fn install_without_noreplace(
