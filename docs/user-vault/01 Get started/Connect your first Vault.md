@@ -18,6 +18,7 @@ or rewritten. Its folder name becomes the initial Vault name.
 - [ ] Confirm the host folder is the Vault you intended.
 - [ ] Confirm the container can read it.
 - [ ] If agents or the browser should write, confirm the container can write it.
+- [ ] If that folder is on ZFS or a FUSE mount, read the filesystem note in [[Install Hatchdoor with Docker Compose]].
 
 If you omit `HOST_VAULT_PATH`, Compose mounts `./vault` next to the deployment.
 An empty folder receives the starter Vault. This is useful for a trial, not a

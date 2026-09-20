@@ -74,6 +74,8 @@ If the final restart step ever fails, the Vault is left paused and hidden rather
 
 Every Git-backed Vault has a console on its Settings page. On a Vault with a remote it is headed **Sync** and its button reads **Sync now**; on a Local history Vault it is headed **History** and reads **Commit now**, because there is nothing to sync with. Either way it reports what happened in plain language rather than a code: a rejected sign-in, an unreachable remote, local edits Hatchdoor isn't sure how to reconcile, or unpushed commits sitting on a Pull-only Vault it isn't allowed to push. Every failure sentence says what happened, confirms nothing was lost, and states the one thing that clears it, ending in **Try again**.
 
+One failure belongs to setting the Vault up rather than to running it: a managed checkout that cloned fine but could not be moved into place. The message names the path and the underlying error. Before 2.6.2 it said only "could not be installed atomically" and threw the real cause away, and that cause was usually the filesystem, since installing the checkout needs the same single-step file operation a note save needs. See [[How to troubleshoot common problems]].
+
 After a failed commit Hatchdoor waits five minutes before trying again on its own, however much you write meanwhile, so a standing problem doesn't fill the log with the same error. Fix the cause and it resumes by itself; press **Commit now** or **Try again** if you don't want to wait.
 
 ---

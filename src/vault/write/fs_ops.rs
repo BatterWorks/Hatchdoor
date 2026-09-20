@@ -5,6 +5,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 
 use crate::cache::parse::content_hash;
+use crate::rename_flags::{RenameFlag, rename_flagged_at};
 use crate::vault::types::NoteEntry;
 
 use super::types::{MutationPhase, TextRewrite, WriteError};
@@ -370,7 +371,27 @@ fn atomic_write_inner(
         // our private name, where we verify its identity. A concurrent atomic
         // save therefore becomes detectable and is swapped back, rather than
         // being silently overwritten in a check-then-rename gap.
-        rename_exchange(&parent, &tmp_name, &parent, &filename)?;
+        if let Err(error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
+            if !exchange_unavailable(commit_directory(path), &error) {
+                return Err(WriteError::from(error));
+            }
+            // The hook stands in for an external process touching the Vault
+            // directory at the commit point. On this path that point is the
+            // instant before the rename rather than just after an exchange,
+            // so it is handed over to fire there.
+            let committed = commit_checked_without_exchange(
+                &parent,
+                &tmp_name,
+                &filename,
+                path,
+                expected,
+                after_exchange,
+            );
+            if committed.is_ok() {
+                let _ = parent.sync_all();
+            }
+            return committed;
+        }
         after_exchange();
         // The exchange is the commit point. From here the destination already
         // holds the new bytes, so every failure below turns on whether the
@@ -433,6 +454,57 @@ fn atomic_write_inner(
     // lost if the directory entry update was not flushed.
     let _ = parent.sync_all();
     Ok(())
+}
+
+/// Commit a conditional write on a filesystem that cannot exchange two names.
+///
+/// This is the pre-2.5.0 shape: read the destination, compare it against the
+/// expected hash, then rename the prepared temporary file over it. Every
+/// precondition the exchange enforced still holds and every error a caller can
+/// see keeps its code and its wording — a stale hash is still
+/// [`WriteError::Conflict`] with the same sentence. What is gone is the
+/// atomicity: a writer outside Hatchdoor that saves the note between the check
+/// and the rename has its save overwritten instead of detected. That race is
+/// the price of writing at all on such a filesystem, and the Vault reports it
+/// once when its runtime is established rather than per write (ADR-26).
+fn commit_checked_without_exchange(
+    parent: &fs::File,
+    tmp_name: &CString,
+    filename: &CString,
+    path: &Path,
+    expected: &str,
+    in_commit_window: impl FnOnce(),
+) -> Result<(), WriteError> {
+    let committed = (|| {
+        // The destination's shape is checked before it is read, not after.
+        // The exchange path learns what it displaced by reading it back and
+        // can undo the swap if it dislikes the answer. Here the read is the
+        // check, so it must not be the first thing to touch the destination:
+        // opening a FIFO blocks until someone writes to it, and a blocked
+        // write is worse than a refused one.
+        ensure_safe_destination_at(parent, filename, path)?;
+        let prior = read_file_at_no_follow(parent, filename).map_err(|error| {
+            WriteError::Io(format!(
+                "failed to read note '{}' before replacing it: {error}",
+                path.display()
+            ))
+        })?;
+        if content_hash(&prior) != expected.trim() {
+            return Err(WriteError::Conflict(format!(
+                "note changed since it was read: expected {}, found {}",
+                expected.trim(),
+                content_hash(&prior)
+            )));
+        }
+        in_commit_window();
+        rename_at(parent, tmp_name, parent, filename)
+    })();
+    if committed.is_err() {
+        // Nothing was committed, so the prepared bytes are litter rather than
+        // anything a recovery would want.
+        let _ = unlink_at(parent, tmp_name);
+    }
+    committed
 }
 
 fn ensure_safe_destination(path: &Path) -> Result<(), WriteError> {
@@ -557,6 +629,17 @@ fn move_file_if_unchanged_inner(
         &destination_parent,
         &destination_name,
     ) {
+        if exchange_unavailable(commit_directory(destination), &error) {
+            return move_checked_without_exchange(
+                &source_parent,
+                &source_name,
+                &destination_parent,
+                &destination_name,
+                source,
+                Some(expected_content_hash),
+                after_exchange,
+            );
+        }
         let _ = remove_move_gate(&destination_parent, &destination_name);
         return Err(WriteError::Io(format!(
             "failed to atomically move '{}' to '{}': {error}",
@@ -622,6 +705,17 @@ pub(super) fn move_file_no_follow(source: &Path, destination: &Path) -> Result<(
         &destination_parent,
         &destination_name,
     ) {
+        if exchange_unavailable(commit_directory(destination), &error) {
+            return move_checked_without_exchange(
+                &source_parent,
+                &source_name,
+                &destination_parent,
+                &destination_name,
+                source,
+                None,
+                || {},
+            );
+        }
         let _ = remove_move_gate(&destination_parent, &destination_name);
         return Err(WriteError::Io(format!(
             "failed to atomically move '{}' to '{}': {error}",
@@ -648,6 +742,69 @@ pub(super) fn move_file_no_follow(source: &Path, destination: &Path) -> Result<(
             source.display()
         ))
     })?;
+    let _ = source_parent.sync_all();
+    let _ = destination_parent.sync_all();
+    Ok(())
+}
+
+/// Move a file on a filesystem that cannot exchange two names, with the
+/// destination name already reserved by its gate directory.
+///
+/// The exchange-based move commits first and inspects afterwards, because an
+/// exchange can always be undone. Without one there is nothing to undo with,
+/// so the order reverses: verify the source, release the reservation, rename.
+/// The caller sees the same conflicts it always did — an occupied destination
+/// was already refused when the gate was created, a stale expected hash and an
+/// irregular source are refused here with their existing wording. Between
+/// releasing the gate and the rename the destination name is briefly
+/// unreserved, which is this path's share of the race the exchange closed
+/// (ADR-26).
+fn move_checked_without_exchange(
+    source_parent: &fs::File,
+    source_name: &CString,
+    destination_parent: &fs::File,
+    destination_name: &CString,
+    source: &Path,
+    expected_content_hash: Option<&str>,
+    in_commit_window: impl FnOnce(),
+) -> Result<(), WriteError> {
+    let verified = match expected_content_hash {
+        Some(expected) => match read_regular_file_at(source_parent, source_name) {
+            Ok(content) if content_hash(&content) == expected.trim() => Ok(()),
+            Ok(content) => Err(WriteError::Conflict(format!(
+                "note changed since it was read: expected {}, found {}",
+                expected.trim(),
+                content_hash(&content)
+            ))),
+            Err(error) => Err(WriteError::Conflict(format!(
+                "refusing to move unsafe source '{}': {error}",
+                source.display()
+            ))),
+        },
+        None => assert_regular_file_at(source_parent, source_name).map_err(|error| {
+            WriteError::Conflict(format!(
+                "refusing to move unsafe source '{}': {error}",
+                source.display()
+            ))
+        }),
+    };
+    if let Err(error) = verified {
+        let _ = remove_move_gate(destination_parent, destination_name);
+        return Err(error);
+    }
+    remove_move_gate(destination_parent, destination_name).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to release the reserved destination for '{}': {error}",
+            source.display()
+        ))
+    })?;
+    in_commit_window();
+    rename_at(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+    )?;
     let _ = source_parent.sync_all();
     let _ = destination_parent.sync_all();
     Ok(())
@@ -883,21 +1040,23 @@ fn rename_exchange(
     to_parent: &fs::File,
     to: &CString,
 ) -> Result<(), std::io::Error> {
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            from_parent.as_raw_fd(),
-            from.as_ptr(),
-            to_parent.as_raw_fd(),
-            to.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+    rename_flagged_at(from_parent, from, to_parent, to, RenameFlag::Exchange)
+}
+
+/// Whether this failed exchange failed because the filesystem cannot exchange
+/// at all, which is the one case that earns the non-atomic path below.
+///
+/// `directory` is where the exchange was attempted; a bare `EINVAL` is not
+/// enough on its own, because misuse of the syscall reports the same errno
+/// (ADR-26).
+fn exchange_unavailable(directory: &Path, error: &std::io::Error) -> bool {
+    crate::rename_flags::flag_unavailable(directory, RenameFlag::Exchange, error)
+}
+
+/// The directory a write's commit happens in, for the capability question
+/// above. Every caller here has already proved the path has a parent.
+fn commit_directory(path: &Path) -> &Path {
+    path.parent().unwrap_or(path)
 }
 
 #[cfg(test)]

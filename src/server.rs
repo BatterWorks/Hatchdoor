@@ -3778,12 +3778,67 @@ mod tests {
         let payload = json_body(response).await;
         assert_eq!(payload["vault_id"], vault_id);
         assert_eq!(payload["enabled"], true);
+        assert_eq!(
+            payload["atomic_compare_and_swap"], true,
+            "an ordinary filesystem commits a save in one step (#345)"
+        );
         assert!(
             payload["warnings"]
                 .as_array()
                 .expect("warnings")
                 .iter()
                 .any(|warning| warning.as_str().unwrap_or("").contains("unauthenticated"))
+        );
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .all(|warning| !warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("cannot swap two files")),
+            "and says nothing about a weakness it does not have"
+        );
+    }
+
+    /// The route is where a browser learns that this Vault saves with weaker
+    /// protection than usual, so both halves of that answer, the field and
+    /// the sentence, are part of the contract (#345).
+    #[tokio::test]
+    async fn vault_scoped_write_capabilities_route_reports_a_degraded_filesystem() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("degraded");
+        let vault_id = create_vault_with_files(&app, "Degraded", &vault_root, &[], 0).await;
+        crate::rename_flags::force_unsupported_for_tests(&vault_root);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        assert_eq!(
+            payload["enabled"], true,
+            "the Vault is still writable, just not atomically"
+        );
+        assert_eq!(payload["atomic_compare_and_swap"], false);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("cannot swap two files in one step"))
         );
     }
 
@@ -3877,6 +3932,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let payload = json_body(response).await;
         assert_eq!(payload["enabled"], false);
+        assert_ne!(
+            payload["atomic_compare_and_swap"], false,
+            "a read-only Vault has its own reason to report and must never be \
+             blamed on its filesystem (#345)"
+        );
         assert!(
             payload["warnings"]
                 .as_array()

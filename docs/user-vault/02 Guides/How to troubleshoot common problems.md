@@ -65,12 +65,41 @@ Two related, more specific errors:
 
 A softer variant: `local_content` reports `read_only` rather than `unavailable` — the folder is readable but not writable by UID `65532`. This isn't an error state; it just means Hatchdoor can browse and search the Vault but not write to it. Fix the same way if write access is what you actually wanted.
 
+## Editing a note fails but creating one works
+
+The symptom is unmistakable once you know it: creating a note succeeds, and every edit, append, rename, move, archive, delete and attachment change fails. Reading, search and Git sync all work, so the Vault looks healthy on every status axis. The error your agent sees is `write_failed`, with a message of `Invalid argument (os error 22)`.
+
+Do not chase permissions for this one. The `chown` above cannot fix it, and `local_content` reports `read_write`, correctly: the folder really is writable.
+
+The cause is the filesystem. Hatchdoor commits a save by swapping the new copy of the note with the old one in a single step, and not every filesystem can do that. ZFS gained the ability in OpenZFS 2.2, and Ubuntu 22.04's standard kernel ships 2.1.5; anything mounted through FUSE cannot do it either. Confirm with `zfs version` on the host and look for `zfs-kmod-2.1.x`.
+
+**Hatchdoor 2.6.2 and later fixes this.** It falls back to checking the note and then replacing it, so every write works again. Upgrade, and nothing else is needed. Nothing was damaged while it was failing: those writes were refused, not half applied.
+
+On a version before 2.6.2, the only other way out is to move the Vault onto a filesystem that can do the swap, such as ext4 or XFS.
+
+After upgrading, a Vault on such a filesystem writes with slightly weaker protection, and Hatchdoor says so rather than leaving you to guess:
+
+- The server log carries one line per Vault at startup, naming the Vault and what the weaker protection costs.
+- `GET /api/v1/vaults/{vault_id}/write-capabilities` reports `atomic_compare_and_swap: false` and adds a matching sentence to its `warnings`, which is also what the Web UI shows above the note.
+
+[[Install Hatchdoor with Docker Compose]] has the full explanation of what that weaker protection means in practice.
+
+> [!note]
+> This is not one of the five Vault status axes, and no `*_error` field carries it. A Vault in this state is genuinely fine on all five; the answer lives on the write-capabilities route and in that startup log line.
+
+## A write fails for some other reason
+
+Any save that fails for a filesystem reason is written to Hatchdoor's own log from 2.6.2 onwards, not only to the log of the agent or browser that asked. Check the server log first; it names the Vault and the underlying error.
+
+One failure deserves its own treatment: `write_recovery_required`. It means the opposite of every other write failure. The new content *was* written and then could not be checked or put back, because something outside Hatchdoor changed the Vault directory mid-write. Do not retry it. The message names the note and the leftover file holding the previous content, and a person has to decide which version the note should keep. It is logged on the server too.
+
 ## Git sync is failing
 
 Check the Vault's Git console for the specific failure rather than assuming. (It is headed **Sync** on a Vault with a remote and **History** on one without, and its button reads **Sync now** or **Commit now** to match.) These need different fixes:
 
 - **Authentication failed** — the stored HTTPS token was rejected by the remote. Re-enter it under **Sign-in** on the Vault's own page; see [[How to set up a Git-backed Vault]].
 - **Clone/fetch failed, or the remote is unreachable** — a network or DNS problem, or the repository URL itself is wrong. Confirm the URL resolves from wherever the container runs, not just from your own machine.
+- **The checkout could not be installed** — the clone itself worked, but Hatchdoor could not move it into place. The message says why, naming the path and the underlying error. Before 2.6.2 this reported only "could not be installed atomically" with the real cause discarded, and the usual cause was the filesystem described under **Editing a note fails but creating one works**; upgrading fixes both.
 - **Local commits ahead on a Pull-only Vault** — the checkout has commits the remote doesn't, and a Pull-only Vault never pushes. They aren't Hatchdoor's: such a Vault refuses every write, so anything committed there you committed yourself, by hand or before you switched the Vault to Pull-only. This isn't a failure exactly. Hatchdoor is reporting that local history and the remote have diverged, and staying pull-only rather than silently discarding your commits. Switch the Vault to **Two-way** if you want them pushed, or accept that Pull-only Vaults are meant to be read-mostly.
 
 > [!note]

@@ -73,6 +73,7 @@ describe("writeApi", () => {
       jsonResponse({
         vault_id: VAULT_ID,
         enabled: true,
+        atomic_compare_and_swap: true,
         warnings: ["read-only mode off"],
       }),
     );
@@ -80,6 +81,7 @@ describe("writeApi", () => {
     await expect(getWriteCapabilities(VAULT_ID)).resolves.toEqual({
       vault_id: VAULT_ID,
       enabled: true,
+      atomic_compare_and_swap: true,
       warnings: ["read-only mode off"],
     });
 

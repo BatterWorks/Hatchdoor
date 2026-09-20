@@ -3624,3 +3624,206 @@ fn a_rename_into_an_ancestor_that_would_not_settle_is_refused() {
             .is_empty()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Writes on a filesystem that cannot exchange two names (#345).
+//
+// OpenZFS before 2.2.0, and every FUSE filesystem, reject `renameat2`'s flags
+// with `EINVAL`. Hatchdoor 2.5.0 made the exchange its commit point with no
+// way back, so a Vault on such a host could create notes and nothing else.
+// CI cannot mount one of those filesystems, so these tests make the write
+// layer's directory answer as one instead, through the same errno the kernel
+// would return.
+// ---------------------------------------------------------------------------
+
+/// A Vault root whose filesystem refuses `renameat2`'s flags.
+fn without_exchange() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    crate::rename_flags::force_unsupported_for_tests(tmp.path());
+    tmp
+}
+
+#[test]
+fn every_conditional_note_write_commits_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::write(root.join("Note.md"), "# Note\n\n## Log\nold\n").expect("note");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let hash = content_hash("# Note\n\n## Log\nold\n");
+    append_note(&entry, "appended\n", &hash).expect("append must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    edit_note(&entry, "old", "edited", &content_hash(&content), false)
+        .expect("edit must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    replace_section(
+        &entry,
+        "## Log",
+        SectionMode::Replace,
+        "replaced\n",
+        &content_hash(&content),
+    )
+    .expect("replace_section must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    let mut updates = serde_json::Map::new();
+    updates.insert("status".to_string(), serde_json::json!("done"));
+    update_note_frontmatter(&entry, updates, &content_hash(&content))
+        .expect("update_frontmatter must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    update_note(&entry, "# Note\n\nwhole\n", &content_hash(&content))
+        .expect("update_note must work without an exchange");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("read"),
+        "# Note\n\nwhole\n"
+    );
+    assert!(
+        leftover_sidecars(root).is_empty(),
+        "no temporary sidecar may survive a committed write"
+    );
+}
+
+#[test]
+fn a_stale_expected_hash_is_still_refused_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::write(root.join("Note.md"), "# Note\nbody\n").expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+
+    let error = append_note(&entry, "more\n", &content_hash("# Note\nsomething else\n"))
+        .expect_err("a stale hash must still be refused");
+
+    match error {
+        WriteError::Conflict(message) => assert!(
+            message.starts_with("note changed since it was read: expected "),
+            "the conflict must keep its wording, got: {message}"
+        ),
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("read"),
+        "# Note\nbody\n",
+        "a refused write must leave the note alone"
+    );
+    assert!(
+        leftover_sidecars(root).is_empty(),
+        "a refused write must not leave its prepared bytes behind"
+    );
+}
+
+#[test]
+fn move_rename_archive_and_delete_all_work_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("inbox")).expect("mkdir");
+    fs::write(root.join("inbox/Idea.md"), "body\n").expect("note");
+    fs::write(root.join("Keep.md"), "kept\n").expect("second note");
+
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "projects/Idea.md",
+        &content_hash("body\n"),
+    )
+    .expect("move must work without an exchange");
+    assert_eq!(outcome.relative_path, Some("projects/Idea".to_string()));
+    assert!(root.join("projects/Idea.md").exists());
+    assert!(!root.join("inbox/Idea.md").exists());
+
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+    archive_note(root, &index, entry, "90-archive/", &content_hash("body\n"))
+        .expect("archive must work without an exchange");
+    assert!(root.join("90-archive/Idea.md").exists());
+
+    let index = build(root);
+    let entry = index.find_by_slug("keep").expect("keep");
+    let outcome = delete_note(root, &index, entry, &content_hash("kept\n"))
+        .expect("delete must work without an exchange");
+    assert!(
+        outcome.trashed_path.is_some(),
+        "delete is a move into the trash and must still report where"
+    );
+    assert!(!root.join("Keep.md").exists());
+}
+
+#[test]
+fn a_move_onto_an_existing_destination_is_still_refused_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::write(root.join("Source.md"), "source\n").expect("source");
+    fs::write(root.join("Taken.md"), "occupied\n").expect("destination");
+    let index = build(root);
+    let entry = index.find_by_slug("source").expect("source");
+
+    let error = move_or_rename_note(root, &index, entry, "Taken.md", &content_hash("source\n"))
+        .expect_err("an occupied destination must still refuse the move");
+
+    assert!(
+        matches!(error, WriteError::Conflict(_)),
+        "expected a conflict, got {error:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Taken.md")).expect("read"),
+        "occupied\n",
+        "the occupant must be untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Source.md")).expect("read"),
+        "source\n",
+        "the source must stay where it was"
+    );
+}
+
+#[test]
+fn attachment_move_and_rename_work_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("mkdir");
+    fs::write(root.join("Media/diagram.png"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "# Note\n![](Media/diagram.png)\n").expect("note");
+
+    let index = build(root);
+    rename_attachment(root, &index, "Media/diagram.png", "chart.png")
+        .expect("rename must work without an exchange");
+    assert!(root.join("Media/chart.png").exists());
+
+    let index = build(root);
+    move_attachment(root, &index, "Media/chart.png", "chart.png")
+        .expect("move must work without an exchange");
+    assert!(root.join("chart.png").exists());
+    assert!(!root.join("Media/chart.png").exists());
+    assert_eq!(
+        fs::read(root.join("chart.png")).expect("read"),
+        BINARY_ASSET,
+        "the moved bytes must be the same bytes"
+    );
+}
+
+/// Every in-flight write parks its bytes at a dot-prefixed sidecar beside the
+/// destination. A finished or refused write must leave none of them.
+fn leftover_sidecars(root: &Path) -> Vec<String> {
+    fs::read_dir(root)
+        .expect("read vault root")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".hatchdoor-tmp-"))
+        .collect()
+}

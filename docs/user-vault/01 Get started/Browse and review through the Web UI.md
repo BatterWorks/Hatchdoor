@@ -39,7 +39,9 @@ The UI can also edit notes when the Vault is writable. **New note** creates a
 Markdown file; click any paragraph, heading, list item, or table row to edit
 it in place — see [[How to edit notes with the live editor]] for the full
 rundown. If those controls are absent, the Vault is read-only or the
-deployment is in demo mode.
+deployment is in demo mode. If they are present but carry a warning about the
+Vault's filesystem not being able to swap two files in one step, editing works
+normally; [[Install Hatchdoor with Docker Compose]] explains what that costs.
 
 Hatchdoor understands wikilinks and refreshes its index when Markdown or
 attachments change. Keep the Markdown files portable: you can still open them

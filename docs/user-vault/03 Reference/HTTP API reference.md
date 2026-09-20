@@ -159,7 +159,7 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 | GET | `/api/v1/vaults/{vault_id}/resolve?target=...` | Resolve one wikilink target to a slug. `{"vault_id": "...", "slug": "...|null"}`. |
 | POST | `/api/v1/vaults/{vault_id}/resolve-batch` | Resolve many targets at once. Body: `{"targets": [...], "asset_targets": [...], "note_path": "...|null"}` (targets + asset_targets capped at 200 combined). `note_path` anchors asset resolution to that note's folder. |
 | GET | `/api/v1/vaults/{vault_id}/assets/{*path}` | Serve one contained asset or attachment file, with extension allowlisting and traversal containment. |
-| GET | `/api/v1/vaults/{vault_id}/write-capabilities` | `{"vault_id", "enabled", "warnings": [...]}` — whether the Web UI's write controls should be shown, and why not if disabled (unwritable path, non-mutable source, or missing web auth on a mutable one). |
+| GET | `/api/v1/vaults/{vault_id}/write-capabilities` | `{"vault_id", "enabled", "atomic_compare_and_swap", "warnings": [...]}` — whether the Web UI's write controls should be shown, and why not if disabled (unwritable path, non-mutable source, or missing web auth on a mutable one). `atomic_compare_and_swap` is `true` when this Vault's filesystem can commit a save as one atomic swap, `false` when saves work through the weaker check-then-rename path, and `null` when the filesystem could not be asked. It answers for the filesystem, not for whether the Vault is writable, so a read-only Vault is never `false` on that account. When it is `false` and `enabled` is `true`, `warnings` gains one sentence saying a change made in another editor mid-save is overwritten rather than refused. |
 | GET | `/api/v1/vaults/{vault_id}/stats/detail` | Rich exact statistics for this one Vault (richer than the collection projection below), including layer diagnostics. |
 
 ## Vault-scoped content — one-or-all
@@ -177,6 +177,8 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 ## Vault-scoped mutations
 
 Content-changing routes. Web bearer token (if configured); refused with `403 demo_read_only` in demo mode rather than a bare `401`. Every mutation except create takes `expected_content_hash`, read from a prior `GET .../notes/{slug}` — a stale hash is rejected rather than overwriting a concurrent edit.
+
+That rejection is unconditional. What depends on the filesystem is the narrower race: on a Vault reporting `atomic_compare_and_swap: false`, a change landing between the hash check and the replacement is overwritten instead of reported, because the save is two steps there rather than one. Read `GET .../write-capabilities` to know which kind of Vault you are writing to.
 
 | Method | Path | Body | Purpose |
 | --- | --- | --- | --- |

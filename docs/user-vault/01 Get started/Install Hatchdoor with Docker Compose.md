@@ -88,6 +88,38 @@ The container also needs read access to your Vault. Grant it write access only
 if agents or the Web UI should change notes. On Linux, verify access for UID
 `65532` without blindly changing ownership of an existing Vault.
 
+### A note on the filesystem holding your Vault
+
+Hatchdoor saves a note by writing the new version beside the old one and then
+swapping the two in a single step. That swap is what lets it notice you also
+saved the note in Obsidian and refuse rather than overwrite your change.
+
+Not every filesystem can do it. ZFS gained the ability in OpenZFS 2.2, and
+Ubuntu 22.04's standard kernel ships 2.1.5, so a Vault on ZFS there cannot;
+neither can anything mounted through FUSE. ext4, XFS, btrfs and ZFS 2.2 or
+later all can. Check with `zfs version` if you are unsure.
+
+A Vault on a filesystem that cannot do the swap still works, and you can still
+edit, move, rename, archive and delete notes in it. Hatchdoor falls back to
+checking the note and then replacing it as two steps. Saving against a note
+that changed under you is still refused. What you lose is the narrow case
+where something outside Hatchdoor saves the note in the instant between the
+check and the replacement: that change is overwritten instead of reported. If
+you are the only one editing, or you always edit through one tool at a time,
+this costs you nothing.
+
+You do not have to configure any of this. Hatchdoor tests the filesystem when
+it opens a Vault and writes one line to its log for each Vault that cannot do
+the swap, saying so in these terms. If the Vault's write settings are shown in
+the Web UI, it says so there too.
+
+> [!note]
+> Before version 2.6.2 there was no fallback, so a Vault on one of those
+> filesystems could create notes but not edit, move or delete them, and the
+> failure reached you only as `Invalid argument (os error 22)` in your agent's
+> log. If you saw that, upgrading fixes it. Nothing was damaged: those writes
+> were refused, not half applied.
+
 Start Hatchdoor:
 
 ```bash

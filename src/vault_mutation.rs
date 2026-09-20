@@ -93,6 +93,18 @@ impl NoteWriteOutcome {
 pub struct WriteCapabilities {
     pub mutate_capable: bool,
     pub vault_writable: bool,
+    /// Whether this Vault's filesystem can commit a conditional write as one
+    /// atomic exchange. `Some(false)` means writes still work but through the
+    /// weaker check-then-rename path, which an editor outside Hatchdoor can
+    /// race (ADR-26).
+    ///
+    /// This answers for the filesystem, not for the Vault's permissions, so a
+    /// read-only Vault on a capable filesystem still answers `Some(true)`.
+    /// `None` is for a filesystem that could not be asked at all, a missing
+    /// path being the case that occurs. What must never happen is a Vault
+    /// blamed on its filesystem for being unwritable for its own reasons
+    /// (#345).
+    pub atomic_compare_and_swap: Option<bool>,
 }
 
 impl WriteCapabilities {
@@ -169,6 +181,14 @@ impl<'a> VaultMutationCore<'a> {
             vault_writable: std::fs::metadata(&vault_path)
                 .map(|metadata| !metadata.permissions().readonly())
                 .unwrap_or(false),
+            atomic_compare_and_swap: match crate::rename_flags::support(
+                &vault_path,
+                crate::rename_flags::RenameFlag::Exchange,
+            ) {
+                crate::rename_flags::FlagSupport::Supported => Some(true),
+                crate::rename_flags::FlagSupport::Unsupported => Some(false),
+                crate::rename_flags::FlagSupport::Undetermined => None,
+            },
         })
     }
 
@@ -461,6 +481,12 @@ pub fn ensure_mutable(
 /// of it.
 pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOperationError {
     if let Some(message) = error.recovery_message() {
+        // The failure that most needs a person is also the one an operator is
+        // least likely to have captured from their client (#345).
+        tracing::error!(
+            vault_id = %vault_id,
+            "Vault write needs manual recovery: {message}"
+        );
         return VaultOperationError::new(
             "write_recovery_required",
             message.to_string(),
@@ -471,7 +497,18 @@ pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOpera
     let (code, message, retryable) = match error {
         WriteError::Conflict(message) => ("write_conflict", message, true),
         WriteError::InvalidInput(message) => ("invalid_write_input", message, false),
-        WriteError::Io(message) => ("write_failed", message, false),
+        WriteError::Io(message) => {
+            // The only record of an I/O write failure used to be whatever the
+            // client happened to log, which is how a whole filesystem being
+            // unable to commit a write took an strace of a running container
+            // to find (#345). A conflict is an expected answer and stays
+            // quiet; this is not.
+            tracing::error!(
+                vault_id = %vault_id,
+                "Vault write failed: {message}"
+            );
+            ("write_failed", message, false)
+        }
     };
     VaultOperationError::new(code, message, Some(vault_id), retryable)
 }
@@ -2209,6 +2246,11 @@ mod tests {
         assert!(capabilities.mutate_capable);
         assert!(capabilities.vault_writable);
         assert!(capabilities.enabled());
+        assert_eq!(
+            capabilities.atomic_compare_and_swap,
+            Some(true),
+            "an ordinary filesystem commits a conditional write in one step"
+        );
     }
 
     #[tokio::test]
@@ -2221,6 +2263,67 @@ mod tests {
         assert!(capabilities.mutate_capable);
         assert!(!capabilities.vault_writable);
         assert!(!capabilities.enabled());
+        assert_ne!(
+            capabilities.atomic_compare_and_swap,
+            Some(false),
+            "a read-only Vault has its own reason to report and must never be \
+             blamed on its filesystem; the answer here is about the filesystem, \
+             which has not changed (#345)"
+        );
+    }
+
+    /// The report has to separate "writes work, with weaker protection" from
+    /// "writes do not work", because they call for different answers from the
+    /// operator (#345).
+    #[tokio::test]
+    async fn write_capabilities_report_a_filesystem_that_cannot_compare_and_swap() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        crate::rename_flags::force_unsupported_for_tests(&workspace.vault_path);
+
+        let capabilities = workspace
+            .core()
+            .write_capabilities(workspace.vault_id)
+            .expect("capabilities");
+
+        assert_eq!(capabilities.atomic_compare_and_swap, Some(false));
+        assert!(
+            capabilities.enabled(),
+            "the Vault is still writable, just without the atomic commit"
+        );
+    }
+
+    /// The bug as reported: on such a filesystem every edit of an existing
+    /// note failed with `write_failed: Invalid argument (os error 22)` while
+    /// creating one worked (#345).
+    #[tokio::test]
+    async fn note_writes_go_through_the_mutation_core_without_an_exchange() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        crate::rename_flags::force_unsupported_for_tests(&workspace.vault_path);
+        let core = workspace.core();
+
+        core.append_to_note(workspace.vault_id, "home", "appended\n", &hash("# Home\n"))
+            .await
+            .expect("append must work without an exchange");
+        assert!(workspace.read("Home.md").contains("appended"));
+
+        let current = hash(&workspace.read("Home.md"));
+        core.edit_note(
+            workspace.vault_id,
+            "home",
+            "appended",
+            "edited",
+            &current,
+            false,
+        )
+        .await
+        .expect("edit must work without an exchange");
+        assert!(workspace.read("Home.md").contains("edited"));
+
+        let stale = core
+            .append_to_note(workspace.vault_id, "home", "more\n", &hash("# Home\n"))
+            .await
+            .expect_err("a stale hash must still be refused");
+        assert_code(&stale, "write_conflict");
     }
 
     #[tokio::test]

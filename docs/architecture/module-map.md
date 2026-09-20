@@ -528,6 +528,52 @@ schemas fail with recovery guidance and are never overwritten.
 **Validation:** `cargo test runtime_config`, followed by the full backend
 checks.
 
+### Filesystem rename-flag capability
+
+**Kind:** infrastructure/filesystem foundation.
+
+**Owned paths:** `src/rename_flags.rs`.
+
+**Public contract:** `RenameFlag`, `FlagSupport`, `support`,
+`flag_unavailable`, `rename_flagged_at`, `rename_flagged_paths`, and the
+test-only `force_unsupported_for_tests`.
+`support` answers whether one `renameat2` flag works on the filesystem holding
+a directory, by performing the real operation on dot-prefixed scratch names
+there and caching the verdict per filesystem. `flag_unavailable` is the
+question a failed flagged rename asks: it combines the errno with that probe,
+so misuse of the syscall stays an error while a filesystem that does not
+implement the flag earns a fallback.
+
+**Consumed dependencies:** `libc` and the local filesystem only. Nothing here
+knows about Vaults, notes, or Git.
+
+**Consumers:** the Vault mutation write layer (`src/vault/write/fs_ops.rs`) for
+its conditional-write and move commits, the Vault-qualified mutation core
+(`src/vault_mutation.rs`) for the reported write capability, Vault runtime
+activation (`src/vault_runtime.rs`) for the one-line-per-Vault report, and the
+managed Git checkout install (`src/git/managed_checkout.rs`).
+
+**Coordination paths:** `src/lib.rs` exports the boundary.
+
+**Invariants:**
+
+- The verdict comes from performing the operation, never from a filesystem's
+  name or version (ADR-26).
+- `Undetermined` is a distinct answer from `Unsupported`, and a directory the
+  probe cannot use reports the former: a Vault unwritable for its own reasons
+  is never reported as lacking compare-and-swap. Only a definite verdict is
+  cached, so a directory that later becomes usable is re-probed, and because
+  the cache is keyed per filesystem, a read-only directory on a filesystem
+  already known to be capable answers `Supported`.
+- A probe leaves nothing behind: its scratch names are dot-prefixed, which the
+  Vault already excludes as noise, and it unlinks them on every path.
+- A bare `EINVAL` is never on its own proof that a flag is missing, because it
+  is equally the errno for misusing the call.
+
+**Validation:** `cargo test rename_flags`, plus `cargo test vault::write` and
+`cargo test vault_mutation` for the callers, followed by the full backend
+checks.
+
 ### Vault collection registry
 
 **Kind:** infrastructure/persistent domain state.
@@ -903,7 +949,9 @@ attachment extensions, `WriteOutcome`, and `WriteError`.
 (ADR-13), and its second caller is the Vault-wide tag rename in `tags.rs`
 (#242).
 
-**Consumed dependencies:** vault index/types, the local filesystem, and
+**Consumed dependencies:** vault index/types, the local filesystem, the
+filesystem rename-flag capability (`src/rename_flags.rs`) that decides whether
+a commit can use `renameat2`'s flags here, and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
 Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
 keeps every rewriter's idea of a code block identical to the indexer's. The
@@ -928,8 +976,14 @@ write API/types, and configuration for archive or upload limits.
 - All HTTP and MCP mutations use this shared layer (ADR-03).
 - Optimistic concurrency uses the expected content hash.
 - A conditional write commits by exchanging its temporary sidecar with the
-  destination, so past that exchange the outcome a caller is told depends on
-  whether the undo put the old bytes back. An undo that succeeds reports the
+  destination wherever the filesystem can do that, so past that exchange the
+  outcome a caller is told depends on whether the undo put the old bytes back.
+  Where the filesystem cannot, the commit falls back to check-then-rename and
+  the exchange-specific outcomes below do not arise, because nothing is
+  committed before the check (ADR-26). The fallback keeps every error code and
+  message shape, and loses only atomicity against a writer outside Hatchdoor.
+  Which path runs is decided by the rename-flag probe, never by a bare
+  `EINVAL`. An undo that succeeds reports the
   original failure; one that cannot run leaves the write committed and
   unverified, and reports `recovery_required` rather than a plain failure, so
   no caller is told a write did not land when it did. A `recovery_required`
@@ -1288,7 +1342,15 @@ commits the rename once. `tag_rename_error` maps its three refusals onto their
 own codes (`invalid_tag_name`, `tag_shape_unsupported`,
 `tag_rename_plan_stale`) and its write failures onto `write_operation_error`.
 It also answers `write_capabilities`, which deliberately does *not* gate on mutability:
-a Vault that refuses writes has to answer that question rather than fail it. A caller whose critical section spans several
+a Vault that refuses writes has to answer that question rather than fail it.
+`WriteCapabilities` carries three answers, not two: `mutate_capable`,
+`vault_writable`, and `atomic_compare_and_swap`, which reports whether the
+Vault's filesystem can commit a conditional write in one step. That third one
+answers for the filesystem rather than for the Vault's permissions, so it is
+`None` only where the filesystem could not be asked and is never `Some(false)`
+for a Vault that is merely read-only (ADR-26, #345). An I/O write failure and
+a `write_recovery_required` failure are both logged server-side before being
+mapped, so neither reaches only the client's log. A caller whose critical section spans several
 operations on one Vault builds a `VaultMutation` with `VaultMutation::gated`
 and takes the lock itself through its `acquire_mutation`: the MCP `batch` tool
 holds one Vault's lock for a whole call, and `tokio::sync::Mutex` is not
@@ -1309,7 +1371,9 @@ function `write_operation_error` is public because the MCP
 `list_note_attachments` read tool calls a `vault/write` function without being
 a mutation and must not grow a second copy of that translation.
 
-**Consumed dependencies:** `vault/write` primitives (unchanged),
+**Consumed dependencies:** the filesystem rename-flag capability
+(`src/rename_flags.rs`), which `write_capabilities` asks for the Vault's
+`atomic_compare_and_swap` answer, `vault/write` primitives (unchanged),
 `VaultReadCore::control_block` for the Vault gate, `VaultControlBlock`'s
 authoritative index and mutation lock, `AppState::vault_archive_prefix`, and
 the live settings snapshot.
@@ -1865,6 +1929,11 @@ the "later consumer" the two paragraphs above anticipated. `run_managed_git_turn
 is the concrete `acquire_or_reuse`-then-`synchronize_managed_checkout` operation
 `VaultWorkKind::Git` executes; it classifies every `ManagedCheckoutError`/
 `ManagedSyncError` into a redacted `VaultWorkError{code, message, retryable}`,
+`ManagedCheckoutError::AtomicInstallFailed` carries the reason the install
+failed rather than discarding it, since the first report of that variant
+reached an operator as a bare "install failed" over a filesystem that could
+not do `RENAME_NOREPLACE` (#345); the install falls back to check-then-rename
+there, as the Vault write layer does (ADR-26). The classification keeps
 distinguishing authentication failures (`ManagedCheckoutError::AuthenticationFailed`,
 `ManagedSyncError::Authentication`, detected via `git2::ErrorCode::Auth`) from
 other remote failures. It takes a `&ManagedCheckoutLease` rather than acquiring
@@ -2315,7 +2384,11 @@ application API in the same change (#101): `POST .../notes`, `PUT
 .../notes/{slug}`, `PATCH .../notes/{slug}/rename|move|move-rename|archive`,
 `DELETE .../notes/{slug}`, `POST .../attachments` (mounted separately from the
 rest of this group so it can also accept a live MCP bearer token, mirroring
-the retired `/api/attachment` route), and `GET .../write-capabilities`. Since
+the retired `/api/attachment` route), and `GET .../write-capabilities`, whose
+payload is `{vault_id, enabled, atomic_compare_and_swap, warnings}`. The
+`atomic_compare_and_swap` field and one matching `warnings` sentence say that
+this Vault's filesystem saves without the atomic swap (ADR-26, #345); that
+sentence is this surface's own wording, like the web-auth warning beside it. Since
 #186 every one of those eight routes has ADR-19's shape: it parses its path
 and body, calls `VaultMutationCore` once, and maps the typed outcome or the
 structured `VaultOperationError` onto a status code — including this surface's

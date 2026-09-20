@@ -10,6 +10,7 @@ pub mod git;
 pub mod handlers;
 pub mod mcp;
 pub mod model_setup;
+pub mod rename_flags;
 pub mod rerank;
 pub mod runtime_config;
 pub mod search;

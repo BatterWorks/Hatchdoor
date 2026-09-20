@@ -80,7 +80,11 @@ pub enum ManagedCheckoutError {
     /// retry instead of retrying blindly on a schedule.
     AuthenticationFailed,
     ValidationFailed,
-    AtomicInstallFailed,
+    /// The checkout could not be installed at its final name. The string says
+    /// why, because the first report of this reached an operator as a bare
+    /// "install failed" with the errno thrown away, and the cause was a
+    /// filesystem that cannot do `RENAME_NOREPLACE` (#345).
+    AtomicInstallFailed(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +97,12 @@ struct CheckoutReceipt {
 
 impl std::fmt::Display for ManagedCheckoutError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::AtomicInstallFailed(reason) = self {
+            return write!(
+                formatter,
+                "managed checkout could not be installed: {reason}"
+            );
+        }
         let message = match self {
             Self::StateDirectoryUnavailable => "managed checkout state directory is unavailable",
             Self::OwnershipUnavailable => "managed checkout is already owned by another process",
@@ -101,7 +111,7 @@ impl std::fmt::Display for ManagedCheckoutError {
             Self::CloneFailed => "managed checkout clone failed",
             Self::AuthenticationFailed => "managed checkout authentication failed",
             Self::ValidationFailed => "managed checkout validation failed",
-            Self::AtomicInstallFailed => "managed checkout could not be installed atomically",
+            Self::AtomicInstallFailed(_) => unreachable!("handled above"),
         };
         formatter.write_str(message)
     }
@@ -345,24 +355,38 @@ fn write_receipt(
         resolved_branch: resolved_branch.to_string(),
         vault_subdirectory: request.vault_subdirectory.clone(),
     };
-    let encoded =
-        serde_json::to_vec(&receipt).map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
+    let encoded = serde_json::to_vec(&receipt).map_err(|error| {
+        ManagedCheckoutError::AtomicInstallFailed(format!(
+            "could not encode the checkout receipt: {error}"
+        ))
+    })?;
     let temporary = vault_directory.join(format!(
         "{RECEIPT_FILE}.acquiring-{}",
-        VaultId::generate().map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?
+        VaultId::generate().map_err(|error| {
+            ManagedCheckoutError::AtomicInstallFailed(format!(
+                "could not name a temporary receipt file: {error}"
+            ))
+        })?
     ));
     let result = (|| {
+        fn receipt_failure(
+            stage: &'static str,
+        ) -> impl FnOnce(std::io::Error) -> ManagedCheckoutError {
+            move |error| {
+                ManagedCheckoutError::AtomicInstallFailed(format!(
+                    "could not {stage} the checkout receipt: {error}"
+                ))
+            }
+        }
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-        file.write_all(&encoded)
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-        file.sync_all()
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
+            .map_err(receipt_failure("create"))?;
+        file.write_all(&encoded).map_err(receipt_failure("write"))?;
+        file.sync_all().map_err(receipt_failure("flush"))?;
         fs::rename(&temporary, vault_directory.join(RECEIPT_FILE))
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)
+            .map_err(receipt_failure("install"))
     })();
     // A failed receipt write is deliberately left in place as acquisition
     // evidence; a later startup rejects it rather than deleting it.
@@ -486,35 +510,78 @@ fn has_interrupted_acquisition(vault_directory: &Path) -> Result<bool, ManagedCh
     }))
 }
 
+/// Install the finished clone at its final name without ever replacing a
+/// checkout that appeared while it was being made.
+///
+/// `RENAME_NOREPLACE` does that in one step, and where the filesystem cannot
+/// do the flag at all the check moves in front of the rename instead: look,
+/// then move. That leaves a gap in which a competing checkout could appear and
+/// be overwritten, which matters far less here than it does for note content —
+/// the lease already keeps one process per Vault directory, and the
+/// alternative was refusing to provision the Vault at all (ADR-26, #345).
 #[cfg(target_os = "linux")]
 fn atomic_install(temporary: &Path, destination: &Path) -> Result<(), ManagedCheckoutError> {
+    use crate::rename_flags::{RenameFlag, flag_unavailable, rename_flagged_paths};
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let temporary = CString::new(temporary.as_os_str().as_bytes())
-        .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-    // SAFETY: both C strings are live and null-terminated for this call only.
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            temporary.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
+    let install_directory = destination.parent().unwrap_or(destination);
+    let encode = |path: &Path| {
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            ManagedCheckoutError::AtomicInstallFailed(format!(
+                "checkout path '{}' contains a NUL byte",
+                path.display()
+            ))
+        })
     };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(ManagedCheckoutError::AtomicInstallFailed)
+    let temporary_name = encode(temporary)?;
+    let destination_name = encode(destination)?;
+
+    match rename_flagged_paths(&temporary_name, &destination_name, RenameFlag::NoReplace) {
+        Ok(()) => Ok(()),
+        Err(error) if flag_unavailable(install_directory, RenameFlag::NoReplace, &error) => {
+            install_without_noreplace(temporary, destination)
+        }
+        Err(error) => Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+            "renameat2 RENAME_NOREPLACE onto '{}' failed: {error}",
+            destination.display()
+        ))),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn atomic_install(_temporary: &Path, _destination: &Path) -> Result<(), ManagedCheckoutError> {
-    Err(ManagedCheckoutError::AtomicInstallFailed)
+fn atomic_install(_temporary: &Path, destination: &Path) -> Result<(), ManagedCheckoutError> {
+    Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+        "installing '{}' needs renameat2, which this platform does not provide",
+        destination.display()
+    )))
+}
+
+fn install_without_noreplace(
+    temporary: &Path,
+    destination: &Path,
+) -> Result<(), ManagedCheckoutError> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+                "'{}' already exists",
+                destination.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+                "could not inspect '{}' before installing the checkout: {error}",
+                destination.display()
+            )));
+        }
+    }
+    fs::rename(temporary, destination).map_err(|error| {
+        ManagedCheckoutError::AtomicInstallFailed(format!(
+            "could not install the checkout at '{}': {error}",
+            destination.display()
+        ))
+    })
 }
 
 fn is_safe_managed_repository_url(url: &str) -> bool {
@@ -781,7 +848,10 @@ mod tests {
 
         let error = atomic_install(&temporary, &destination).expect_err("destination replaced");
 
-        assert_eq!(error, ManagedCheckoutError::AtomicInstallFailed);
+        assert!(
+            matches!(error, ManagedCheckoutError::AtomicInstallFailed(_)),
+            "expected an install failure, got {error:?}"
+        );
         assert_eq!(
             fs::read_to_string(destination.join("evidence")).unwrap(),
             "existing"
@@ -789,6 +859,56 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temporary.join("candidate")).unwrap(),
             "new"
+        );
+    }
+
+    /// A filesystem that rejects `RENAME_NOREPLACE` used to make a managed Git
+    /// Vault impossible to provision, and said only "could not be installed
+    /// atomically" about it (#345).
+    #[test]
+    fn a_checkout_installs_where_the_filesystem_rejects_no_replace() {
+        let root = tempdir().expect("temporary directory");
+        crate::rename_flags::force_unsupported_for_tests(root.path());
+        let temporary = root.path().join("repository.acquiring");
+        let destination = root.path().join("repository");
+        fs::create_dir(&temporary).expect("temporary checkout");
+        fs::write(temporary.join("candidate"), "new").expect("candidate evidence");
+
+        atomic_install(&temporary, &destination).expect("install must fall back to a plain rename");
+
+        assert_eq!(
+            fs::read_to_string(destination.join("candidate")).unwrap(),
+            "new"
+        );
+        assert!(!temporary.exists(), "the temporary name must be gone");
+    }
+
+    #[test]
+    fn the_no_replace_fallback_still_refuses_an_occupied_destination_and_says_why() {
+        let root = tempdir().expect("temporary directory");
+        crate::rename_flags::force_unsupported_for_tests(root.path());
+        let temporary = root.path().join("repository.acquiring");
+        let destination = root.path().join("repository");
+        fs::create_dir(&temporary).expect("temporary checkout");
+        fs::create_dir(&destination).expect("competing checkout");
+        fs::write(destination.join("evidence"), "existing").expect("existing evidence");
+
+        let error = atomic_install(&temporary, &destination).expect_err("destination replaced");
+
+        let ManagedCheckoutError::AtomicInstallFailed(reason) = &error else {
+            panic!("expected an install failure, got {error:?}");
+        };
+        assert!(
+            reason.contains("already exists"),
+            "the failure must name its cause, got: {reason}"
+        );
+        assert!(
+            error.to_string().contains("already exists"),
+            "and must carry it to the operator, got: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("evidence")).unwrap(),
+            "existing"
         );
     }
 
