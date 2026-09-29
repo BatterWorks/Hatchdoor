@@ -1251,7 +1251,9 @@ impl VaultMutation {
     /// mutation can be added without it: `label` names the operation for the
     /// commit title, `addressed` is what the caller named, and the outcome
     /// supplies the resulting path and the files actually touched. A write
-    /// that failed records nothing, because nothing changed on disk.
+    /// that failed records nothing, because nothing changed on disk. The same
+    /// goes for marking the Vault's snapshot stale and asking for its Index
+    /// and commit turns (#324).
     async fn run_write<T: RecordedWrite + Send + 'static>(
         &self,
         label: &'static str,
@@ -1275,15 +1277,29 @@ impl VaultMutation {
         translate: fn(VaultId, E) -> VaultOperationError,
         op: impl FnOnce() -> Result<T, E> + Send + 'static,
     ) -> Result<T, VaultOperationError> {
-        let outcome = offload(op)
-            .await
-            .map_err(|error| translate(self.vault_id, error))?;
+        // The published snapshot is marked stale on the blocking pool, right
+        // after the write lands and still under the caller's mutation guard,
+        // which is what keeps an Index turn already building from publishing
+        // over it as fresh (#324).
+        let control = self.control.clone();
+        let outcome = offload(move || {
+            let outcome = op()?;
+            control.mark_snapshot_behind_write();
+            Ok(outcome)
+        })
+        .await
+        .map_err(|error| translate(self.vault_id, error))?;
         self.control.write_ledger().record(WriteRecord {
             op: label.to_string(),
             target: outcome.written_path().unwrap_or(addressed).to_string(),
             affected_paths: outcome.affected_paths().to_vec(),
             summary: self.commit_summary.clone(),
         });
+        // After the record, so the commit this asks for can name the write.
+        // The write path asks for its own Index and commit turns rather than
+        // leaving that to a watcher, which may never have started or may have
+        // lost the event (#324).
+        self.control.report_write();
         Ok(outcome)
     }
 

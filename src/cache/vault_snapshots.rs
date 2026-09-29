@@ -345,6 +345,26 @@ impl SqliteCache {
         self.mark_vault_snapshot_stale_if_current(vault_id, attempt)
     }
 
+    /// Mark a Vault's published snapshot stale because a foreground write has
+    /// just changed its authoritative Markdown (#324). A no-op when the Vault
+    /// has no snapshot row.
+    ///
+    /// Unlike [`Self::mark_vault_snapshot_stale`], this begins no snapshot
+    /// attempt, so an Index turn already building keeps its right to publish;
+    /// the caller must hold the Vault's foreground mutation guard, which is
+    /// what makes that safe. Such a turn either read before the write, and so
+    /// publishes `Stale` because a mutation intervened, or reads after it, and
+    /// so publishes a generation that includes it.
+    pub(crate) fn mark_vault_snapshot_behind_write(&self, vault_id: VaultId) -> Result<(), String> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE vault_snapshots SET freshness = 'stale' WHERE vault_id = ?1",
+            params![vault_id.to_string()],
+        )
+        .map_err(|error| format!("mark Vault snapshot {vault_id} stale after a write: {error}"))?;
+        Ok(())
+    }
+
     /// Remove a Vault from shared-cache participation without deleting its
     /// last successful rows. Re-enabling is intentionally coupled to a later
     /// successful [`Self::replace_vault_snapshot`] publication.

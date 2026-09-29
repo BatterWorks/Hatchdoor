@@ -213,7 +213,16 @@ that production inventory are still checked for stale paths and duplicates.
   stops (#229). `run_server()`
   coalesces those intents through the shared `VaultWorkCoordinator` as Index
   requests. It is the only watcher: the transitional single-Vault adapter is
-  gone with the rest of the legacy lane (#185).
+  gone with the rest of the legacy lane (#185). An event flagged `Rescan`
+  (the kernel's queue overflowed and events were lost) always qualifies, since
+  an Index turn is already the full rescan it asks for (#324).
+- The watcher is not the only producer of that intent. The mutation core
+  reports every successful foreground write on the same channel through
+  `VaultControlBlock::report_write`, and before that labels the Vault's
+  published snapshot stale through `mark_snapshot_behind_write`, still under
+  the write's mutation guard. A write is therefore indexed, committed and
+  reported stale in the meantime whether or not a watcher exists or saw it
+  (#324); the coordinator coalesces the two reports of one change.
 - The one worker loop in `run_server()` takes the next coordinator position
   and hands it to `vault_executor::VaultWorkExecutor` — see the Vault work
   execution boundary below. The loop itself holds no readiness policy, no turn
@@ -228,7 +237,9 @@ that production inventory are still checked for stale paths and duplicates.
   `set_search_status`/`set_git_status`) republishes authoritative
   local-content availability after a Git turn, since `activation_snapshot`
   only stats `vault_path` once, at `reconcile()` time, before a managed
-  checkout exists. `activation_snapshot`'s Git status defaults to `Pending`
+  checkout exists. When that makes the Vault Active it also starts (or
+  replaces) the Vault's watcher, which activation skipped for want of a
+  directory (#324). `activation_snapshot`'s Git status defaults to `Pending`
   (an immediate first sync) for a genuinely new Vault or a
   disabled-to-enabled transition only; `reconcile()`'s non-retained-
   definition branch (an in-place edit to an already-active Vault) instead
@@ -1384,7 +1395,8 @@ exclusion patterns would make invisible; resolving the archive prefix from the
 Vault's own archive folder or the instance default; running the blocking write
 off the async runtime; recording what that write did in the Vault's
 `git::WriteLedger`, so the commit that eventually records it can say so
-(#249); and returning `NoteWriteOutcome` or a structured
+(#249); marking the Vault's published snapshot stale and asking for its Index
+and commit turns itself, rather than relying on a watcher (#324); and returning `NoteWriteOutcome` or a structured
 `VaultOperationError`. `VaultMutation::with_commit_summary` carries the
 caller's one-line description of the change into that record; the private
 `RecordedWrite` trait is what lets `run_write` build the record once for all
@@ -1630,7 +1642,10 @@ demoted-layer, note-summary, health-check, graph, and layered/filtered
 search variants are retired. The crate-private
 `vault_snapshots` seam owns Vault-ID-qualified candidate publication,
 stale/participation state, attempt ordering, and Vault-local disposal in the
-shared cache. A published `VaultSnapshotRead` is structural: notes, links,
+shared cache. `mark_vault_snapshot_behind_write` is the one stale-marking
+call that begins no attempt, so an Index turn already building still
+publishes; its caller holds the Vault's mutation guard, which is what lets
+that turn's own freshness verdict stay correct (#324). A published `VaultSnapshotRead` is structural: notes, links,
 tags, and the layer catalog. It carries no chunks — search reads those and
 their vectors through its own SQL rather than through a snapshot, so the
 `vault_chunk_vectors` join every collection read used to pay for is gone —
