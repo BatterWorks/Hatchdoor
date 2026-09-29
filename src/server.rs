@@ -986,7 +986,23 @@ pub async fn run_server() {
     // Migration may persist the registry and discard a recognized legacy
     // cache, so run it only after startup security/configuration refusals and
     // before opening SQLite.
-    let vault_registry = VaultRegistryStore::at_default_path();
+    // The registry fences its own state directory off Vault roots; the cache
+    // directory and the settings file's directory are instance state too, so
+    // no Vault may contain or sit inside them either (#325).
+    let settings_path =
+        settings_file_path(&config.cache_db_path, settings_file_override.as_deref());
+    let vault_registry = VaultRegistryStore::at_default_path().with_reserved_directories(
+        [config.cache_db_path.as_path(), settings_path.as_path()]
+            .into_iter()
+            .filter_map(std::path::Path::parent)
+            .map(|directory| {
+                if directory.as_os_str().is_empty() {
+                    std::path::PathBuf::from(".")
+                } else {
+                    directory.to_path_buf()
+                }
+            }),
+    );
     let legacy_vault_path = match &config.vault_source {
         VaultSource::Local { vault_path } => vault_path.clone(),
     };

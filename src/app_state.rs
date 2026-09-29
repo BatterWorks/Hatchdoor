@@ -203,8 +203,9 @@ mod tests {
         let directory = tempdir().expect("temp dir");
         let vault_path = directory.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("vault dir");
-        let store =
-            crate::vault_registry::VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let store = crate::vault_registry::VaultRegistryStore::new(
+            directory.path().join("state/vaults.json"),
+        );
         let committed = store
             .add(
                 0,

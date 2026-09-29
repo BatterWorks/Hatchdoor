@@ -626,7 +626,15 @@ existence) for the managed-Git Git-turn dispatch boundary's internal use only
 — never exposed to HTTP, MCP, or any other external-facing surface,
 explicit confirmed-empty initialization for migration recovery, and the
 versioned `/data/state/vaults.json` format. An absent file
-is a complete revision-0 zero-Vault state and is not created by reads. Commits
+is a complete revision-0 zero-Vault state and is not created by reads; only a
+definite `NotFound` counts as absent, and any other read or stat failure is a
+`Storage` error rather than an empty registry a mutation could commit over
+(#325). `add`, `edit`, and `enable` refuse, as `InvalidSource`, a `Local` root
+or `ExistingGit` checkout that contains or sits inside the registry's own state
+directory or any directory named through `with_reserved_directories` (runtime
+composition passes the cache and settings directories); a `ManagedGit`
+checkout, whose location under the state directory the store itself chooses,
+is exempt (#325). Commits
 are serialized by normalized registry path across all store handles in the
 process, compare the expected persisted revision, increment it once, and
 atomically replace the file with owner-only permissions. Corrupt, unsupported,
@@ -749,7 +757,13 @@ store adds no service, framework, or speculative trait (ADR-02/13).
 `start_with_no_vaults`. Inspection returns a deterministic no-deployment,
 existing-registry, imported, or stable `legacy_migration_required` recovery
 outcome. Any existing registry, including an intentionally empty one,
-permanently suppresses legacy import. A safe import copies legacy exclusions,
+permanently suppresses legacy import, and every inspection that finds one
+removes the stored retired Git-lane keys again (`HATCHDOOR_GIT_SYNC_ENABLED`,
+`_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`, `_BRANCH`, `_DEBOUNCE_SECONDS`),
+logging and retrying on the next start on failure, so a crash between an
+import's registry commit and its one-shot cleanup cannot leave the plaintext
+token in settings (#325); `HATCHDOOR_EXCLUDE` and the author keys keep their
+live readers and are left alone. A safe import copies legacy exclusions,
 Git behavior, credentials, and commit identity into the ordinary Vault
 definition; the retired write-debounce value has no successor. A safe import of
 a plain `Local` source whose directory holds no Markdown writes the starter
@@ -1555,6 +1569,12 @@ persisted registry file itself is unreadable; `legacy_migration_recovery`
 (`{code: "legacy_migration_required", message}`) means the registry loaded fine
 (empty, revision 0) but automatic legacy import could not prove the deployment
 and is still pending (#150), in which case no Vaults are listed at all.
+While either recovery flag is set, `create` is refused with the pending
+recovery's own code (`legacy_migration_required` or
+`legacy_environment_cleanup_required`), so a created Vault can never give the
+registry state that wedges the flag (#325). The credential-replacement retry
+skips a disabled Vault, which would otherwise gain a Git schedule entry that
+disconnect never deactivates (#325).
 `start_with_no_vaults` is the confirmed action for the second: it requires a
 pending failed import and an explicit `confirm`, commits an ordinary empty
 revision-1 registry (refusing `registry_revision_conflict` if the registry
@@ -2424,7 +2444,8 @@ directly by `every_management_error_code_keeps_its_historical_status`:
 refusals, `registry_revision_conflict`,
 `legacy_migration_recovery_not_pending`, `vault_disabled`,
 `capability_unavailable`) are `409`; `vault_registry_recovery_required`,
-`legacy_environment_cleanup_required`, and `vault_unavailable` are `503`; and
+`legacy_environment_cleanup_required`, `legacy_migration_required`, and
+`vault_unavailable` are `503`; and
 `internal_error`/`registry_revision_exhausted` are `500`. On top of that the
 adapter adds the two statuses the core does not model: `201` for a creation and
 `202` for admitted background work. `internal_error` is logged and sanitized by

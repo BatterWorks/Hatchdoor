@@ -16,7 +16,7 @@ use super::{
 #[test]
 fn absent_registry_is_zero_vault_without_creating_a_file() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
 
     let state = store.load().expect("load absent registry");
@@ -33,7 +33,7 @@ fn absent_registry_is_zero_vault_without_creating_a_file() {
 #[test]
 fn initialize_empty_registry_persists_intentional_zero_vault_state() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
 
     let snapshot = store
@@ -84,7 +84,7 @@ fn local_definition_add_round_trips_through_the_public_snapshot() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(
@@ -132,7 +132,7 @@ fn vault_names_are_unique_without_regard_to_case() {
     let second_path = directory.path().join("second");
     std::fs::create_dir(&first_path).expect("create first Vault");
     std::fs::create_dir(&second_path).expect("create second Vault");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     store
         .add(0, local_definition("Personal", first_path, true))
         .expect("add first Vault");
@@ -159,7 +159,7 @@ fn vault_name_uniqueness_handles_case_mappings_that_expand() {
     let second_path = directory.path().join("second");
     std::fs::create_dir(&first_path).expect("create first Vault");
     std::fs::create_dir(&second_path).expect("create second Vault");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     store
         .add(0, local_definition("Straße", first_path, true))
         .expect("add first Vault");
@@ -180,7 +180,7 @@ fn disabled_definitions_continue_reserving_their_canonical_paths() {
     let parent = directory.path().join("notes");
     let nested = parent.join("nested");
     std::fs::create_dir_all(&nested).expect("create nested Vault paths");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     store
         .add(0, local_definition("Paused", parent, false))
         .expect("add disabled Vault");
@@ -202,7 +202,7 @@ fn disabled_definitions_continue_reserving_their_canonical_paths() {
 #[test]
 fn managed_https_credentials_are_persisted_but_redacted_from_reads_and_debug() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let credentials = HttpsCredentials {
         username: "git-user".to_string(),
         token: "super-secret-token".to_string(),
@@ -251,7 +251,7 @@ fn managed_https_credentials_are_persisted_but_redacted_from_reads_and_debug() {
 #[test]
 fn crate_private_https_credentials_accessor_returns_plaintext_only_for_configured_vaults() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let credentials = HttpsCredentials {
         username: "git-user".to_string(),
         token: "super-secret-token".to_string(),
@@ -330,7 +330,7 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
     let repository_path = directory.path().join("repository");
     git2::Repository::init(&repository_path).expect("initialize repository");
     std::fs::create_dir(repository_path.join("notes")).expect("create Vault subdirectory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(
@@ -402,7 +402,7 @@ fn existing_git_retains_remote_identity_while_git_mode_changes_normally() {
     let directory = tempdir().expect("temporary directory");
     let repository_path = directory.path().join("repository");
     git2::Repository::init(&repository_path).expect("initialize repository");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let repository_url = "https://example.test/notes.git".to_string();
     let added = store
         .add(
@@ -474,7 +474,7 @@ fn existing_git_poll_interval_stays_outside_identity_while_enabled() {
     let directory = tempdir().expect("temporary directory");
     let repository_path = directory.path().join("repository");
     git2::Repository::init(&repository_path).expect("initialize repository");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let repository_url = "https://example.test/notes.git".to_string();
     let added = store
         .add(
@@ -550,7 +550,7 @@ fn existing_git_symlink_subdirectory_cannot_bypass_canonical_overlap_validation(
     let actual = repository_path.join("actual");
     std::fs::create_dir(&actual).expect("create actual Vault path");
     symlink("actual", repository_path.join("alias")).expect("create in-repository symlink");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(
             0,
@@ -595,7 +595,7 @@ fn existing_git_source_rejects_the_repository_metadata_directory_as_its_location
     let directory = tempdir().expect("temporary directory");
     let repository_path = directory.path().join("repository");
     git2::Repository::init(&repository_path).expect("initialize repository");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
 
     let error = store
@@ -634,7 +634,7 @@ fn malformed_https_repository_urls_save_nothing() {
         "https://example.test/%zz/notes.git",
     ] {
         let directory = tempdir().expect("temporary directory");
-        let path = directory.path().join("vaults.json");
+        let path = directory.path().join("state/vaults.json");
         let store = VaultRegistryStore::new(&path);
 
         let error = store
@@ -674,7 +674,7 @@ fn malformed_https_repository_urls_save_nothing() {
 #[test]
 fn a_poll_interval_below_the_minimum_saves_nothing() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
 
     let error = store
@@ -714,7 +714,7 @@ fn a_poll_interval_below_the_minimum_saves_nothing() {
 #[test]
 fn a_one_minute_poll_interval_is_accepted_for_both_managed_and_existing_git() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(
@@ -790,7 +790,7 @@ fn an_existing_git_poll_interval_below_the_minimum_saves_nothing() {
     let directory = tempdir().expect("temporary directory");
     let repository_path = directory.path().join("repository");
     git2::Repository::init(&repository_path).expect("initialize repository");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
 
     let error = store
@@ -831,7 +831,7 @@ fn existing_git_local_history_poll_interval_is_not_floor_checked() {
     let directory = tempdir().expect("temporary directory");
     let repository_path = directory.path().join("repository");
     git2::Repository::init(&repository_path).expect("initialize repository");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(
@@ -876,7 +876,7 @@ fn existing_git_local_history_poll_interval_is_not_floor_checked() {
 #[test]
 fn a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_with_the_default() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
         "schema_version": 1,
         "revision": 1,
@@ -895,6 +895,8 @@ fn a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_wi
             }
         }
     }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write pre-interval registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -922,7 +924,7 @@ fn a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_wi
 #[test]
 fn an_existing_git_record_written_before_poll_interval_secs_existed_still_loads_with_the_default() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
         "schema_version": 1,
         "revision": 1,
@@ -942,6 +944,8 @@ fn an_existing_git_record_written_before_poll_interval_secs_existed_still_loads_
             }
         }
     }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write pre-interval registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -967,7 +971,7 @@ fn archive_folder_and_commit_identity_are_normalized_and_round_trip_through_add(
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(
@@ -999,7 +1003,7 @@ fn archive_folder_rejects_an_empty_or_control_character_value() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     for invalid in ["   ", "///", "bad\u{0007}folder"] {
         let error = store
@@ -1023,7 +1027,7 @@ fn commit_identity_requires_a_non_empty_name_and_email_together() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     for invalid in [
         VaultCommitIdentity {
@@ -1059,7 +1063,7 @@ fn commit_identity_requires_a_non_empty_name_and_email_together() {
 #[test]
 fn a_record_written_before_archive_folder_and_commit_identity_existed_still_loads_with_defaults() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
         "schema_version": 1,
         "revision": 1,
@@ -1075,6 +1079,8 @@ fn a_record_written_before_archive_folder_and_commit_identity_existed_still_load
             }
         }
     }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write pre-identity registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1095,7 +1101,7 @@ fn a_record_written_before_archive_folder_and_commit_identity_existed_still_load
 #[test]
 fn https_credentials_accept_a_token_alone_and_substitute_the_documented_placeholder_username() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(
@@ -1126,7 +1132,7 @@ fn https_credentials_accept_a_token_alone_and_substitute_the_documented_placehol
 #[test]
 fn https_credentials_reject_an_empty_token_even_with_a_username() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let error = store
         .add(
@@ -1157,7 +1163,7 @@ fn edit_can_set_and_then_clear_archive_folder_and_commit_identity() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let committed = store
         .add(0, local_definition("Vault", vault_path.clone(), false))
         .expect("add disabled Vault");
@@ -1204,7 +1210,7 @@ fn identity_changes_require_a_disabled_definition_and_explicit_confirmation() {
     let replacement_path = directory.path().join("replacement");
     std::fs::create_dir(&original_path).expect("create original Vault");
     std::fs::create_dir(&replacement_path).expect("create replacement Vault");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(0, local_definition("Notes", original_path, true))
         .expect("add Vault");
@@ -1267,7 +1273,7 @@ fn disconnect_removes_only_the_definition_and_preserves_vault_files() {
     std::fs::create_dir(&vault_path).expect("create Vault");
     let note_path = vault_path.join("kept.md");
     std::fs::write(&note_path, "# Kept\n").expect("write note");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(0, local_definition("Notes", vault_path.clone(), true))
         .expect("add Vault");
@@ -1287,7 +1293,7 @@ fn disconnect_removes_only_the_definition_and_preserves_vault_files() {
 #[test]
 fn structurally_invalid_persisted_definitions_enter_recovery_without_overwrite() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
           "schema_version": 1,
           "revision": 8,
@@ -1306,6 +1312,8 @@ fn structurally_invalid_persisted_definitions_enter_recovery_without_overwrite()
             }
           }
         }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write invalid registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1329,7 +1337,7 @@ fn structurally_invalid_persisted_definitions_enter_recovery_without_overwrite()
 #[test]
 fn credential_bearing_repository_urls_enter_redacted_recovery() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
           "schema_version": 1,
           "revision": 4,
@@ -1348,6 +1356,8 @@ fn credential_bearing_repository_urls_enter_redacted_recovery() {
             }
           }
         }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write unsafe registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1363,7 +1373,7 @@ fn credential_bearing_repository_urls_enter_redacted_recovery() {
 #[test]
 fn malformed_persisted_secret_fields_do_not_echo_values_in_recovery() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
           "schema_version": 1,
           "revision": 4,
@@ -1382,6 +1392,8 @@ fn malformed_persisted_secret_fields_do_not_echo_values_in_recovery() {
             }
           }
         }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write malformed registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1397,7 +1409,7 @@ fn malformed_persisted_secret_fields_do_not_echo_values_in_recovery() {
 #[test]
 fn enabled_definitions_allow_name_mode_and_credential_changes() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let source = VaultSource::ManagedGit {
         repository_url: "https://example.test/notes.git".to_string(),
         branch: Some("main".to_string()),
@@ -1498,7 +1510,7 @@ fn non_identity_edits_do_not_require_the_source_to_be_currently_available() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(
             0,
@@ -1526,7 +1538,7 @@ fn non_identity_edits_do_not_require_the_source_to_be_currently_available() {
 #[test]
 fn invalid_sources_reject_the_transaction_without_leaking_credentials() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
     let unsafe_source = VaultSource::ManagedGit {
         repository_url: "https://git-user:embedded-secret@example.test/notes.git".to_string(),
@@ -1590,7 +1602,7 @@ fn readable_non_writable_local_vaults_remain_valid() {
     std::fs::create_dir(&vault_path).expect("create Vault");
     std::fs::set_permissions(&vault_path, std::fs::Permissions::from_mode(0o555))
         .expect("make Vault non-writable");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
 
     let committed = store
         .add(0, local_definition("Read only", vault_path, true))
@@ -1610,7 +1622,7 @@ fn enable_preserves_identity_and_increments_the_registry_revision() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(0, local_definition("Paused", vault_path, false))
         .expect("add disabled Vault");
@@ -1629,7 +1641,7 @@ fn enable_revalidates_a_local_source_before_saving() {
     let directory = tempdir().expect("temporary directory");
     let vault_path = directory.path().join("notes");
     std::fs::create_dir(&vault_path).expect("create Vault");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(0, local_definition("Paused", vault_path.clone(), false))
         .expect("add disabled Vault");
@@ -1654,7 +1666,7 @@ fn enable_revalidates_a_local_source_before_saving() {
 #[test]
 fn confirmed_repository_change_does_not_carry_an_old_credential() {
     let directory = tempdir().expect("temporary directory");
-    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
     let added = store
         .add(
             0,
@@ -1755,10 +1767,10 @@ fn managed_checkout_paths_participate_in_overlap_validation() {
         )
         .expect_err("managed checkout overlap accepted");
 
-    assert_eq!(
-        error,
-        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
-    );
+    // A managed checkout lives under the registry's state directory, so the
+    // instance-state fence (#325) refuses the overlapping Local root before
+    // the pairwise overlap check is reached.
+    assert_instance_state_refusal(&error);
 }
 
 #[cfg(unix)]
@@ -1801,10 +1813,18 @@ fn absent_managed_checkout_resolves_a_symlinked_state_parent_for_overlap_checks(
         )
         .expect_err("symlink-aliased managed checkout parent accepted");
 
-    assert_eq!(
-        error,
-        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
-    );
+    // A managed checkout lives under the registry's state directory, so the
+    // instance-state fence (#325) refuses the overlapping Local root before
+    // the pairwise overlap check is reached.
+    assert_instance_state_refusal(&error);
+}
+
+fn assert_instance_state_refusal(error: &VaultRegistryError) {
+    let VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(message)) = error
+    else {
+        panic!("expected the instance-state refusal, got {error:?}");
+    };
+    assert!(message.contains("instance state"), "{message}");
 }
 
 fn local_definition(name: &str, path: PathBuf, enabled: bool) -> NewVaultDefinition {
@@ -1887,7 +1907,7 @@ fn committed_registry_is_private_to_its_owner() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
 
     store.commit(0, []).expect("commit empty registry");
@@ -1903,7 +1923,7 @@ fn committed_registry_is_private_to_its_owner() {
 #[test]
 fn stale_revision_is_rejected_without_changing_the_registry() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = VaultRegistryStore::new(&path);
     let initial = store.commit(0, []).expect("initial commit");
     let before = std::fs::read(&path).expect("registry before conflict");
@@ -1926,8 +1946,10 @@ fn stale_revision_is_rejected_without_changing_the_registry() {
 #[test]
 fn corrupt_registry_enters_recovery_and_is_never_overwritten() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = b"{ definitely not valid json";
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write corrupt registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1948,8 +1970,10 @@ fn corrupt_registry_enters_recovery_and_is_never_overwritten() {
 #[test]
 fn future_schema_enters_recovery_with_upgrade_guidance() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{"schema_version":2,"revision":41,"vaults":{}}"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write future registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1972,7 +1996,7 @@ fn future_schema_enters_recovery_with_upgrade_guidance() {
 #[test]
 fn current_schema_with_unknown_record_fields_is_recoverable_corruption() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let original = br#"{
             "schema_version": 1,
             "revision": 3,
@@ -1980,6 +2004,8 @@ fn current_schema_with_unknown_record_fields_is_recoverable_corruption() {
                 "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {"name": "not-yet-supported"}
             }
         }"#;
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
     std::fs::write(&path, original).expect("write incompatible registry");
     let store = VaultRegistryStore::new(&path);
 
@@ -1995,7 +2021,7 @@ fn current_schema_with_unknown_record_fields_is_recoverable_corruption() {
 fn concurrent_commits_serialize_and_reject_one_stale_writer() {
     let directory = tempdir().expect("temporary directory");
     let store = Arc::new(VaultRegistryStore::new(
-        directory.path().join("vaults.json"),
+        directory.path().join("state/vaults.json"),
     ));
     store.commit(0, []).expect("initial commit");
     let barrier = Arc::new(Barrier::new(3));
@@ -2043,7 +2069,7 @@ fn concurrent_commits_serialize_and_reject_one_stale_writer() {
 #[test]
 fn independently_constructed_stores_serialize_writes_to_the_same_path() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let first = Arc::new(VaultRegistryStore::new(&path));
     let second = Arc::new(VaultRegistryStore::new(&path));
     first.commit(0, []).expect("initial commit");
@@ -2087,7 +2113,7 @@ fn independently_constructed_stores_serialize_writes_to_the_same_path() {
 #[test]
 fn replacement_never_exposes_partial_json_to_readers() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("vaults.json");
+    let path = directory.path().join("state/vaults.json");
     let store = Arc::new(VaultRegistryStore::new(&path));
     let vaults = (0..128)
         .map(|_| {
@@ -2139,4 +2165,136 @@ fn replacement_never_exposes_partial_json_to_readers() {
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
         .count();
     assert_eq!(temporary_files, 0);
+}
+
+/// #325: a Vault root that is, contains, or sits inside the registry's own
+/// state directory would expose `vaults.json` (and its plaintext credentials)
+/// through the attachment read and write paths, so `add` refuses all three.
+#[test]
+fn add_refuses_local_roots_overlapping_the_registry_state_directory() {
+    let directory = tempdir().expect("temporary directory");
+    let state = directory.path().join("instance/state");
+    let inside = state.join("inside");
+    std::fs::create_dir_all(&inside).expect("create state directory");
+    let store = VaultRegistryStore::new(state.join("vaults.json"));
+
+    for root in [state.clone(), directory.path().join("instance"), inside] {
+        let error = store
+            .add(0, local_definition("Pierced", root.clone(), true))
+            .expect_err("a root overlapping instance state was accepted");
+        assert_instance_state_refusal(&error);
+    }
+    assert!(!store.path().exists(), "a refused add wrote the registry");
+
+    let outside = directory.path().join("notes");
+    std::fs::create_dir(&outside).expect("create sibling Vault");
+    store
+        .add(0, local_definition("Sibling", outside, true))
+        .expect("a sibling of the state directory stays valid");
+}
+
+#[test]
+fn add_refuses_an_existing_git_checkout_that_contains_the_state_directory() {
+    let directory = tempdir().expect("temporary directory");
+    let repository_path = directory.path().join("repository");
+    git2::Repository::init(&repository_path).expect("initialize repository");
+    std::fs::create_dir(repository_path.join("notes")).expect("create Vault subdirectory");
+    let store = VaultRegistryStore::new(repository_path.join("state/vaults.json"));
+
+    let error = store
+        .add(
+            0,
+            NewVaultDefinition {
+                name: "Checkout".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: None,
+                    branch: None,
+                    vault_subdirectory: Some(PathBuf::from("notes")),
+                    mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect_err("a checkout containing instance state was accepted");
+    assert_instance_state_refusal(&error);
+}
+
+/// Runtime composition names the cache and settings directories as further
+/// instance state; they are fenced exactly like the registry's own directory.
+#[test]
+fn add_refuses_roots_overlapping_a_reserved_instance_directory() {
+    let directory = tempdir().expect("temporary directory");
+    let cache = directory.path().join("data/cache");
+    std::fs::create_dir_all(&cache).expect("create cache directory");
+    let store = VaultRegistryStore::new(directory.path().join("data/state/vaults.json"))
+        .with_reserved_directories([cache.clone()]);
+
+    for root in [cache, directory.path().join("data")] {
+        let error = store
+            .add(0, local_definition("Cache", root, true))
+            .expect_err("a root overlapping the cache directory was accepted");
+        assert_instance_state_refusal(&error);
+    }
+}
+
+#[test]
+fn edit_refuses_moving_a_vault_onto_the_state_directory() {
+    let directory = tempdir().expect("temporary directory");
+    let state = directory.path().join("state");
+    let notes = directory.path().join("notes");
+    std::fs::create_dir_all(&state).expect("create state directory");
+    std::fs::create_dir(&notes).expect("create Vault");
+    let store = VaultRegistryStore::new(state.join("vaults.json"));
+    let added = store
+        .add(0, local_definition("Notes", notes, false))
+        .expect("add disabled Vault");
+    let vault_id = added.definitions().next().expect("definition").vault_id();
+
+    let error = store
+        .edit(1, vault_id, local_edit("Notes", state, true))
+        .expect_err("moving a Vault onto instance state was accepted");
+    assert_instance_state_refusal(&error);
+    let VaultRegistryState::Ready(current) = store.load().expect("reload") else {
+        panic!("registry entered recovery");
+    };
+    assert_eq!(current.revision(), 1, "a refused edit committed");
+}
+
+/// #325: `load` used `Path::exists`, which reads every stat failure as
+/// "absent", so an unreadable registry became an empty revision-0 registry a
+/// mutation could then commit over. Only `NotFound` means absent now.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_registry_is_an_error_never_an_empty_registry() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("state/vaults.json");
+    std::fs::create_dir_all(path.parent().expect("state directory"))
+        .expect("create state directory");
+    // A self-referencing symlink fails every stat with ELOOP, a non-NotFound
+    // error that needs no special privileges to reproduce.
+    symlink(&path, &path).expect("symlink loop");
+    let notes = directory.path().join("notes");
+    std::fs::create_dir(&notes).expect("create Vault");
+    let store = VaultRegistryStore::new(&path);
+
+    assert!(matches!(store.load(), Err(VaultRegistryError::Storage(_))));
+    assert!(matches!(
+        store.add(0, local_definition("Notes", notes, true)),
+        Err(VaultRegistryError::Storage(_))
+    ));
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .expect("registry entry")
+            .file_type()
+            .is_symlink(),
+        "the unreadable registry was replaced"
+    );
 }

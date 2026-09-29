@@ -318,6 +318,7 @@ pub(crate) const MANAGEMENT_ERROR_CODES: &[&str] = &[
     "capability_unavailable",
     "vault_registry_recovery_required",
     "legacy_environment_cleanup_required",
+    "legacy_migration_required",
     "vault_unavailable",
     "registry_revision_exhausted",
     "internal_error",
@@ -645,6 +646,25 @@ impl<'a> VaultCollectionManagement<'a> {
         // reaches this diff) — a future change to that CAS contract would
         // need to preserve this guarantee or expose the generated ID
         // directly.
+        //
+        // Refused while startup recovery is pending (#325): a created Vault
+        // would give the registry real state that `start_with_no_vaults`
+        // (which always commits from revision 0) could never clear the flag
+        // over, and discovery would keep hiding it behind that flag.
+        if let Some(recovery) = self
+            .state
+            .legacy_migration_recovery
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            return Err(VaultOperationError::new(
+                recovery.code(),
+                recovery.message(),
+                None,
+                false,
+            ));
+        }
         let before_ids: BTreeSet<VaultId> = match self.state.vault_registry.load() {
             Ok(VaultRegistryState::Ready(snapshot)) => snapshot.vault_ids().collect(),
             Ok(VaultRegistryState::Recovery(recovery)) => return Err(recovery_error(&recovery)),
@@ -1038,7 +1058,14 @@ impl<'a> VaultCollectionManagement<'a> {
         snapshot: &VaultRegistrySnapshot,
         vault_id: VaultId,
     ) {
-        let Some(definition) = snapshot.definition(vault_id) else {
+        // A disabled Vault has no scheduler entry, and must not gain one here:
+        // `retry_now` self-registers, and disconnect only deactivates entries
+        // for Vaults that were active (#325). Enabling it later schedules its
+        // Git turn through the ordinary activation path.
+        let Some(definition) = snapshot
+            .definition(vault_id)
+            .filter(VaultDefinition::enabled)
+        else {
             return;
         };
         if let Some(poll_interval) = definition.source().managed_git_poll_interval() {
@@ -1572,6 +1599,100 @@ mod tests {
             .expect("discovery");
         assert!(discovery.legacy_migration_recovery.is_none());
         assert_eq!(discovery.registry_revision, Some(1));
+    }
+
+    /// #325: a Vault created while a failed legacy import awaits recovery gave
+    /// the registry real state that `start_with_no_vaults` (always committing
+    /// from revision 0) could never clear the flag over, while discovery kept
+    /// hiding the Vault behind that flag. Creation is refused instead, with
+    /// the pending recovery's own code, and the registry stays untouched.
+    #[tokio::test]
+    async fn create_is_refused_while_legacy_migration_recovery_is_pending() {
+        let (state, _worker, directory) = test_state();
+        let vault_path = directory.path().join("notes");
+        std::fs::create_dir(&vault_path).expect("vault dir");
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") = Some(
+            crate::vault_migration::LegacyMigrationRecovery::for_test("legacy import failed"),
+        );
+
+        let refused = VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Notes",
+                VaultSource::Local { path: vault_path },
+            ))
+            .await
+            .expect_err("creation must wait for the recovery decision");
+        assert_eq!(refused.code, "legacy_migration_required");
+        assert_eq!(ready_snapshot(&state).revision(), 0);
+
+        // The recovery action still works afterwards: the flag is not wedged.
+        VaultCollectionManagement::new(&state)
+            .start_with_no_vaults(true)
+            .await
+            .expect("start with no Vaults");
+        assert!(
+            state
+                .legacy_migration_recovery
+                .read()
+                .expect("recovery lock")
+                .is_none()
+        );
+    }
+
+    /// #325: replacing credentials on a *disabled* remote-backed Vault used to
+    /// self-register it with the Git scheduler through `retry_now`, an entry
+    /// disconnect never removes because it only deactivates active Vaults.
+    #[tokio::test]
+    async fn credential_replacement_on_a_disabled_vault_registers_no_git_schedule() {
+        let (state, _worker, _directory) = test_state();
+
+        VaultCollectionManagement::new(&state)
+            .create(CreateVaultRequest {
+                enabled: false,
+                https_credentials: Some(HttpsCredentialsInput {
+                    username: Some("git-user".to_string()),
+                    token: "old-token".to_string(),
+                }),
+                ..create_request(
+                    "Remote notes",
+                    managed_git_source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+                )
+            })
+            .await
+            .expect("create the disabled Vault");
+        let snapshot = ready_snapshot(&state);
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+        assert_eq!(state.managed_git.poll_interval_for_test(vault_id), None);
+
+        VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                EditVaultRequest {
+                    expected_registry_revision: snapshot.revision(),
+                    name: "Remote notes".to_string(),
+                    source: managed_git_source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+                    exclude_patterns: Vec::new(),
+                    https_credentials: HttpsCredentialsPatch::Replace {
+                        username: Some("git-user".to_string()),
+                        token: "new-token".to_string(),
+                    },
+                    confirm_identity_change: false,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .await
+            .expect("replace the disabled Vault's credentials");
+
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            None,
+            "a disabled Vault must not gain a Git schedule entry"
+        );
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Git));
     }
 
     /// Closes issue #97's reopening finding 3: replacing a Vault's HTTPS
