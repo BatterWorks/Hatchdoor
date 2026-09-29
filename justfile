@@ -134,6 +134,34 @@ dev-status:
 dev-clean: _prepare-cargo
     cargo clean
 
+# The checks to run before a pull request: formatting, lints for both the
+# shipped and the all-features build, the backend tests once, and the frontend.
+# Skips the tests that load real model weights. See CONTRIBUTING.md.
+#
+# The test lines drop HATCHDOOR_VAULT_REGISTRY_PATH, which this file exports
+# for the dev server: the tests must see the deployed default, not .dev/.
+check: _check-static && _check-frontend
+    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
+
+# Everything `check` covers, plus the backend tests in the exact configuration
+# a deployment ships and the tests that load real model weights (the first run
+# downloads them from Hugging Face).
+check-full: _check-static && _check-frontend
+    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all
+    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --all-features
+
+_check-static: _prepare-cargo
+    cargo fmt --all -- --check
+    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings
+
+_check-frontend:
+    cd frontend && npm run format:check
+    cd frontend && npm run lint
+    cd frontend && npm run typecheck
+    cd frontend && npm test
+    cd frontend && npm run build
+
 # Exits non-zero so the review cannot be skipped silently. Pass a different
 # base with `just docs-freshness main`.
 #

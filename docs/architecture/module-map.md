@@ -1842,8 +1842,8 @@ ONNX embedders are unconditional, while `src/embed/candle_embedder.rs` and the
 candle inference stack it needs stay behind the non-default `eval` feature and
 must never become reachable from a default build.
 
-**Validation:** `cargo test embed`; feature-gated or model-loading tests when
-applicable; cache identity/rebuild tests for identity changes; `cargo clippy
+**Validation:** `cargo test embed`; `just check-full` for the model-loading
+tests; cache identity/rebuild tests for identity changes; `cargo clippy
 --all-targets --all-features` so the `eval`-gated embedders still compile.
 
 ### Reranking
@@ -1866,7 +1866,8 @@ applicable; cache identity/rebuild tests for identity changes; `cargo clippy
 **Invariant:** reranking must not enter the runtime search path without
 superseding ADR-05.
 
-**Validation:** `cargo test rerank` and relevant eval runner tests.
+**Validation:** `cargo test rerank`, relevant eval runner tests, and `just
+check-full` for the model-loading tests.
 
 ### Git synchronization
 
@@ -2854,8 +2855,8 @@ version stays in the default tree even though Hatchdoor's own edge to it is now
 
 **Validation:** `cargo test eval`, binary argument tests, and the relevant eval
 command for behavioral changes. Because a default `cargo test --all` skips both
-binaries' test targets entirely, the guide's second run,
-`cargo test --all --all-features`, is what keeps them from rotting.
+binaries' test targets entirely, the `cargo test --all --features eval` run in
+`just check` is what keeps them from rotting.
 
 ## Frontend
 
@@ -4072,25 +4073,18 @@ wants a new dependency.
 
 ## Full validation gates
 
-Backend:
-
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all
+just check
 ```
 
-Frontend:
+It runs formatting, clippy for the default and the all-features build, the
+backend tests with `--features eval`, and the frontend format, lint, typecheck,
+test and build steps. `CONTRIBUTING.md` lists the exact commands. Run
+`npm ci` in `frontend/` first on a fresh checkout.
 
-```bash
-cd frontend
-npm ci
-npm run format:check
-npm run lint
-npm run typecheck
-npm test
-npm run build
-```
+`just check-full` adds the backend tests in the default configuration and with
+`--all-features`, which loads real model weights. Run it for changes to
+Embeddings, Reranking, model identities, or inference dependencies.
 
 Use focused tests during development. Run the full gates before merging a
 boundary or interface change.

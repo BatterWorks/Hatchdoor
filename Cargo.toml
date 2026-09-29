@@ -80,6 +80,16 @@ name = "index_microbench"
 path = "src/bin/index_microbench.rs"
 required-features = ["eval"]
 
+# Dependencies build optimised even in debug and test builds; Hatchdoor's own
+# crate stays at the default opt-level 0. The test suite spends most of its time
+# inside dependencies (bundled SQLite, JSON, tokenizers), so this cut a default
+# test run from 23.5s to 14.9s on a 4-core machine. Rebuilding after an edit to
+# Hatchdoor itself is unchanged. The cost is a slower first build (15 minutes
+# instead of 3 for the test build on the same machine) and a slower rebuild of
+# whichever dependencies change. Release builds are unaffected.
+[profile.dev.package."*"]
+opt-level = 2
+
 [dev-dependencies]
 jsonschema = { version = "0.30", default-features = false }
 tempfile = "3"

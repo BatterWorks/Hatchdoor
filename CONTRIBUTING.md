@@ -13,41 +13,53 @@ Branch off `development` and open your pull request against `development` — no
 
 ## Checks before a pull request
 
-Run the checks that match the files you changed.
+Run the checks before opening a pull request:
 
-Backend (Rust):
+```bash
+just check
+```
+
+It runs these, stopping at the first failure:
 
 ```bash
 cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-cargo test --all --all-features
-```
-
-The offline benchmark harness — the `eval` and `index_microbench` binaries and
-the candle-backed embedders they sweep — sits behind the non-default `eval`
-feature, so a default build compiles none of it. That is why the checks run
-twice: the default run is what a deployment actually ships, and the all-features
-run is the only thing that compiles the gated lines and executes the harness's
-own test targets, which a default `cargo test` skips entirely. Without the
-second run, gated code rots with nothing to say so.
-
-`--all-features` also enables `embedder-tests`, whose tests load real model
-weights. The first such run downloads them from Hugging Face — allow for that
-once, and for the disk it costs; afterwards they come from the local cache. If
-you need an offline run, `cargo test --all --features eval` covers the harness
-without the model downloads.
-
-Frontend (`frontend/`):
-
-```bash
+cargo test --all --features eval
 cd frontend
-npm ci
+npm run format:check
 npm run lint
 npm run typecheck
 npm test
 npm run build
 ```
+
+Run `npm ci` in `frontend/` first on a fresh checkout or after the lockfile
+changes. While you work, run the individual commands for the side you are
+touching, or a focused `cargo test <module>`.
+
+The offline benchmark harness (the `eval` and `index_microbench` binaries and
+the candle-backed embedders they sweep) sits behind the non-default `eval`
+feature, so a default build compiles none of it. Clippy therefore runs twice:
+the default run lints exactly what a deployment ships, and the all-features run
+is the only one that compiles the gated lines. The tests run once, with
+`--features eval`. That run covers every test a default build has, plus the
+harness's own test targets, which a default `cargo test` skips entirely.
+Without it, gated code rots with nothing to say so.
+
+The full suite adds two more backend runs:
+
+```bash
+just check-full
+```
+
+It runs the tests in the exact default configuration a deployment ships, and
+with `--all-features`, which turns on `embedder-tests`: tests that load real
+model weights. The first such run downloads the weights from Hugging Face, so
+allow for that once, and for the disk it costs; afterwards they come from the
+local cache. Run `just check-full` when you change `src/embed/`, `src/rerank/`,
+model identities, or the version of `fastembed` or another inference
+dependency.
 
 When changing a callout accent or any token in `frontend/src/styles/base.css`:
 
