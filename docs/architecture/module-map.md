@@ -1453,8 +1453,12 @@ a mutation and must not grow a second copy of that translation.
 (`src/rename_flags.rs`), which `write_capabilities` asks for the Vault's
 `atomic_compare_and_swap` answer, `vault/write` primitives (unchanged),
 `VaultReadCore::control_block` for the Vault gate, `VaultControlBlock`'s
-authoritative index and mutation lock, `AppState::vault_archive_prefix`, and
-the live settings snapshot.
+authoritative index and mutation lock, `VaultControlBlock::mark_snapshot_behind_write`
+(which labels the Vault's published SQLite snapshot stale through the cache's
+`mark_vault_snapshot_behind_write`) and `VaultControlBlock::report_write` (which
+sends the Vault ID on the watcher intent channel so the server requests Commit
+and Index turns) (#324), `AppState::vault_archive_prefix`, and the live
+settings snapshot.
 
 **Consumers:** `handlers/vault_write.rs` (all eight routes) and
 `mcp/tools/write.rs` (all sixteen write tools, standalone, and every one
@@ -1689,7 +1693,9 @@ metadata and cache queries must observe one published generation.
 FTS5, and sqlite-vec.
 
 **Consumers:** application state/reindexing, runtime composition's per-Vault
-Index dispatch, Vault-qualified read projections, the Vault-qualified search
+Index dispatch, the Vault-qualified mutation core (which reaches
+`mark_vault_snapshot_behind_write` only through runtime composition's
+`VaultControlBlock::mark_snapshot_behind_write`, #324), Vault-qualified read projections, the Vault-qualified search
 core, handlers, MCP reads, evaluation tooling, diagnostics, and the one-time
 legacy single-Vault migration's read-only evidence check.
 
