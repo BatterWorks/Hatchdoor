@@ -43,6 +43,9 @@ const NETWORK_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// (a dropped VPN, a firewall that drops rather than rejects, a hung proxy)
 /// releases the Vault's mutation lock and the one work lane within this
 /// bound instead of holding both forever (#322).
+///
+/// Shutdown waits for an in-flight turn, so `stop_grace_period` in
+/// `docker-compose.yml` must stay above this plus the connect bound.
 #[cfg(not(test))]
 const NETWORK_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 // Test builds use short bounds so a stalled-remote test finishes quickly.

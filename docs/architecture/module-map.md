@@ -4076,7 +4076,11 @@ packet scope:
   default-feature locked Rust suite. BuildKit Cargo cache mounts and optional
   Cargo build controls are documented in `docs/development/container-builds.md`.
   Consumers are local Docker builders and external CI; no provider-specific
-  configuration belongs in this contract. Validate cold/warm verification,
+  configuration belongs in this contract. `docker-compose.yml` sets
+  `stop_grace_period` above the Git connect plus transfer bounds in
+  `git/mod.rs`, so shutdown can wait out a wedged sync turn instead of being
+  killed by Docker's default 10 s grace (#322); raise it if those bounds grow.
+  Validate cold/warm verification,
   source/dependency invalidation, and the final image's platform/healthcheck.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: Rust build and dependency
   coordination.
