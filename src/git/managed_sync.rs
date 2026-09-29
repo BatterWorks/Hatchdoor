@@ -586,6 +586,7 @@ fn fetch(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Mana
     let mut remote = repository
         .find_remote(&remote_name)
         .map_err(|_| ManagedSyncError::Validation)?;
+    super::bound_network_waits();
     let mut options = FetchOptions::new();
     if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
         options.remote_callbacks(callbacks);
@@ -777,6 +778,7 @@ fn push(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Manag
     let mut remote = repository
         .find_remote(&remote_name)
         .map_err(|_| ManagedSyncError::Validation)?;
+    super::bound_network_waits();
     let mut options = PushOptions::new();
     if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
         options.remote_callbacks(callbacks);
@@ -930,6 +932,42 @@ mod tests {
         assert_eq!(
             classify_remote_error(network_error),
             ManagedSyncError::Remote
+        );
+    }
+
+    fn run_against_stalled_remote(
+        mode: ManagedSyncMode,
+    ) -> Result<ManagedSyncOutcome, ManagedSyncError> {
+        let (root, mut config) = fixture(mode);
+        let stalled = crate::git::stalled_https_remote();
+        Repository::open(&config.repository_path)
+            .expect("checkout")
+            .remote_set_url("origin", &stalled)
+            .expect("point origin at the stalled remote");
+        config.repository_url = stalled;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _root = root;
+            let _ = sender.send(synchronize_managed_checkout(&config, &WriteLedger::new()));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("sync against a stalled remote never returned")
+    }
+
+    #[test]
+    fn a_stalled_remote_fails_a_pull_only_turn_as_a_retryable_remote_error() {
+        assert_eq!(
+            run_against_stalled_remote(ManagedSyncMode::PullOnly),
+            Err(ManagedSyncError::Remote)
+        );
+    }
+
+    #[test]
+    fn a_stalled_remote_fails_a_two_way_turn_as_a_retryable_remote_error() {
+        assert_eq!(
+            run_against_stalled_remote(ManagedSyncMode::TwoWay),
+            Err(ManagedSyncError::Remote)
         );
     }
 

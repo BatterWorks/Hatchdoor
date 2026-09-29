@@ -442,8 +442,10 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
         OwnershipUnavailable => ("managed_git_checkout_busy", true),
         UnsafeRepositoryUrl => ("managed_git_unsafe_url", false),
         // A preserved-and-rejected structural mismatch (unknown directory,
-        // escaping symlink, interrupted acquisition) — needs a human, not a
-        // blind retry.
+        // escaping symlink, or leftovers the next acquisition could not
+        // delete) — needs a human, not a blind retry. An ordinary
+        // interrupted acquisition never reaches here: the next attempt
+        // discards its own leftovers and clones again (#322).
         DestinationInvalid => ("managed_git_destination_invalid", false),
         CloneFailed => ("managed_git_remote_unreachable", true),
         AuthenticationFailed => ("managed_git_authentication_failed", false),

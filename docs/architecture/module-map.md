@@ -1930,12 +1930,17 @@ them (only when those paths live inside the vault), appending to an existing
 and `acquire_or_reuse` form the shared-core managed-HTTPS acquisition boundary.
 It holds a per-Vault process ownership lease, clones only into an
 application-owned temporary sibling, validates origin, branch, repository
-shape, and canonical Vault containment before atomic installation, and writes
-an application-owned receipt that retains a once-resolved default branch.
-Reuse accepts only a receipt-backed matching checkout; unknown, interrupted,
-damaged, mismatched, credential-bearing, or out-of-containment destinations
-remain untouched and are rejected. This boundary neither fetches nor resets,
-checks out, polls, pushes, or attempts automatic reacquisition/recovery.
+shape, and canonical Vault containment, writes an application-owned receipt
+that retains a once-resolved default branch, and only then installs
+atomically, so an installed checkout never lacks its receipt (#322).
+Reuse accepts only a receipt-backed matching checkout; unknown, damaged,
+mismatched, credential-bearing, or out-of-containment destinations remain
+untouched and are rejected. An interrupted acquisition is not unknown: a failed
+clone removes its own temporary, and while no `repository` is installed the
+next acquisition, under the lease, deletes only the leftover temporaries whose
+names this module generates (`repository.acquiring-<id>`, the receipt's
+`.acquiring-<id>`; symlinks as links) and clones again (#322). This boundary
+neither fetches nor resets, checks out, polls, or pushes.
 `reuse_existing_checkout` is `acquire_or_reuse` with the acquisition half
 removed and `Ok(None)` in its place (#267): a commit turn must open no network
 connection, and cloning is one, so it reuses the checkout a Vault already has
@@ -1970,7 +1975,12 @@ The uniquely selected managed remote and its push URL must remain the
 configured credential-free HTTPS repository identity; unrelated remotes in an
 operator-owned `ExistingGit` checkout are outside this boundary and untouched.
 Public HTTPS makes no credential callback; supplied credentials are callback
-input only and remain redacted. This boundary does not acquire, delete,
+input only and remain redacted. Every fetch, push and clone first calls the
+crate-private `bound_network_waits` (`git/mod.rs`), which sets libgit2's
+process-wide socket timeouts once: 15 s to connect, 120 s without a byte
+moving. A remote that stalls mid-transfer therefore fails the turn as the
+retryable `managed_git_remote_unreachable` and releases the Vault's mutation
+lock and the one work lane, rather than holding both until restart (#322). This boundary does not acquire, delete,
 schedule, poll, persist status, or repair checkouts.
 
 `WriteRecord`, `WriteLedger`, and `build_commit_message` are what makes a
