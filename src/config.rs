@@ -191,8 +191,10 @@ pub fn parse_exclude_patterns(raw: &str) -> Vec<String> {
 }
 
 pub fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn"));
+    let filter =
+        capped_log_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn")
+        }));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -201,9 +203,47 @@ pub fn init_logging() {
         .init();
 }
 
+/// The MCP library logs every message it sends, tool results included, at
+/// debug and trace. A tool result can carry a transfer link (ADR-27), whose
+/// credential must never reach a log, so the library is held at info whatever
+/// `RUST_LOG` asks for. A directive for a more specific target wins in an
+/// `EnvFilter`, so the two modules that log messages are capped by name as
+/// well as the crate. Its info-level lines carry no messages.
+const MESSAGE_LOGGING_TARGETS: &[&str] = &[
+    "rmcp",
+    "rmcp::service",
+    "rmcp::transport::streamable_http_server",
+];
+
+fn capped_log_filter(filter: EnvFilter) -> EnvFilter {
+    MESSAGE_LOGGING_TARGETS
+        .iter()
+        .fold(filter, |filter, target| {
+            filter.add_directive(
+                format!("{target}=info")
+                    .parse()
+                    .expect("a static log directive parses"),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_logging_stays_at_info_even_under_a_trace_filter() {
+        let filter = capped_log_filter(EnvFilter::new(
+            "trace,rmcp=trace,rmcp::service=trace,rmcp::transport::streamable_http_server=debug",
+        ))
+        .to_string();
+        for target in MESSAGE_LOGGING_TARGETS {
+            assert!(filter.contains(&format!("{target}=info")), "{filter}");
+            for noisy in ["trace", "debug"] {
+                assert!(!filter.contains(&format!("{target}={noisy}")), "{filter}");
+            }
+        }
+    }
 
     #[test]
     fn parse_port_accepts_valid_u16() {

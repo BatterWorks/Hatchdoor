@@ -111,13 +111,26 @@ pub struct ModelChoiceResult {
 // Capability report and write receipts owned by the MCP surface
 // ---------------------------------------------------------------------------
 
-/// One way an agent may upload an attachment into a Vault. The two variants
-/// carry different fields (an HTTP endpoint has a path and auth story; the
-/// base64 fallback names its tool), so they are internally tagged on `id`,
-/// which is also the discriminator a caller sees on the wire today.
+/// One way an agent may upload an attachment into a Vault. The variants carry
+/// different fields (a transfer link names the tool that mints it; an HTTP
+/// endpoint has a path and auth story; the base64 fallback names its tool), so
+/// they are internally tagged on `id`, which is also the discriminator a
+/// caller sees on the wire today.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(tag = "id")]
 pub enum AttachmentImportMethod {
+    /// The recommended route (ADR-27): mint an upload link with `tool`, then
+    /// send the file to it. Needs no token and no server address.
+    #[serde(rename = "transfer_link")]
+    TransferLink {
+        tool: &'static str,
+        role: &'static str,
+        method: &'static str,
+        max_bytes: u64,
+        recommended_for: &'static str,
+        requires: &'static str,
+        usage: &'static str,
+    },
     #[serde(rename = "http_multipart")]
     HttpMultipart {
         role: &'static str,
@@ -173,7 +186,10 @@ pub struct NoteAttachmentsResult {
 pub enum AttachmentContent {
     #[serde(rename = "url")]
     Url {
+        /// A transfer link (ADR-27): absolute, and carrying its own credential.
         download_url: String,
+        /// Unix time in seconds after which `download_url` stops working.
+        expires_at: u64,
         path_note: &'static str,
         auth: &'static str,
     },
@@ -190,6 +206,21 @@ pub struct GetAttachmentResult {
     pub size_bytes: u64,
     pub content_type: String,
     pub content: AttachmentContent,
+}
+
+/// `create_upload_link`'s answer: an upload transfer link (ADR-27) for one
+/// target, good once, until `expires_at`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UploadLinkResult {
+    pub vault_id: String,
+    pub target_relative_path: String,
+    pub overwrite: bool,
+    pub upload_url: String,
+    pub method: &'static str,
+    /// Unix time in seconds after which `upload_url` stops working.
+    pub expires_at: u64,
+    pub max_bytes: u64,
+    pub usage: &'static str,
 }
 
 /// The receipt every note-mutation tool returns (`create_note` through
@@ -372,6 +403,7 @@ output_schemas! {
     "archive_note" => NoteWriteResult,
     "delete_note" => NoteWriteResult,
     "import_attachment" => AttachmentWriteResult,
+    "create_upload_link" => UploadLinkResult,
     "move_attachment" => AttachmentWriteResult,
     "rename_attachment" => AttachmentWriteResult,
     "delete_attachment" => AttachmentWriteResult,
@@ -412,6 +444,8 @@ mod schema_tests {
             bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![],
             rate_limits_enabled: true,
+            public_url: None,
+            request_origin: None,
         };
         let mut names: Vec<String> = crate::mcp::tools::setup_tools_list()
             .into_iter()
@@ -425,12 +459,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 43,
-            "3 setup + 15 read + 1 batch + 8 management + 16 write tools"
+            total, 44,
+            "3 setup + 15 read + 1 batch + 8 management + 17 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 43, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 44, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
@@ -501,6 +535,15 @@ mod schema_tests {
             vault_accepts_mutation: true,
             allowed_extensions: allowed_extension_samples(),
             methods: vec![
+                AttachmentImportMethod::TransferLink {
+                    tool: "create_upload_link",
+                    role: "default",
+                    method: "POST",
+                    max_bytes: 100_000_000,
+                    recommended_for: "any client that can make an HTTP request",
+                    requires: "HTTP",
+                    usage: "call create_upload_link, then POST the file",
+                },
                 AttachmentImportMethod::HttpMultipart {
                     role: "default",
                     method: "POST",
@@ -531,8 +574,9 @@ mod schema_tests {
             );
         }
         // The tag discriminator survives serialization.
-        assert_eq!(enabled["methods"][0]["id"], "http_multipart");
-        assert_eq!(enabled["methods"][1]["id"], "mcp_base64");
+        assert_eq!(enabled["methods"][0]["id"], "transfer_link");
+        assert_eq!(enabled["methods"][1]["id"], "http_multipart");
+        assert_eq!(enabled["methods"][2]["id"], "mcp_base64");
 
         let disabled = serde_json::to_value(AttachmentImportConfigResult {
             vault_id: enabled["vault_id"].as_str().unwrap().to_string(),
@@ -564,9 +608,10 @@ mod schema_tests {
             size_bytes: 1234,
             content_type: "image/png".to_string(),
             content: AttachmentContent::Url {
-                download_url: "/api/v1/vaults/x/assets/Sources/diagram.png".to_string(),
-                path_note: "resolve against this MCP endpoint",
-                auth: "requires the web bearer token",
+                download_url: "http://127.0.0.1:42824/api/v1/vaults/x/transfers/Sources/diagram.png?expires=1&signature=s".to_string(),
+                expires_at: 1,
+                path_note: "fetch it as it is",
+                auth: "none needed",
             },
         })
         .expect("serialize");

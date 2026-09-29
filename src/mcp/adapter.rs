@@ -60,6 +60,28 @@ impl HatchdoorMcpHandler {
     }
 }
 
+/// The `http://host:port` an MCP request arrived on, from its `Host` header (or
+/// an HTTP/2 request's authority). Transfer links fall back to it when no
+/// public address is configured (ADR-27). Hatchdoor serves plain HTTP itself,
+/// so the scheme is always `http`; a deployment behind an HTTPS front end sets
+/// `HATCHDOOR_PUBLIC_URL` instead. Trusting the header is safe here because the
+/// link goes back to the same caller that sent it.
+fn request_origin(parts: &axum::http::request::Parts) -> Option<String> {
+    let authority = match parts
+        .headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(host) => host.parse::<axum::http::uri::Authority>().ok()?,
+        None => parts.uri.authority()?.clone(),
+    };
+    // Credentials in the authority have no place in a link.
+    if authority.as_str().contains('@') {
+        return None;
+    }
+    Some(format!("http://{authority}"))
+}
+
 impl ServerHandler for HatchdoorMcpHandler {
     fn get_info(&self) -> ServerInfo {
         // `model_setup_pending`, not the collection's index readiness: a client
@@ -207,9 +229,13 @@ impl ServerHandler for HatchdoorMcpHandler {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let config = self.config().map_err(internal_config_error)?;
+        let mut config = self.config().map_err(internal_config_error)?;
+        config.request_origin = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(request_origin);
         let params = json!({
             "name": request.name.as_ref(),
             "arguments": Value::from(request.arguments.unwrap_or_default()),
@@ -340,6 +366,29 @@ mod tests {
         let advertised = advertised_protocol_versions();
         let versions: Vec<&str> = advertised.iter().map(|version| version.as_str()).collect();
         assert_eq!(versions, super::super::config::SUPPORTED_PROTOCOL_VERSIONS);
+    }
+
+    fn parts(host: Option<&str>) -> axum::http::request::Parts {
+        let mut request = axum::http::Request::builder().uri("/mcp");
+        if let Some(host) = host {
+            request = request.header(axum::http::header::HOST, host);
+        }
+        request.body(()).expect("request").into_parts().0
+    }
+
+    #[test]
+    fn request_origin_is_the_host_the_request_arrived_on() {
+        assert_eq!(
+            super::request_origin(&parts(Some("127.0.0.1:42824"))),
+            Some("http://127.0.0.1:42824".to_string())
+        );
+        assert_eq!(
+            super::request_origin(&parts(Some("notes.lan"))),
+            Some("http://notes.lan".to_string())
+        );
+        assert_eq!(super::request_origin(&parts(None)), None);
+        assert_eq!(super::request_origin(&parts(Some("bad host/x"))), None);
+        assert_eq!(super::request_origin(&parts(Some("user@evil"))), None);
     }
 
     #[test]

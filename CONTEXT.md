@@ -98,3 +98,7 @@ _Avoid_: Base, view, aggregator note, dashboard
 **Query result**:
 The notes a query selects, projected as rows carrying the properties the query asked for. Derived state: recomputed on demand and never written into a note. A saved query's result is not vault content, so it is absent from search, backlinks, statistics, and the graph.
 _Avoid_: Computed content, rendered note
+
+**Transfer link**:
+A short-lived address, handed to an agent by an authenticated call, that lets whoever holds it download one attachment or upload one file to one named location, without the agent's own token. It is narrower than the token that produced it: one file, one direction, a few minutes.
+_Avoid_: Presigned URL, signed URL, download URL (when meant as the credentialed link)

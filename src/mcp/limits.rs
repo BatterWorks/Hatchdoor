@@ -171,6 +171,20 @@ impl RateLimiter {
             _expensive: expensive,
         })
     }
+
+    /// Admit one ordinary tool call's worth of work arriving outside `/mcp`
+    /// on `token`'s budget: an MCP-admitted asset read, or a transfer-link
+    /// download. The order is the transport's own: concurrency first, so a
+    /// busy refusal does not also spend quota. Hold the guard until the
+    /// response is built.
+    pub async fn admit_tool_call(
+        &self,
+        token: &McpBearerToken,
+    ) -> Result<ConcurrencyGuard, Duration> {
+        let guard = self.try_acquire(RequestClass::ToolCall).await?;
+        self.check_quota(token, std::time::Instant::now())?;
+        Ok(guard)
+    }
 }
 
 #[cfg(test)]

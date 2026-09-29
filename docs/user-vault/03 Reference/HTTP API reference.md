@@ -25,6 +25,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | `/api/v1/vaults/...` reads (`GET`) | Web bearer token if configured, **unauthenticated in demo mode** |
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
 | `/api/v1/vaults/{vault_id}/attachments` (upload) | Web bearer token **or** a live MCP bearer token; same demo-mode refusal as other writes |
+| `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled — see [[#Transfer links]] |
 
 > [!warning]
 > Demo mode treats settings and model setup as operator-only surfaces that don't exist (`404`), but treats every Vault-scoped route as present — reads are public, writes/control answer `403 demo_read_only`. Don't infer "not implemented" from a `404` on a `/api/v1/vaults/...` path; check the method and current mode first.
@@ -75,6 +76,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | instant | switch |
 | `HATCHDOOR_MCP_BEARER_TOKEN` | instant | secret |
 | `HATCHDOOR_MCP_ALLOWED_ORIGINS` | instant | text |
+| `HATCHDOOR_PUBLIC_URL` | instant | text |
 | `HATCHDOOR_MAX_ATTACHMENT_BYTES` | instant | number |
 | `HATCHDOOR_MCP_MAX_BASE64_BYTES` | instant | number |
 | `HATCHDOOR_GIT_SYNC_ENABLED` | instant | mode |
@@ -192,6 +194,17 @@ That rejection is unconditional. What depends on the filesystem is the narrower 
 | POST | `/api/v1/vaults/{vault_id}/attachments` | `multipart/form-data`: `target_relative_path`, `file` | Import an attachment file. Accepts the web token **or** a live MCP bearer token, unlike other mutations — an MCP agent can use it directly without provisioning a separate web token. |
 
 All of the above (except attachment upload) return `VaultWriteOutcomeResponse`: `{"vault_id", "ok", "slug", "relative_path", "content_hash", "quality_warnings": [...], "rewritten_notes", "moved_assets", "trashed_path", "layer"}`. `rewritten_notes` counts other notes whose wikilinks were rewritten to follow a rename/move; `quality_warnings` flags things like a missing heading, not hard failures. Attachment upload returns `VaultAttachmentOutcomeResponse`: `{"vault_id", "ok", "attachment", "rewritten_notes", "trashed_path", "cleanup_warning"}`.
+
+## Transfer links
+
+Transfer links are minted over MCP, never by these routes: `get_attachment` returns a download link and `create_upload_link` an upload link (see [[MCP tools reference]]). Both address one path on this route and carry `expires`, a `signature`, and for uploads `overwrite` and `nonce`, in the query string. Send them exactly as given, with no `Authorization` header.
+
+| Method | Path | Body | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/v1/vaults/{vault_id}/transfers/{*path}` | — | Download the attachment a download link names. Answers like the asset route, held to `HATCHDOOR_MCP_MAX_BASE64_BYTES` and the MCP rate quota (`429` with `Retry-After`). Usable any number of times until it expires. |
+| POST | `/api/v1/vaults/{vault_id}/transfers/{*path}` | `multipart/form-data`: `file`, and optionally `target_relative_path`, which must match the link | Upload one file to the path an upload link names, under `HATCHDOOR_MAX_ATTACHMENT_BYTES`. Returns `VaultAttachmentOutcomeResponse`. Usable once. |
+
+Refusals are `403` with a stable `code`: `transfer_link_invalid` (any other path, Vault, or target; a tampered link; a link from before a restart or an MCP password change), `transfer_link_expired` (five minutes after minting), `transfer_link_spent` (an upload link's second use), `mcp_disabled` (MCP is off), and `mcp_write_disabled` (an upload while MCP writes are off). An upload whose target appeared after the link was minted, when replacing was not allowed, is `409 write_conflict`.
 
 ---
 

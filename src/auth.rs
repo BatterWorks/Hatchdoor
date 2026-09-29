@@ -94,15 +94,18 @@ fn request_is_authorized(request: &Request, expected: &[u8]) -> bool {
     false
 }
 
-/// Rewrite the `access_token` value in a query string to `REDACTED`. The web
-/// token can ride in the query for `<img>`/download navigations, and the request
-/// trace span logs the full URI (at debug level), so the raw token must never
-/// reach the span. Other query parameters are preserved.
+/// Rewrite every credential in a query string to `REDACTED`: the web token's
+/// `access_token`, which rides in the query for `<img>`/download navigations,
+/// and a transfer link's `signature` (ADR-27). The request trace span logs the
+/// full URI (at debug level), so neither may reach the span. Other query
+/// parameters are preserved.
 pub fn redact_query_token(query: &str) -> String {
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some(("access_token", _)) => "access_token=REDACTED".to_string(),
+            Some((key @ ("access_token" | crate::transfer_link::SIGNATURE_PARAM), _)) => {
+                format!("{key}=REDACTED")
+            }
             _ => pair.to_string(),
         })
         .collect::<Vec<_>>()
@@ -253,31 +256,21 @@ pub(crate) async fn require_web_or_live_mcp_read_token(
         return next.run(request).await;
     }
 
-    // Same order the `/mcp` transport uses: a concurrency rejection must not
-    // also spend quota on a request that never reached the handler.
     let token = crate::mcp::subscriptions::McpBearerToken(Arc::from(
         presented.expect("an MCP match presented a token"),
     ));
-    let guard = match tokens
-        .limiter
-        .try_acquire(crate::mcp::limits::RequestClass::ToolCall)
-        .await
-    {
+    let guard = match tokens.limiter.admit_tool_call(&token).await {
         Ok(guard) => guard,
         Err(retry_in) => return too_many_requests(retry_in),
     };
-    if let Err(retry_in) = tokens
-        .limiter
-        .check_quota(&token, std::time::Instant::now())
-    {
-        return too_many_requests(retry_in);
-    }
     let response = next.run(request).await;
     drop(guard);
     response
 }
 
-fn too_many_requests(retry_in: std::time::Duration) -> Response {
+/// `429` with `Retry-After`, for a request refused by the MCP tool budget
+/// outside `/mcp` (this route, and transfer-link downloads).
+pub(crate) fn too_many_requests(retry_in: std::time::Duration) -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(
@@ -423,6 +416,14 @@ mod tests {
         assert_eq!(
             redact_query_token("access_token=x"),
             "access_token=REDACTED"
+        );
+    }
+
+    #[test]
+    fn redact_query_token_hides_a_transfer_link_signature() {
+        assert_eq!(
+            redact_query_token("expires=1&replace=false&nonce=n&signature=s3cr3t"),
+            "expires=1&replace=false&nonce=n&signature=REDACTED"
         );
     }
 

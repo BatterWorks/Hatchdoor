@@ -151,16 +151,22 @@ const COPY: Record<
     label: "Websites allowed to connect",
     help: "Assistants running inside a browser must come from one of these addresses. Separated by commas.",
   },
+  HATCHDOOR_PUBLIC_URL: {
+    section: "agents",
+    label: "Public address",
+    help: "The address people and assistants use to reach this server. Assistants download and upload files through short-lived links built on it. Only needed when Hatchdoor sits behind a proxy or HTTPS front end; left empty, links use the address the assistant connected to.",
+    example: "https://notes.example.com",
+  },
   HATCHDOOR_MAX_ATTACHMENT_BYTES: {
     section: "uploads",
     label: "Largest file from this app",
-    help: "The biggest file you can drop into a note from your browser.",
+    help: "The biggest file you can drop into a note from your browser, or an assistant can upload through a link.",
     unit: "in megabytes",
   },
   HATCHDOOR_MCP_MAX_BASE64_BYTES: {
     section: "uploads",
     label: "Largest file from an assistant",
-    help: "The biggest file an assistant can send inline. Assistants that can make a normal upload are not limited by this.",
+    help: "The biggest file an assistant can send inline, and the biggest it can download. An assistant uploading through a link is held to the limit above instead.",
     unit: "in megabytes",
   },
   HATCHDOOR_GIT_SYNC_ENABLED: {

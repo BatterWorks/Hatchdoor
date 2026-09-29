@@ -10,7 +10,7 @@
 //! refused by the other for the same reason. The checks themselves are private
 //! to this module; what the read core re-exports to adapters is only
 //! [`ResolvedAsset`], [`AssetPathError`], [`AssetReadError`], and
-//! [`asset_download_path`], so no consumer can reassemble a different policy
+//! [`encode_relative_path`], so no consumer can reassemble a different policy
 //! from the parts.
 
 use std::io::Read;
@@ -95,19 +95,17 @@ pub(super) fn describe_asset(
     })
 }
 
-/// The path component of the Vault asset route's own URL for one attachment,
-/// percent-encoded a segment at a time. It lives with the containment policy so
-/// a caller building a link to an attachment (the MCP `get_attachment` tool)
-/// cannot drift from the path the route really serves, and mirrors the
-/// frontend's encoding of the same route
+/// A Vault-relative path as a URL path, percent-encoded a segment at a time.
+/// It lives with the containment policy so a caller building a link to an
+/// attachment (transfer links, ADR-27) cannot drift from the path a route
+/// really serves, and mirrors the frontend's encoding of the asset route
 /// (`frontend/src/components/note-page/wikilinks.ts`).
-pub(crate) fn asset_download_path(vault_id: &str, relative_path: &str) -> String {
-    let encoded = relative_path
+pub(crate) fn encode_relative_path(relative_path: &str) -> String {
+    relative_path
         .split('/')
         .map(percent_encode_segment)
         .collect::<Vec<_>>()
-        .join("/");
-    format!("/api/v1/vaults/{vault_id}/assets/{encoded}")
+        .join("/")
 }
 
 /// Percent-encode one URL path segment: everything outside RFC 3986's
@@ -365,10 +363,10 @@ mod tests {
     }
 
     #[test]
-    fn asset_download_path_percent_encodes_each_segment_but_not_the_separators() {
+    fn encode_relative_path_percent_encodes_each_segment_but_not_the_separators() {
         assert_eq!(
-            asset_download_path("vault-1", "My Folder/a b.png"),
-            "/api/v1/vaults/vault-1/assets/My%20Folder/a%20b.png"
+            encode_relative_path("My Folder/a b.png"),
+            "My%20Folder/a%20b.png"
         );
     }
 }

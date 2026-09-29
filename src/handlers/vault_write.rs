@@ -148,7 +148,7 @@ pub struct VaultAttachmentOutcomeResponse {
 /// A `(status, body)` pair small enough to propagate through intermediate
 /// `Result`s; built into a real `Response` only at the point it is returned
 /// from a handler.
-type ApiError = (StatusCode, VaultApiError);
+pub(crate) type ApiError = (StatusCode, VaultApiError);
 
 /// The HTTP half of ADR-19's mapping for a Vault mutation: one structured
 /// core error becomes a status code plus the same `{code, message, vault_id,
@@ -156,7 +156,7 @@ type ApiError = (StatusCode, VaultApiError);
 /// does not raise — the Vault-resolution and index-build failures it inherits
 /// from the read core — fall through to the shared read bucket, so a mutation
 /// reports a missing, disabled, or unavailable Vault exactly as a read does.
-fn mutation_error_response(error: VaultOperationError) -> Response {
+pub(crate) fn mutation_error_response(error: VaultOperationError) -> Response {
     let status = match error.code.as_str() {
         // `write_failed` carries the underlying I/O detail, which this surface
         // has always sanitized away; MCP reports it verbatim under that code.
@@ -213,7 +213,7 @@ fn bad_request_error(error: VaultApiError) -> ApiError {
     (StatusCode::BAD_REQUEST, error)
 }
 
-fn invalid_input_error(vault_id: VaultId, field: &str) -> ApiError {
+pub(crate) fn invalid_input_error(vault_id: VaultId, field: &str) -> ApiError {
     (
         StatusCode::BAD_REQUEST,
         VaultApiError::new(
@@ -502,63 +502,13 @@ pub async fn vault_scoped_upload_attachment_handler(
         }
     };
 
-    let mut target_relative_path: Option<String> = None;
-    let mut file_bytes: Option<Vec<u8>> = None;
-    while let Some(field) = match multipart.next_field().await {
-        Ok(field) => field,
-        Err(error) => {
-            return VaultApiError::new(
-                "invalid_write_input",
-                format!("invalid multipart upload: {error}"),
-                Some(vault_id),
-                false,
-            )
-            .respond(StatusCode::BAD_REQUEST);
-        }
-    } {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "target_relative_path" {
-            let value = match read_multipart_field(field, MAX_TARGET_RELATIVE_PATH_BYTES).await {
-                Ok(value) => value,
-                Err(error) => {
-                    return VaultApiError::new(
-                        "invalid_write_input",
-                        format!("invalid target_relative_path field: {error}"),
-                        Some(vault_id),
-                        false,
-                    )
-                    .respond(StatusCode::BAD_REQUEST);
-                }
-            };
-            let value = match String::from_utf8(value) {
-                Ok(value) => value,
-                Err(_) => {
-                    return VaultApiError::new(
-                        "invalid_write_input",
-                        "target_relative_path must be valid UTF-8".to_string(),
-                        Some(vault_id),
-                        false,
-                    )
-                    .respond(StatusCode::BAD_REQUEST);
-                }
-            };
-            target_relative_path = Some(value);
-        } else if name == "file" {
-            let bytes = match read_multipart_field(field, max_attachment_bytes).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return VaultApiError::new(
-                        "invalid_write_input",
-                        format!("invalid file field: {error}"),
-                        Some(vault_id),
-                        false,
-                    )
-                    .respond(StatusCode::BAD_REQUEST);
-                }
-            };
-            file_bytes = Some(bytes);
-        }
-    }
+    let UploadForm {
+        target_relative_path,
+        file_bytes,
+    } = match read_upload_form(&mut multipart, vault_id, max_attachment_bytes).await {
+        Ok(form) => form,
+        Err(error) => return respond(error),
+    };
 
     let target_relative_path = match non_empty_input(
         vault_id,
@@ -588,6 +538,82 @@ pub async fn vault_scoped_upload_attachment_handler(
     }
 }
 
+/// The fields of an attachment upload form: `target_relative_path` and
+/// `file`, each absent when the form did not send it. Shared by the bearer
+/// upload route and the transfer-link upload route (ADR-27), which accept the
+/// same request shape.
+pub(crate) struct UploadForm {
+    pub(crate) target_relative_path: Option<String>,
+    pub(crate) file_bytes: Option<Vec<u8>>,
+}
+
+/// Read an upload form, enforcing `max_attachment_bytes` on the file field as
+/// it streams in. A malformed form is answered with the route's `400`.
+pub(crate) async fn read_upload_form(
+    multipart: &mut Multipart,
+    vault_id: VaultId,
+    max_attachment_bytes: u64,
+) -> Result<UploadForm, ApiError> {
+    let mut target_relative_path: Option<String> = None;
+    let mut file_bytes: Option<Vec<u8>> = None;
+    while let Some(field) = match multipart.next_field().await {
+        Ok(field) => field,
+        Err(error) => {
+            return Err(bad_request_error(VaultApiError::new(
+                "invalid_write_input",
+                format!("invalid multipart upload: {error}"),
+                Some(vault_id),
+                false,
+            )));
+        }
+    } {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "target_relative_path" {
+            let value = match read_multipart_field(field, MAX_TARGET_RELATIVE_PATH_BYTES).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(bad_request_error(VaultApiError::new(
+                        "invalid_write_input",
+                        format!("invalid target_relative_path field: {error}"),
+                        Some(vault_id),
+                        false,
+                    )));
+                }
+            };
+            let value = match String::from_utf8(value) {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(bad_request_error(VaultApiError::new(
+                        "invalid_write_input",
+                        "target_relative_path must be valid UTF-8".to_string(),
+                        Some(vault_id),
+                        false,
+                    )));
+                }
+            };
+            target_relative_path = Some(value);
+        } else if name == "file" {
+            let bytes = match read_multipart_field(field, max_attachment_bytes).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Err(bad_request_error(VaultApiError::new(
+                        "invalid_write_input",
+                        format!("invalid file field: {error}"),
+                        Some(vault_id),
+                        false,
+                    )));
+                }
+            };
+            file_bytes = Some(bytes);
+        }
+    }
+
+    Ok(UploadForm {
+        target_relative_path,
+        file_bytes,
+    })
+}
+
 /// Field names are protocol metadata, never a second unbounded upload body.
 const MAX_TARGET_RELATIVE_PATH_BYTES: u64 = 16 * 1024;
 
@@ -615,7 +641,10 @@ async fn read_multipart_field(
     Ok(output)
 }
 
-fn attachment_outcome_response(vault_id: VaultId, outcome: AttachmentOutcome) -> Response {
+pub(crate) fn attachment_outcome_response(
+    vault_id: VaultId,
+    outcome: AttachmentOutcome,
+) -> Response {
     (
         StatusCode::OK,
         Json(VaultAttachmentOutcomeResponse {

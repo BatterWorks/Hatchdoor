@@ -506,7 +506,10 @@ accessor for "this key's value, or a descriptive error" that `src/config.rs`,
 `src/mcp/config.rs`, and `src/git/config.rs` all call rather than each keeping
 its own copy; `ConfigSnapshot::pinned_count` and `RuntimeConfig::settings_path`
 support the startup pinned-setting log line and local-versioning `.gitignore`
-setup respectively.
+setup respectively. `RuntimeConfig::value_revision` counts how many published
+snapshots changed one key's resolved value, so a consumer that derives
+something from a value (the transfer-link key from the MCP token) learns of
+every change, including a change back to an earlier value.
 
 **Consumers:** runtime composition constructs the startup instance. The
 settings HTTP API and the archive, index, MCP, and git live consumers bind a
@@ -827,10 +830,64 @@ for per-request attachment authorization.
 `frontend/src/api/api.ts`, and any route whose authentication requirements
 change.
 
+`RateLimiter::admit_tool_call` is the one admission sequence (concurrency,
+then quota) for a tool call's worth of work outside `/mcp`, shared by the
+asset-read guard and transfer-link downloads, and `too_many_requests` is their
+shared `429`.
+`redact_query_token` redacts a transfer link's `signature` as well as the web
+token's `access_token`, so neither reaches the request trace span (ADR-27).
+Transfer links are redeemed on their own routes, not through these guards.
+
 **Invariants:** constant-time token comparison, no token logging, and deliberate
 query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 
 **Validation:** `cargo test auth` and server/router tests.
+
+### Transfer links
+
+**Kind:** infrastructure/security.
+
+**Owned paths:** `src/transfer_link.rs`.
+
+**Public contract:** `TransferLinks` (one instance in `AppState`), with `key`,
+`mint_download`, `mint_upload`, `verify_download`, and `redeem_upload`;
+`SigningKey`, `MintedLink`, `Grant`, `LinkRefusal` (and its stable `code`s),
+`LINK_LIFETIME`, and `SIGNATURE_PARAM`. A link is an absolute URL on the
+Vault-scoped `/transfers/{*path}` route whose query carries `expires`, for
+uploads `overwrite` and `nonce`, and a BLAKE3 keyed-hash `signature` over the
+Vault ID, the relative path, the expiry, and the grant. `key` derives the
+`SigningKey` one request works under from the in-memory master key, the MCP
+token's revision, and the token the request was admitted on, so a tool call
+admitted on a token that has since rotated mints links the new token will not
+accept. See ADR-27.
+
+**Consumers:** the MCP `get_attachment` and `create_upload_link` tools mint;
+`src/handlers/transfer.rs` verifies and redeems; `src/auth.rs` redacts
+`SIGNATURE_PARAM` from the request trace span.
+
+**Consumed dependencies:** `RuntimeConfig::value_revision` for the MCP token's
+revision, `vault_read::encode_relative_path` for the per-segment path encoding,
+and `auth::constant_time_eq`.
+
+**Coordination paths:** `src/app_state.rs` (the field), `src/lib.rs`,
+`src/server.rs` (the `/transfers/{*path}` route and the span's `traced_uri`),
+`src/handlers/mod.rs`, `src/mcp/tools/mod.rs` (`transfer_link_signer`), and
+`src/config.rs` (`capped_log_filter`, which holds the `rmcp` crate and its two
+message-logging modules at info whatever `RUST_LOG` asks for, because a tool
+result can carry a link).
+
+**Invariants:** a link names one Vault and one path and one direction and is
+refused for anything else; it expires five minutes after minting, checked when
+the transfer starts; the signing key is random, held only in memory, and bound
+to the MCP token's revision and value, so a restart or any token change
+(including back to an old value) strands every link; a link is always
+absolute, and minting is refused when there is no address to build it on;
+no link credential reaches a log; an upload link is spent by its first
+redemption; this module never decides whether MCP or write mode is on, which
+the redeeming adapter re-reads per request.
+
+**Validation:** `cargo test transfer_link`, `cargo test transfer` in the server
+router tests, followed by the full backend checks.
 
 ### HTTP wire types
 
@@ -1228,7 +1285,7 @@ bound, and `asset_on_surface`. Its primitives stay private to
 `src/vault_read/assets.rs`; adapters see only `ResolvedAsset`,
 `AssetPathError` (which owns each outcome's stable `code` and message, while
 the HTTP status stays in `handlers/assets.rs`), `AssetReadError`, and
-`asset_download_path`. `VaultResolveResponse` is the wikilink-resolution
+`encode_relative_path`. `VaultResolveResponse` is the wikilink-resolution
 projection, relocated here from `handlers/vault_content.rs` in #188 so both
 adapters serialize the same type. `VaultReads` is the owned handle that runs a
 read off the async runtime (`OffloadedReadError` separates the Vault's own
@@ -1335,8 +1392,13 @@ the sixteen primitives, which is what a standalone caller wants:
 `replace_section`, `update_frontmatter`, `rename_note`, `move_note`,
 `move_rename_note`, `archive_note`, `delete_note`, `import_attachment`,
 `move_attachment`, `rename_attachment`, `delete_attachment`, and
-`rename_tag`. `rename_tag` is the one Vault-wide mutation: without an expected
-plan hash it plans off the async runtime and records nothing; with one it
+`rename_tag`. `check_attachment_import` is not a mutation: it answers, without
+writing, locking, or recording, whether `import_attachment` would refuse a
+target before its bytes arrive (the Vault gate, marker and noise refusals, the
+path and extension checks, and an existing file that may not be replaced), so
+an upload transfer link can be refused when minted (#310). `rename_tag` is
+the one Vault-wide mutation: without an expected plan hash it plans off the
+async runtime and records nothing; with one it
 records a single ledger entry for every note it rewrote, so a synced Vault
 commits the rename once. `tag_rename_error` maps its three refusals onto their
 own codes (`invalid_tag_name`, `tag_shape_unsupported`,
@@ -2213,6 +2275,7 @@ vault_runtime`.
 - `src/handlers/downloads.rs`
 - `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
+- `src/handlers/transfer.rs`
 - `src/handlers/vault_collection_reads.rs`
 - `src/handlers/vault_content.rs`
 - `src/handlers/vault_write.rs`
@@ -2226,6 +2289,16 @@ the servable-extension allow-list, the content-type table, and the size bound
 now belong to the read core (`src/vault_read/assets.rs`), which applies
 `VaultReadCore`'s browse-surface gating to them, so both surfaces refuse the
 same paths. What `assets.rs` keeps is this route's own wire shaping.
+`transfer.rs` redeems transfer links (ADR-27) on
+`/api/v1/vaults/{vault_id}/transfers/{*path}`: `GET` downloads through
+`vault_scoped_asset_handler` with the `McpAssetRead` ceiling after spending the
+transport's tool budget, and `POST` uploads through the mutation core's
+`import_attachment` with the upload route's own multipart form, read by the
+shared `vault_write::read_upload_form`. Both re-read the live configuration per
+request: MCP disabled refuses every link (`mcp_disabled`), write mode off every
+upload (`mcp_write_disabled`), and a link that does not verify is `403` with
+`transfer_link_invalid`, `transfer_link_expired`, or `transfer_link_spent`. The
+routes sit outside the bearer and web-token guards, which they leave unchanged.
 `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
 full refreshed document. MCP enablement and its bearer token validate together
@@ -2534,7 +2607,18 @@ projection envelope around `SavedQueryEvaluation`. Its arguments have no
 every request that reaches no answer is a structured tool error rather than a
 success with zero rows. `get_note` reports the Note's `saved_queries` through
 `VaultQualifiedNote` itself, so the adapter adds nothing. Catalogue grows to
-43, purely additive.
+43, purely additive. #310 adds `create_upload_link`, the seventeenth write tool
+(ADR-27): it asks the mutation core's `check_attachment_import` whether the
+target would be refused before any bytes arrive, then mints an upload transfer
+link through `AppState::transfer_links`, answering `UploadLinkResult`. It is in
+`WRITE_OPS`, so write mode gates it and `batch` may carry it. The adapter now
+records the host each tool call arrived on in `McpConfig::request_origin`,
+which transfer links fall back to when `HATCHDOOR_PUBLIC_URL` is unset.
+`McpConfig::public_url` parses that setting (`parse_public_url`, failing
+closed on an invalid pin like the attachment limits) and `link_base` picks
+between the two. `tools::transfer_link_signer` is the one place a tool gets its
+signing key and base, and refuses with `invalid_params` when there is no base.
+Catalogue grows to 44, purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -2628,8 +2712,9 @@ a hash-protected write at frontmatter cost rather than reading every body.
 `get_attachment` is the
 outbound counterpart to `import_attachment`'s inbound flow, addressed by the
 same `relative_path` `list_note_attachments` reports: `encoding: "url"` (the
-default) returns an HTTP `download_url` under the existing Vault-scoped
-`/assets/{*path}` route, and `encoding: "base64"` inlines the bytes instead,
+default) returns a download transfer link (ADR-27, #310) on the Vault-scoped
+`/transfers/{*path}` route, absolute and carrying its own credential, with
+`expires_at`; `encoding: "base64"` inlines the bytes instead,
 bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment`
 enforces on the way in. Resolution goes through
 `VaultReadCore::contained_asset` (#188), so the Vault gate, containment, the
@@ -2637,10 +2722,12 @@ extension allow-list, the content type, and the browse surface are the same
 ones the `/assets/{*path}` route answers on — a demoted or excluded asset is
 refused identically on both surfaces, rather than MCP bypassing the surface
 policy as it did while it reached into `handlers/assets.rs` directly. The
-advertised `download_url` carries no credential of its own, but the route it
-points at accepts this MCP session's own bearer token while MCP is enabled, as
-well as the web bearer token — see the auth boundary's public contract for why
-the read direction is gated differently from the upload direction.
+link's redemption runs through the same asset handler under the same byte
+ceiling and tool budget as an MCP-admitted asset read, so it cannot reach an
+attachment `get_attachment` would refuse. `get_attachment_import_config`
+recommends the transfer link (`create_upload_link`) first, keeps the
+bearer-token multipart route as the `alternative` for clients that hold the
+token, and `import_attachment` as the base64 fallback.
 `update_frontmatter` is a
 write tool over `vault/write`'s shallow top-level YAML merge primitive
 (`update_note_frontmatter`): explicit null deletes a key, unmentioned keys
@@ -2682,7 +2769,7 @@ MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
 request, and attachment authorization never retains a rotated MCP token.
 
-Since #186 every one of the write tools, sixteen since #242, has ADR-19's shape: it
+Since #186 every one of the write tools, seventeen since #310, has ADR-19's shape: it
 validates its own arguments and then calls the Vault-qualified mutation core
 once, mapping the typed outcome or the structured `VaultOperationError` onto a
 tool result or a JSON-RPC failure. Two meanings live only here — a target path

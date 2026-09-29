@@ -44,7 +44,7 @@ Two HTTP routes accept the MCP bearer token as well as the web one, so an agent 
 | Route | Accepts the MCP token | Why that gate |
 | --- | --- | --- |
 | `POST /api/v1/vaults/{vault_id}/attachments` (upload) | while MCP **and** MCP writes are enabled | It writes. Turning write mode off has to revoke it, or the setting would mean nothing on this path. |
-| `GET /api/v1/vaults/{vault_id}/assets/{*path}` (download; where `get_attachment`'s `download_url` points) | while MCP is enabled | It reads. Write mode isn't the relevant gate for a read — but see below, because this one is not simply "the same as the web token". |
+| `GET /api/v1/vaults/{vault_id}/assets/{*path}` (download) | while MCP is enabled | It reads. Write mode isn't the relevant gate for a read — but see below, because this one is not simply "the same as the web token". |
 
 The MCP token is header-only on both. Only the web token may ride in an `access_token` query parameter, because only the browser needs it to.
 
@@ -57,6 +57,22 @@ A request carrying the **web** token is unaffected by both — it's the browser,
 
 > [!note]
 > On a deployment with no web bearer token configured, the download route stays open exactly as it always was. Turning MCP on never starts demanding a credential the browser has never had.
+
+### Transfer links
+
+Those two routes help a client that holds the MCP token. An agent running inside an MCP client usually does not: the client keeps the token and the server's address in its own configuration and never shows them to the model. Handing the agent the token is the wrong fix, because it opens every Vault for writing and would end up in shell commands and transcripts.
+
+So an authenticated MCP call can mint a **transfer link** instead. `get_attachment` returns one for downloading a file, and `create_upload_link` returns one for uploading a file to one named path. A link is a full address that carries its own credential, much narrower than the token that minted it:
+
+- **One file, one direction.** A download link reads one attachment in one Vault. An upload link writes one file to one path, whether or not it may replace an existing file fixed when it was minted, once.
+- **Five minutes.** Every link expires five minutes after it is minted. The time is checked when a transfer starts, so a slow upload that started in time finishes.
+- **Revocable without a list.** Links are signed with a random key that lives only in memory and changes whenever the MCP password changes. A restart or a password change therefore strands every outstanding link. Each request also re-reads the live settings: MCP off refuses every link, and **Let assistants change notes** off refuses every upload link.
+- **No bigger allowance.** A download through a link spends the same rate quota and is held to the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` ceiling as the MCP token on the download route above. An upload keeps `HATCHDOOR_MAX_ATTACHMENT_BYTES`. A link reaches only what `get_attachment` itself would return.
+- **Kept out of logs.** The link's signature is redacted from the server's request log like the web token.
+
+A leaked link exposes one file, or one upload slot, for at most five minutes. A leaked MCP token exposes every Vault until you change it.
+
+Links are built on **Public address** (`HATCHDOOR_PUBLIC_URL`) when it is set, and otherwise on the address the agent's MCP request arrived on. Behind a proxy or an HTTPS front end that arriving address is usually not the one agents can reach, so set the public address there.
 
 > [!note]
 > The web token and the MCP token are unrelated on purpose. An agent's MCP token leaking doesn't hand out Settings or Web UI access, and revoking one never requires rotating the other. Give an agent the MCP token, never the web token — it should never need Settings access to do its job.

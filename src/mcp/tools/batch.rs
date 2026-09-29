@@ -642,6 +642,8 @@ mod tests {
             bearer_token: None,
             allowed_origins: Vec::new(),
             rate_limits_enabled: true,
+            public_url: None,
+            request_origin: None,
         };
         let advertised: Vec<String> = super::super::tools_list(&config)
             .iter()

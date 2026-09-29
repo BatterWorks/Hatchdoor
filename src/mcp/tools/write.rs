@@ -227,6 +227,7 @@ pub(super) const WRITE_OPS: &[&str] = &[
     "archive_note",
     "delete_note",
     "import_attachment",
+    "create_upload_link",
     "move_attachment",
     "rename_attachment",
     "delete_attachment",
@@ -259,6 +260,7 @@ pub(super) async fn dispatch_write_tool(
         "archive_note" => archive_note_tool(state, vault, arguments).await,
         "delete_note" => delete_note_tool(state, vault, arguments).await,
         "import_attachment" => import_attachment_tool(state, vault, arguments, config).await,
+        "create_upload_link" => create_upload_link_tool(state, vault, arguments, config).await,
         "move_attachment" => move_attachment_tool(state, vault, arguments).await,
         "rename_attachment" => rename_attachment_tool(state, vault, arguments).await,
         "delete_attachment" => delete_attachment_tool(state, vault, arguments).await,
@@ -558,6 +560,51 @@ pub(super) async fn import_attachment_tool(
         .await
         .map_err(mutation_error)?;
     Ok(attachment_success(vault.vault_id, outcome))
+}
+
+/// Mint an upload transfer link (ADR-27) for one target: the route an agent
+/// takes when it can make an HTTP request but holds neither the MCP token nor
+/// the server's address. Refuses at once whatever the upload itself would
+/// refuse before the bytes arrive, so an agent never sends a file to a link
+/// that was doomed; the upload checks again when it lands.
+pub(super) async fn create_upload_link_tool(
+    state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    let args: CreateUploadLinkArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid create_upload_link arguments: {error}"))
+    })?;
+    let target_relative_path =
+        non_empty_argument("target_relative_path", args.target_relative_path)?;
+    let overwrite = args.overwrite.unwrap_or(false);
+    vault
+        .mutation(None)
+        .check_attachment_import(&target_relative_path, overwrite)
+        .await
+        .map_err(mutation_error)?;
+
+    let (key, base) = super::transfer_link_signer(&state, config)?;
+    let link = state.transfer_links.mint_upload(
+        &key,
+        base,
+        vault.vault_id,
+        &target_relative_path,
+        overwrite,
+    );
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::UploadLinkResult {
+            vault_id: vault.vault_id.to_string(),
+            target_relative_path,
+            overwrite,
+            upload_url: link.url,
+            method: "POST",
+            expires_at: link.expires_at,
+            max_bytes: config.max_attachment_bytes,
+            usage: "POST multipart/form-data to upload_url with the file in a field named `file`, e.g. curl -F file=@/path/to/file '<upload_url>'. No token or other header is needed. A `target_relative_path` field is optional and must match this link's target. The link works once and expires five minutes after it was minted; ask for a new one if it is refused.",
+        },
+    )))
 }
 
 pub(super) async fn move_attachment_tool(
@@ -860,7 +907,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "import_attachment",
-            "description": "Upload an attachment into one Vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (call get_attachment_import_config for this Vault to see the limit in bytes and the allowed extensions). Prefer the Vault-scoped HTTP upload endpoint (POST /api/v1/vaults/{vault_id}/attachments) when possible. Returns compact metadata for the imported file.",
+            "description": "Upload an attachment into one Vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (call get_attachment_import_config for this Vault to see the limit in bytes and the allowed extensions). Prefer create_upload_link whenever the client can make an HTTP request: the file then never passes through this conversation. Returns compact metadata for the imported file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -870,6 +917,20 @@ pub(super) fn write_tools_list() -> Vec<Value> {
                     "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["content", "target_relative_path"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "create_upload_link",
+            "description": "Get a short-lived upload link for one file, the recommended way to upload an attachment from any client that can make an HTTP request (shell, curl). The link carries its own credential and the server's address, so no token or endpoint knowledge is needed: POST the file to it as multipart/form-data in a field named `file`. It is good for one upload to exactly target_relative_path, works once, and expires five minutes after it is minted, or sooner if the server restarts or MCP write mode is turned off. Refused at once when the target is invalid, has an extension uploads do not allow, or already exists and overwrite is false. The size limit is max_bytes in the answer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png."},
+                    "overwrite": {"type": "boolean", "default": false, "description": "Allow the upload to replace an existing file at the target."}
+                },
+                "required": ["target_relative_path"],
                 "additionalProperties": false
             },
             "annotations": write_tool_annotations(true, false)
@@ -1102,6 +1163,15 @@ struct ImportAttachmentArgs {
     overwrite: Option<bool>,
     #[serde(default)]
     commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateUploadLinkArgs {
+    vault_id: VaultId,
+    target_relative_path: String,
+    #[serde(default)]
+    overwrite: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

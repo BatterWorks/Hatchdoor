@@ -1143,6 +1143,7 @@ pub(crate) mod test_support {
             demo_mode: false,
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
+            transfer_links: Default::default(),
         };
         (state, worker, directory)
     }

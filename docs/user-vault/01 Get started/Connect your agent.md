@@ -35,6 +35,8 @@ Authorization: Bearer <your-mcp-password>
 > [!warning]
 > Do not expose Hatchdoor directly to the public internet just to reach MCP. Keep it on a trusted network or place it behind an authenticated, encrypted access layer.
 
+If an agent reaches Hatchdoor through such a layer, such as a proxy that adds HTTPS, also fill in **Public address** in **Agent access (MCP)** with the address the agent uses, for example `https://notes.example.com`. Agents download and upload files through short-lived links built on that address; left empty, the links use the address Hatchdoor itself sees, which behind a proxy is usually not one the agent can reach.
+
 Do not put the MCP password in a note, a prompt, or a screenshot. MCP is a
 second door into your Vault; it stays disabled unless you deliberately enable
 it, and it always needs this password even for reading.
