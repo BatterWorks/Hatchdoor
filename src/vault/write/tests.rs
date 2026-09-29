@@ -3827,3 +3827,206 @@ fn leftover_sidecars(root: &Path) -> Vec<String> {
         .filter(|name| name.contains(".hatchdoor-tmp-"))
         .collect()
 }
+
+// Issue #299: a note rewritten only because a name it carries changed
+// elsewhere is bookkeeping, not authorship, so it keeps the modification time
+// it had.
+
+/// 1 February 2026, with a nanosecond part a whole-second copy would lose.
+fn february_first() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::new(1_769_904_000, 123_456_789)
+}
+
+fn stamp_modified(path: &Path, modified: std::time::SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(modified)))
+        .expect("stamp modification time");
+}
+
+fn modified_time(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .expect("modification time")
+}
+
+fn february_first_ns() -> i64 {
+    let since_epoch = february_first()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after epoch");
+    i64::try_from(since_epoch.as_nanos()).expect("fits")
+}
+
+#[test]
+fn renaming_a_note_leaves_its_referrers_modification_time_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "See [[Target]]").expect("backlink");
+    stamp_modified(&root.join("Backlink.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let outcome = move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("body"))
+        .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Renamed]]"
+    );
+    assert_eq!(modified_time(&root.join("Backlink.md")), february_first());
+    assert_eq!(
+        crate::cache::parse::file_snapshot(&root.join("Backlink.md"))
+            .expect("snapshot")
+            .mtime_ns,
+        february_first_ns(),
+        "the index must read the preserved time, not the rename"
+    );
+}
+
+#[test]
+fn a_renamed_or_moved_note_keeps_its_own_modification_time() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    stamp_modified(&root.join("Target.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("body")).expect("rename");
+    assert_eq!(modified_time(&root.join("Renamed.md")), february_first());
+
+    let index = build(root);
+    let entry = index.find_by_slug("renamed").expect("renamed");
+    move_or_rename_note(root, &index, entry, "Deep/Moved.md", &content_hash("body")).expect("move");
+    assert_eq!(modified_time(&root.join("Deep/Moved.md")), february_first());
+}
+
+#[test]
+fn moving_archiving_and_deleting_a_note_leave_referrers_modification_times_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[Notes/Target]] and [[Target]]",
+    )
+    .expect("backlink");
+    let backlink = root.join("Backlink.md");
+
+    stamp_modified(&backlink, february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let moved = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Moved/Target.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+    assert_eq!(moved.rewritten_notes, 1);
+    assert_eq!(modified_time(&backlink), february_first(), "after move");
+
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let archived =
+        archive_note(root, &index, entry, "90-archive/", &content_hash("body")).expect("archive");
+    assert_eq!(archived.rewritten_notes, 1);
+    assert_eq!(modified_time(&backlink), february_first(), "after archive");
+
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let deleted = delete_note(root, &index, entry, &content_hash("body")).expect("delete");
+    assert!(deleted.rewritten_notes >= 1);
+    assert_eq!(
+        fs::read_to_string(&backlink).expect("backlink"),
+        "See  and ",
+        "delete removed both links"
+    );
+    assert_eq!(modified_time(&backlink), february_first(), "after delete");
+}
+
+#[test]
+fn moving_an_attachment_leaves_the_referring_notes_modification_time_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/image.png"), "png").expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/image.png)").expect("note");
+    stamp_modified(&root.join("Note.md"), february_first());
+    let index = build(root);
+
+    let outcome =
+        move_attachment(root, &index, "Media/image.png", "Archive/image.png").expect("move");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("note"),
+        "![](Archive/image.png)"
+    );
+    assert_eq!(modified_time(&root.join("Note.md")), february_first());
+}
+
+#[test]
+fn a_rolled_back_rewrite_restores_the_referrers_modification_time() {
+    use super::types::MutationPhase;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "before [[Target]] after").expect("backlink");
+    stamp_modified(&root.join("Backlink.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    super::notes::delete_note_with_failure(root, &index, entry, &content_hash("body"), |phase| {
+        if phase == MutationPhase::Rewrite {
+            Err(WriteError::Io(
+                "injected failure after rewrites".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("the injected failure must abort the delete");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("restored"),
+        "before [[Target]] after"
+    );
+    assert_eq!(modified_time(&root.join("Backlink.md")), february_first());
+}
+
+#[test]
+fn a_note_the_author_edits_still_takes_a_fresh_modification_time() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Home.md"), "old").expect("home");
+    stamp_modified(&root.join("Home.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("home").expect("home");
+
+    update_note(entry, "new", &content_hash("old")).expect("update");
+    assert!(modified_time(&root.join("Home.md")) > february_first());
+
+    stamp_modified(&root.join("Home.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("home").expect("home");
+    edit_note(entry, "new", "newer", &content_hash("new\n"), false).expect("edit");
+    assert!(modified_time(&root.join("Home.md")) > february_first());
+}
+
+#[test]
+fn renaming_a_tag_leaves_the_retagged_notes_modification_time_alone() {
+    let dir = tag_vault(&[("Note.md", "---\ntags: [project]\n---\nBody\n")]);
+    let root = dir.path();
+    stamp_modified(&root.join("Note.md"), february_first());
+
+    apply_tag(root, "project", "projects");
+
+    assert_eq!(read(root, "Note.md"), "---\ntags: [projects]\n---\nBody\n");
+    assert_eq!(modified_time(&root.join("Note.md")), february_first());
+}
