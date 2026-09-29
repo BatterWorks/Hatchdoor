@@ -261,6 +261,28 @@ describe("pure helpers", () => {
     });
     expect(withFiles.files).toEqual(["a.md", "b.md"]);
 
+    const rejected = describeGitFailure({
+      code: "managed_git_push_rejected",
+      message:
+        "managed checkout push was rejected by the remote: pre-receive hook declined",
+      retryable: false,
+    });
+    expect(rejected.label).toBe("push refused");
+    expect(rejected.tier).toBe("error");
+    expect(rejected.sentence).toContain("refused Hatchdoor's push");
+    expect(rejected.files).toBeUndefined();
+
+    const unfinished = describeGitFailure({
+      code: "managed_git_operation_in_progress",
+      message: "unfinished merge",
+      retryable: false,
+      detail: { kind: "affected_paths", paths: ["notes/Home.md"], total: 1 },
+    });
+    expect(unfinished.label).toBe("unfinished merge");
+    expect(unfinished.tier).toBe("error");
+    expect(unfinished.sentence).toContain("part-way through a merge");
+    expect(unfinished.files).toEqual(["notes/Home.md"]);
+
     const unknown = describeGitFailure({
       code: "managed_git_not_remote",
       message: "not a remote vault",
@@ -853,6 +875,47 @@ describe("VaultSettingsDetail — sync console", () => {
     expect(screen.getByText("notes/a.md")).toBeVisible();
     expect(screen.getByText("notes/b.md")).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+
+  it("lists the conflicted files of an unfinished merge the checkout was left in", async () => {
+    mockDetail(
+      baseVault(
+        {
+          type: "managed_git",
+          repository_url: "https://example.test/notes.git",
+          branch: "main",
+          mode: "two_way",
+          poll_interval_secs: 3600,
+        },
+        {
+          git: "unavailable",
+          git_error: {
+            code: "managed_git_operation_in_progress",
+            message:
+              "managed checkout has an unfinished merge with conflicts in: notes/Home.md",
+            retryable: false,
+            detail: {
+              kind: "affected_paths",
+              paths: ["notes/Home.md"],
+              total: 1,
+            },
+          },
+        },
+      ),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(screen.getByText(/part-way through a merge/i)).toBeVisible();
+    expect(screen.getByText("notes/Home.md")).toBeVisible();
+    expect(
+      screen.queryByText(/Something unexpected stopped/i),
+    ).not.toBeInTheDocument();
   });
 
   it("calls the retry endpoint when retrying a failed Vault", async () => {

@@ -1105,12 +1105,22 @@ where
 
 /// Read a Vault's stored HTTPS credentials, mapping an unreachable registry
 /// into the retryable failure a Git turn reports for it.
+///
+/// The client-visible message is fixed: `VaultRegistryError`'s text embeds
+/// the registry file's absolute host path, and this failure becomes the
+/// Vault's published `git_error` (#323). The full error goes to the
+/// operator's log instead.
 fn git_credentials(
     registry: &VaultRegistryStore,
     vault_id: VaultId,
 ) -> Result<Option<crate::vault_registry::HttpsCredentials>, VaultWorkError> {
     registry.https_credentials(vault_id).map_err(|error| {
-        VaultWorkError::new("managed_git_registry_unavailable", error.to_string(), true)
+        tracing::warn!(%vault_id, %error, "Vault registry unavailable for a Git turn");
+        VaultWorkError::new(
+            "managed_git_registry_unavailable",
+            "Hatchdoor could not read this Vault's stored Git settings",
+            true,
+        )
     })
 }
 

@@ -2735,3 +2735,25 @@ async fn a_commit_turn_leaves_the_remote_sync_schedule_where_it_was() {
         "nor does it change the interval"
     );
 }
+
+/// #323: a Git turn that cannot read the registry publishes this failure as
+/// the Vault's `git_error`, which every client sees. The registry error's own
+/// text names the registry file's absolute host path.
+#[test]
+fn an_unreadable_registry_is_reported_without_the_host_path() {
+    let directory = tempdir().expect("temporary directory");
+    let registry_path = directory.path().join("state/vaults.json");
+    std::fs::create_dir_all(&registry_path).expect("a directory where the file should be");
+    let registry = VaultRegistryStore::new(registry_path);
+    let vault_id = VaultId::generate().expect("vault id");
+
+    let error = git_credentials(&registry, vault_id).expect_err("registry cannot be read");
+
+    assert_eq!(error.code(), "managed_git_registry_unavailable");
+    assert!(error.retryable());
+    assert!(
+        !error.message().contains('/'),
+        "client-visible message leaks a host path: {}",
+        error.message()
+    );
+}

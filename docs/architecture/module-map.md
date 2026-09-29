@@ -1918,10 +1918,14 @@ configured Vault subtree. Remote fetch/integrate/push, unpushed accounting,
 and interrupted-merge marker recovery are gone with the instance-wide task
 (#185); every remote graph operation this boundary still performs lives in
 `managed_sync.rs`, which owns its own conflict and containment rules.
-`classify_local_history_error` still reports an encountered `ManualRecovery`
-as the non-retryable
-`existing_git_local_history_manual_recovery_required`, defensively rather
-than because a local-history turn can produce one. This boundary has no wire
+`commit_local` refuses a checkout found mid-merge, mid-rebase, mid-cherry-pick
+or mid-revert, or with a conflicted index, as `ManualRecovery` (#323): seeding
+its commit index from HEAD would otherwise drop the conflict entries and
+commit the conflict markers. `classify_local_history_error` reports that as
+the non-retryable `existing_git_local_history_manual_recovery_required` and
+leaves the operation for the operator to finish. Its client-visible messages
+are fixed per code; the full `GitError`, which names host paths, goes only to
+the operator log. This boundary has no wire
 surface and no instance-wide lifecycle: `GET /api/git-status` was retired in
 #183 along with the Settings console it fed, and the settings handler's
 preflight → drain → replacement protocol went with the task itself in #185.
