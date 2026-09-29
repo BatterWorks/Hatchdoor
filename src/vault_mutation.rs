@@ -28,10 +28,10 @@ use crate::git::WriteRecord;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
     AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagRename, TagRenameError,
-    VaultIndex, WriteError, WriteOutcome, append_note, archive_note, create_note,
-    delete_attachment, delete_note, edit_note, import_attachment_bytes, move_attachment,
-    move_or_rename_note, rename_attachment, rename_tag, replace_section, update_note,
-    update_note_frontmatter,
+    VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
+    check_attachment_import_target, create_note, delete_attachment, delete_note, edit_note,
+    import_attachment_bytes, move_attachment, move_or_rename_note, rename_attachment, rename_tag,
+    replace_section, update_note, update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
 use crate::vault_read::VaultReadCore;
@@ -387,6 +387,22 @@ impl<'a> VaultMutationCore<'a> {
         let _guard = target.acquire_mutation().await?;
         target
             .import_attachment(target_relative_path, bytes, max_bytes, overwrite)
+            .await
+    }
+
+    /// Whether an import to `target_relative_path` would be refused before
+    /// its bytes arrive: the Vault gate, the marker and noise refusals, the
+    /// path and extension checks, and an existing file that may not be
+    /// replaced. Writes nothing and takes no lock, so the answer can be stale
+    /// by the time the import runs, which checks again.
+    pub async fn check_attachment_import(
+        &self,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        overwrite: bool,
+    ) -> Result<(), VaultOperationError> {
+        self.open(vault_id)?
+            .check_attachment_import(target_relative_path, overwrite)
             .await
     }
 
@@ -977,6 +993,23 @@ impl VaultMutation {
             import_attachment_bytes(&vault_path, &target_path, &bytes, max_bytes, overwrite)
         })
         .await
+    }
+
+    /// [`VaultMutationCore::check_attachment_import`] on a Vault already
+    /// gated. Answers the same refusals `import_attachment` would, with the
+    /// same codes, and records nothing in the write ledger.
+    pub async fn check_attachment_import(
+        &self,
+        target_relative_path: &str,
+        overwrite: bool,
+    ) -> Result<(), VaultOperationError> {
+        self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(target_relative_path)?;
+        let vault_path = self.control.vault_path().to_path_buf();
+        let target_path = target_relative_path.to_string();
+        offload(move || check_attachment_import_target(&vault_path, &target_path, overwrite))
+            .await
+            .map_err(|error| write_operation_error(self.vault_id, error))
     }
 
     /// Move one attachment, rewriting every reference to it.

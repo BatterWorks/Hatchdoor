@@ -4,6 +4,7 @@ pub mod diagnostics;
 mod downloads;
 mod settings;
 mod spa;
+mod transfer;
 pub(crate) mod vault_collection_reads;
 pub(crate) mod vault_content;
 mod vault_write;
@@ -19,6 +20,7 @@ pub use settings::{
     patch_settings_handler, reveal_mcp_token_handler, reveal_web_token_handler,
 };
 pub use spa::spa_index_handler;
+pub use transfer::{download_transfer_handler, upload_transfer_handler};
 pub use vault_collection_reads::{
     vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,
     vault_scope_stats_handler, vault_scope_tree_handler,

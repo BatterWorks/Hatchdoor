@@ -347,6 +347,26 @@ fn is_collection_management_tool(name: &str) -> bool {
     )
 }
 
+/// What a tool needs to mint a transfer link (ADR-27): the key this call's
+/// admitting token signs under, and the absolute origin the link is built on.
+/// A link is always absolute, so with no public address configured and no
+/// arriving host to fall back on, minting is refused rather than answered with
+/// a link the agent could not resolve.
+pub(super) fn transfer_link_signer<'a>(
+    state: &AppState,
+    config: &'a McpConfig,
+) -> Result<(crate::transfer_link::SigningKey, &'a str), JsonRpcFailure> {
+    let token = config.bearer_token.as_deref().ok_or_else(|| {
+        JsonRpcFailure::internal("MCP is running without a bearer token".to_string())
+    })?;
+    let base = config.link_base().ok_or_else(|| {
+        JsonRpcFailure::invalid_params(
+            "Hatchdoor cannot tell which address this request reached it on, so it cannot build a transfer link; an operator can set HATCHDOOR_PUBLIC_URL. For a download, call get_attachment again with encoding \"base64\".",
+        )
+    })?;
+    Ok((state.transfer_links.key(&state.runtime_config, token), base))
+}
+
 pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
     let value = value.trim().to_string();
     if value.is_empty() {
@@ -418,6 +438,7 @@ mod tests {
             demo_mode: false,
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::terms_required(),
+            transfer_links: Default::default(),
         };
         (state, tmp)
     }

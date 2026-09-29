@@ -36,6 +36,17 @@ A sixth, less common one: **`403 Forbidden`, "Forbidden MCP origin"** — an `Or
 > [!note]
 > MCP sessions are held in memory only, so restarting Hatchdoor ends every one of them. A client holding a session finds out on its next call — as the `Session not found` or the `422` above — and has to re-initialize. No Hatchdoor setting keeps sessions across a restart, so a client that keeps retrying the same failing call needs restarting or reconnecting; that lever is yours, not Hatchdoor's. Clients that don't use a session at all are unaffected.
 
+## An agent can't download or upload a file
+
+Agents move files through short-lived links that `get_attachment` and `create_upload_link` hand out. A link answers `403` with a `code` that says what went wrong:
+
+- **`transfer_link_expired`**: the link is more than five minutes old. Ask for a new one.
+- **`transfer_link_invalid`**: the link was used for a different file, or Hatchdoor restarted or the MCP password changed since it was issued. Ask for a new one.
+- **`transfer_link_spent`**: an upload link was already used. Each works once.
+- **`mcp_disabled`** or **`mcp_write_disabled`**: MCP, or **Let assistants change notes**, is off.
+
+If the agent cannot reach the link's address at all, and Hatchdoor sits behind a proxy or HTTPS front end, set **Public address** in **Settings** → **Agent access (MCP)** to the address agents use. A download over `HATCHDOOR_MCP_MAX_BASE64_BYTES` answers `413`; raise that limit in **Settings** → **Uploads**.
+
 ## Model download is stuck or failed
 
 Check `get_model_setup_status` (MCP) or `GET /api/startup-status` — a failed download reports `"failed"` with a message describing exactly what broke, e.g. a Hugging Face fetch error for a specific model file. Fix: `POST /api/model/retry` (or ask the agent to call `get_model_setup_status` again and retry) once whatever blocked the download — usually network access to Hugging Face — is resolved.

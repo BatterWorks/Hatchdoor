@@ -64,12 +64,7 @@ pub fn import_attachment_bytes(
             "attachment exceeds max size: {size} > {max_bytes}",
         )));
     }
-    if target_path.exists() && !overwrite {
-        return Err(WriteError::Conflict(format!(
-            "Attachment already exists: {}",
-            normalize_attachment_relative_path(target_relative_path)?
-        )));
-    }
+    ensure_import_target_free(&target_path, target_relative_path, overwrite)?;
 
     // Resolve markers before mutating the filesystem. A malformed marker must
     // fail this request atomically rather than leaving a persisted attachment
@@ -87,6 +82,35 @@ pub fn import_attachment_bytes(
         cleanup_warning: None,
         affected_paths: vec![target_path],
     })
+}
+
+/// The refusals [`import_attachment_bytes`] can make before it has the bytes:
+/// an invalid or escaping target, a disallowed extension, and an existing
+/// file that may not be replaced. Writes nothing, so an upload link can be
+/// refused when it is minted rather than after the agent has sent the file.
+/// The import itself checks again, since the Vault may change in between.
+pub fn check_attachment_import_target(
+    vault_root: &Path,
+    target_relative_path: &str,
+    overwrite: bool,
+) -> Result<(), WriteError> {
+    let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
+    ensure_uploadable_attachment_path(&target_path)?;
+    ensure_import_target_free(&target_path, target_relative_path, overwrite)
+}
+
+fn ensure_import_target_free(
+    target_path: &Path,
+    target_relative_path: &str,
+    overwrite: bool,
+) -> Result<(), WriteError> {
+    if target_path.exists() && !overwrite {
+        return Err(WriteError::Conflict(format!(
+            "Attachment already exists: {}",
+            normalize_attachment_relative_path(target_relative_path)?
+        )));
+    }
+    Ok(())
 }
 
 pub fn move_attachment(

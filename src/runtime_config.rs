@@ -36,6 +36,7 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
             "HATCHDOOR_MCP_ALLOWED_ORIGINS",
             "http://127.0.0.1,http://localhost",
         ),
+        ("HATCHDOOR_PUBLIC_URL", ""),
         ("HATCHDOOR_GIT_SYNC_ENABLED", "false"),
         ("HATCHDOOR_GIT_HTTPS_TOKEN", ""),
         ("HATCHDOOR_GIT_REMOTE", "origin"),
@@ -325,6 +326,9 @@ pub struct RuntimeConfig {
     defaults: Arc<BTreeMap<String, String>>,
     snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     stored_values: Arc<Mutex<BTreeMap<String, String>>>,
+    /// How many published snapshots have changed each key's resolved value
+    /// since startup. Written only while `stored_values` is held.
+    revisions: Arc<Mutex<BTreeMap<String, u64>>>,
     store: Arc<SettingsStore>,
     #[cfg(test)]
     _test_directory: Option<Arc<tempfile::TempDir>>,
@@ -353,6 +357,7 @@ impl RuntimeConfig {
             defaults: Arc::new(defaults),
             snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
             stored_values: Arc::new(Mutex::new(stored_values)),
+            revisions: Arc::new(Mutex::new(BTreeMap::new())),
             store: Arc::new(store),
             #[cfg(test)]
             _test_directory: None,
@@ -363,6 +368,36 @@ impl RuntimeConfig {
     /// operation. Holding this `Arc` never observes a later save.
     pub fn snapshot(&self) -> Arc<ConfigSnapshot> {
         self.snapshot.load_full()
+    }
+
+    /// How many times `key`'s resolved value has changed since startup. Zero
+    /// until the first change. A consumer that derives something from a value
+    /// (a signing key from the MCP token, for example) compares revisions to
+    /// learn that the value changed, even when it later changed back.
+    pub fn value_revision(&self, key: &str) -> u64 {
+        self.revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Make `next` the live snapshot, counting every key whose resolved value
+    /// it changes. Callers hold the `stored_values` lock, which serializes
+    /// publication.
+    fn publish(&self, next: Arc<ConfigSnapshot>) {
+        let previous = self.snapshot.load_full();
+        let mut revisions = self
+            .revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (key, setting) in next.settings() {
+            if previous.setting(key).map(|old| &old.value) != Some(&setting.value) {
+                *revisions.entry(key.clone()).or_default() += 1;
+            }
+        }
+        self.snapshot.store(next);
     }
 
     /// The durable settings file's path, so a caller (e.g. local git
@@ -409,7 +444,7 @@ impl RuntimeConfig {
 
         self.store.persist(&next_values)?;
         let next_snapshot = Arc::new(resolve(&self.environment, &next_values, &self.defaults));
-        self.snapshot.store(next_snapshot.clone());
+        self.publish(next_snapshot.clone());
         *stored_values = next_values;
         Ok(next_snapshot)
     }
@@ -469,7 +504,7 @@ impl RuntimeConfig {
             })?;
             return Err(error);
         }
-        self.snapshot.store(next_snapshot.clone());
+        self.publish(next_snapshot.clone());
         *stored_values = next_values;
         Ok((value, next_snapshot))
     }
@@ -882,5 +917,49 @@ mod tests {
             ),
             std::path::PathBuf::from("/state/custom-settings.json")
         );
+    }
+
+    #[test]
+    fn value_revision_counts_changes_to_the_resolved_value_even_back_to_an_old_one() {
+        let config = RuntimeConfig::for_tests();
+        let key = "HATCHDOOR_ARCHIVE_PREFIX";
+        assert_eq!(config.value_revision(key), 0);
+
+        let save = |value: &str| {
+            config
+                .save([(key.to_string(), value.to_string())])
+                .expect("save");
+        };
+        save("90-archive/");
+        assert_eq!(
+            config.value_revision(key),
+            0,
+            "an unchanged value is no change"
+        );
+        save("other/");
+        assert_eq!(config.value_revision(key), 1);
+        save("90-archive/");
+        assert_eq!(
+            config.value_revision(key),
+            2,
+            "changing back is still a change"
+        );
+        assert_eq!(config.value_revision("HATCHDOOR_EXCLUDE"), 0);
+    }
+
+    #[test]
+    fn value_revision_ignores_a_stored_change_beneath_an_environment_pin() {
+        let dir = tempdir().expect("temp dir");
+        let key = "HATCHDOOR_ARCHIVE_PREFIX";
+        let config = RuntimeConfig::load(
+            dir.path().join("settings.json"),
+            Environment::from_values([(key.to_string(), "pinned/".to_string())]),
+            defaults(),
+        )
+        .expect("runtime config");
+        config
+            .save([(key.to_string(), "stored/".to_string())])
+            .expect("save");
+        assert_eq!(config.value_revision(key), 0);
     }
 }

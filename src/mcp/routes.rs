@@ -345,6 +345,7 @@ mod tests {
             demo_mode: false,
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
+            transfer_links: Default::default(),
         }
     }
 
@@ -2663,7 +2664,7 @@ mod tests {
 
     /// `get_attachment` names the attachment back the way the caller asked for
     /// it, not by the canonicalised path resolution produces internally, so the
-    /// `relative_path` it echoes and the `download_url` it builds agree — and
+    /// `relative_path` it echoes and the transfer link it builds agree — and
     /// that URL escapes each segment, since a Vault names attachments with
     /// spaces and non-ASCII freely.
     #[tokio::test]
@@ -2685,7 +2686,7 @@ mod tests {
             result["content"]["download_url"]
                 .as_str()
                 .expect("download_url")
-                .ends_with("/assets/Media/a%20shot.png"),
+                .contains("/transfers/Media/a%20shot.png?"),
             "{result:#}"
         );
 
@@ -2761,13 +2762,18 @@ mod tests {
         assert_eq!(payload["enabled"], true);
 
         let methods = payload["methods"].as_array().expect("methods array");
-        assert_eq!(methods.len(), 2);
-        assert_eq!(methods[0]["id"], "http_multipart");
+        assert_eq!(methods.len(), 3);
+        // The transfer link is the recommended route (ADR-27).
+        assert_eq!(methods[0]["id"], "transfer_link");
+        assert_eq!(methods[0]["role"], "default");
+        assert_eq!(methods[0]["tool"], "create_upload_link");
+        assert_eq!(methods[1]["id"], "http_multipart");
+        assert_eq!(methods[1]["role"], "alternative");
         assert_eq!(
-            methods[0]["path"],
+            methods[1]["path"],
             format!("/api/v1/vaults/{vault_id}/attachments")
         );
-        assert_eq!(methods[1]["id"], "mcp_base64");
+        assert_eq!(methods[2]["id"], "mcp_base64");
         assert!(
             payload["allowed_extensions"]
                 .as_array()
@@ -2775,7 +2781,7 @@ mod tests {
                 .contains(&json!("png"))
         );
         assert!(
-            methods[0]["auth"]
+            methods[1]["auth"]
                 .as_str()
                 .expect("auth guidance")
                 .contains("MCP token is accepted only while MCP and MCP write mode are both currently enabled")
@@ -2790,8 +2796,11 @@ mod tests {
         assert!(body["result"]["structuredContent"]["attachments"].is_array());
     }
 
+    /// The default answer is a transfer link (ADR-27): absolute, built on the
+    /// host the MCP request arrived on, and carrying its own credential. The
+    /// link's redemption is covered end to end in `server.rs`.
     #[tokio::test]
-    async fn get_attachment_returns_a_working_download_url_by_default() {
+    async fn get_attachment_returns_a_transfer_link_by_default() {
         // get_attachment needs no write permission and no note context: the
         // attachment only has to exist on disk at relative_path.
         let (state, _tmp) = test_state();
@@ -2820,15 +2829,82 @@ mod tests {
         assert_eq!(content["size_bytes"], 9);
         assert_eq!(content["content_type"], "image/png");
         assert_eq!(content["content"]["encoding"], "url");
-        assert_eq!(
-            content["content"]["download_url"],
-            format!("/api/v1/vaults/{vault_id}/assets/Sources/diagram.png")
+        let url = content["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(
+            url.starts_with(&format!(
+                "http://localhost/api/v1/vaults/{vault_id}/transfers/Sources/diagram.png?expires="
+            )),
+            "{url}"
         );
+        assert!(url.contains("&signature="), "{url}");
+        assert!(content["content"]["expires_at"].as_u64().is_some());
         assert!(
             content["content"]["auth"]
                 .as_str()
                 .unwrap()
-                .contains("web bearer token")
+                .starts_with("None needed")
+        );
+    }
+
+    /// Behind a proxy the arriving host is not the one agents reach, so the
+    /// public-address setting wins whenever it is set.
+    #[tokio::test]
+    async fn get_attachment_builds_its_link_on_the_public_address_when_set() {
+        let (state, _tmp) = test_state();
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_PUBLIC_URL".to_string(),
+                "https://notes.example.com/".to_string(),
+            )])
+            .expect("public address");
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("clip.png"), b"png").expect("attachment");
+
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "clip.png"}),
+        )
+        .await;
+        let url = body["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(
+            url.starts_with("https://notes.example.com/api/v1/vaults/"),
+            "{url}"
+        );
+    }
+
+    /// A link is always absolute: with no public address and no host to fall
+    /// back on, the call is refused rather than answered with a link the agent
+    /// could not resolve.
+    #[tokio::test]
+    async fn a_link_is_refused_rather_than_minted_without_an_address() {
+        let (state, _tmp) = test_state();
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("clip.png"), b"png").expect("attachment");
+        let config = McpConfig {
+            enabled: true,
+            bearer_token: Some(TEST_TOKEN.to_string()),
+            ..McpConfig::disabled()
+        };
+        let failure = crate::mcp::tools::handle_tools_call(
+            state.clone(),
+            Some(json!({
+                "name": "get_attachment",
+                "arguments": {"vault_id": vault_id_of(&state), "relative_path": "clip.png"}
+            })),
+            &config,
+        )
+        .await
+        .expect_err("no address to build a link on");
+        assert!(
+            failure.message.contains("HATCHDOOR_PUBLIC_URL"),
+            "{}",
+            failure.message
         );
     }
 
@@ -2937,7 +3013,13 @@ mod tests {
             let result = crate::mcp::tools::handle_tools_call(
                 state,
                 Some(json!({"name": name, "arguments": arguments})),
-                &McpConfig::disabled(),
+                // The token and origin a live MCP call would carry, which a
+                // `get_attachment` download link is minted from.
+                &McpConfig {
+                    bearer_token: Some(TEST_TOKEN.to_string()),
+                    request_origin: Some("http://localhost".to_string()),
+                    ..McpConfig::disabled()
+                },
             )
             .await
             .expect("tool result");

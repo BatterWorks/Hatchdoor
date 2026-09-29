@@ -64,6 +64,9 @@ pub struct AppState {
     /// bind an immutable snapshot once per operation.
     pub runtime_config: crate::runtime_config::RuntimeConfig,
     pub startup: StartupTracker,
+    /// Signs and checks transfer links (ADR-27). Its key lives only here, in
+    /// memory, so a restart strands every outstanding link.
+    pub transfer_links: Arc<crate::transfer_link::TransferLinks>,
 }
 
 impl AppState {

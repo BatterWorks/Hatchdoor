@@ -22,7 +22,7 @@ mod assets;
 mod query;
 mod saved_query;
 
-pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
+pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, encode_relative_path};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
 pub use saved_query::{
     SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryEvaluation,

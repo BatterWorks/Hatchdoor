@@ -71,6 +71,14 @@ const settings = [
     kind: "text",
   },
   {
+    key: "HATCHDOOR_PUBLIC_URL",
+    value: "",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "text",
+  },
+  {
     key: "HATCHDOOR_MAX_ATTACHMENT_BYTES",
     value: "10485760",
     source: "default",
@@ -246,6 +254,19 @@ describe("SettingsPage", () => {
     const requested = mockedApiFetch.mock.calls.map((call) => String(call[0]));
     expect(requested).not.toContain("/api/index-status");
     expect(requested).not.toContain("/api/git-status");
+  });
+
+  it("offers the public address under Agent access", async () => {
+    mockPage();
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+
+    expect(await screen.findByText("Public address")).toBeVisible();
+    expect(
+      screen.getByPlaceholderText("https://notes.example.com"),
+    ).toBeVisible();
   });
 
   it("surfaces a held draft under This server and withdraws once it is discarded", async () => {

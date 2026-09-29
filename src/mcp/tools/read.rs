@@ -28,8 +28,8 @@ use crate::vault_management::{
 use crate::vault_read::{
     AssetPathError, AssetReadError, NoteQuery, NoteQueryCondition, OffloadedReadError,
     ResolvedAsset, TreeScope, VaultReadError, VaultReads, VaultResolveResponse, VaultScope,
-    asset_download_path, clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap,
-    clamp_tree_max_depth, note_not_found,
+    clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap, clamp_tree_max_depth,
+    note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -618,11 +618,20 @@ pub(super) async fn get_attachment_tool(
     };
 
     let content = match fetched.bytes {
-        None => results::AttachmentContent::Url {
-            download_url: asset_download_path(&vault_id.to_string(), &relative_path),
-            path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
-            auth: "Send this MCP session's own bearer token as an Authorization: Bearer header; the route accepts it for as long as MCP stays enabled. This deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) also works, as a header or an access_token query parameter. When neither token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
-        },
+        None => {
+            // A transfer link (ADR-27): the agent holds neither this session's
+            // token nor the server's address, so the link carries both.
+            let (key, base) = super::transfer_link_signer(&state, config)?;
+            let link = state
+                .transfer_links
+                .mint_download(&key, base, vault_id, &relative_path);
+            results::AttachmentContent::Url {
+                download_url: link.url,
+                expires_at: link.expires_at,
+                path_note: "Absolute URL; fetch it as it is, e.g. curl -o <file> '<download_url>'.",
+                auth: "None needed: the link carries its own credential for this one file. It works any number of times until expires_at, five minutes after it was issued, and stops sooner if the server restarts, its MCP token changes, or MCP is disabled; call get_attachment again for a fresh one. The download is limited to HATCHDOOR_MCP_MAX_BASE64_BYTES and counts against this session's tool quota. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
+            }
+        }
         Some(bytes) => {
             use base64::Engine as _;
             results::AttachmentContent::Base64 {
@@ -674,13 +683,22 @@ pub(super) async fn attachment_import_config_tool(
 
     let methods: Vec<results::AttachmentImportMethod> = if enabled {
         vec![
-            results::AttachmentImportMethod::HttpMultipart {
+            results::AttachmentImportMethod::TransferLink {
+                tool: "create_upload_link",
                 role: "default",
+                method: "POST",
+                max_bytes: config.max_attachment_bytes,
+                recommended_for: "the default for any file size; use whenever the client can make an out-of-band HTTP request. Needs no token and no server address.",
+                requires: "ability to make an HTTP request outside MCP (e.g. shell/curl)",
+                usage: "Call create_upload_link with this vault_id and a Vault-relative `target_relative_path`, then POST multipart/form-data with the file in a field named `file` to the upload_url it returns. The link works once and expires after five minutes.",
+            },
+            results::AttachmentImportMethod::HttpMultipart {
+                role: "alternative",
                 method: "POST",
                 path: format!("/api/v1/vaults/{vault_id}/attachments"),
                 path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
                 max_bytes: config.max_attachment_bytes,
-                recommended_for: "the default for any file size; use unless the client cannot make an out-of-band HTTP request",
+                recommended_for: "clients that already hold a bearer token and the server's address; an agent inside an MCP client usually holds neither, so use create_upload_link instead",
                 auth: "Send `Authorization: Bearer <token>` with either the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) or this session's MCP token. The MCP token is accepted only while MCP and MCP write mode are both currently enabled, checked per request: if an operator disables either one, this credential loses upload access immediately even though the same token still reads. No token is required when neither is configured.",
                 requires: "ability to make an HTTP request outside MCP (e.g. shell/curl)",
                 usage: "POST multipart/form-data with fields `target_relative_path` and `file`.",
@@ -698,7 +716,7 @@ pub(super) async fn attachment_import_config_tool(
     };
 
     let usage = if enabled {
-        "Two upload methods are available for this Vault. Prefer the HTTP endpoint by default; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible."
+        "Upload methods are available for this Vault. Prefer create_upload_link and send the file to the link it returns; use the bearer-token HTTP endpoint only if this client holds the token itself; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible."
     } else if !config.write_enabled {
         "Attachment upload is disabled for this instance. An operator must set HATCHDOOR_MCP_WRITE_ENABLED; no other Vault will accept uploads either until they do."
     } else {

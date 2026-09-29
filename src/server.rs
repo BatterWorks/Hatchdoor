@@ -28,10 +28,11 @@ use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
-    disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
-    generate_mcp_token_handler, get_settings_handler, health_handler, list_vaults_handler,
-    patch_settings_handler, refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler,
-    reveal_web_token_handler, spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
+    disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
+    enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
+    list_vaults_handler, patch_settings_handler, refresh_vault_handler, retry_vault_handler,
+    reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler,
+    start_with_no_vaults_handler, sync_vault_handler, upload_transfer_handler,
     vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
     vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
     vault_scoped_archive_note_handler, vault_scoped_asset_handler,
@@ -549,6 +550,24 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         ))
     };
 
+    // Transfer links (ADR-27): an agent that holds neither the MCP token nor
+    // the server's address downloads or uploads one file through a link an
+    // MCP call minted. Deliberately outside both guards above: the link's own
+    // signature is the credential, and the bearer and web-token admission
+    // those guards perform must not change. The handlers re-read the live
+    // configuration per request and share the transport's limiter, so a
+    // download spends the same budget an MCP-admitted asset read does.
+    let transfers = Router::new()
+        .route(
+            "/api/v1/vaults/{vault_id}/transfers/{*path}",
+            get(download_transfer_handler).merge(
+                post(upload_transfer_handler)
+                    .layer(DefaultBodyLimit::max(attachment_body_limit))
+                    .layer(demo_guard.clone()),
+            ),
+        )
+        .layer(Extension(mcp_transport.limiter()));
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
@@ -558,6 +577,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(vaults_v1)
         .merge(vault_assets)
         .merge(vault_attachment)
+        .merge(transfers)
         .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
@@ -582,20 +602,13 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .layer(
             TraceLayer::new_for_http()
                 // Custom span so the URI logged never contains the raw web token
-                // that `<img>`/download URLs may carry as ?access_token=...
+                // that `<img>`/download URLs may carry as ?access_token=..., nor
+                // a transfer link's ?signature=...
                 .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
-                    let target = match request.uri().query() {
-                        Some(query) => format!(
-                            "{}?{}",
-                            request.uri().path(),
-                            crate::auth::redact_query_token(query)
-                        ),
-                        None => request.uri().path().to_string(),
-                    };
                     tracing::info_span!(
                         "request",
                         method = %request.method(),
-                        uri = %target,
+                        uri = %traced_uri(request.uri()),
                         version = ?request.version(),
                     )
                 })
@@ -606,6 +619,16 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             reject_startup_recovery_mutation,
         ))
         .with_state(state)
+}
+
+/// The request URI as the trace span records it: the path, and the query with
+/// every credential redacted (`auth::redact_query_token`), so neither the web
+/// token's `access_token` nor a transfer link's `signature` reaches a log.
+fn traced_uri(uri: &axum::http::Uri) -> String {
+    match uri.query() {
+        Some(query) => format!("{}?{}", uri.path(), crate::auth::redact_query_token(query)),
+        None => uri.path().to_string(),
+    }
 }
 
 /// Environment-cleanup recovery keeps liveness and read-only explanation
@@ -1160,6 +1183,7 @@ pub async fn run_server() {
         demo_mode: config.demo_mode,
         runtime_config,
         startup,
+        transfer_links: Default::default(),
     };
 
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
@@ -1861,6 +1885,7 @@ mod tests {
             demo_mode,
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
+            transfer_links: Default::default(),
         };
 
         (
@@ -1943,6 +1968,7 @@ mod tests {
             demo_mode: false,
             runtime_config,
             startup: StartupTracker::ready(),
+            transfer_links: Default::default(),
         };
 
         (build_router(state.clone(), web_bearer_token), tmp, state)
@@ -2750,6 +2776,652 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "disabling MCP must revoke the credential on the very next request"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Transfer links (ADR-27)
+    // -----------------------------------------------------------------------
+
+    /// One MCP tool call over the real router, answered as its JSON-RPC
+    /// message. The `host` header is what a link built from the arriving
+    /// request uses as its address.
+    async fn mcp_tool_call(
+        app: &Router,
+        token: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let session = initialize_mcp_session(app, token).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", session)
+                    .header("accept", "application/json, text/event-stream")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                            "params": {"name": name, "arguments": arguments}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+        let json = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .find(|data| !data.is_empty())
+            .unwrap_or(text.trim());
+        serde_json::from_str(json).unwrap_or_else(|error| panic!("{error}: {text}"))
+    }
+
+    /// The path and query of a link built on `http://localhost`, which is what
+    /// `oneshot` takes.
+    fn link_target(url: &str) -> String {
+        url.strip_prefix("http://localhost")
+            .unwrap_or(url)
+            .to_string()
+    }
+
+    fn fetch_link(app: &Router, target: String) -> impl std::future::Future<Output = Response> {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .uri(link_target(&target))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+        }
+    }
+
+    /// A multipart upload with no credential, the shape an agent sends to an
+    /// upload link: `file`, plus `target_relative_path` when given.
+    fn upload_link_request(target: String, named: Option<&str>, bytes: &[u8]) -> Request<Body> {
+        let boundary = "hatchdoor-link-boundary";
+        let mut body = Vec::new();
+        if let Some(named) = named {
+            body.extend(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"target_relative_path\"\r\n\r\n{named}\r\n"
+                )
+                .into_bytes(),
+            );
+        }
+        body.extend(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .into_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend(format!("\r\n--{boundary}--\r\n").into_bytes());
+        Request::builder()
+            .uri(link_target(&target))
+            .method("POST")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .expect("request")
+    }
+
+    async fn transfer_vault(
+        app: &Router,
+        tmp: &TempDir,
+        name: &str,
+        revision: u64,
+    ) -> (String, std::path::PathBuf) {
+        let vault_root = tmp.path().join(name);
+        let vault_id = create_vault_with_files_using_token(
+            app,
+            name,
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            revision,
+            Some("web-secret"),
+        )
+        .await;
+        (vault_id, vault_root)
+    }
+
+    fn parsed_vault_id(raw: &str) -> crate::vault_registry::VaultId {
+        raw.parse().expect("vault id")
+    }
+
+    #[tokio::test]
+    async fn a_download_link_from_get_attachment_alone_fetches_the_file_byte_for_byte() {
+        // The #310 failure: a 1.5 MB manual in the Vault that an agent holding
+        // no token and no server address could not get out.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Manuals", 0).await;
+        let manual: Vec<u8> = (0..1_514_342_u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        std::fs::create_dir_all(vault_root.join("personal/home")).expect("dir");
+        std::fs::write(
+            vault_root.join("personal/home/AEG User Manual (FR).pdf"),
+            &manual,
+        )
+        .expect("manual");
+
+        let answer = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({
+                "vault_id": vault_id,
+                "relative_path": "personal/home/AEG User Manual (FR).pdf"
+            }),
+        )
+        .await;
+        let content = &answer["result"]["structuredContent"]["content"];
+        let url = content["download_url"].as_str().expect("download_url");
+        assert!(url.starts_with("http://localhost/api/v1/vaults/"), "{url}");
+
+        let response = fetch_link(&app, link_target(url)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.len(), manual.len());
+        assert!(bytes.as_ref() == manual.as_slice(), "byte for byte");
+    }
+
+    #[tokio::test]
+    async fn a_download_link_is_refused_for_any_other_path_or_vault_and_once_revoked() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "First", 0).await;
+        let (other_id, other_root) = transfer_vault(&app, &tmp, "Second", 1).await;
+        std::fs::write(vault_root.join("a.png"), b"a").expect("a");
+        std::fs::write(vault_root.join("b.png"), b"b").expect("b");
+        std::fs::write(other_root.join("a.png"), b"other").expect("other a");
+
+        let link = state.transfer_links.mint_download(
+            &state
+                .transfer_links
+                .key(&state.runtime_config, "mcp-secret"),
+            "http://localhost",
+            parsed_vault_id(&vault_id),
+            "a.png",
+        );
+        let query = link.url.split_once('?').expect("query").1.to_string();
+        assert_eq!(
+            fetch_link(&app, link.url.clone()).await.status(),
+            StatusCode::OK
+        );
+
+        for target in [
+            format!("/api/v1/vaults/{vault_id}/transfers/b.png?{query}"),
+            format!("/api/v1/vaults/{other_id}/transfers/a.png?{query}"),
+            format!("/api/v1/vaults/{vault_id}/transfers/a.png"),
+        ] {
+            let refused = fetch_link(&app, target.clone()).await;
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{target}");
+            assert_eq!(json_body(refused).await["code"], "transfer_link_invalid");
+        }
+
+        // MCP disabled refuses every link, and enabling it again restores it.
+        let save = |key: &str, value: &str| {
+            state
+                .runtime_config
+                .save([(key.to_string(), value.to_string())])
+                .expect("save")
+        };
+        save("HATCHDOOR_MCP_ENABLED", "false");
+        let disabled = fetch_link(&app, link.url.clone()).await;
+        assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(disabled).await["code"], "mcp_disabled");
+        save("HATCHDOOR_MCP_ENABLED", "true");
+        assert_eq!(
+            fetch_link(&app, link.url.clone()).await.status(),
+            StatusCode::OK
+        );
+
+        // A token change strands it for good, even changed back.
+        save("HATCHDOOR_MCP_BEARER_TOKEN", "rotated-secret");
+        save("HATCHDOOR_MCP_BEARER_TOKEN", "mcp-secret");
+        let stranded = fetch_link(&app, link.url.clone()).await;
+        assert_eq!(stranded.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(stranded).await["code"], "transfer_link_invalid");
+    }
+
+    #[tokio::test]
+    async fn a_download_link_keeps_the_mcp_byte_ceiling_and_spends_the_tool_quota() {
+        // A cheaper transport, not a larger allowance: the same ceiling and
+        // the same budget as an MCP-admitted read of the asset route.
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("small ceiling");
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Ceiling", 0).await;
+        std::fs::write(vault_root.join("small.png"), b"12345678").expect("small");
+        std::fs::write(vault_root.join("big.png"), b"0123456789abcdef").expect("big");
+        let mint = |path: &str| {
+            state
+                .transfer_links
+                .mint_download(
+                    &state
+                        .transfer_links
+                        .key(&state.runtime_config, "mcp-secret"),
+                    "http://localhost",
+                    parsed_vault_id(&vault_id),
+                    path,
+                )
+                .url
+        };
+
+        let refused = fetch_link(&app, mint("big.png")).await;
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(json_body(refused).await["code"], "asset_too_large");
+
+        // The refusal above spent one call of the budget, like any tool call.
+        let small = mint("small.png");
+        for _ in 1..crate::mcp::limits::TOOL_CALLS_PER_MINUTE {
+            assert_eq!(
+                fetch_link(&app, small.clone()).await.status(),
+                StatusCode::OK
+            );
+        }
+        let throttled = fetch_link(&app, small.clone()).await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(throttled.headers().contains_key("retry-after"));
+
+        // The bearer route shares that one budget rather than having its own.
+        let bearer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/assets/small.png"))
+                    .header("authorization", "Bearer mcp-secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(bearer.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn a_download_link_reaches_nothing_get_attachment_would_refuse() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Contained", 0).await;
+        std::fs::write(tmp.path().join("outside.png"), b"secret").expect("outside");
+        std::fs::create_dir_all(vault_root.join(".obsidian")).expect("config dir");
+        std::fs::write(vault_root.join(".obsidian/shot.png"), b"noise").expect("noise");
+        std::fs::write(vault_root.join("data.csv"), b"a,b").expect("unservable");
+
+        // The link answers exactly as get_attachment does: refused with the
+        // same code for escaping the Vault, a missing file, a note, and a type
+        // Hatchdoor does not serve, and served alike where get_attachment
+        // serves.
+        for path in [
+            "../outside.png",
+            "missing.png",
+            ".obsidian/shot.png",
+            "Home.md",
+            "data.csv",
+        ] {
+            let answer = mcp_tool_call(
+                &app,
+                "mcp-secret",
+                "get_attachment",
+                serde_json::json!({"vault_id": vault_id, "relative_path": path}),
+            )
+            .await;
+            let refused_by_tool = answer["result"]["isError"] == true;
+
+            let link = state.transfer_links.mint_download(
+                &state
+                    .transfer_links
+                    .key(&state.runtime_config, "mcp-secret"),
+                "http://localhost",
+                parsed_vault_id(&vault_id),
+                path,
+            );
+            let fetched = fetch_link(&app, link.url).await;
+            assert_eq!(fetched.status().is_success(), !refused_by_tool, "{path}");
+            if refused_by_tool {
+                assert_eq!(
+                    json_body(fetched).await["code"],
+                    answer["result"]["structuredContent"]["code"],
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_upload_link_from_create_upload_link_alone_writes_its_target_once() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Uploads", 0).await;
+        // At the size limit exactly (10 MiB by default).
+        let payload = vec![7_u8; crate::mcp::config::DEFAULT_MAX_ATTACHMENT_BYTES as usize];
+
+        let answer = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "Inbox/scan.pdf"}),
+        )
+        .await;
+        let result = &answer["result"]["structuredContent"];
+        assert_eq!(result["method"], "POST");
+        assert_eq!(
+            result["max_bytes"],
+            crate::mcp::config::DEFAULT_MAX_ATTACHMENT_BYTES
+        );
+        let url = link_target(result["upload_url"].as_str().expect("upload_url"));
+
+        let uploaded = app
+            .clone()
+            .oneshot(upload_link_request(url.clone(), None, &payload))
+            .await
+            .expect("response");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("Inbox/scan.pdf")).expect("written"),
+            payload
+        );
+
+        let again = app
+            .clone()
+            .oneshot(upload_link_request(url, None, b"second"))
+            .await
+            .expect("response");
+        assert_eq!(again.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(again).await["code"], "transfer_link_spent");
+    }
+
+    #[tokio::test]
+    async fn an_upload_link_is_refused_for_another_target_and_while_writes_are_off() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Targets", 0).await;
+        let mint = |target: &str| {
+            state
+                .transfer_links
+                .mint_upload(
+                    &state
+                        .transfer_links
+                        .key(&state.runtime_config, "mcp-secret"),
+                    "http://localhost",
+                    parsed_vault_id(&vault_id),
+                    target,
+                    false,
+                )
+                .url
+        };
+
+        // Another target, either by the path or by the form's own field.
+        let link = mint("in/a.png");
+        let (_, query) = link.split_once('?').expect("query");
+        let elsewhere = app
+            .clone()
+            .oneshot(upload_link_request(
+                format!("/api/v1/vaults/{vault_id}/transfers/in/b.png?{query}"),
+                None,
+                b"x",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(elsewhere.status(), StatusCode::FORBIDDEN);
+        let named = app
+            .clone()
+            .oneshot(upload_link_request(
+                mint("in/c.png"),
+                Some("in/d.png"),
+                b"x",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(named.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(named).await["code"], "transfer_link_invalid");
+        assert!(!vault_root.join("in/b.png").exists());
+        assert!(!vault_root.join("in/d.png").exists());
+
+        // Write mode off refuses the upload and the minting.
+        let pending = mint("in/e.png");
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                "false".to_string(),
+            )])
+            .expect("writes off");
+        let off = app
+            .clone()
+            .oneshot(upload_link_request(pending, None, b"x"))
+            .await
+            .expect("response");
+        assert_eq!(off.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(off).await["code"], "mcp_write_disabled");
+        let minting = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "in/f.png"}),
+        )
+        .await;
+        assert!(
+            minting["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("HATCHDOOR_MCP_WRITE_ENABLED")),
+            "{minting:#}"
+        );
+        assert!(!vault_root.join("in/e.png").exists());
+
+        // MCP off refuses every link, uploads included.
+        let pending = mint("in/g.png");
+        state
+            .runtime_config
+            .save([
+                (
+                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                    "true".to_string(),
+                ),
+                ("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string()),
+            ])
+            .expect("MCP off");
+        let disabled = app
+            .clone()
+            .oneshot(upload_link_request(pending, None, b"x"))
+            .await
+            .expect("response");
+        assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(disabled).await["code"], "mcp_disabled");
+        assert!(!vault_root.join("in/g.png").exists());
+    }
+
+    #[tokio::test]
+    async fn an_existing_target_is_refused_when_minted_and_again_when_redeemed() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Existing", 0).await;
+        std::fs::write(vault_root.join("taken.png"), b"old").expect("taken");
+        let create = |target: &'static str, overwrite: bool| {
+            let app = app.clone();
+            let vault_id = vault_id.clone();
+            async move {
+                mcp_tool_call(
+                    &app,
+                    "mcp-secret",
+                    "create_upload_link",
+                    serde_json::json!({
+                        "vault_id": vault_id,
+                        "target_relative_path": target,
+                        "overwrite": overwrite
+                    }),
+                )
+                .await
+            }
+        };
+
+        let refused = create("taken.png", false).await;
+        assert_eq!(refused["result"]["isError"], true, "{refused:#}");
+        assert_eq!(
+            refused["result"]["structuredContent"]["code"],
+            "write_conflict"
+        );
+
+        let bad_extension = create("script.exe", false).await;
+        assert_eq!(
+            bad_extension["result"]["isError"], true,
+            "{bad_extension:#}"
+        );
+
+        // Free when minted, taken by the time the file arrives.
+        let answer = create("race.png", false).await;
+        let url = link_target(
+            answer["result"]["structuredContent"]["upload_url"]
+                .as_str()
+                .expect("upload_url"),
+        );
+        std::fs::write(vault_root.join("race.png"), b"first").expect("race");
+        let conflict = app
+            .clone()
+            .oneshot(upload_link_request(url, None, b"second"))
+            .await
+            .expect("response");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read(vault_root.join("race.png")).expect("kept"),
+            b"first"
+        );
+
+        // Replacing, when the link allows it.
+        let answer = create("taken.png", true).await;
+        let url = link_target(
+            answer["result"]["structuredContent"]["upload_url"]
+                .as_str()
+                .expect("upload_url"),
+        );
+        let replaced = app
+            .clone()
+            .oneshot(upload_link_request(url, Some("taken.png"), b"new"))
+            .await
+            .expect("response");
+        assert_eq!(replaced.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("taken.png")).expect("new"),
+            b"new"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_link_keeps_the_attachment_size_limit() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MAX_ATTACHMENT_BYTES".to_string(),
+                "4".to_string(),
+            )])
+            .expect("small limit");
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Limit", 0).await;
+        let link = state.transfer_links.mint_upload(
+            &state
+                .transfer_links
+                .key(&state.runtime_config, "mcp-secret"),
+            "http://localhost",
+            parsed_vault_id(&vault_id),
+            "big.png",
+            false,
+        );
+        let refused = app
+            .clone()
+            .oneshot(upload_link_request(link.url, None, b"12345"))
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(!vault_root.join("big.png").exists());
+    }
+
+    /// The request span's `uri` field is the only place a request URL is
+    /// logged, so a link's credential stays out of the logs if it stays out of
+    /// that field. Checked on the span's own formatter rather than through a
+    /// scoped subscriber, whose callsite cache makes a captured-log test flaky
+    /// when tests run in parallel.
+    #[test]
+    fn a_link_signature_never_reaches_the_request_trace() {
+        let state = RuntimeConfig::for_tests();
+        let links = crate::transfer_link::TransferLinks::new();
+        let vault_id: crate::vault_registry::VaultId = "00000000-0000-4000-8000-000000000001"
+            .parse()
+            .expect("vault id");
+        for url in [
+            links
+                .mint_download(&links.key(&state, "t"), "http://h", vault_id, "a.png")
+                .url,
+            links
+                .mint_upload(
+                    &links.key(&state, "t"),
+                    "http://h",
+                    vault_id,
+                    "b.png",
+                    false,
+                )
+                .url,
+        ] {
+            let signature = url.split("signature=").nth(1).expect("signature");
+            let traced = traced_uri(&url.parse().expect("uri"));
+            assert!(traced.contains("signature=REDACTED"), "{traced}");
+            assert!(!traced.contains(signature), "{traced}");
+            assert!(
+                traced.contains("expires="),
+                "other parameters survive: {traced}"
+            );
+        }
     }
 
     #[tokio::test]
