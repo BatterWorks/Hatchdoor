@@ -298,15 +298,20 @@ describe("collectLegacyHeldDrafts migrates completely (#330)", () => {
     const events: string[] = [];
     const originalKey = Storage.prototype.key;
     const originalSetItem = Storage.prototype.setItem;
-    const key = vi
-      .spyOn(Storage.prototype, "key")
-      .mockImplementation(function (this: Storage, index: number) {
-        events.push("key");
-        return originalKey.call(this, index);
-      });
+    const key = vi.spyOn(Storage.prototype, "key").mockImplementation(function (
+      this: Storage,
+      index: number,
+    ) {
+      events.push("key");
+      return originalKey.call(this, index);
+    });
     const setItem = vi
       .spyOn(Storage.prototype, "setItem")
-      .mockImplementation(function (this: Storage, name: string, value: string) {
+      .mockImplementation(function (
+        this: Storage,
+        name: string,
+        value: string,
+      ) {
         events.push("setItem");
         originalSetItem.call(this, name, value);
       });

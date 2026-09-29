@@ -1,5 +1,31 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach, vi } from "vitest";
+
+// Test files share one jsdom and one module cache per worker (`isolate: false`
+// in vite.config.ts), and Vitest runs this file again before each of them.
+// Put back what a fresh environment would give the next file.
+//
+// Source modules an earlier file imported stay evaluated otherwise, so their
+// state carries over and this file's `vi.mock` never reaches them. Packages
+// in node_modules are loaded by Node, not Vitest, and are not reset: the
+// imports above are the same instances the test file gets.
+vi.resetModules();
+
+// Stylesheets an earlier file imported. `css: true` injects them into the
+// head, and they can hide elements from role queries here. Modules this
+// file imports inject their own again.
+for (const style of document.head.querySelectorAll("style[data-vite-dev-id]")) {
+  style.remove();
+}
+
+for (const element of [document.documentElement, document.body]) {
+  for (const { name } of [...element.attributes]) {
+    element.removeAttribute(name);
+  }
+}
+document.body.replaceChildren();
+localStorage.clear();
 
 type EventSourceListener = (event: MessageEvent<string>) => void;
 
@@ -64,6 +90,13 @@ Object.defineProperty(window, "__hatchdoorEventSources", {
   writable: true,
   value: MockEventSource.instances,
 });
+
+// Testing Library only unmounts automatically when `afterEach` is a global,
+// and this config leaves Vitest's globals off. Without it a test sees the
+// DOM of whichever test ran before it, which `--sequence.shuffle` exposes.
+// This `cleanup` sees the test file's renders only because the package is
+// not inlined (see `server.deps.inline`), so both share one instance.
+afterEach(cleanup);
 
 afterEach(() => {
   MockEventSource.instances.length = 0;

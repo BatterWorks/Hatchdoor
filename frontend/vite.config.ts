@@ -63,6 +63,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
+    // One jsdom per worker instead of one per file: about 20 s instead of 80 s
+    // on 4 cores. The setup file resets what files would otherwise leak.
+    isolate: false,
     css: true,
     testTimeout: 15_000,
     coverage: {
