@@ -313,6 +313,8 @@ Any read or write refused this way says so twice: `isError` is true on the resul
 
 `batch` runs an ordered list of the tools above in a single call. There is one such tool, not a batching variant per tool: each item names an `op` and carries that tool's own `arguments` exactly as a standalone call would, `vault_id` included, so one batch can span several Vaults.
 
+`operations` is the only thing `batch` itself takes. Unlike every other tool it has no top-level `vault_id` and no batch-level `commit_summary`; each goes inside the `arguments` of the items whose tool takes it. A call that sends a field `batch` does not know is refused before any item runs, and the refusal names every unknown field at once, at both levels, together with the shape it expects.
+
 ```json
 {
   "operations": [
