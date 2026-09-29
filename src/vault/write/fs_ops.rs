@@ -1,8 +1,9 @@
 use std::ffi::CString;
-use std::fs;
+use std::fs::{self, FileTimes};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::cache::parse::content_hash;
 use crate::rename_flags::{RenameFlag, rename_flagged_at};
@@ -20,6 +21,9 @@ enum Compensation {
         path: PathBuf,
         original: String,
         applied_hash: String,
+        /// The note's modification time before the rewrite, so restoring
+        /// its content does not also stamp it with the time of the rollback.
+        original_modified: Option<SystemTime>,
     },
 }
 
@@ -98,6 +102,13 @@ impl MutationJournal {
     /// the same loop were being written. A note that moved on since the plan
     /// read it is refused with [`WriteError::Conflict`] and nothing is
     /// written to it (#321).
+    ///
+    /// A rewrite here is bookkeeping, not authorship: the note changes only
+    /// because a name it carries changed elsewhere, a note or attachment it
+    /// links to or a tag renamed across the Vault. So the committed file
+    /// keeps the modification time the note had before, and the Vault's
+    /// writing history survives a rename that touches hundreds of notes
+    /// (#299).
     fn apply_rewrites_with_before_commit(
         &mut self,
         rewrites: Vec<TextRewrite>,
@@ -111,6 +122,7 @@ impl MutationJournal {
                     rewrite.path.display()
                 ))
             })?;
+            let original_modified = captured_modified_time(&rewrite.path);
             if content_hash(&original) != rewrite.original_hash {
                 // Vault-relative, because this message reaches an MCP client
                 // verbatim and the absolute host path is nobody's business
@@ -121,8 +133,12 @@ impl MutationJournal {
                 )));
             }
             before_commit(&rewrite.path);
-            let result =
-                atomic_write_if_unchanged(&rewrite.path, &rewrite.content, &rewrite.original_hash);
+            let result = atomic_write_if_unchanged_keeping_modified(
+                &rewrite.path,
+                &rewrite.content,
+                &rewrite.original_hash,
+                original_modified,
+            );
             let committed_despite_error = result.is_err()
                 && fs::read_to_string(&rewrite.path)
                     .is_ok_and(|current| current == rewrite.content);
@@ -132,6 +148,7 @@ impl MutationJournal {
                     path: rewrite.path,
                     original,
                     applied_hash: content_hash(&rewrite.content),
+                    original_modified,
                 });
             }
             result?;
@@ -181,8 +198,14 @@ impl MutationJournal {
                     path,
                     original,
                     applied_hash,
+                    original_modified,
                 } => {
-                    let result = atomic_write_if_unchanged(&path, &original, &applied_hash);
+                    let result = atomic_write_if_unchanged_keeping_modified(
+                        &path,
+                        &original,
+                        &applied_hash,
+                        original_modified,
+                    );
                     ("restore rewritten note", vec![path], result)
                 }
             };
@@ -295,7 +318,7 @@ pub(super) fn atomic_write_if_unchanged(
 }
 
 pub(super) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
-    atomic_write_inner(path, bytes, None, || {}, || {})
+    atomic_write_inner(path, bytes, None, None, || {}, || {})
 }
 
 fn atomic_write_bytes_if_unchanged(
@@ -303,7 +326,58 @@ fn atomic_write_bytes_if_unchanged(
     bytes: &[u8],
     expected_content_hash: &str,
 ) -> Result<(), WriteError> {
-    atomic_write_inner(path, bytes, Some(expected_content_hash), || {}, || {})
+    atomic_write_inner(path, bytes, Some(expected_content_hash), None, || {}, || {})
+}
+
+/// A conditional write that leaves the note carrying `modified` rather than
+/// the time of the write. `None` means the original time could not be read,
+/// and the note takes a fresh one as any other write would.
+fn atomic_write_if_unchanged_keeping_modified(
+    path: &Path,
+    content: &str,
+    expected_content_hash: &str,
+    modified: Option<SystemTime>,
+) -> Result<(), WriteError> {
+    atomic_write_inner(
+        path,
+        content.as_bytes(),
+        Some(expected_content_hash),
+        modified,
+        || {},
+        || {},
+    )
+}
+
+/// Read the modification time a bookkeeping rewrite should keep. A failure
+/// only costs the note its old timestamp, so it is logged, not raised.
+fn captured_modified_time(path: &Path) -> Option<SystemTime> {
+    match fs::symlink_metadata(path).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => Some(modified),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "could not read a note's modification time; the rewrite will refresh it"
+            );
+            None
+        }
+    }
+}
+
+/// Stamp the prepared file with the time the note had before. This runs on
+/// the temporary file ahead of the commit, so the note is never visible
+/// under its real name carrying the wrong time. The content is what the
+/// caller asked for; a timestamp the filesystem refuses is logged and the
+/// write goes ahead, since a fresh time is exactly what every write did
+/// before #299.
+fn keep_modified_time(file: &fs::File, path: &Path, modified: SystemTime) {
+    if let Err(error) = file.set_times(FileTimes::new().set_modified(modified)) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "could not preserve a note's modification time; it now carries the time of this write"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +391,7 @@ fn atomic_write_if_unchanged_with_before_exchange(
         path,
         content.as_bytes(),
         Some(expected_content_hash),
+        None,
         before_exchange,
         || {},
     )
@@ -336,6 +411,7 @@ fn atomic_write_if_unchanged_with_after_exchange(
         path,
         content.as_bytes(),
         Some(expected_content_hash),
+        None,
         || {},
         after_exchange,
     )
@@ -345,6 +421,7 @@ fn atomic_write_inner(
     path: &Path,
     bytes: &[u8],
     expected_content_hash: Option<&str>,
+    preserved_modified: Option<SystemTime>,
     before_commit: impl FnOnce(),
     after_exchange: impl FnOnce(),
 ) -> Result<(), WriteError> {
@@ -355,7 +432,14 @@ fn atomic_write_inner(
     // Without the fsync, a crash just after the rename can leave the note file's
     // name pointing at data the OS never flushed (an empty or truncated file).
     file.write_all(bytes)
-        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            // Stamped after the last byte is written, since any later write
+            // would refresh it, and before the fsync makes it durable.
+            if let Some(modified) = preserved_modified {
+                keep_modified_time(&file, path, modified);
+            }
+            file.sync_all()
+        })
         .map_err(|error| {
             let _ = unlink_at(&parent, &tmp_name);
             WriteError::Io(format!(
@@ -1310,6 +1394,7 @@ mod tests {
             &note,
             b"safe\n",
             None,
+            None,
             || {
                 fs::rename(&notes, &original_parent).expect("swap away opened parent");
                 symlink(&external, &notes).expect("replace path with external symlink");
@@ -1709,5 +1794,45 @@ mod tests {
         assert_eq!(fs::read_to_string(note_source).unwrap(), "note");
         assert_eq!(fs::read_to_string(backlink).unwrap(), "manual edit");
         assert!(!note_destination.exists());
+    }
+
+    /// Issue #299: a timestamp is cosmetic next to the content, so neither
+    /// reading nor applying one may fail the write it rides on.
+    #[test]
+    fn a_timestamp_that_cannot_be_read_or_applied_does_not_fail_the_write() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Note.md");
+        fs::write(&note, "original\n").expect("note");
+
+        assert_eq!(captured_modified_time(&dir.path().join("Gone.md")), None);
+        atomic_write_if_unchanged_keeping_modified(
+            &note,
+            "rewritten\n",
+            &content_hash("original\n"),
+            None,
+        )
+        .expect("a note whose time could not be read is still rewritten");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "rewritten\n");
+
+        // An O_PATH handle refuses timestamp changes, standing in for a
+        // filesystem that does the same.
+        let refusing = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(&note)
+            .expect("path-only handle");
+        assert!(
+            refusing
+                .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+                .is_err(),
+            "the stand-in must actually refuse"
+        );
+        keep_modified_time(&refusing, &note, SystemTime::UNIX_EPOCH);
+        assert_ne!(
+            fs::metadata(&note).unwrap().modified().unwrap(),
+            SystemTime::UNIX_EPOCH
+        );
     }
 }
