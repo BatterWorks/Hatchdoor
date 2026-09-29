@@ -165,14 +165,74 @@ struct BatchOperation {
     arguments: Value,
 }
 
+/// Appended to every refusal of a malformed batch payload, so the caller learns
+/// the shape it should have sent rather than only the next field serde expected.
+const BATCH_SHAPE_HINT: &str = "batch takes only `operations`, an array of `{op, arguments}` \
+     items. Each tool's own arguments, vault_id and commit_summary included, go inside an \
+     item's `arguments`.";
+
+/// Parses the `batch` arguments, naming every unknown field in one refusal.
+///
+/// `deny_unknown_fields` stops at the first stray key, and without
+/// `preserve_order` serde walks keys alphabetically, so a caller sending a
+/// top-level `vault_id` and a batch-level `commit_summary` used to learn about
+/// them one round trip at a time (#297). The keys at both levels are checked
+/// here first; serde then reports anything else, such as a missing `op` or a
+/// wrong type, with the same shape appended.
+fn parse_batch_args(arguments: Value) -> Result<BatchArgs, JsonRpcFailure> {
+    let mut unknown: Vec<String> = Vec::new();
+    if let Some(object) = arguments.as_object() {
+        unknown.extend(unknown_keys(object, &["operations"], ""));
+        if let Some(operations) = object.get("operations").and_then(Value::as_array) {
+            for (index, item) in operations.iter().enumerate() {
+                // A non-object item has no keys to name; serde refuses it below.
+                if let Some(item) = item.as_object() {
+                    let prefix = format!("operations[{index}].");
+                    unknown.extend(unknown_keys(item, &["op", "arguments"], &prefix));
+                }
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        let noun = if unknown.len() == 1 {
+            "field"
+        } else {
+            "fields"
+        };
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "Invalid batch arguments: unknown {noun} {}. {BATCH_SHAPE_HINT}",
+            unknown.join(", ")
+        )));
+    }
+    serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!(
+            "Invalid batch arguments: {error}. {BATCH_SHAPE_HINT}"
+        ))
+    })
+}
+
+/// The keys of `object` outside `known`, sorted and quoted with `prefix` so
+/// the refusal reads the same whatever order the caller sent them in.
+fn unknown_keys(
+    object: &serde_json::Map<String, Value>,
+    known: &[&str],
+    prefix: &str,
+) -> Vec<String> {
+    let mut keys: Vec<String> = object
+        .keys()
+        .filter(|key| !known.contains(&key.as_str()))
+        .map(|key| format!("`{prefix}{key}`"))
+        .collect();
+    keys.sort();
+    keys
+}
+
 pub(super) async fn batch_tool(
     state: AppState,
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: BatchArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid batch arguments: {error}"))
-    })?;
+    let args = parse_batch_args(arguments)?;
     if args.operations.is_empty() {
         return Err(JsonRpcFailure::invalid_params(
             "batch operations cannot be empty",
@@ -489,7 +549,7 @@ fn failure_to_error_value(failure: JsonRpcFailure) -> Value {
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag is not allowed inside a batch; call it on its own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag is not allowed inside a batch; call it on its own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -507,7 +567,7 @@ pub(super) fn batch_tool_schema() -> Value {
                             },
                             "arguments": {
                                 "type": "object",
-                                "description": "That tool's own arguments exactly as it is called standalone, including vault_id."
+                                "description": "That tool's own arguments exactly as it is called standalone. This is the only place vault_id and commit_summary go; batch itself takes neither."
                             }
                         },
                         "required": ["op", "arguments"],
@@ -692,6 +752,104 @@ mod tests {
 
         let plain_text = item_error_value(&crate::mcp::protocol::tool_error("no payload".into()));
         assert_eq!(plain_text, json!({"message": "no payload"}));
+    }
+
+    #[test]
+    fn unknown_fields_are_collected_across_both_levels_in_one_message() {
+        let failure = parse_batch_args(json!({
+            "vault_id": "v",
+            "commit_summary": "s",
+            "operations": [
+                {"op": "get_note", "arguments": {}},
+                {"op": "update_note", "arguments": {}, "slug": "a", "commit_summary": "c"},
+                "not an object"
+            ]
+        }))
+        .expect_err("unknown fields are refused");
+
+        assert_eq!(failure.code, JsonRpcFailure::invalid_params("").code);
+        assert_eq!(
+            failure.message,
+            "Invalid batch arguments: unknown fields `commit_summary`, `vault_id`, \
+             `operations[1].commit_summary`, `operations[1].slug`. batch takes only \
+             `operations`, an array of `{op, arguments}` items. Each tool's own arguments, \
+             vault_id and commit_summary included, go inside an item's `arguments`."
+        );
+    }
+
+    #[test]
+    fn a_single_unknown_field_is_named_in_the_singular() {
+        let failure = parse_batch_args(json!({"vault_id": "v", "operations": []}))
+            .expect_err("unknown field is refused");
+        assert!(
+            failure
+                .message
+                .starts_with("Invalid batch arguments: unknown field `vault_id`. batch takes only"),
+            "{}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn a_malformed_payload_without_unknown_fields_still_states_the_shape() {
+        let failure = parse_batch_args(json!({"operations": [{"op": "get_note"}]}))
+            .expect_err("a missing field is refused");
+        assert!(failure.message.contains("missing field `arguments`"));
+        assert!(
+            failure
+                .message
+                .contains("batch takes only `operations`, an array of `{op, arguments}` items"),
+            "{}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn a_well_formed_payload_parses() {
+        let args = parse_batch_args(json!({
+            "operations": [{"op": "get_note", "arguments": {"vault_id": "v", "slug": "home"}}]
+        }))
+        .expect("valid batch arguments");
+        assert_eq!(args.operations.len(), 1);
+        assert_eq!(args.operations[0].op, "get_note");
+    }
+
+    #[test]
+    fn batch_tool_description_states_where_vault_id_and_commit_summary_belong() {
+        let schema = batch_tool_schema();
+        let description = schema["description"].as_str().expect("description");
+        assert!(
+            description.contains(
+                "Unlike every other tool, batch takes no top-level vault_id and no batch-level \
+                 commit_summary: each goes inside the arguments of the operations whose tool \
+                 takes it."
+            ),
+            "{description}"
+        );
+        let arguments = schema["inputSchema"]["properties"]["operations"]["items"]["properties"]
+            ["arguments"]["description"]
+            .as_str()
+            .expect("arguments description");
+        assert!(
+            arguments.contains("the only place vault_id and commit_summary go"),
+            "{arguments}"
+        );
+    }
+
+    #[test]
+    fn batch_tool_schema_keeps_operations_as_its_only_property() {
+        let schema = batch_tool_schema();
+        let input = &schema["inputSchema"];
+        assert_eq!(input["required"], json!(["operations"]));
+        assert_eq!(input["additionalProperties"], false);
+        assert_eq!(
+            input["properties"]
+                .as_object()
+                .expect("properties")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["operations"]
+        );
     }
 
     #[test]

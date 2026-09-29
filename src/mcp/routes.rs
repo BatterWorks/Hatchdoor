@@ -4196,6 +4196,80 @@ mod tests {
         );
     }
 
+    /// The three attempts from #297, which each used to surface one wrong field
+    /// per round trip, and one call wrong at both levels. Each is refused once,
+    /// naming every unknown field and the accepted shape, before any item runs.
+    #[tokio::test]
+    async fn batch_names_every_unknown_field_in_one_refusal() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let create =
+            json!({"vault_id": vault_id, "relative_path": "Batch/Shape.md", "content": "x"});
+
+        let cases = [
+            (
+                json!({
+                    "vault_id": vault_id,
+                    "commit_summary": "two writes",
+                    "operations": [{"op": "create_note", "relative_path": "Batch/Shape.md", "content": "x"}]
+                }),
+                vec![
+                    "`commit_summary`",
+                    "`vault_id`",
+                    "`operations[0].relative_path`",
+                    "`operations[0].content`",
+                ],
+            ),
+            (
+                json!({
+                    "vault_id": vault_id,
+                    "operations": [{"op": "create_note", "arguments": create, "commit_summary": "one"}]
+                }),
+                vec!["`vault_id`", "`operations[0].commit_summary`"],
+            ),
+            (
+                json!({
+                    "vault_id": vault_id,
+                    "operations": [{"op": "create_note", "arguments": create}]
+                }),
+                vec!["`vault_id`"],
+            ),
+            (
+                json!({
+                    "commit_summary": "both levels",
+                    "operations": [
+                        {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}},
+                        {"op": "create_note", "arguments": create, "vault_id": vault_id, "slug": "shape"}
+                    ]
+                }),
+                vec![
+                    "`commit_summary`",
+                    "`operations[1].slug`",
+                    "`operations[1].vault_id`",
+                ],
+            ),
+        ];
+
+        for (arguments, unknown) in cases {
+            let body = call_tool(&state, "batch", arguments).await;
+            assert_eq!(body["error"]["code"], -32602, "{body:#}");
+            let message = body["error"]["message"].as_str().expect("message");
+            for field in &unknown {
+                assert!(message.contains(field), "{field} missing from: {message}");
+            }
+            assert!(
+                message.contains("batch takes only `operations`, an array of `{op, arguments}`"),
+                "the accepted shape is missing from: {message}"
+            );
+            assert!(
+                !registered_vault_path(&state)
+                    .join("Batch/Shape.md")
+                    .exists(),
+                "a refused batch must not run any item"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn batch_deletes_a_note_and_an_attachment_created_earlier_in_the_same_call() {
         let (state, _tmp) = write_state();
