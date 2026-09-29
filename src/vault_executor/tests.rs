@@ -3111,3 +3111,51 @@ async fn a_panicking_index_turn_is_published_and_its_vault_can_still_be_disabled
     .expect("disabling the Vault whose turn panicked does not hang");
     assert!(executor.vaults.runtime(panicked).is_none());
 }
+
+#[tokio::test]
+async fn a_turn_that_panics_holding_its_vaults_status_lock_does_not_stop_the_dispatch_loop() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, _first, _second, _) = two_vault_executor(directory.path()).await;
+
+    let outcome = worker
+        .run_next(|request| {
+            let vaults = executor.vaults.clone();
+            async move {
+                vaults
+                    .runtime(request.vault_id())
+                    .expect("active Vault")
+                    .while_holding_status_lock(|| {
+                        panic!("injected panic while holding the Vault's status lock")
+                    })
+            }
+        })
+        .await
+        .expect("the panicking turn still completes");
+    // The dispatch loop calls this right after the turn; with the status lock
+    // poisoned it used to panic out of the loop and end every Vault's work.
+    executor.publish_outcome(&outcome);
+    let panicked = outcome.request.vault_id();
+    let snapshot = executor
+        .vaults
+        .runtime(panicked)
+        .expect("panicked Vault")
+        .snapshot();
+    assert_eq!(snapshot.search, VaultSearchStatus::Unavailable);
+    assert_eq!(
+        snapshot
+            .search_error
+            .expect("the panic is on the Vault")
+            .code,
+        crate::vault_work::TURN_PANICKED
+    );
+
+    // The loop goes on: the other Vault indexes and the collection settles.
+    let next = worker
+        .run_next(|request| executor.run(request))
+        .await
+        .expect("the other Vault's turn");
+    assert_ne!(next.request.vault_id(), panicked);
+    next.result.as_ref().expect("the other Vault indexes");
+    executor.publish_outcome(&next);
+    assert!(executor.startup.collection_indexes_ready());
+}

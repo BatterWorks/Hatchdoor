@@ -383,7 +383,7 @@ through `request_if_idle` after a backoff that starts at
 `INDEX_RETRY_BASE_DELAY` and doubles, at most `INDEX_RETRY_LIMIT` times per
 run of consecutive failures; a success resets the count. A turn that
 panicked (`TURN_PANICKED`) gets its Vault's failed search status published
-here, since the turn never reached its own publication. Per ADR-13/ADR-18 this is a plain module with a
+here, since the turn never reached its own publication. `publish_outcome` logs the outcome first and contains a panic in its own work, because it runs on the shared dispatch loop outside the turn's panic boundary; the Vault control block's status lock tolerates poisoning so a turn that panicked while holding it cannot make every later read or publication of that Vault panic. Per ADR-13/ADR-18 this is a plain module with a
 small public surface — no trait, no framework, no second execution lane.
 
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one

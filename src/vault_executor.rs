@@ -255,31 +255,13 @@ impl VaultWorkExecutor {
     /// what the *collection* concludes from a turn having finished. One
     /// Vault's failure is never the instance's: it stays on that Vault's own
     /// status, where every collection read already reports it (#326).
+    ///
+    /// It runs on the dispatch loop every Vault shares, so it contains its
+    /// own panics instead of ending that loop.
     pub(crate) fn publish_outcome(&self, outcome: &VaultWorkOutcome) {
         let vault_id = outcome.request.vault_id();
-        if outcome.request.kind() == VaultWorkKind::Index {
-            match &outcome.result {
-                Ok(()) => self.index_retries.clear(vault_id),
-                Err(error) if error.code() == TURN_PANICKED => {
-                    // The turn never reached its own failure publication, so
-                    // it would otherwise read `Indexing` forever.
-                    if let Some(control_block) = self.vaults.runtime(vault_id) {
-                        publish_index_failure(&control_block, &self.cache, error, true);
-                    }
-                }
-                // Deferred until the embedder is installed, which re-requests
-                // every active Vault itself.
-                Err(error) if error.code() == "embedder_not_ready" => {}
-                Err(error) if error.retryable() => self.schedule_index_retry(vault_id),
-                Err(_) => {}
-            }
-            if !self.startup.collection_indexes_ready() && collection_indexes_settled(&self.vaults)
-            {
-                self.startup.set_ready();
-                self.model_setup_started.store(false, Ordering::Release);
-                info!("Vault collection indexing complete");
-            }
-        }
+        // Logged before anything touches the Vault's state, so a failure
+        // below cannot swallow the line that explains it.
         if let Err(error) = &outcome.result {
             // Repair remains expected until its dedicated packet;
             // Index and Git failures are actionable per-Vault status.
@@ -306,6 +288,48 @@ impl VaultWorkExecutor {
                     "Vault background work turn failed"
                 );
             }
+        }
+        // This runs on the dispatch loop every Vault shares, outside the
+        // turn's own panic boundary. A panic here, e.g. while publishing the
+        // status of a Vault whose turn just panicked, would end that loop
+        // and stop every Vault's background work, so it is contained too.
+        let consequences = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.apply_collection_consequences(outcome);
+        }));
+        if let Err(panic) = consequences {
+            error!(
+                vault_id = %vault_id,
+                kind = ?outcome.request.kind(),
+                message = crate::vault_work::panic_message(panic.as_ref()),
+                "publishing a Vault background work outcome panicked; background work continues"
+            );
+        }
+    }
+
+    fn apply_collection_consequences(&self, outcome: &VaultWorkOutcome) {
+        let vault_id = outcome.request.vault_id();
+        if outcome.request.kind() != VaultWorkKind::Index {
+            return;
+        }
+        match &outcome.result {
+            Ok(()) => self.index_retries.clear(vault_id),
+            Err(error) if error.code() == TURN_PANICKED => {
+                // The turn never reached its own failure publication, so
+                // it would otherwise read `Indexing` forever.
+                if let Some(control_block) = self.vaults.runtime(vault_id) {
+                    publish_index_failure(&control_block, &self.cache, error, true);
+                }
+            }
+            // Deferred until the embedder is installed, which re-requests
+            // every active Vault itself.
+            Err(error) if error.code() == "embedder_not_ready" => {}
+            Err(error) if error.retryable() => self.schedule_index_retry(vault_id),
+            Err(_) => {}
+        }
+        if !self.startup.collection_indexes_ready() && collection_indexes_settled(&self.vaults) {
+            self.startup.set_ready();
+            self.model_setup_started.store(false, Ordering::Release);
+            info!("Vault collection indexing complete");
         }
     }
 

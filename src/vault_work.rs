@@ -397,7 +397,7 @@ impl<Fut: Future> Future for CatchUnwind<Fut> {
 }
 
 /// The text a panic was raised with, when it carried one.
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic
         .downcast_ref::<&str>()
         .copied()

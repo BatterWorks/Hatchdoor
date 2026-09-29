@@ -760,10 +760,30 @@ impl VaultControlBlock {
         })
     }
 
+    /// The published status survives a panic raised while its lock was held:
+    /// every writer replaces whole fields and recomputes the capabilities from
+    /// them, so the value behind a poisoned lock is still a coherent status.
+    /// Refusing it would turn one panicked turn into a panic on every later
+    /// read, status publication and readiness check of that Vault, including
+    /// the shared dispatch loop's publication of the panic itself (#326).
+    fn write_snapshot(&self) -> std::sync::RwLockWriteGuard<'_, CollectionVaultSnapshot> {
+        self.snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Run `during` while holding this Vault's status write lock, so a test
+    /// can poison it the way a turn panicking mid-publication would.
+    #[cfg(test)]
+    pub(crate) fn while_holding_status_lock<R>(&self, during: impl FnOnce() -> R) -> R {
+        let _guard = self.write_snapshot();
+        during()
+    }
+
     pub fn snapshot(&self) -> CollectionVaultSnapshot {
         self.snapshot
             .read()
-            .expect("Vault control snapshot poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -909,10 +929,7 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let mut snapshot = self
-            .snapshot
-            .write()
-            .expect("Vault control snapshot poisoned");
+        let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.search = status;
         snapshot.search_error = error;
@@ -939,10 +956,7 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let mut snapshot = self
-            .snapshot
-            .write()
-            .expect("Vault control snapshot poisoned");
+        let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.local_content = status;
         snapshot.activation = if status == LocalContentStatus::Unavailable {
@@ -1044,10 +1058,7 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let mut snapshot = self
-            .snapshot
-            .write()
-            .expect("Vault control snapshot poisoned");
+        let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.git = status;
         snapshot.git_error = error;
