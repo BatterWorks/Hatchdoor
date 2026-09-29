@@ -10,6 +10,8 @@ Hatchdoor is multi-vault by design — there's no selected or default Vault anyw
 
 Open **Settings** → **Add a Vault**. The same creation form handles every Vault, first or fifth: **A folder on this server** for a plain directory or an existing local Git checkout, **A managed Git checkout** for a remote Hatchdoor should clone and own. See [[Connect your first Vault]] for the container-path caveat with local folders, and [[How to set up a Git-backed Vault]] for the full field-by-field walkthrough of Git behaviour.
 
+A Vault's folder can't overlap Hatchdoor's own instance state: the directory holding `vaults.json` (`/data/state` in the container), the cache directory, or the directory of the settings file. Creating, editing or resuming a local-folder or existing-checkout Vault whose root is one of those directories, sits inside one, or contains one is refused with `400 invalid_vault_definition`. Managed Git checkouts are exempt because Hatchdoor places them under the state directory itself.
+
 > [!note]
 > Demo mode (`HATCHDOOR_DEMO_MODE=true`) removes **Add a Vault** entirely — a public read-only instance has no Settings screen to reach it from.
 

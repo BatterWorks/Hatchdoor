@@ -158,6 +158,13 @@ pub fn migrate_legacy_vault(
     let ignored_environment_keys = ignored_legacy_environment_keys(&input.environment);
     match fs::symlink_metadata(registry.path()) {
         Ok(_) => {
+            // Only the settings half of the legacy cleanup is retried here. The
+            // disposable-cache half is deliberately one-shot: once a registry
+            // exists, `cache_db_path` is the live multi-Vault cache, which
+            // `is_recognized_legacy_cache` cannot tell apart from a legacy one,
+            // so deleting it on every start would wipe the live index. A legacy
+            // cache left by an interrupted import holds no secret and is
+            // adopted and rebuilt by `SqliteCache::open` on that same boot.
             if let Err(error) = runtime_config.remove_stored(RETIRED_LEGACY_STORED_KEYS) {
                 tracing::warn!(
                     %error,
@@ -896,6 +903,40 @@ mod tests {
                 .expect("archive prefix"),
             "archive/"
         );
+    }
+
+    #[test]
+    fn an_existing_registry_never_deletes_the_live_cache() {
+        let root = tempdir().expect("temporary deployment");
+        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
+        registry
+            .initialize_empty(0)
+            .expect("registry committed on an earlier boot");
+        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
+        drop(crate::cache::SqliteCache::open(&cache_db_path, 768).expect("live cache"));
+        assert!(
+            crate::cache::is_recognized_legacy_cache(&cache_db_path),
+            "the live cache is indistinguishable from a legacy one, which is why the cache cleanup is never retried"
+        );
+        let runtime_config = RuntimeConfig::load(
+            root.path().join("cache/settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+
+        migrate_legacy_vault(
+            &registry,
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path: root.path().join("vault"),
+                cache_db_path: cache_db_path.clone(),
+                environment: BTreeMap::new(),
+            },
+        )
+        .expect("existing registry wins");
+
+        assert!(cache_db_path.is_file(), "the live cache survives a restart");
     }
 
     #[test]
