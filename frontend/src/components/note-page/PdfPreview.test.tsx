@@ -19,9 +19,17 @@ describe("PdfPreview", () => {
     mocks.workerOptions.workerSrc = "";
   });
 
+  const devicePixelRatio = Object.getOwnPropertyDescriptor(
+    window,
+    "devicePixelRatio",
+  )!;
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    // Test files share one jsdom, so put back the layout this file fakes.
+    Reflect.deleteProperty(HTMLElement.prototype, "clientWidth");
+    Object.defineProperty(window, "devicePixelRatio", devicePixelRatio);
   });
 
   it("shows an accessible loading state and retains a direct-open fallback", () => {

@@ -47,6 +47,11 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   vi.restoreAllMocks();
+  // Test files share one jsdom, which has none of these, so a stand-in left
+  // here would reach the next file.
+  Reflect.deleteProperty(navigator, "clipboard");
+  Reflect.deleteProperty(document, "execCommand");
+  Reflect.deleteProperty(document, "fonts");
 });
 
 describe("App content rendering", () => {

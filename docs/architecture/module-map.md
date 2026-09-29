@@ -4046,6 +4046,16 @@ builder for each non-healthy per-Vault condition (indexing, stale, sync
 failed, sync stopped, conflict, unavailable) plus the collection-read
 envelope/participant shapes.
 
+Test files run with `isolate: false` (#351): each worker keeps one jsdom and
+one module cache across files. `setup.ts` runs before every file and puts
+back what a fresh environment would give it: it resets the module registry,
+drops stylesheets earlier files injected, clears `<html>` and `<body>`
+attributes, the body's children and `localStorage`, and unmounts Testing
+Library renders after every test. A test that overrides anything else on
+`window`, `document`, `navigator`, a prototype or a global must restore it in
+its own `afterEach`. Validate a change here with
+`npx vitest run --sequence.shuffle` five times in a row.
+
 ## Auxiliary repository paths
 
 These paths are outside the runtime module catalog and require separate work
