@@ -43,6 +43,13 @@ impl VaultWorkRequest {
         Self { vault_id, kind }
     }
 
+    /// A request for a test to describe an outcome with, without taking it
+    /// from a coordinator.
+    #[cfg(test)]
+    pub(crate) fn for_tests(vault_id: VaultId, kind: VaultWorkKind) -> Self {
+        Self::new(vault_id, kind)
+    }
+
     pub fn vault_id(self) -> VaultId {
         self.vault_id
     }
@@ -315,16 +322,31 @@ impl VaultWorkWorker {
     /// Wait for and execute one globally serialized operation turn.
     ///
     /// Returned failures complete the turn exactly like successes, allowing
-    /// the next Vault to proceed. Panics are intentionally outside this
-    /// returned-failure contract and remain task failures for the lifecycle
-    /// owner to handle.
+    /// the next Vault to proceed. So does a panic: it is caught here and
+    /// returned as a [`TURN_PANICKED`] failure, because this is the one
+    /// worker every Vault shares. Letting the panic unwind would end the
+    /// dispatch task, stop every Vault's background work for the rest of the
+    /// process, and leave this turn's Vault marked active, so a later disable
+    /// or edit waiting for its safe boundary would wait forever.
     pub async fn run_next<F, Fut>(&mut self, execute: F) -> Option<VaultWorkOutcome>
     where
         F: FnOnce(VaultWorkRequest) -> Fut,
         Fut: Future<Output = Result<(), VaultWorkError>>,
     {
         let request = self.next_request().await?;
-        let result = execute(request).await;
+        let result = CatchUnwind(Box::pin(execute(request)))
+            .await
+            .unwrap_or_else(|panic| {
+                Err(VaultWorkError::new(
+                    TURN_PANICKED,
+                    format!(
+                        "The {:?} turn stopped unexpectedly: {}",
+                        request.kind(),
+                        panic_message(panic.as_ref())
+                    ),
+                    false,
+                ))
+            });
         self.shared
             .state
             .lock()
@@ -349,6 +371,38 @@ impl VaultWorkWorker {
             notified.await;
         }
     }
+}
+
+/// The error code a turn that panicked completes with.
+pub const TURN_PANICKED: &str = "vault_work_turn_panicked";
+
+/// Polls a turn's future, turning a panic raised while polling it into an
+/// ordinary `Err`. The future is boxed so it is `Unpin`, which keeps this
+/// free of `unsafe` pin projection and of a dependency for one combinator.
+struct CatchUnwind<Fut>(std::pin::Pin<Box<Fut>>);
+
+impl<Fut: Future> Future for CatchUnwind<Fut> {
+    type Output = std::thread::Result<Fut::Output>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let turn = self.0.as_mut();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| turn.poll(cx))) {
+            Ok(poll) => poll.map(Ok),
+            Err(panic) => std::task::Poll::Ready(Err(panic)),
+        }
+    }
+}
+
+/// The text a panic was raised with, when it carried one.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no panic message")
 }
 
 impl QueueState {
@@ -593,6 +647,64 @@ mod tests {
             .is_err(),
             "no Git rerun was queued by the skipped automatic requests"
         );
+    }
+
+    /// A panic in a turn's async shell used to unwind straight through the
+    /// one shared worker: the dispatch task died, no other Vault's work ever
+    /// ran again, and the panicking Vault stayed marked active, so a disable
+    /// or edit waiting for its safe boundary hung (#326).
+    #[tokio::test]
+    async fn a_panicking_turn_completes_and_the_worker_keeps_serving_other_vaults() {
+        let panicking = vault_id("00000000-0000-4000-8000-000000000001");
+        let healthy = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(panicking, VaultWorkKind::Index);
+        coordinator.request(healthy, VaultWorkKind::Index);
+
+        let outcome = worker
+            .run_next(|request| async move {
+                if request.vault_id() == panicking {
+                    panic!("injected turn panic");
+                }
+                Ok::<(), VaultWorkError>(())
+            })
+            .await
+            .expect("the panicking turn still completes");
+        assert_eq!(
+            outcome.request,
+            VaultWorkRequest::new(panicking, VaultWorkKind::Index)
+        );
+        let error = outcome
+            .result
+            .expect_err("a panic is reported as a failure");
+        assert_eq!(error.code(), super::TURN_PANICKED);
+        assert!(!error.retryable());
+        assert!(
+            error.message().contains("injected turn panic"),
+            "the panic's own text reaches the log line: {}",
+            error.message()
+        );
+
+        coordinator.drain_vault(panicking);
+        timeout(
+            Duration::from_secs(1),
+            coordinator.wait_for_vault_safe_boundary(panicking),
+        )
+        .await
+        .expect("a disable or edit of the panicking Vault does not hang");
+
+        let next = timeout(
+            Duration::from_secs(1),
+            worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) }),
+        )
+        .await
+        .expect("the worker is still serving")
+        .expect("the other Vault's turn");
+        assert_eq!(
+            next.request,
+            VaultWorkRequest::new(healthy, VaultWorkKind::Index)
+        );
+        next.result.expect("the other Vault's turn runs normally");
     }
 
     #[tokio::test]

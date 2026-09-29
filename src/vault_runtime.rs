@@ -294,6 +294,26 @@ impl VaultRuntime {
         snapshot.error = None;
     }
 
+    /// [`Self::set_indexing`], unless the phase is already `Ready`. Decided
+    /// under the one write lock, so a concurrent `set_ready` cannot be undone
+    /// by a progress report that read the phase just before it.
+    pub fn set_indexing_unless_ready(&self, progress: IndexingProgressSnapshot) {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .expect("vault runtime snapshot poisoned");
+        if snapshot.phase == VaultPhase::Ready {
+            return;
+        }
+        snapshot.phase = VaultPhase::Indexing;
+        snapshot.capabilities = VaultCapabilities::derive(snapshot.mode, snapshot.phase);
+        snapshot.model = None;
+        snapshot.downloaded_bytes = None;
+        snapshot.total_bytes = None;
+        snapshot.indexing = Some(progress);
+        snapshot.error = None;
+    }
+
     pub fn set_ready(&self) {
         self.set_phase(VaultPhase::Ready);
     }
@@ -1228,25 +1248,111 @@ impl VaultCollectionRuntime {
     /// Existing enabled runtimes are retained when their definition and path
     /// are unchanged, so an unrelated Vault update cannot replace their locks
     /// or in-memory status.
+    ///
+    /// The replacement control blocks are built before the collection's write
+    /// lock is taken, not under it. Activating one stats its directory, reads
+    /// its retained snapshot from SQLite and registers a recursive watcher on
+    /// every directory of the Vault, and every HTTP and MCP read waits on that
+    /// lock: holding it across the walk froze all of them for the length of a
+    /// large Vault's watcher registration on every registry mutation (#326).
+    /// The lock is then held only to install the result, and only if no other
+    /// reconciliation installed a revision in between; if one did, this one's
+    /// unadopted blocks are revoked and it starts over from what is live.
     pub fn reconcile(
         &self,
         registry: &VaultRegistryStore,
         snapshot: &VaultRegistrySnapshot,
     ) -> bool {
-        let mut state = self
-            .state
-            .write()
-            .expect("Vault collection runtime poisoned");
-        if snapshot.revision() <= state.registry_revision {
-            return false;
-        }
-        let previous = std::mem::take(&mut state.vaults);
-        let mut next = BTreeMap::new();
         let revision_publisher = CollectionRevisionPublisher {
             state: Arc::downgrade(&self.state),
             revisions: self.revisions.clone(),
         };
+        let (mut state, previous, next) = loop {
+            let (observed_revision, observed) = {
+                let state = self
+                    .state
+                    .read()
+                    .expect("Vault collection runtime poisoned");
+                if snapshot.revision() <= state.registry_revision {
+                    return false;
+                }
+                (state.registry_revision, state.vaults.clone())
+            };
+            let next = self.next_entries(registry, snapshot, &observed, &revision_publisher);
+            let mut state = self
+                .state
+                .write()
+                .expect("Vault collection runtime poisoned");
+            if state.registry_revision == observed_revision {
+                // Only `reconcile` replaces the map, and it always advances
+                // the revision, so an unchanged revision is an unchanged map.
+                let previous = std::mem::take(&mut state.vaults);
+                break (state, previous, next);
+            }
+            drop(state);
+            revoke_unadopted(&observed, &next);
+        };
 
+        for (vault_id, entry) in &previous {
+            let VaultCollectionEntry::Active(previous_runtime) = entry else {
+                continue;
+            };
+            let retained = matches!(
+                next.get(vault_id),
+                Some(VaultCollectionEntry::Active(next_runtime))
+                    if Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
+            );
+            if !retained {
+                previous_runtime.revoke();
+            }
+        }
+
+        let previous_snapshots = collection_snapshots(&previous);
+        let next_snapshots = collection_snapshots(&next);
+        let changed_vault_ids: Vec<VaultId> = {
+            let mut ids = BTreeSet::new();
+            for (vault_id, snapshot) in &next_snapshots {
+                if previous_snapshots.get(vault_id) != Some(snapshot) {
+                    ids.insert(*vault_id);
+                }
+            }
+            for vault_id in previous_snapshots.keys() {
+                if !next_snapshots.contains_key(vault_id) {
+                    ids.insert(*vault_id);
+                }
+            }
+            ids.into_iter().collect()
+        };
+        state.registry_revision = snapshot.revision();
+        let event = if changed_vault_ids.is_empty() {
+            None
+        } else {
+            state.collection_revision = state.collection_revision.saturating_add(1);
+            Some(VaultCollectionRevisionEvent {
+                collection_revision: state.collection_revision,
+                vault_ids: changed_vault_ids,
+                category: VaultChangeCategory::Definition,
+            })
+        };
+        state.vaults = next;
+        drop(state);
+        if let Some(event) = event {
+            self.revisions.send_replace(event);
+        }
+        true
+    }
+
+    /// The collection `snapshot` describes, built from `previous`: retained
+    /// control blocks where a definition and path are unchanged, freshly
+    /// activated ones everywhere else. Called without the collection lock.
+    fn next_entries(
+        &self,
+        registry: &VaultRegistryStore,
+        snapshot: &VaultRegistrySnapshot,
+        previous: &BTreeMap<VaultId, VaultCollectionEntry>,
+        revision_publisher: &CollectionRevisionPublisher,
+    ) -> BTreeMap<VaultId, VaultCollectionEntry> {
+        let mut next = BTreeMap::new();
         for definition in snapshot.definitions() {
             let vault_id = definition.vault_id();
             let vault_path = registry.vault_path(&definition);
@@ -1303,6 +1409,8 @@ impl VaultCollectionRuntime {
                         } else {
                             CarriedOverState::default()
                         };
+                        #[cfg(test)]
+                        observe_activation();
                         VaultCollectionEntry::Active(VaultControlBlock::activate(
                             definition,
                             vault_path,
@@ -1316,54 +1424,7 @@ impl VaultCollectionRuntime {
             };
             next.insert(vault_id, entry);
         }
-
-        for (vault_id, entry) in &previous {
-            let VaultCollectionEntry::Active(previous_runtime) = entry else {
-                continue;
-            };
-            let retained = matches!(
-                next.get(vault_id),
-                Some(VaultCollectionEntry::Active(next_runtime))
-                    if Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
-            );
-            if !retained {
-                previous_runtime.revoke();
-            }
-        }
-
-        let previous_snapshots = collection_snapshots(&previous);
-        let next_snapshots = collection_snapshots(&next);
-        let changed_vault_ids: Vec<VaultId> = {
-            let mut ids = BTreeSet::new();
-            for (vault_id, snapshot) in &next_snapshots {
-                if previous_snapshots.get(vault_id) != Some(snapshot) {
-                    ids.insert(*vault_id);
-                }
-            }
-            for vault_id in previous_snapshots.keys() {
-                if !next_snapshots.contains_key(vault_id) {
-                    ids.insert(*vault_id);
-                }
-            }
-            ids.into_iter().collect()
-        };
-        state.registry_revision = snapshot.revision();
-        let event = if changed_vault_ids.is_empty() {
-            None
-        } else {
-            state.collection_revision = state.collection_revision.saturating_add(1);
-            Some(VaultCollectionRevisionEvent {
-                collection_revision: state.collection_revision,
-                vault_ids: changed_vault_ids,
-                category: VaultChangeCategory::Definition,
-            })
-        };
-        state.vaults = next;
-        drop(state);
-        if let Some(event) = event {
-            self.revisions.send_replace(event);
-        }
-        true
+        next
     }
 
     /// Rebuild disposable background work from the authoritative collection and
@@ -1809,6 +1870,45 @@ impl Default for VaultCollectionRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Revoke every control block `next` activated rather than carried over from
+/// `previous`, for a reconciliation that lost the race to install it: each
+/// may already be watching its directory, and nothing else would stop it.
+fn revoke_unadopted(
+    previous: &BTreeMap<VaultId, VaultCollectionEntry>,
+    next: &BTreeMap<VaultId, VaultCollectionEntry>,
+) {
+    for (vault_id, entry) in next {
+        let VaultCollectionEntry::Active(runtime) = entry else {
+            continue;
+        };
+        let carried_over = matches!(
+            previous.get(vault_id),
+            Some(VaultCollectionEntry::Active(previous_runtime))
+                if Arc::ptr_eq(&previous_runtime.snapshot, &runtime.snapshot)
+        );
+        if !carried_over {
+            runtime.revoke();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Called on the reconciling thread just before each control block is
+    /// activated, so a test can observe what that thread holds at the time.
+    pub(crate) static ACTIVATION_OBSERVER: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_activation() {
+    ACTIVATION_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow().as_ref() {
+            observer();
+        }
+    });
 }
 
 fn collection_snapshots(

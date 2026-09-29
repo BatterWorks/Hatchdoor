@@ -3974,6 +3974,35 @@ mod tests {
         assert_eq!(after.status(), StatusCode::OK);
     }
 
+    /// Once the collection has settled, a later Index turn's progress is one
+    /// Vault's upkeep: `/ready` keeps answering 200 through it (#326).
+    #[tokio::test]
+    async fn ready_endpoint_stays_ready_through_a_routine_reindex() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state.startup.set_ready();
+        state
+            .startup
+            .report_indexing_progress(crate::startup::IndexingProgressSnapshot {
+                notes_completed: 1,
+                notes_total: 2,
+                chunks_completed: 1,
+                chunks_total: 2,
+                tokens_completed: 10,
+                tokens_total: 20,
+                elapsed_seconds: 1,
+            });
+        let readiness = build_router(state, None)
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(readiness.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn vault_scoped_resolve_batch_marks_archived_notes() {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);

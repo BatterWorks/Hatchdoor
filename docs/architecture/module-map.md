@@ -154,7 +154,11 @@ that production inventory are still checked for stale paths and duplicates.
   and unsupported hostnames fail with guidance rather than depending on DNS.
   The built-in `--healthcheck` selects a local target in the listener's address
   family, preserving the IPv6 listener path in the shell-free runtime image.
-- `StartupTracker` exposes startup/model/indexing readiness.
+- `StartupTracker` exposes startup/model/indexing readiness. `/ready` answers
+  from it. `report_indexing_progress` is how an Index turn reports progress,
+  and it never moves a tracker that has already settled `Ready`: a routine
+  reindex is one Vault's upkeep, reported on that Vault, not an instance
+  readiness change (#326).
 - `VaultRuntime` and its serialized snapshot expose only the process startup's
   local source/mode, lifecycle phase, and derived non-Git capabilities. Git
   source, mode, and capabilities are derived per Vault by
@@ -163,7 +167,11 @@ that production inventory are still checked for stale paths and duplicates.
 - `VaultCollectionRuntime` reconciles only newer registry snapshots into zero,
   one, or many Vault-ID-keyed `VaultControlBlock` values; an older asynchronous
   reconciliation cannot replace or re-admit work after a newer collection is
-  live. During activation, it derives Ready or Stale search capability from a
+  live. `reconcile()` activates replacement control blocks (directory stat,
+  retained-snapshot read, recursive watcher registration) before it takes the
+  collection write lock, and holds that lock only to install the result if
+  the registry revision it read is still live; otherwise it revokes the blocks
+  it built and starts over (#326). During activation, it derives Ready or Stale search capability from a
   retained participating SQLite snapshot before its reconstructed Index turn
   runs; a missing, nonparticipating, or unreadable snapshot remains
   Unavailable. Each enabled block owns its
@@ -203,8 +211,10 @@ that production inventory are still checked for stale paths and duplicates.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records. Once the embedder is installed, startup queues
   each active Vault through the collection Index coordinator; it does not run a
-  second legacy single-Vault cache build. Startup becomes Ready after every
-  active collection Vault's Index turn settles Ready.
+  second legacy single-Vault cache build. Startup becomes Ready once every
+  active collection Vault's Index turn has settled (see
+  `collection_indexes_settled` below), and stays Ready through later
+  rebuilds and single-Vault failures; only model setup leaves it (#326).
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
   an independently cancellable handle. A qualifying filesystem event opens a
   quiet window that later events restart, bounded by a fixed ceiling
@@ -335,7 +345,11 @@ when their owning packets integrate the coordinator.
 per turn; duplicate pending work coalesces and duplicate active work retains at
 most one rerun, except through `request_if_idle`, which an automatic producer
 uses to add none; remaining work returns to the tail; a returned failure completes
-its turn and remains attributable to one Vault. The queue stays disposable and
+its turn and remains attributable to one Vault. So does a panic in a turn's
+future: `run_next` catches it and completes the turn with a non-retryable
+`TURN_PANICKED` (`vault_work_turn_panicked`) failure, so one panicking turn
+cannot end the shared worker or leave its Vault's safe boundary unreachable
+(#326). The queue stays disposable and
 adds no priorities, throttling, persistence, second lane, generic timeout, or
 forced cancellation. Runtime lifecycle stops new work, discards queued work,
 and waits only for an active turn's safe boundary; restart reconstruction uses
@@ -359,9 +373,17 @@ saved setting still reaches the next turn without a restart — that is where
 `git_author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
 commit identity, overridden per Vault by
 `git::config::resolve_commit_identity`) and `HATCHDOOR_EMBED_LAYERS` are read.
-`collection_indexes_ready` is the startup readiness rule: startup becomes
-Ready once every active Vault's Index turn has settled `Ready`, and an empty
-collection is never Ready. Per ADR-13/ADR-18 this is a plain module with a
+`collection_indexes_settled` is the startup readiness rule: startup becomes
+Ready once every active Vault's Index turn has settled — searchable (`Ready`
+or `Stale`), failed with the failure on that Vault's own status, or with no
+local Markdown to index — and an empty collection is never Ready. A single
+Vault's failure never marks the instance failed (#326). `publish_outcome`
+also retries a retryable Index failure (other than `embedder_not_ready`)
+through `request_if_idle` after a backoff that starts at
+`INDEX_RETRY_BASE_DELAY` and doubles, at most `INDEX_RETRY_LIMIT` times per
+run of consecutive failures; a success resets the count. A turn that
+panicked (`TURN_PANICKED`) gets its Vault's failed search status published
+here, since the turn never reached its own publication. Per ADR-13/ADR-18 this is a plain module with a
 small public surface — no trait, no framework, no second execution lane.
 
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one
@@ -734,7 +756,11 @@ configuration or credentials, and carries no revision or concurrency contract
 of its own — a poll can rewrite it without disturbing the Vault collection or
 a client's `expected_registry_revision`. Losing it costs one extra Git turn
 per Vault, so a missing, unreadable, or unparseable file reads as "no record"
-and never blocks startup; a file whose `schema_version` exceeds this build's
+and never blocks startup. Every read-modify-write (`record_git_turn`,
+`forget`) is serialized by one lock that clones of a store share, and the
+file is replaced by write-to-temporary-then-rename in its own directory, so
+a record and a forget cannot undo each other and no reader sees a partial
+file (#326); a file whose `schema_version` exceeds this build's
 is read as "no record" and, unlike a corrupt one, is never overwritten, so a
 downgrade cannot destroy a newer build's state. Records are written whole
 through the parent directory's creation, hold owner-only content by way of the

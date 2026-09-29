@@ -1026,6 +1026,101 @@ fn an_older_registry_snapshot_cannot_replace_a_newer_live_collection() {
     assert!(live.vaults.contains_key(&second_id));
 }
 
+/// Activating a control block stats its directory, reads SQLite and walks the
+/// whole tree registering watches. None of that may happen under the
+/// collection lock every HTTP and MCP read takes, or a registry mutation
+/// freezes every read for the length of the walk (#326).
+#[test]
+fn reconcile_activates_control_blocks_without_holding_the_collection_lock() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let first_path = directory.path().join("first");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    let one = add_local_vault(&registry, &empty, "First", first_path);
+    let collection = VaultCollectionRuntime::new();
+
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    ACTIVATION_OBSERVER.with(|observer| {
+        let collection = collection.clone();
+        let observed = observed.clone();
+        *observer.borrow_mut() = Some(Box::new(move || {
+            observed
+                .borrow_mut()
+                .push(collection.state.try_write().is_ok());
+        }));
+    });
+    assert!(collection.reconcile(&registry, &one));
+    ACTIVATION_OBSERVER.with(|observer| observer.borrow_mut().take());
+
+    assert_eq!(
+        *observed.borrow(),
+        vec![true],
+        "the collection lock is free while the control block activates"
+    );
+    assert_eq!(collection.active_vault_ids().len(), 1);
+}
+
+/// Building outside the lock opens a window in which another reconciliation
+/// can install its revision. The one that finds the map moved on must not
+/// install blocks built from what it saw before; it starts over from what is
+/// live, and still converges on the newest revision.
+#[test]
+fn reconcile_that_loses_the_install_race_rebuilds_from_the_live_collection() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    std::fs::create_dir_all(&second_path).expect("second Vault directory");
+    let one = add_local_vault(&registry, &empty, "First", first_path);
+    let two = add_local_vault(&registry, &one, "Second", second_path);
+    let first_id = vault_id_named(&two, "First");
+    let collection = VaultCollectionRuntime::new();
+
+    // While the newer reconciliation is activating, an older one installs.
+    let interleaved: std::rc::Rc<std::cell::RefCell<Option<VaultControlBlock>>> =
+        std::rc::Rc::default();
+    let entered = std::rc::Rc::new(std::cell::Cell::new(false));
+    ACTIVATION_OBSERVER.with(|observer| {
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let one = one.clone();
+        let interleaved = interleaved.clone();
+        let entered = entered.clone();
+        *observer.borrow_mut() = Some(Box::new(move || {
+            if !entered.replace(true) {
+                assert!(collection.reconcile(&registry, &one));
+                *interleaved.borrow_mut() = collection.runtime(first_id);
+            }
+        }));
+    });
+    assert!(collection.reconcile(&registry, &two));
+    ACTIVATION_OBSERVER.with(|observer| observer.borrow_mut().take());
+    let interleaved = interleaved
+        .borrow_mut()
+        .take()
+        .expect("the older reconciliation installed the first Vault");
+
+    let live = collection.snapshot();
+    assert_eq!(live.registry_revision, two.revision());
+    assert_eq!(live.vaults.len(), 2);
+    let first = collection.runtime(first_id).expect("first Vault");
+    assert!(
+        Arc::ptr_eq(&first.snapshot, &interleaved.snapshot),
+        "the first Vault keeps the block the interleaved install made, rather than one \
+         built before it and never installed"
+    );
+    assert!(first.is_accepting_operations());
+}
+
 #[tokio::test]
 async fn disabling_a_vault_waits_for_an_active_foreground_mutation_safe_boundary() {
     use crate::vault_work::VaultWorkCoordinator;
