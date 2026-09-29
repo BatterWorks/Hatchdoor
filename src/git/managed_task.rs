@@ -372,12 +372,15 @@ pub fn run_existing_git_remote_turn(
     let branch = match branch {
         Some(branch) => branch,
         None => resolve_checked_out_branch(&repository_path).map_err(|_| {
+            // The path is for the operator's log only: the message below
+            // reaches every client through the Vault's status (#323).
+            warn!(
+                repository_path = %repository_path.display(),
+                "cannot determine the checked-out branch of an existing Git checkout"
+            );
             VaultWorkError::new(
                 "existing_git_branch_unresolved",
-                format!(
-                    "cannot determine the currently checked-out branch of '{}'",
-                    repository_path.display()
-                ),
+                "cannot determine the currently checked-out branch of this Vault's Git checkout",
                 false,
             )
         })?,
@@ -488,6 +491,14 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
         // which is exactly the kind of transient condition backoff exists
         // for.
         PushRace => ("managed_git_push_race_exhausted", true, None),
+        // A protected branch or a hook says no on every attempt until
+        // someone changes the remote's rules, so retrying is pointless.
+        PushRejected { .. } => ("managed_git_push_rejected", false, None),
+        OperationInProgress { files } => (
+            "managed_git_operation_in_progress",
+            false,
+            (!files.is_empty()).then_some(VaultWorkErrorDetail::AffectedPaths(files)),
+        ),
         Authentication => ("managed_git_authentication_failed", false, None),
         Remote => ("managed_git_remote_unreachable", true, None),
     };
@@ -496,6 +507,25 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
         Some(detail) => work_error.with_detail(detail),
         None => work_error,
     }
+}
+
+/// True for a published Git failure that only a turn talking to the remote
+/// can clear: a successful commit turn proves the local checkout is healthy,
+/// and says nothing about a conflict with the remote, a refused push, or a
+/// remote that cannot be reached. The executor keeps such a failure
+/// published across commit turns so it stays visible until a sync resolves
+/// it (#323). Every code here is produced only by [`classify_sync_error`] or
+/// [`classify_checkout_error`] for a remote operation, never by a commit turn.
+pub(crate) fn is_remote_only_failure(code: &str) -> bool {
+    matches!(
+        code,
+        "managed_git_conflict"
+            | "managed_git_push_rejected"
+            | "managed_git_push_race_exhausted"
+            | "managed_git_remote_unreachable"
+            | "managed_git_authentication_failed"
+            | "managed_git_pull_only_local_commits"
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1515,6 +1545,98 @@ mod tests {
                 "{error:?} should carry no structured detail"
             );
         }
+    }
+
+    /// #323: the two failures this issue added are both non-retryable and
+    /// structured, and only the remote-side ones outlive a commit turn.
+    #[test]
+    fn push_rejections_and_unfinished_operations_are_classified_for_a_human() {
+        let rejected = classify_sync_error(ManagedSyncError::PushRejected {
+            reason: "protected branch hook declined".to_string(),
+        });
+        assert_eq!(rejected.code(), "managed_git_push_rejected");
+        assert!(!rejected.retryable());
+        assert!(
+            rejected
+                .message()
+                .contains("protected branch hook declined")
+        );
+        assert!(is_remote_only_failure(rejected.code()));
+
+        let stranded = classify_sync_error(ManagedSyncError::OperationInProgress {
+            files: vec!["vault/Home.md".to_string()],
+        });
+        assert_eq!(stranded.code(), "managed_git_operation_in_progress");
+        assert!(!stranded.retryable());
+        assert_eq!(
+            stranded.detail(),
+            Some(&VaultWorkErrorDetail::AffectedPaths(vec![
+                "vault/Home.md".to_string()
+            ]))
+        );
+        assert!(
+            !is_remote_only_failure(stranded.code()),
+            "a commit turn refuses the same state, so its success disproves it"
+        );
+        assert_eq!(
+            classify_sync_error(ManagedSyncError::OperationInProgress { files: Vec::new() })
+                .detail(),
+            None
+        );
+
+        assert!(is_remote_only_failure("managed_git_conflict"));
+        for commit_code in [
+            "managed_git_dirty_working_copy",
+            "managed_git_validation_failed",
+            "existing_git_local_history_validation_failed",
+            "vault_commit_mode_does_not_commit",
+        ] {
+            assert!(!is_remote_only_failure(commit_code), "{commit_code}");
+        }
+    }
+
+    /// #323: this message reaches every client through the Vault's status,
+    /// and used to embed the checkout's absolute host path.
+    #[test]
+    fn an_unresolvable_branch_is_reported_without_the_host_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repository_path = root.path().join("detached-checkout");
+        let repository = git2::Repository::init(&repository_path).expect("repository");
+        std::fs::create_dir(repository_path.join("vault")).expect("vault directory");
+        std::fs::write(repository_path.join("vault/Home.md"), "# Home\n").expect("note");
+        let mut index = repository.index().expect("index");
+        index
+            .add_path(Path::new("vault/Home.md"))
+            .expect("stage note");
+        let tree = repository
+            .find_tree(index.write_tree().expect("tree id"))
+            .expect("tree");
+        let signature = git2::Signature::now("Test", "test@example.test").expect("signature");
+        let commit = repository
+            .commit(None, &signature, &signature, "initial", &tree, &[])
+            .expect("commit");
+        repository.set_head_detached(commit).expect("detach HEAD");
+
+        let error = run_existing_git_remote_turn(
+            repository_path.clone(),
+            repository_path.join("vault"),
+            Some("https://example.test/vault.git".to_string()),
+            None,
+            VaultGitMode::TwoWay,
+            None,
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("detached HEAD has no branch");
+
+        assert_eq!(error.code(), "existing_git_branch_unresolved");
+        let root_text = root.path().to_string_lossy().into_owned();
+        assert!(
+            !error.message().contains(&root_text) && !error.message().contains('/'),
+            "client-visible message leaks a host path: {}",
+            error.message()
+        );
     }
 
     /// A test-only stand-in for a Vault's configured poll interval. Shorter

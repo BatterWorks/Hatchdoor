@@ -442,10 +442,14 @@ small public surface — no trait, no framework, no second execution lane.
   so a standing failure costs one turn per cooldown window rather than one per
   save; a success clears it. Status publication is otherwise identical to a
   sync turn's: `Ready`, or `Unavailable` with the structured error and its
-  affected paths. A commit that succeeds on a Vault whose *remote* sync is
-  failing does clear that failure's status until the next scheduled sync
-  republishes it. The alternative, a commit that can never clear a status it
-  can set, was judged the worse lie.
+  affected paths. A commit that succeeds clears only a failure a commit could
+  have caused: a standing remote-only failure (`git::managed_task::is_remote_only_failure`:
+  a conflict with the remote, a refused push, an exhausted push race, an
+  unreachable remote, rejected credentials, unpushed Pull-only commits) stays
+  published, file list included, until a sync turn resolves it (#323). Syncs
+  run on the poll interval and commits on every save, so the earlier rule,
+  a commit clears everything, erased a conflict within one save of it
+  appearing.
 - `publish_managed_git_turn_outcome` is the single publication path every Git
   turn exit reaches: Git status always, plus authoritative local-content
   availability on success (`activation_snapshot` only stats `vault_path` once,
@@ -1957,15 +1961,29 @@ Pull-only never commits and leaves the ledger alone. Pull-only refuses and prese
 history, then only fast-forwards a clean checkout. Two-way commits Vault-subtree
 work before every tree-changing graph operation, refuses unrelated repository
 work, fast-forwards remote-only advancement, creates a merge commit for clean
-divergence, aborts a verified clean conflict back to the pre-merge local commit,
-and never pushes after conflict. It uses safe checkout transitions and rejects
-outside-Vault dirt rather than overwriting it; the narrowly scoped conflict
-abort is the only hard reset. A non-fast-forward push retries only through one
-bounded fetch-integrate-push graph replay before returning a redacted push-race
-error. `commit_managed_checkout` is the Two-way commit without the graph
+divergence, aborts every conflict back to the pre-merge local commit, and
+never pushes after conflict. The abort runs to completion whatever else the
+merge touched, inside the Vault subtree or outside it, leaving no MERGE_HEAD,
+no conflict entries, and no conflict markers; it force-restores only the paths
+the merge wrote, so a note an external editor saved mid-turn survives for the
+next turn to commit, and falls back to a whole-tree hard reset only when that
+targeted restore fails (#323). It otherwise uses safe checkout transitions and
+rejects outside-Vault dirt rather than overwriting it. A non-fast-forward push
+retries only through one bounded fetch-integrate-push graph replay before
+returning a redacted push-race error. A push the remote accepts but refuses to
+apply (a protected branch, a refusing hook) is read ref by ref through
+libgit2's `push_update_reference` callback and fails the turn as
+`ManagedSyncError::PushRejected` (`managed_git_push_rejected`, not retryable)
+with the remote's one-line reason, instead of passing as synchronized. `commit_managed_checkout` is the Two-way commit without the graph
 (#267): the same `prepare_two_way_worktree` step, and then it stops, with no
 fetch, merge or push. It validates through `open_commit_repository`, which
-proves the repository shape and Vault containment and nothing else;
+proves the repository shape and Vault containment, and refuses a checkout
+that is mid-merge (or any other unfinished Git operation) or whose index
+holds conflict entries as `ManagedSyncError::OperationInProgress`
+(`managed_git_operation_in_progress`, conflicted paths as detail), leaving it
+untouched: committing it would publish conflict markers and drop the merge's
+second parent, and this boundary cannot tell an interrupted Hatchdoor merge
+from an operator's deliberate one (#323);
 `open_validated_repository` is that plus the checked-out branch and the
 uniquely selected remote, which only an operation that talks to that remote
 needs. Pull-only is refused outright, because such a Vault refuses writes and
@@ -2109,6 +2127,11 @@ only the contained Vault subtree of whatever enclosing checkout the Vault sits
 in and never contacting a remote. It classifies every `GitError` into a
 redacted `VaultWorkError`, mirroring the legacy single-Vault task's transient
 split (`Remote`/`Other` retry; validation, conflict, and dirty-tree do not).
+Its client-facing message is fixed per code rather than `GitError`'s text,
+which carries absolute host paths; the full error goes to the log (#323).
+Every Git error message that reaches a Vault's status is path-free, including
+`existing_git_branch_unresolved` and `ManagedCheckoutError::AtomicInstallFailed`
+reasons.
 Unlike managed-Git Vaults, an `ExistingGit` Local-history Vault is never
 registered with `ManagedGitScheduler`. Before #267 that left it with exactly
 one turn per process, the `Pending`-triggered one at activation, so every

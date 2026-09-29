@@ -584,10 +584,9 @@ fn atomic_install(temporary: &Path, destination: &Path) -> Result<(), ManagedChe
     let install_directory = destination.parent().unwrap_or(destination);
     let encode = |path: &Path| {
         CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            ManagedCheckoutError::AtomicInstallFailed(format!(
-                "checkout path '{}' contains a NUL byte",
-                path.display()
-            ))
+            ManagedCheckoutError::AtomicInstallFailed(
+                "a checkout path contains a NUL byte".to_string(),
+            )
         })
     };
     let temporary_name = encode(temporary)?;
@@ -599,18 +598,16 @@ fn atomic_install(temporary: &Path, destination: &Path) -> Result<(), ManagedChe
             install_without_noreplace(temporary, destination)
         }
         Err(error) => Err(ManagedCheckoutError::AtomicInstallFailed(format!(
-            "renameat2 RENAME_NOREPLACE onto '{}' failed: {error}",
-            destination.display()
+            "renameat2 RENAME_NOREPLACE onto the checkout destination failed: {error}"
         ))),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn atomic_install(_temporary: &Path, destination: &Path) -> Result<(), ManagedCheckoutError> {
-    Err(ManagedCheckoutError::AtomicInstallFailed(format!(
-        "installing '{}' needs renameat2, which this platform does not provide",
-        destination.display()
-    )))
+fn atomic_install(_temporary: &Path, _destination: &Path) -> Result<(), ManagedCheckoutError> {
+    Err(ManagedCheckoutError::AtomicInstallFailed(
+        "installing the checkout needs renameat2, which this platform does not provide".to_string(),
+    ))
 }
 
 fn install_without_noreplace(
@@ -619,23 +616,20 @@ fn install_without_noreplace(
 ) -> Result<(), ManagedCheckoutError> {
     match fs::symlink_metadata(destination) {
         Ok(_) => {
-            return Err(ManagedCheckoutError::AtomicInstallFailed(format!(
-                "'{}' already exists",
-                destination.display()
-            )));
+            return Err(ManagedCheckoutError::AtomicInstallFailed(
+                "the checkout destination already exists".to_string(),
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(ManagedCheckoutError::AtomicInstallFailed(format!(
-                "could not inspect '{}' before installing the checkout: {error}",
-                destination.display()
+                "could not inspect the checkout destination before installing it: {error}"
             )));
         }
     }
     fs::rename(temporary, destination).map_err(|error| {
         ManagedCheckoutError::AtomicInstallFailed(format!(
-            "could not install the checkout at '{}': {error}",
-            destination.display()
+            "could not install the checkout at its destination: {error}"
         ))
     })
 }
@@ -1096,6 +1090,10 @@ mod tests {
         assert!(
             error.to_string().contains("already exists"),
             "and must carry it to the operator, got: {error}"
+        );
+        assert!(
+            !error.to_string().contains('/'),
+            "without the host path, which reaches every client (#323): {error}"
         );
         assert_eq!(
             fs::read_to_string(destination.join("evidence")).unwrap(),

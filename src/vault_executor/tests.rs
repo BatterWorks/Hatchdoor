@@ -1184,6 +1184,105 @@ async fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_bro
     index_turn.result.expect("Index turn can proceed");
 }
 
+/// #323: a successful commit turn used to republish `Ready`, erasing a
+/// sync conflict and its file list within one save of it appearing. A
+/// conflict survives commit turns; a sync that succeeds clears it.
+#[test]
+fn a_sync_conflict_survives_successful_commit_turns_until_a_sync_resolves_it() {
+    let directory = tempdir().expect("temporary state directory");
+    let (_collection, _registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    managed_git.activate(
+        vault_id,
+        std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+    );
+    let cooldown = crate::git::CommitCooldown::new();
+    publish_managed_git_turn_outcome(
+        &control_block,
+        &coordinator,
+        &managed_git,
+        vault_id,
+        &Err(VaultWorkError::new(
+            "managed_git_conflict",
+            "managed checkout merge conflict: vault/Home.md",
+            false,
+        )
+        .with_detail(crate::vault_work::VaultWorkErrorDetail::AffectedPaths(
+            vec!["vault/Home.md".to_string()],
+        ))),
+    );
+    let published = control_block.snapshot();
+
+    for _ in 0..2 {
+        finish_commit_turn(
+            &control_block,
+            &cooldown,
+            vault_id,
+            Ok(crate::git::ManagedGitOutcome::Synchronized),
+        )
+        .expect("commit turn succeeded");
+    }
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Unavailable);
+    assert_eq!(after.git_error, published.git_error);
+    assert!(
+        after
+            .git_error
+            .as_ref()
+            .is_some_and(|error| error.detail.is_some()),
+        "the conflicted file list must survive too"
+    );
+
+    publish_managed_git_turn_outcome(
+        &control_block,
+        &coordinator,
+        &managed_git,
+        vault_id,
+        &Ok(crate::git::ManagedGitOutcome::Synchronized),
+    );
+    let resolved = control_block.snapshot();
+    assert_eq!(resolved.git, VaultGitStatus::Ready);
+    assert!(resolved.git_error.is_none());
+}
+
+/// The other half of #323's rule: a failure a commit turn can itself
+/// produce is cleared by the next commit turn that succeeds.
+#[test]
+fn a_successful_commit_turn_clears_a_failure_a_commit_could_have_caused() {
+    let directory = tempdir().expect("temporary state directory");
+    let (_collection, _registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
+    let cooldown = crate::git::CommitCooldown::new();
+    let _ = finish_commit_turn(
+        &control_block,
+        &cooldown,
+        vault_id,
+        Err(VaultWorkError::new(
+            "managed_git_dirty_working_copy",
+            "managed checkout has unsupported local work: outside.txt",
+            false,
+        )),
+    );
+    assert_eq!(control_block.snapshot().git, VaultGitStatus::Unavailable);
+
+    finish_commit_turn(
+        &control_block,
+        &cooldown,
+        vault_id,
+        Ok(crate::git::ManagedGitOutcome::Synchronized),
+    )
+    .expect("commit turn succeeded");
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Ready);
+    assert!(after.git_error.is_none());
+}
+
 #[test]
 fn publish_managed_git_turn_outcome_isolates_a_failure_from_already_acquired_local_markdown() {
     let directory = tempdir().expect("temporary state directory");

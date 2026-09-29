@@ -953,11 +953,20 @@ fn finish_commit_turn(
         Ok(outcome) => {
             info!(%vault_id, ?outcome, "Vault Git commit turn completed");
             commit_cooldown.clear(vault_id);
-            // The same status a successful sync publishes. A remote failure
-            // this clears is republished by that Vault's next scheduled sync
-            // turn: the commit half being healthy is the honest report of
-            // what this turn actually proved.
-            let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
+            // A commit proves the local half of Git healthy and nothing
+            // about the remote. A standing remote-only failure (a conflict
+            // with the remote, a refused push) stays published: syncs run
+            // on the poll interval, a day by default, and a commit fires on
+            // every save, so clearing it here would hide the one failure
+            // that needs a human almost as soon as it appeared (#323).
+            // Anything else is a failure this turn just disproved.
+            let remote_failure_stands = control_block
+                .snapshot()
+                .git_error
+                .is_some_and(|error| crate::git::managed_task::is_remote_only_failure(&error.code));
+            if !remote_failure_stands {
+                let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
+            }
         }
         Err(error) => {
             commit_cooldown.arm(vault_id);

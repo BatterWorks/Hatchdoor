@@ -213,17 +213,42 @@ pub fn run_local_history_git_turn(
 /// dropped: `GitError` is the shared error of a module `init_local_repo` and
 /// `validate_repo` also raise, and its variants are not this function's to
 /// narrow.
+///
+/// The client-facing message is fixed per code, never `error.to_string()`:
+/// `GitError`'s strings carry absolute host paths (the Vault path, the
+/// repository root, libgit2's own "could not find repository at '…'"), and
+/// this message reaches every client through the Vault's status (#323). The
+/// full error goes to the operator's log instead.
 fn classify_local_history_error(error: GitError) -> VaultWorkError {
-    let code = match &error {
-        GitError::Validation(_) => "existing_git_local_history_validation_failed",
-        GitError::Conflict { .. } => "existing_git_local_history_conflict",
-        GitError::DirtyWorkingTree { .. } => "existing_git_local_history_dirty_working_tree",
-        GitError::ManualRecovery { .. } => "existing_git_local_history_manual_recovery_required",
-        GitError::Remote(_) => "existing_git_local_history_remote_unexpected",
-        GitError::Other(_) => "existing_git_local_history_git_error",
+    let (code, message) = match &error {
+        GitError::Validation(_) => (
+            "existing_git_local_history_validation_failed",
+            "this Vault's Git checkout failed validation",
+        ),
+        GitError::Conflict { .. } => (
+            "existing_git_local_history_conflict",
+            "this Vault's Git checkout has a merge conflict",
+        ),
+        GitError::DirtyWorkingTree { .. } => (
+            "existing_git_local_history_dirty_working_tree",
+            "this Vault's Git checkout has uncommitted edits Hatchdoor will not overwrite",
+        ),
+        GitError::ManualRecovery { .. } => (
+            "existing_git_local_history_manual_recovery_required",
+            "this Vault's Git checkout is part-way through an operation that needs manual recovery",
+        ),
+        GitError::Remote(_) => (
+            "existing_git_local_history_remote_unexpected",
+            "a Local history turn unexpectedly reached a Git remote",
+        ),
+        GitError::Other(_) => (
+            "existing_git_local_history_git_error",
+            "Git could not record this Vault's local history",
+        ),
     };
+    tracing::warn!(code, %error, "Local history Git turn failed");
     let retryable = matches!(error, GitError::Remote(_) | GitError::Other(_));
-    VaultWorkError::new(code, error.to_string(), retryable)
+    VaultWorkError::new(code, message, retryable)
 }
 
 /// Initialise a vault for explicitly-confirmed local versioning. The ignore
@@ -539,6 +564,31 @@ mod tests {
     use git2::Repository;
     use std::fs;
     use tempfile::TempDir;
+
+    /// #323: a Local history failure's message reaches every client through
+    /// the Vault's status, and used to carry `GitError`'s text, which embeds
+    /// the Vault's absolute host path.
+    #[test]
+    fn a_local_history_failure_is_reported_without_the_host_path() {
+        let root = tempfile::tempdir().expect("not a repository");
+        let vault_path = root.path().join("vault");
+        fs::create_dir(&vault_path).expect("vault directory");
+
+        let error = run_local_history_git_turn(
+            vault_path,
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("no enclosing repository");
+
+        assert_eq!(error.code(), "existing_git_local_history_validation_failed");
+        assert!(
+            !error.message().contains('/'),
+            "client-visible message leaks a host path: {}",
+            error.message()
+        );
+    }
 
     #[test]
     fn local_history_commits_only_the_contained_vault_subtree() {
