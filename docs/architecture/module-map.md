@@ -3174,7 +3174,10 @@ the shell.
 `App.demo-mode.test.tsx`, #152), `app/ExplorerPane.test.tsx`,
 `app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
 `vaults/vaultCollection.test.ts`, `useTheme.test.tsx`, storage tests, then full
-frontend checks. Layout changes to
+frontend checks. Service-worker and PWA changes (`main.tsx`, `vite.config.ts`)
+also need `pwaPrecache.test.ts` (lazy-chunk precache exclusion and runtime
+caching) and the PWA contracts in `clientAuditContracts.test.ts`, plus a
+production build to confirm the precache manifest. Layout changes to
 the explorer pane need a browser as well as the suite: its zone structure
 depends on real cascade behavior that jsdom does not reproduce.
 
