@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { StatsPage } from "./StatsPage";
 import { VAULT_SCOPE_KEY } from "../app/constants";
 import { discoveryResponse, healthyVault } from "../test/fixtures/vaults";
-import type { MonthActivity, VaultStats, VaultSummary } from "../types";
+import type {
+  CreatedDateStatus,
+  MonthActivity,
+  VaultStats,
+  VaultSummary,
+} from "../types";
 
 const FIRST = healthyVault("Notes");
 const SECOND = healthyVault("Archive");
@@ -29,7 +34,7 @@ function activityWindow(counts: number[]): MonthActivity[] {
   ];
   return months.map((month, index) => ({
     month,
-    modified_count: counts[index],
+    created_count: counts[index],
   }));
 }
 
@@ -44,6 +49,7 @@ function statsWithNoteCount(noteCount: number): VaultStats {
     top_tags: [],
     most_linked: [],
     activity_by_month: [],
+    created_date_status: "complete",
     notes_per_folder: [],
     longest_notes: [],
     shortest_notes: [],
@@ -69,7 +75,9 @@ function mockInstance(
   counts: Record<string, number>,
   failing: string[] = [],
   activity: MonthActivity[] = [],
+  statuses: CreatedDateStatus[] = ["complete"],
 ) {
+  let detailReads = 0;
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input: RequestInfo | URL) => {
@@ -95,12 +103,16 @@ function mockInstance(
         const vault = vaults.find(
           (candidate) => candidate.vault_id === vaultId,
         );
+        // Each read takes the next status, and the last one repeats.
+        const status = statuses[Math.min(detailReads, statuses.length - 1)];
+        detailReads += 1;
         return jsonResponse({
           vault_id: vaultId,
           vault_name: vault?.name ?? "",
           stats: {
             ...statsWithNoteCount(counts[vaultId] ?? 0),
             activity_by_month: activity,
+            created_date_status: status,
           },
         });
       }
@@ -121,13 +133,22 @@ function renderStats() {
  * Renders one Vault whose only distinguishing figure is its note count, with
  * the supplied activity window, and waits for that count to appear.
  */
-async function renderActivity(activity: MonthActivity[]) {
+async function renderActivity(
+  activity: MonthActivity[],
+  statuses: CreatedDateStatus[] = ["complete"],
+) {
   window.localStorage.setItem(VAULT_SCOPE_KEY, FIRST.vault_id);
-  mockInstance([FIRST], { [FIRST.vault_id]: 11 }, [], activity);
+  const fetchMock = mockInstance(
+    [FIRST],
+    { [FIRST.vault_id]: 11 },
+    [],
+    activity,
+    statuses,
+  );
 
   const rendered = renderStats();
   await waitFor(() => expect(screen.getByText("11")).toBeTruthy());
-  return rendered;
+  return { ...rendered, fetchMock };
 }
 
 afterEach(() => {
@@ -200,7 +221,7 @@ describe("StatsPage honours Vault scope (#102)", () => {
   });
 });
 
-describe("Writing Activity reads as a calendar (#298)", () => {
+describe("Notes created reads as a calendar (#298)", () => {
   it("draws the supplied window in order and averages over six months", async () => {
     const { container } = await renderActivity(
       activityWindow([0, 0, 1, 0, 2, 3]),
@@ -219,7 +240,13 @@ describe("Writing Activity reads as a calendar (#298)", () => {
     expect(counts).toEqual(["0", "0", "1", "0", "2", "3"]);
 
     expect(screen.getByText("Avg: 1.0 / month")).toBeTruthy();
-    expect(screen.getByText(/Peak: Sep · 3 notes/)).toBeTruthy();
+    expect(screen.getByText(/Peak: Sep · 3 new notes/)).toBeTruthy();
+  });
+
+  it("says one new note, not one new notes", async () => {
+    await renderActivity(activityWindow([0, 0, 1, 0, 0, 0]));
+
+    expect(screen.getByText(/Peak: Jun · 1 new note$/)).toBeTruthy();
   });
 
   it("draws finite bars and a peak for a window nobody wrote in", async () => {
@@ -233,18 +260,81 @@ describe("Writing Activity reads as a calendar (#298)", () => {
     expect(bars).toHaveLength(6);
     // Scaling against a zero maximum would ask for a NaN height.
     expect(bars.map((bar) => bar.style.height)).toEqual(Array(6).fill("2px"));
-    expect(screen.getByText(/Peak: Apr · 0 notes/)).toBeTruthy();
+    expect(screen.getByText(/Peak: Apr · 0 new notes/)).toBeTruthy();
     expect(screen.getByText("Avg: 0.0 / month")).toBeTruthy();
   });
 
   it("averages over the window rather than over the bars it received", async () => {
     const { container } = await renderActivity([
-      { month: "2026-08", modified_count: 6 },
-      { month: "2026-09", modified_count: 6 },
+      { month: "2026-08", created_count: 6 },
+      { month: "2026-09", created_count: 6 },
     ]);
 
     expect(container.querySelectorAll(".stats-act-col")).toHaveLength(2);
     // Twelve notes over a six-month window is 2.0, not 6.0 over two bars.
     expect(screen.getByText("Avg: 2.0 / month")).toBeTruthy();
+  });
+});
+
+describe("Notes created says when its dates are estimates (#300)", () => {
+  it("names what it counts and shows no notice when every date is sound", async () => {
+    await renderActivity(activityWindow([0, 0, 1, 0, 2, 3]));
+
+    expect(screen.getByText("Notes created, last 6 months")).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("says so when a repository's history is incomplete", async () => {
+    await renderActivity(activityWindow([0, 0, 1, 0, 2, 3]), ["estimated"]);
+
+    expect(screen.getByRole("status").textContent).toBe(
+      "Some dates are estimated: this repository's history is incomplete.",
+    );
+  });
+
+  it("asks again while history is being read, then drops the notice", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { fetchMock } = await renderActivity(
+        activityWindow([0, 0, 1, 0, 2, 3]),
+        ["reading", "complete"],
+      );
+      expect(screen.getByRole("status").textContent).toBe("Reading history…");
+
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+      const detailReads = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes("/stats/detail"),
+      );
+      expect(detailReads).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops asking again after a bounded number of tries", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { fetchMock } = await renderActivity(
+        activityWindow([0, 0, 1, 0, 2, 3]),
+        ["reading"],
+      );
+
+      // Each retry waits for its fetch to settle before the next is timed, so
+      // tick well past the limit; an uncapped poll would keep going.
+      for (let tick = 0; tick < 80; tick += 1) {
+        await vi.advanceTimersByTimeAsync(3000);
+      }
+
+      const detailReads = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes("/stats/detail"),
+      );
+      // The first read plus twenty retries, and the notice stays up.
+      expect(detailReads).toHaveLength(21);
+      expect(screen.getByRole("status").textContent).toBe("Reading history…");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

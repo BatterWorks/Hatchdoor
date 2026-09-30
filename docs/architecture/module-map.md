@@ -121,7 +121,9 @@ that production inventory are still checked for stale paths and duplicates.
   (#249). An in-place definition edit rotates the control block, and the
   ledger moves to the replacement alongside `prior_git`: its records describe
   writes already on disk and still uncommitted, so the rotation must not drop
-  them.
+  them. It also owns the Vault's `git::NoteHistory` (#300), which does not
+  move on rotation: a definition edit may point the Vault at another
+  repository, so the replacement starts with an empty history cache.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
@@ -1234,8 +1236,15 @@ every legacy `VaultStatsResponse` field from the same published snapshot
 cache tables the retired scope-less statistics query read. Its
 `activity_by_month` is a window rather than a list of findings (#298): exactly
 six `MonthActivity` entries, oldest first, one per calendar month ending at the
-current UTC month, zero-filled where no Note was modified, and counting no Note
-from outside the window. `VaultScope`
+current UTC month, zero-filled where no Note was created, and counting no Note
+from outside the window. Each entry's `created_count` counts Notes by created
+date (#300, ADR-29): a `created` property that reads as a date, else, for a
+Git-backed Vault, the commit that first added the Note through the Vault's
+`NoteHistory` (`git/note_history.rs`, held on its control block), else
+modification time. `created_date_status` reports `estimated` when history
+should have dated a Note and could not (shallow, unreadable) and `reading`
+while the walk is still running; the recent lists stay on modification
+time. `VaultScope`
 serializes as the flat scalar
 `docs/migrations/vault-scoped-clients.md`'s envelope documents — the Vault
 ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
@@ -1400,7 +1409,8 @@ the shared cache's published Vault snapshot seam, existing Vault note/link
 types, and Runtime Search's two tag primitives (`normalize_tag_path`,
 `tag_matches`) for a query's tag condition. That last one is a dependency on
 the shared search *vocabulary*, not on retrieval: nothing here calls
-`VaultSearchCore`.
+`VaultSearchCore`. `statistics_detail` also reads a Git-backed Vault's
+`git::NoteHistory` through its control block to date notes (#300).
 
 **Consumers:** `handlers/vault_content.rs` (exact note/link/resolve reads,
 `saved_queries`,
@@ -1991,6 +2001,7 @@ check-full` for the model-loading tests.
 - `src/git/managed_sync.rs`
 - `src/git/managed_task.rs`
 - `src/git/message.rs`
+- `src/git/note_history.rs`
 - `src/git/sync.rs`
 
 **Public contract:** `GitMode` (`off`/`local`, carried only by the legacy
@@ -2054,6 +2065,23 @@ next acquisition, under the lease, deletes only the leftover temporaries whose
 names this module generates (`repository.acquiring-<id>`, the receipt's
 `.acquiring-<id>`; symlinks as links) and clones again (#322). This boundary
 neither fetches nor resets, checks out, polls, or pushes.
+`NoteHistory` (`note_history.rs`, #300, ADR-29) dates each note in a
+Git-backed Vault by the author date of the commit that first added it, following
+renames forward across the whole repository, so a note moved into a Vault
+subdirectory keeps its date; a delete-then-recreate or a copy is new, and a
+shallow clone's graft commit yields `FirstAdd::Unknown` rather than a date. It
+walks once per `HEAD` on a background thread, keeps the result in memory, and
+extends it by only the new commits when `HEAD` descends from the cached one
+and the cached walk was not shallow. The tree at `HEAD` decides which notes
+exist, so a merge that keeps a note one branch deleted keeps its date. The
+control block starts a walk when an active Git-backed Vault's runtime is
+built, and `VaultControlBlock::history_location` names the repository root
+and the Vault's prefix inside it.
+`NoteHistory::read` answers `Ready`, `Reading` (after waiting up to the
+caller's bound) or `Unavailable`. It is read-only against the repository and
+never touches the index, the working tree, or the network. The Vault read
+projection (`vault_read.rs`'s `statistics_detail`) is its only consumer.
+
 `reuse_existing_checkout` is `acquire_or_reuse` with the acquisition half
 removed and `Ok(None)` in its place (#267): a commit turn must open no network
 connection, and cloning is one, so it reuses the checkout a Vault already has
@@ -4014,9 +4042,11 @@ smoke test if routing changes, and full frontend checks.
 **Public contract:** `StatsPage` and the
 `GET /api/v1/vaults/{vault_id}/stats/detail` payload (#137; the legacy
 unscoped `/api/stats` this section previously cited was retired in #101). The
-Writing Activity chart draws `activity_by_month` in the order supplied and
-averages over the six-month window rather than over the entries received
-(#298).
+"Notes created" chart draws `activity_by_month`'s `created_count` in the order
+supplied and averages over the six-month window rather than over the entries
+received (#298). It shows a one-line notice when `created_date_status` is
+`estimated` or `reading`, and asks again for a Vault still `reading` until it
+is not (#300).
 
 **Consumed dependencies:** shared API/error/types/UI and router links.
 

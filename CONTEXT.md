@@ -87,6 +87,10 @@ _Avoid_: Note ID, permalink, handle, key
 A labelled fact in one note's frontmatter, such as a price or a renewal date. Distinct from the frontmatter block itself, which is where properties live; a query tests properties, not the block.
 _Avoid_: Field, attribute, metadata
 
+**Created date**:
+The day a note first came into existence in its vault. It is fixed once known: renaming, moving, or editing a note never changes it, and neither does copying or restoring the vault. A date the author states in the note's `created` property is authoritative; only when there is none, or it cannot be read as a date, is the created date inferred, from the vault's history if it has one and otherwise from the file. The Stats page's "Notes created" chart counts notes by created date. Distinct from modification time, which records the last change to the file and is what the recently-modified lists follow.
+_Avoid_: Birth time, ctime, first-seen date
+
 **Query**:
 A request for the notes whose properties, tags, or path satisfy stated conditions. A query selects: a note either qualifies or it does not, and the notes come back in a stable order. Distinct from a search, which finds notes by meaning and ranks them by how well they match.
 _Avoid_: Search, filter, lookup
