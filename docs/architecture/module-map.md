@@ -3173,7 +3173,9 @@ accordion under `all`: pure derivation for the landing default (the open
 note's own Vault, else the last persisted, else nothing), the unavailable-
 Vault unfold gate, the `LAST_UNFOLDED_VAULT_KEY` persistence pair, and the
 per-Vault namespacing of the shared `expandedFolders` record the accordion's
-folder-open memory needs. Unfolding a Vault never calls `setScope`, same
+folder-open memory needs. `vaultFolderUpdate` lifts a Vault tree's folder
+update to that whole record, reading the Vault's slice from the record it is
+applied to rather than from a render's snapshot (#305). Unfolding a Vault never calls `setScope`, same
 invariant as the Scope zone's own narrow-scope call being the only one.
 
 Narrowing the scope to one Vault also moves the reader. `App.tsx`'s
@@ -3522,7 +3524,15 @@ read is in flight and there would otherwise be nothing to compare against. A
 collapsed folder renders none of its children — the browser hides a closed
 `<details>`' content anyway, so mounting a row per note bought DOM and render
 time and nothing else; the cost is that find-in-page no longer reaches a note
-inside a collapsed folder. The tree read's own `partial` (`treePartial`)
+inside a collapsed folder. A folder's children also mount whenever its own
+`<details>` last reported itself open, so it can never show open and empty
+(#305). `FolderTree`'s and `ExplorerPane`'s `onExpandedFoldersChange` carry an
+`ExpandedFoldersUpdate`, a function of the previous record rather than a whole
+next record, and the accordion applies its per-Vault namespacing inside it
+through `app/vaultAccordion.ts`'s `vaultFolderUpdate`:
+React dispatches `toggle` through every ancestor `<details>`, so several
+folders can write in one batch, and each write has to see the others. A
+`FolderNode` ignores a toggle whose target is not its own element. The tree read's own `partial` (`treePartial`)
 and the Vaults it left out (`treeMissingVaults`) reach `app/ExplorerPane.tsx`
 (#334): a trailing `.explorer-tree-partial` warn-ink line under the tree
 names them, an unfolded accordion Vault the read left out says it did not
@@ -3560,7 +3570,9 @@ shared UI components (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`),
 tree/recent/event endpoints.
 
 **Validation:** folder/note-candidate/state comparison tests and affected App
-navigation tests; `app/ExplorerPane.test.tsx` covers the tree and list
+navigation tests; `components/Explorer.test.tsx` covers nested folder
+open/close, the active note's ancestors, and the open-but-empty invariant
+(#305); `app/ExplorerPane.test.tsx` covers the tree and list
 components in composition, including the single-active-highlight invariant.
 `hooks/useVaultTree.test.ts` covers the `/recent` read's partiality at three
 and eight Vaults, the tree read's partiality, a failed `/recent` read, and a
