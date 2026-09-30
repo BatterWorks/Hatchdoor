@@ -383,6 +383,18 @@
   }
 }
 
+/* The single-Vault condition row (#334): the trigger's layout, nothing to
+   press. */
+.topbar-scope-trigger.is-static {
+  cursor: default;
+}
+
+@media (hover: hover) {
+  .topbar-scope-trigger.is-static:hover {
+    background: transparent;
+  }
+}
+
 /* Truncation priority under width pressure, in a fixed order (#145): the
    rule collapses first (a `flex-shrink` two orders of magnitude past the
    name's claims nearly all the shrinkage before the name loses a pixel),

@@ -19,7 +19,11 @@ import {
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
 import { describeMissingVaults } from "../lib/vaultParticipants";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
-import { deriveVaultAggregate, scopeName } from "./vaultSlotLogic";
+import {
+  deriveVaultAggregate,
+  deriveVaultSlot,
+  scopeName,
+} from "./vaultSlotLogic";
 import {
   expandedFoldersForVault,
   getStoredUnfoldedVault,
@@ -689,6 +693,15 @@ export function ExplorerPane({
   // nothing to offer there; reporting the Vault's health still does.
   const headVault =
     narrowedVault ?? (vaults.length === 1 ? vaults[0] : undefined);
+  // At one enabled Vault that head is the only desktop place the Vault's
+  // condition shows, so while it carries one it is pinned to the scrolling
+  // nav's top or bottom edge rather than scrolling out of view under a long
+  // tree or below Changed on disk and Recently viewed (#334).
+  const pinHead =
+    vaults.length === 1 &&
+    headVault !== undefined &&
+    deriveVaultSlot(headVault, vaultNoteCounts[headVault.vault_id], demoMode)
+      .kind === "condition";
   // A settled read that produced no tree and no error: every Vault it asked
   // left itself out. Without this the pane was blank, with nothing to click.
   const treeAnswered = !loadingTree && !treeError;
@@ -778,6 +791,7 @@ export function ExplorerPane({
             {tree || (headVault && !loadingTree) ? (
               <SideHead
                 label="Notes"
+                className={pinHead ? "is-pinned" : undefined}
                 count={headVault || !tree ? undefined : countNotes(tree)}
                 slot={
                   headVault ? (

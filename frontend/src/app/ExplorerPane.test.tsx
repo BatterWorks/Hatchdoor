@@ -1446,4 +1446,32 @@ describe("Single-Vault instances surface the Vault's health (#334)", () => {
     const notesHead = screen.getByText("Notes").closest(".side-head");
     expect(notesHead).toHaveTextContent("42");
   });
+
+  it("pins the Notes head while it carries the one Vault's condition", () => {
+    renderPane({ vaults: [conflictVault("Solo")], scope: "all", tree: TREE });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).toHaveClass("is-pinned");
+  });
+
+  it("leaves a healthy single-Vault Notes head unpinned", () => {
+    const solo = healthyVault("Solo");
+    renderPane({
+      vaults: [solo],
+      scope: "all",
+      tree: TREE,
+      vaultNoteCounts: { [solo.vault_id]: 42 },
+    });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).not.toHaveClass("is-pinned");
+  });
+
+  it("does not pin a narrowed head when more than one Vault is enabled", () => {
+    const vaults = [conflictVault("Solo"), healthyVault("Other")];
+    renderPane({ vaults, scope: vaults[0].vault_id, tree: TREE });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).not.toHaveClass("is-pinned");
+  });
 });

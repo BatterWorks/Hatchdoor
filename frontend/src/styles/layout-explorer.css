@@ -366,6 +366,17 @@ button.side-head {
   cursor: pointer;
 }
 
+/* The single-Vault Notes head while it reports a condition (#334): the one
+   desktop place that Vault's health shows, so it sticks to whichever edge of
+   the scrolling nav it would otherwise leave through. */
+.explorer-nav > .side-head.is-pinned {
+  position: sticky;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  background: var(--bg);
+}
+
 button.side-head:focus-visible {
   outline: 2px solid var(--hot);
   outline-offset: 1px;

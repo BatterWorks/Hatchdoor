@@ -3147,7 +3147,8 @@ discovery fetch, not just one frame, since nothing else in the shell blocks
 on `vaultsLoading` the way the `"/"` route's own content does. Everywhere a
 Vault's
 condition slot renders — the Scope zone, its collapsed head, the mobile
-scope row/sheet (`AppTopbar.tsx`), the explorer accordion, and each graph
+scope row/sheet and its single-Vault condition row (`AppTopbar.tsx`,
+#334), the explorer accordion and single-Vault `Notes` head, and each graph
 island caption (`GraphPage.tsx`, below) — `vaultSlotLogic.ts`'s
 `deriveVaultSlot`/`deriveVaultAggregate`/`describeScopeSlot` take an optional
 trailing `demoMode` parameter (default `false`) that clamps every condition
@@ -3407,7 +3408,12 @@ answer instead of showing an empty section, and a settled read with no tree
 at all shows a `Nothing Found` error block with Retry rather than a blank
 pane. At exactly one enabled Vault the flat tree's `Notes` head carries that
 Vault's `VaultSlot`, since no Scope zone, accordion or mobile scope row
-renders there and it is the only place the Vault's condition can show.
+renders there. While that slot reports a condition the head takes
+`.is-pinned` and sticks to the top or bottom edge of `.explorer-nav`, so a
+long tree or long Changed on disk and Recently viewed lists never scroll it
+out of view; on mobile, where the head sits in the closed drawer,
+`app/AppTopbar.tsx` shows the same condition in a non-pickable
+`.topbar-mobile-meta` row (#334). A healthy single Vault gets neither.
 `useVaultTree` additionally exposes `vaultTrees` (#142): every participating
 Vault's own tree, grouped rather than merged, straight off the `/tree`
 read's own per-Vault array. The existing merged `tree` (via `mergeVaultTrees`)
@@ -4211,8 +4217,12 @@ clipboard behavior. Vault Explorer consumes tree comparison, while Note reading
 consumes note and link comparison. `vaultParticipants.ts` (#141) — a
 `VaultReadProjection`'s `participants` down to the Vaults that did not answer
 fresh, and the shared "X did not answer." sentence — is consumed by Vault
-Explorer (`ChangesPanel`) and Search (`SearchDialog`), the two flattened
-collection surfaces a `partial` read can span.
+Explorer (`ChangesPanel`, and `useVaultTree` for the tree read's missing
+Vaults), Search (`SearchDialog`), and the Application shell's
+`app/ExplorerPane.tsx` (the tree's trailing line, the accordion's per-Vault
+"did not answer" line and the empty-tree error block, #334). The tree is
+the third surface, after the Changed on disk list and search results, whose
+`partial` read names the Vaults that did not answer.
 
 **Coordination rule:** keep these utilities behavior-only. Feature-specific
 copy labels, workflows, or state ownership stay with their feature.
