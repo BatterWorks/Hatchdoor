@@ -1075,12 +1075,14 @@ watching, and application startup.
 `src/vault.rs`, including note CRUD-by-move, section/edit primitives,
 shallow frontmatter merge (`update_note_frontmatter`), attachment
 operations, the Vault-wide tag rename (`rename_tag` with `TagRename`,
-`TagRenameNote`, `TagRenameError`, and `UnsupportedTagNote`), allowed
+`TagRenameNote`, `TagRenameError`, and `UnsupportedTagNote`), the Vault-wide
+tag delete (`delete_tag` with `TagDelete`, `TagDeleteNote`, `TagDeleteError`,
+and `NestedTag`, #258), allowed
 attachment extensions, `WriteOutcome`, and `WriteError`.
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
-(ADR-13), and its second caller is the Vault-wide tag rename in `tags.rs`
-(#242).
+(ADR-13), and its second caller is the Vault-wide tag rename and delete in
+`tags.rs` (#242, #258).
 
 **Consumed dependencies:** vault index/types, the local filesystem, the
 filesystem rename-flag capability (`src/rename_flags.rs`) that decides whether
@@ -1146,6 +1148,14 @@ write API/types, and configuration for archive or upload limits.
   not read back as exactly the promised tags. The writes go through
   `MutationJournal` one note at a time, and a failure restores every note
   already written.
+- A tag delete (#258) shares the rename's handshake, frontmatter editor,
+  read-back backstop and journal, with its own fingerprint. It removes one
+  exact tag from frontmatter `tags` values and never edits a note body. It is
+  refused as a whole while any note carries a tag nested under the target or
+  carries the target inline, because tag search is hierarchical and reads
+  bodies, and the delete promises that a search for the tag then finds
+  nothing. A list it empties stays as `tags: []`: the key is kept and the
+  block never stripped, unlike `update_note_frontmatter` deleting its last key.
 - Delete is recoverable trash; archive is move-based (ADR-11).
 - A rewritten backlink keeps its shape, and a link that resolved before a
   move still resolves after it: a path-qualified link takes the new full path,
@@ -1469,15 +1479,15 @@ and commit turns itself, rather than relying on a watcher (#324); and returning 
 `VaultOperationError`. `VaultMutation::with_commit_summary` carries the
 caller's one-line description of the change into that record; the private
 `RecordedWrite` trait is what lets `run_write` build the record once for all
-sixteen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
+seventeen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
 resolved from the `LayerMap` the write's own pre-write index build already
 holds rather than from a post-write rescan (#101). `VaultMutationCore` carries a one-shot form — gate, lock, write — for each of
-the sixteen primitives, which is what a standalone caller wants:
+the seventeen primitives, which is what a standalone caller wants:
 `create_note`, `update_note`, `append_to_note`, `edit_note`,
 `replace_section`, `update_frontmatter`, `rename_note`, `move_note`,
 `move_rename_note`, `archive_note`, `delete_note`, `import_attachment`,
-`move_attachment`, `rename_attachment`, `delete_attachment`, and
-`rename_tag`. `check_attachment_import` is not a mutation: it answers, without
+`move_attachment`, `rename_attachment`, `delete_attachment`, `rename_tag`, and
+`delete_tag`. `check_attachment_import` is not a mutation: it answers, without
 writing, locking, or recording, whether `import_attachment` would refuse a
 target before its bytes arrive (the Vault gate, marker and noise refusals, the
 path and extension checks, and an existing file that may not be replaced), so
@@ -1488,6 +1498,10 @@ records a single ledger entry for every note it rewrote, so a synced Vault
 commits the rename once. `tag_rename_error` maps its three refusals onto their
 own codes (`invalid_tag_name`, `tag_shape_unsupported`,
 `tag_rename_plan_stale`) and its write failures onto `write_operation_error`.
+`delete_tag` (#258) follows the same plan-then-apply path and records one
+ledger entry, `delete tag "#<tag>"`; `tag_delete_error` maps its refusals onto
+`invalid_tag_name`, `tag_has_nested_tags`, `tag_used_inline`,
+`tag_shape_unsupported`, and `tag_delete_plan_stale`.
 It also answers `write_capabilities`, which deliberately does *not* gate on mutability:
 a Vault that refuses writes has to answer that question rather than fail it.
 `WriteCapabilities` carries three answers, not two: `mutate_capable`,
@@ -1530,8 +1544,8 @@ and Index turns) (#324), `AppState::vault_archive_prefix`, and the live
 settings snapshot.
 
 **Consumers:** `handlers/vault_write.rs` (all eight routes) and
-`mcp/tools/write.rs` (all sixteen write tools, standalone, and every one
-except `rename_tag` inside `batch`).
+`mcp/tools/write.rs` (every write tool standalone, and every one except
+`rename_tag` and `delete_tag` inside `batch`).
 Each is a wire-shaping adapter: it parses transport input, calls this core
 once, and maps the typed outcome or the structured error onto a status code or
 a JSON-RPC failure. The core has no route or tool ownership.
@@ -2799,7 +2813,11 @@ which transfer links fall back to when `HATCHDOOR_PUBLIC_URL` is unset.
 closed on an invalid pin like the attachment limits) and `link_base` picks
 between the two. `tools::transfer_link_signer` is the one place a tool gets its
 signing key and base, and refuses with `invalid_params` when there is no base.
-Catalogue grows to 44, purely additive.
+Catalogue grows to 44, purely additive. #258 adds `delete_tag`, the
+eighteenth write tool, shaped exactly like `rename_tag`: in `WRITE_OPS`, in
+`NOT_BATCHABLE_WRITE_OPS`, answering `DeleteTagResult`, with its refusals as
+structured tool errors carrying their own codes. Catalogue grows to 45,
+purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -2964,7 +2982,7 @@ MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
 request, and attachment authorization never retains a rotated MCP token.
 
-Since #186 every one of the write tools, seventeen since #310, has ADR-19's shape: it
+Since #186 every one of the write tools, eighteen since #258, has ADR-19's shape: it
 validates its own arguments and then calls the Vault-qualified mutation core
 once, mapping the typed outcome or the structured `VaultOperationError` onto a
 tool result or a JSON-RPC failure. Two meanings live only here — a target path

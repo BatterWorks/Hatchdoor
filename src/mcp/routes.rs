@@ -3751,6 +3751,138 @@ mod tests {
         assert!(!registered_vault_path(&state).join("Should/Not.md").exists());
     }
 
+    /// Issue #258: a delete plans without recording, then applies as one
+    /// recorded write named after the tag.
+    #[tokio::test]
+    async fn delete_tag_plans_then_applies_as_one_recorded_write() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+        std::fs::write(root.join("A.md"), "---\ntags: [keep, Draft]\n---\nBody\n").expect("a");
+        std::fs::write(root.join("B.md"), "---\ntags: draft\ntitle: B\n---\n").expect("b");
+
+        let plan = call_tool(&state, "delete_tag", json!({"tag": "#Draft"})).await;
+        let plan = &plan["result"]["structuredContent"];
+        assert_eq!(plan["ok"], true, "{plan}");
+        assert_eq!(plan["applied"], false);
+        assert_eq!(plan["tag"], "draft");
+        assert_eq!(plan["notes_affected"], 2);
+        assert_eq!(plan["notes"][0]["relative_path"], "A");
+        let hash = plan["plan_hash"].as_str().expect("plan hash").to_string();
+        let runtime = state
+            .vaults
+            .runtime(vault_id_of(&state))
+            .expect("Vault runtime");
+        assert!(
+            runtime.write_ledger().take().is_empty(),
+            "a plan records nothing"
+        );
+
+        let applied = call_tool(
+            &state,
+            "delete_tag",
+            json!({"tag": "draft", "expected_plan_hash": hash, "commit_summary": "drop drafts"}),
+        )
+        .await;
+        let applied = &applied["result"]["structuredContent"];
+        assert_eq!(applied["applied"], true, "{applied}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("A.md")).expect("a"),
+            "---\ntags: [keep]\n---\nBody\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("B.md")).expect("b"),
+            "---\ntags: []\ntitle: B\n---\n"
+        );
+        let records = runtime.write_ledger().take();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].op, "delete tag");
+        assert_eq!(records[0].target, "#draft");
+        assert_eq!(records[0].affected_paths.len(), 2);
+        assert_eq!(records[0].summary.as_deref(), Some("drop drafts"));
+
+        let stale = call_tool(
+            &state,
+            "delete_tag",
+            json!({"tag": "draft", "expected_plan_hash": hash}),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true);
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"],
+            "tag_delete_plan_stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tag_refusals_carry_their_own_codes() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+
+        let invalid = call_tool(&state, "delete_tag", json!({"tag": "a b"})).await;
+        assert_eq!(
+            invalid["result"]["structuredContent"]["code"],
+            "invalid_tag_name"
+        );
+
+        std::fs::write(
+            root.join("Parent.md"),
+            "---\ntags: [area, area/work]\n---\n",
+        )
+        .expect("n");
+        let nested = call_tool(&state, "delete_tag", json!({"tag": "area"})).await;
+        let error = &nested["result"]["structuredContent"];
+        assert_eq!(error["code"], "tag_has_nested_tags", "{nested}");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("'area/work' (1 note(s))"),
+            "the refusal names the nested tag and its count: {error}"
+        );
+
+        std::fs::write(root.join("Inline.md"), "Mentions #area/work in prose.\n").expect("i");
+        let inline = call_tool(&state, "delete_tag", json!({"tag": "area/work"})).await;
+        let error = &inline["result"]["structuredContent"];
+        assert_eq!(error["code"], "tag_used_inline", "{inline}");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("'Inline'"),
+            "the refusal names the note: {error}"
+        );
+        assert_eq!(error["retryable"], false);
+        assert_eq!(
+            std::fs::read_to_string(root.join("Parent.md")).expect("p"),
+            "---\ntags: [area, area/work]\n---\n",
+            "a refusal writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_delete_tag_before_running_anything() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": "Should/Not.md", "content": "x"}},
+                {"op": "delete_tag", "arguments": {"vault_id": vault_id, "tag": "a"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602, "{body:#}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("'delete_tag' is not allowed inside batch"),
+            "{body:#}"
+        );
+        assert!(!registered_vault_path(&state).join("Should/Not.md").exists());
+    }
+
     #[tokio::test]
     async fn rename_note_returns_new_slug() {
         let (state, _tmp) = write_state();

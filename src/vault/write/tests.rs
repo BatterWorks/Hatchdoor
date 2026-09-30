@@ -4,7 +4,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cache::parse::content_hash;
+use crate::cache::parse::{content_hash, extract_tags};
 use crate::vault::types::{VaultIndex, VaultScanConfig};
 
 fn build(root: &Path) -> VaultIndex {
@@ -3623,6 +3623,291 @@ fn a_rename_into_an_ancestor_that_would_not_settle_is_refused() {
             .notes
             .is_empty()
     );
+}
+
+// ---------------------------------------------------------------------------
+// delete_tag (#258)
+// ---------------------------------------------------------------------------
+
+fn plan_delete(root: &Path, tag: &str) -> Result<TagDelete, TagDeleteError> {
+    delete_tag(root, &build_catalog(root), tag, None)
+}
+
+fn apply_delete(root: &Path, tag: &str) -> TagDelete {
+    let plan = plan_delete(root, tag).expect("plan");
+    let hash = plan
+        .plan_hash
+        .expect("a plan with changes has a fingerprint");
+    delete_tag(root, &build_catalog(root), tag, Some(&hash)).expect("apply")
+}
+
+#[test]
+fn delete_tag_plans_without_writing_and_applies_only_its_own_fingerprint() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [a, draft, b]\n---\nBody\n"),
+        ("B.md", "---\ntags: [other]\n---\n"),
+    ]);
+    let root = dir.path();
+    let before = read(root, "A.md");
+
+    let plan = plan_delete(root, "draft").expect("plan");
+    assert!(!plan.applied);
+    assert_eq!(plan.tag, "draft");
+    assert_eq!(plan.notes.len(), 1);
+    assert_eq!(plan.notes[0].relative_path, "A");
+    assert!(plan.plan_hash.is_some());
+    assert!(plan.affected_paths.is_empty());
+    assert_eq!(read(root, "A.md"), before, "a plan writes nothing");
+
+    let stale = delete_tag(
+        root,
+        &build_catalog(root),
+        "draft",
+        Some("fnv1a64:0000000000000000"),
+    );
+    assert_eq!(stale, Err(TagDeleteError::StalePlan));
+    assert_eq!(read(root, "A.md"), before, "a stale plan writes nothing");
+
+    let applied = delete_tag(
+        root,
+        &build_catalog(root),
+        "draft",
+        plan.plan_hash.as_deref(),
+    )
+    .expect("apply");
+    assert!(applied.applied);
+    assert_eq!(applied.affected_paths, vec![root.join("A.md")]);
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [a, b]\n---\nBody\n",
+        "only the deleted item goes; the list keeps its one-line form"
+    );
+    assert_eq!(
+        applied.notes[0].content_hash,
+        content_hash(&read(root, "A.md")),
+        "the reported hash is spendable on the next write"
+    );
+    assert!(
+        !extract_tags(&read(root, "A.md")).contains("draft"),
+        "the index no longer reads the tag"
+    );
+}
+
+#[test]
+fn delete_tag_refuses_a_fingerprint_the_vault_has_moved_past() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [draft]\n---\n")]);
+    let root = dir.path();
+    let plan = plan_delete(root, "draft").expect("plan");
+    fs::write(root.join("B.md"), "---\ntags: [draft]\n---\n").expect("new note");
+
+    let result = delete_tag(
+        root,
+        &build_catalog(root),
+        "draft",
+        plan.plan_hash.as_deref(),
+    );
+    assert_eq!(result, Err(TagDeleteError::StalePlan));
+    assert_eq!(read(root, "A.md"), "---\ntags: [draft]\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags: [draft]\n---\n");
+}
+
+#[test]
+fn a_note_losing_its_last_tag_keeps_an_empty_list_and_every_other_byte() {
+    let dir = tag_vault(&[
+        (
+            "Flow.md",
+            "---\ntitle: Flow\ntags: [draft]\n# a comment\nstatus: open\n---\nBody #x/y stays.\n",
+        ),
+        (
+            "Block.md",
+            "---\ntags:\n  - draft\naliases: [b]\n---\nBody\n",
+        ),
+        ("Scalar.md", "---\ntags: draft\ntitle: S\n---\n"),
+        ("Hashed.md", "---\ntags: [\"#Draft\", keep]\n---\n"),
+    ]);
+    let root = dir.path();
+    let applied = apply_delete(root, "draft");
+    assert_eq!(applied.notes.len(), 4);
+    assert_eq!(
+        read(root, "Flow.md"),
+        "---\ntitle: Flow\ntags: []\n# a comment\nstatus: open\n---\nBody #x/y stays.\n"
+    );
+    assert_eq!(
+        read(root, "Block.md"),
+        "---\ntags: []\naliases: [b]\n---\nBody\n",
+        "an emptied block list has no block form, so it becomes one line"
+    );
+    assert_eq!(read(root, "Scalar.md"), "---\ntags: []\ntitle: S\n---\n");
+    assert_eq!(read(root, "Hashed.md"), "---\ntags: [keep]\n---\n");
+}
+
+#[test]
+fn a_block_list_keeps_its_shape_when_other_tags_remain() {
+    let dir = tag_vault(&[("A.md", "---\ntags:\n  - a\n  - draft\n  - b\n---\n")]);
+    let root = dir.path();
+    apply_delete(root, "draft");
+    assert_eq!(read(root, "A.md"), "---\ntags:\n  - a\n  - b\n---\n");
+}
+
+#[test]
+fn delete_tag_matches_any_case_and_accepts_a_leading_hash() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [Draft]\n---\n"),
+        ("B.md", "---\ntags: [draft]\n---\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan_delete(root, "#Draft").expect("plan");
+    assert_eq!(plan.tag, "draft");
+    assert_eq!(plan.notes.len(), 2);
+    assert_eq!(
+        plan.plan_hash,
+        plan_delete(root, "draft").expect("plan").plan_hash,
+        "#Draft and draft are the same delete"
+    );
+    apply_delete(root, "#DRAFT");
+    assert_eq!(read(root, "A.md"), "---\ntags: []\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags: []\n---\n");
+}
+
+#[test]
+fn deleting_a_tag_no_note_carries_plans_nothing() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [drafts, draftish/x]\n---\n")]);
+    let root = dir.path();
+    let plan = plan_delete(root, "draft").expect("plan");
+    assert!(plan.notes.is_empty());
+    assert_eq!(plan.plan_hash, None);
+}
+
+#[test]
+fn delete_tag_refuses_while_any_note_uses_the_tag_inline() {
+    let dir = tag_vault(&[
+        ("Front.md", "---\ntags: [area/work]\n---\n"),
+        ("Both.md", "---\ntags: [area/work]\n---\nSee #area/work.\n"),
+        ("Body.md", "Only #Area/Work inline.\n"),
+        (
+            "Code.md",
+            "---\ntags: [area/work]\n---\n`#area/work` is code.\n",
+        ),
+    ]);
+    let root = dir.path();
+    let before: Vec<String> = ["Front.md", "Both.md", "Body.md", "Code.md"]
+        .iter()
+        .map(|path| read(root, path))
+        .collect();
+
+    let Err(TagDeleteError::InlineUse(notes)) = plan_delete(root, "area/work") else {
+        panic!("an inline use refuses the whole delete");
+    };
+    assert_eq!(notes, vec!["Body".to_string(), "Both".to_string()]);
+
+    let refused = delete_tag(
+        root,
+        &build_catalog(root),
+        "area/work",
+        Some("fnv1a64:0000000000000000"),
+    );
+    assert!(matches!(refused, Err(TagDeleteError::InlineUse(_))));
+    let after: Vec<String> = ["Front.md", "Both.md", "Body.md", "Code.md"]
+        .iter()
+        .map(|path| read(root, path))
+        .collect();
+    assert_eq!(after, before, "a refused delete writes nothing");
+}
+
+#[test]
+fn delete_tag_refuses_while_any_tag_is_nested_under_it() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [domain, domain/work]\n---\n"),
+        (
+            "B.md",
+            "---\ntags: [domain/work/x]\n---\n#domain/work here\n",
+        ),
+        ("C.md", "---\ntags: [domainish/x, domain]\n---\n"),
+    ]);
+    let root = dir.path();
+    let Err(TagDeleteError::NestedTags(nested)) = plan_delete(root, "domain") else {
+        panic!("a nested tag refuses the whole delete");
+    };
+    assert_eq!(
+        nested,
+        vec![
+            NestedTag {
+                tag: "domain/work".to_string(),
+                notes: 2
+            },
+            NestedTag {
+                tag: "domain/work/x".to_string(),
+                notes: 1
+            },
+        ]
+    );
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [domain, domain/work]\n---\n"
+    );
+    assert_eq!(
+        read(root, "C.md"),
+        "---\ntags: [domainish/x, domain]\n---\n"
+    );
+
+    // Cleared bottom-up, the same delete goes through.
+    apply_delete(root, "domain/work/x");
+    fs::write(root.join("B.md"), "---\ntags: []\n---\nnothing inline\n").expect("edit");
+    apply_delete(root, "domain/work");
+    apply_delete(root, "domain");
+    assert_eq!(read(root, "A.md"), "---\ntags: []\n---\n");
+    assert_eq!(read(root, "C.md"), "---\ntags: [domainish/x]\n---\n");
+}
+
+#[test]
+fn delete_tag_refuses_a_name_the_vault_could_not_hold() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [draft]\n---\n")]);
+    let root = dir.path();
+    for bad in ["", "#", "a b", "a//b", "/a"] {
+        assert!(
+            matches!(
+                plan_delete(root, bad),
+                Err(TagDeleteError::InvalidTagName(_))
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn delete_tag_refuses_a_note_it_cannot_edit_in_place() {
+    let dir = tag_vault(&[
+        ("Quoted.md", "---\ntags: [ 'draft' ,  x ]\n---\n"),
+        ("Fine.md", "---\ntags: [draft]\n---\n"),
+    ]);
+    let root = dir.path();
+    fs::write(root.join("Bytes.md"), b"---\ntags: [draft]\n---\n\xff\n").expect("bytes");
+    let Err(TagDeleteError::UnsupportedShape(notes)) = plan_delete(root, "draft") else {
+        panic!("a note that cannot be edited in place refuses the whole delete");
+    };
+    let paths: Vec<&str> = notes
+        .iter()
+        .map(|note| note.relative_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["Bytes", "Quoted"]);
+    assert_eq!(read(root, "Fine.md"), "---\ntags: [draft]\n---\n");
+
+    // A note that is not text and does not carry the tag is no obstacle.
+    fs::remove_file(root.join("Quoted.md")).expect("remove");
+    fs::write(root.join("Bytes.md"), b"---\ntags: [x]\n---\n\xff\n").expect("bytes");
+    apply_delete(root, "draft");
+    assert_eq!(read(root, "Fine.md"), "---\ntags: []\n---\n");
+}
+
+#[test]
+fn deleting_a_tag_removes_every_spelling_and_leaves_nothing_for_a_second_run() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [draft, keep, Draft]\n---\n")]);
+    let root = dir.path();
+    apply_delete(root, "draft");
+    assert_eq!(read(root, "A.md"), "---\ntags: [keep]\n---\n");
+    let again = plan_delete(root, "draft").expect("second plan");
+    assert!(again.notes.is_empty(), "{again:?}");
+    assert_eq!(again.plan_hash, None);
 }
 
 // ---------------------------------------------------------------------------

@@ -163,7 +163,7 @@ Hashtags inside code are never tags, so a note that documents a tag convention d
 Write it as `#not/a-tag` in your note.
 ````
 
-An agent renaming a tag across the Vault with `rename_tag` goes by these same rules, so a hashtag in code is left as written.
+An agent renaming a tag across the Vault with `rename_tag` goes by these same rules, so a hashtag in code is left as written. `delete_tag` does too: a hashtag in code is not an inline use of the tag, so it does not block a delete.
 
 ---
 
