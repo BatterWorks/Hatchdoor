@@ -83,6 +83,10 @@ _Avoid_: Sync task, git sync, debounce (when meant instance-wide)
 A note's address within one vault: a short lowercase form of its name, unique in that vault, by which browsers and agents ask for the note. Unlike a Vault ID it is derived rather than assigned, so renaming a note moves its address.
 _Avoid_: Note ID, permalink, handle, key
 
+**Note link**:
+A reference from one note to another, written either as a wikilink (`[[Title]]`) or as a Markdown link whose target is a `.md` path. Both forms are the same thing: each navigates, and each counts toward backlinks, the Links panel, the graph, and statistics. A Markdown link to anything that is not a `.md` file is an attachment reference or an external link, never a note link.
+_Avoid_: Wikilink (when meant to cover both forms), internal link
+
 **Note property**:
 A labelled fact in one note's frontmatter, such as a price or a renewal date. Distinct from the frontmatter block itself, which is where properties live; a query tests properties, not the block.
 _Avoid_: Field, attribute, metadata
