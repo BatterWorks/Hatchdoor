@@ -4138,8 +4138,10 @@ already reflects them.
 through (Vault creation, the identity-change confirmation, the reindex
 confirmation): it moves focus into the dialog on open, keeps Tab inside it,
 closes on Escape (held while the dialog's own Cancel is disabled), and
-returns focus to the opener, the same contract `NoteActionsDialog.tsx` keeps
-for its own dialogs. A Vault's own page (#338) reads the registry revision
+returns focus to the opener. It follows `NoteActionsDialog.tsx`'s focus-in,
+Tab-wrap and Escape behaviour and adds what that dialog does not: focus
+return to the opener, pulling stray focus back inside, and focusing the
+dialog itself when it holds no focusable control. A Vault's own page (#338) reads the registry revision
 fresh at the click for Pause, Resume and Disconnect, which carry no form
 fields; a Save and the identity round trip's pause step are checked against
 the revision the form was based on, and a `registry_revision_conflict`
