@@ -29,20 +29,42 @@ pub enum SectionMode {
     After,
 }
 
-struct PreparedNoteContent {
+/// Text a write is about to put on disk, and the quality warnings that
+/// describe what preparing it changed.
+struct PreparedText {
     content: String,
     warnings: Vec<String>,
 }
 
-fn prepare_note_content(content: &str) -> Result<PreparedNoteContent, WriteError> {
+fn reject_nul(content: &str) -> Result<(), WriteError> {
     if content.contains('\0') {
         return Err(WriteError::InvalidInput(
             "note content cannot contain NUL bytes".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// `content` with every CRLF and lone CR turned into LF.
+fn to_lf(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Whether `content` ends in a line break. A lone CR counts, as it does in
+/// CommonMark, so a separator is never added after one.
+fn ends_with_line_break(content: &str) -> bool {
+    content.ends_with(['\n', '\r'])
+}
+
+/// Normalise the content of a whole-content write (`create_note`,
+/// `update_note`): CRLF and CR become LF and a final newline is added. ADR-22
+/// allows this only for a write that replaces the whole note; the partial
+/// writes use `prepare_inserted_text` instead.
+fn prepare_note_content(content: &str) -> Result<PreparedText, WriteError> {
+    reject_nul(content)?;
 
     let mut warnings = Vec::new();
-    let mut normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut normalized = to_lf(content);
     if normalized != content {
         warnings.push("normalized CRLF/CR line endings to LF".to_string());
     }
@@ -52,10 +74,78 @@ fn prepare_note_content(content: &str) -> Result<PreparedNoteContent, WriteError
     }
     warnings.extend(frontmatter_warnings(&normalized));
 
-    Ok(PreparedNoteContent {
+    Ok(PreparedText {
         content: normalized,
         warnings,
     })
+}
+
+const BREAK_BEFORE_WARNING: &str = "added a line break before the supplied text";
+const BREAK_AFTER_WARNING: &str = "added a line break after the supplied text";
+
+/// The line ending a partial write gives the text it inserts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+}
+
+impl LineEnding {
+    /// Whichever of CRLF and lone LF `content` uses more often, and LF on a
+    /// tie or when it has no line breaks. The frontend's `detectLineEnding`
+    /// applies the same rule.
+    fn of(content: &str) -> Self {
+        let crlf = content.matches("\r\n").count();
+        let lone_lf = content.matches('\n').count() - crlf;
+        if crlf > lone_lf { Self::Crlf } else { Self::Lf }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lf => "LF",
+            Self::Crlf => "CRLF",
+        }
+    }
+}
+
+/// Prepare the text a partial write inserts into an existing note (ADR-22).
+/// Only the caller's text is touched: its line breaks, in whatever form they
+/// arrived, are written in the note's own `line_ending`. The note itself is
+/// never normalised, so the warnings describe the supplied text alone.
+fn prepare_inserted_text(text: &str, line_ending: LineEnding) -> Result<PreparedText, WriteError> {
+    reject_nul(text)?;
+    let conformed = match line_ending {
+        LineEnding::Lf => to_lf(text),
+        other => to_lf(text).replace('\n', other.as_str()),
+    };
+    let mut warnings = Vec::new();
+    if conformed != text {
+        warnings.push(format!(
+            "converted line endings in the supplied text to {} to match the note",
+            line_ending.name()
+        ));
+    }
+    Ok(PreparedText {
+        content: conformed,
+        warnings,
+    })
+}
+
+/// The frontmatter quality warnings for a note a partial write produced. The
+/// check reads an LF view so a CRLF note is checked like any other; the note
+/// on disk is not changed by it.
+fn partial_write_frontmatter_warnings(content: &str) -> Vec<String> {
+    if !content.contains('\r') {
+        return frontmatter_warnings(content);
+    }
+    frontmatter_warnings(&to_lf(content))
 }
 
 fn frontmatter_warnings(content: &str) -> Vec<String> {
@@ -328,29 +418,33 @@ pub fn update_note_frontmatter(
     })
 }
 
+/// Append text to a note. The existing bytes are kept as they are; the
+/// appended text uses the note's own line ending, is separated from a last
+/// line that has no line break, and ends with a line break (ADR-22).
 pub fn append_note(
     entry: &NoteEntry,
     content: &str,
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
-    let mut current = fs::read_to_string(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}': {error}",
-            entry.relative_path
-        ))
-    })?;
-    if !current.ends_with('\n') {
-        current.push('\n');
-    }
-    current.push_str(content);
-    let prepared = prepare_note_content(&current)?;
-    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
+    let current = read_note(entry)?;
+    let line_ending = LineEnding::of(&current);
+    let appended = prepare_inserted_text(content, line_ending)?;
+    let mut warnings = appended.warnings;
+    // Appended text always ends with a line break, whatever the note did.
+    let splice = Splice {
+        block: &appended.content,
+        line_ending,
+        end_with_break: true,
+    };
+    let updated = splice.join(&current, "", &mut warnings);
+    warnings.extend(partial_write_frontmatter_warnings(&updated));
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&prepared.content)),
-        quality_warnings: prepared.warnings,
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -388,18 +482,22 @@ pub fn edit_note(
         }
         _ => {}
     }
+    // Only the matched text changes (ADR-22): the replacement takes the
+    // note's line ending, and nothing else in the note is normalised.
+    let replacement = prepare_inserted_text(new_string, LineEnding::of(&current))?;
     let updated = if replace_all {
-        current.replace(old_string, new_string)
+        current.replace(old_string, &replacement.content)
     } else {
-        current.replacen(old_string, new_string, 1)
+        current.replacen(old_string, &replacement.content, 1)
     };
-    let prepared = prepare_note_content(&updated)?;
-    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
+    let mut warnings = replacement.warnings;
+    warnings.extend(partial_write_frontmatter_warnings(&updated));
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&prepared.content)),
-        quality_warnings: prepared.warnings,
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -423,18 +521,26 @@ pub fn replace_section(
     }
     let current = read_note(entry)?;
     let (start, end) = section_span(&current, requested, &entry.relative_path)?;
-    let updated = match mode {
-        SectionMode::Replace => splice(&current[..start], content, &current[end..]),
-        SectionMode::Before => splice(&current[..start], content, &current[start..]),
-        SectionMode::After => splice(&current[..end], content, &current[end..]),
+    let line_ending = LineEnding::of(&current);
+    let block = prepare_inserted_text(content, line_ending)?;
+    let mut warnings = block.warnings;
+    let splice = Splice {
+        block: &block.content,
+        line_ending,
+        end_with_break: ends_with_line_break(&current),
     };
-    let prepared = prepare_note_content(&updated)?;
-    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
+    let updated = match mode {
+        SectionMode::Replace => splice.join(&current[..start], &current[end..], &mut warnings),
+        SectionMode::Before => splice.join(&current[..start], &current[start..], &mut warnings),
+        SectionMode::After => splice.join(&current[..end], &current[end..], &mut warnings),
+    };
+    warnings.extend(partial_write_frontmatter_warnings(&updated));
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&prepared.content)),
-        quality_warnings: prepared.warnings,
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -519,20 +625,41 @@ fn section_span(
     }
 }
 
-/// Join `prefix + block + suffix`, guaranteeing newline separation so an
-/// inserted block never glues onto adjacent lines.
-fn splice(prefix: &str, block: &str, suffix: &str) -> String {
-    let mut out = String::with_capacity(prefix.len() + block.len() + suffix.len() + 2);
-    out.push_str(prefix);
-    if !prefix.is_empty() && !prefix.ends_with('\n') {
-        out.push('\n');
+/// A block of supplied text `replace_section` or `append_note` places between
+/// two untouched parts of a note.
+struct Splice<'a> {
+    block: &'a str,
+    line_ending: LineEnding,
+    /// Whether a block that ends the note must end with a line break.
+    end_with_break: bool,
+}
+
+impl Splice<'_> {
+    /// Join `prefix + block + suffix`, adding a line break in the note's own
+    /// line ending wherever the block would otherwise glue onto an adjacent
+    /// line, and reporting each one. A block that ends the note ends with a
+    /// line break only when `end_with_break` says so. An empty block removes
+    /// text and adds nothing. The block has been through
+    /// `prepare_inserted_text`, so it never ends in a lone CR and checking for
+    /// `\n` is enough.
+    fn join(&self, prefix: &str, suffix: &str, warnings: &mut Vec<String>) -> String {
+        let mut out = String::with_capacity(prefix.len() + self.block.len() + suffix.len() + 4);
+        out.push_str(prefix);
+        if !self.block.is_empty() {
+            if !prefix.is_empty() && !ends_with_line_break(prefix) {
+                out.push_str(self.line_ending.as_str());
+                warnings.push(BREAK_BEFORE_WARNING.to_string());
+            }
+            out.push_str(self.block);
+            let needs_break = !suffix.is_empty() || self.end_with_break;
+            if needs_break && !self.block.ends_with('\n') {
+                out.push_str(self.line_ending.as_str());
+                warnings.push(BREAK_AFTER_WARNING.to_string());
+            }
+        }
+        out.push_str(suffix);
+        out
     }
-    out.push_str(block);
-    if !suffix.is_empty() && !block.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(suffix);
-    out
 }
 
 pub fn move_or_rename_note(

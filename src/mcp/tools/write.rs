@@ -343,10 +343,15 @@ pub(super) async fn append_to_note_tool(
         JsonRpcFailure::invalid_params(format!("Invalid append_to_note arguments: {error}"))
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
-    let content = non_empty_argument("content", args.content)?;
+    // Checked for emptiness but passed on untrimmed: the write layer reports
+    // any line break it adds to the caller's text, so stripping the caller's
+    // own trailing newline here would make that report false (#316).
+    if args.content.trim().is_empty() {
+        return Err(JsonRpcFailure::invalid_params("content cannot be empty"));
+    }
     let outcome = vault
         .mutation(args.commit_summary)
-        .append_to_note(&slug, &content, &args.expected_content_hash)
+        .append_to_note(&slug, &args.content, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
     Ok(note_write_result(vault.vault_id, outcome))
@@ -803,7 +808,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "append_to_note",
-            "description": "Append Markdown content to an existing note. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Append Markdown content to an existing note. The existing text is left as it was. The appended text takes the note's own line ending (CRLF or LF, whichever the note mostly uses), a line break is added before it when the note's last line has none and after it when the text has none, quality_warnings names each conversion or added line break, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -819,7 +824,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "edit_note",
-            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. Every byte outside the replaced text is left as it was. Line breaks in new_string take the note's own line ending (CRLF or LF, whichever the note mostly uses), quality_warnings names any conversion, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -837,7 +842,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "replace_section",
-            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. Every byte outside the section is left as it was. Line breaks in content take the note's own line ending (CRLF or LF, whichever the note mostly uses), a line break is added where content would otherwise run into an adjacent line, quality_warnings names each conversion or added line break, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1372,19 +1377,14 @@ mod finalize_tests {
         );
     }
 
-    /// The five tools whose note passes through the core's preparation step
-    /// say so in their own description, since the hash they return can
-    /// differ from a hash of what the caller sent (#260). update_frontmatter
-    /// skips that step and must not claim otherwise.
+    /// The two whole-content tools normalise the note and say so in their own
+    /// description, since the hash they return can differ from a hash of what
+    /// the caller sent (#260). The partial writes leave the rest of the note
+    /// as it was (ADR-22, #316) and must not claim a whole-note normalisation.
     #[test]
-    fn content_writing_tools_say_the_note_is_normalised() {
-        let normalising = [
-            "create_note",
-            "update_note",
-            "append_to_note",
-            "edit_note",
-            "replace_section",
-        ];
+    fn content_writing_tools_describe_their_line_ending_handling() {
+        let normalising = ["create_note", "update_note"];
+        let partial = ["append_to_note", "edit_note", "replace_section"];
         for tool in write_tools_list() {
             let name = tool["name"].as_str().expect("tool name");
             let description = tool["description"].as_str().expect("description");
@@ -1396,6 +1396,14 @@ mod finalize_tests {
                 normalising.contains(&name),
                 "{name}: normalisation sentence present = {says_so}"
             );
+            if partial.contains(&name) {
+                assert!(
+                    description.contains("is left as it was")
+                        && description.contains("the note's own line ending")
+                        && description.contains("content_hash is the hash of the file as written"),
+                    "{name}: partial-write sentence missing"
+                );
+            }
         }
     }
 

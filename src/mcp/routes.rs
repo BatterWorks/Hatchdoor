@@ -3537,7 +3537,47 @@ mod tests {
         assert_eq!(edited["result"]["structuredContent"]["ok"], true);
         assert_eq!(
             std::fs::read_to_string(registered_vault_path(&state).join("Home.md"),).expect("read"),
-            "# Home\nALPHA token\n[[Plan]]\n"
+            "# Home\nALPHA token\n[[Plan]]",
+            "edit_note leaves the missing final newline alone (#316)"
+        );
+    }
+
+    /// #316: the text an agent appends reaches the note as it was sent, so a
+    /// trailing newline it supplied is not stripped and then reported as a
+    /// line break Hatchdoor added, and leading indentation survives.
+    #[tokio::test]
+    async fn append_to_note_keeps_the_supplied_text_as_sent() {
+        let (state, _tmp) = write_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let appended = call_tool(
+            &state,
+            "append_to_note",
+            json!({
+                "slug": "home",
+                "content": "    indented code\n",
+                "expected_content_hash": hash
+            }),
+        )
+        .await;
+        assert_eq!(appended["result"]["structuredContent"]["ok"], true);
+        assert_eq!(
+            appended["result"]["structuredContent"]["quality_warnings"],
+            json!(["added a line break before the supplied text"])
+        );
+        assert_eq!(
+            std::fs::read_to_string(registered_vault_path(&state).join("Home.md")).expect("read"),
+            "# Home\nalpha token\n[[Plan]]\n    indented code\n"
+        );
+
+        let blank = call_tool(
+            &state,
+            "append_to_note",
+            json!({"slug": "home", "content": " \n ", "expected_content_hash": "x"}),
+        )
+        .await;
+        assert!(
+            blank["error"].is_object(),
+            "whitespace-only content is still refused: {blank}"
         );
     }
 
@@ -4741,7 +4781,7 @@ mod tests {
                 // construction, and must still succeed because the prior
                 // create in this same batch is chained into it.
                 {"op": "append_to_note", "arguments": {
-                    "vault_id": vault_id, "slug": "chained", "content": "\ntwo",
+                    "vault_id": vault_id, "slug": "chained", "content": "two",
                     "expected_content_hash": "fnv1a64:deliberately-stale"
                 }}
             ]}),
