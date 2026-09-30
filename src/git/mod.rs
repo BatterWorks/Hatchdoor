@@ -4,6 +4,7 @@ pub mod managed_checkout;
 pub mod managed_sync;
 pub mod managed_task;
 pub mod message;
+pub mod note_history;
 pub mod sync;
 
 use crate::vault_registry::{VaultGitMode, VaultSource};
@@ -27,6 +28,7 @@ pub use managed_task::{
     spawn_scheduler_tick,
 };
 pub use message::{WriteLedger, WriteRecord, build_commit_message};
+pub use note_history::{FirstAdd, FirstAdds, HistoryRead, NoteHistory};
 pub use sync::{
     CommitOutcome, GitError, commit_local, has_uncommitted_changes, init_local_repo,
     run_local_history_git_turn, validate_local_repo, validate_repo,

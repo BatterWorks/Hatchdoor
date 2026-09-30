@@ -380,12 +380,20 @@ export type NoteRef = { title: string; slug: string };
 export type NoteWordRef = NoteRef & { word_count: number };
 export type LinkedNoteRef = NoteRef & { backlink_count: number };
 /**
- * One calendar month of the Writing Activity window. `activity_by_month`
- * carries exactly six of these, oldest first, one per calendar month ending at
- * the current UTC month, zero-filled where nobody wrote (#298). Average over
- * the window, not over the entries received.
+ * One calendar month of the "Notes created" window: how many notes have their
+ * created date in it (#300). `activity_by_month` carries exactly six of these,
+ * oldest first, one per calendar month ending at the current UTC month,
+ * zero-filled where nobody started a note (#298). Average over the window, not
+ * over the entries received.
  */
-export type MonthActivity = { month: string; modified_count: number };
+export type MonthActivity = { month: string; created_count: number };
+/**
+ * Whether every created date behind the chart came from where it should have.
+ * `estimated`: a Git-backed Vault's history is shallow or unreadable, so some
+ * notes were dated by their files. `reading`: the history is still being read
+ * and asking again shortly will do better.
+ */
+export type CreatedDateStatus = "complete" | "estimated" | "reading";
 export type FolderStat = { folder: string; note_count: number };
 export type NoteList = { count: number; notes: NoteRef[] };
 
@@ -422,6 +430,7 @@ export type VaultStats = {
   top_tags: TagStat[];
   most_linked: LinkedNoteRef[];
   activity_by_month: MonthActivity[];
+  created_date_status: CreatedDateStatus;
   notes_per_folder: FolderStat[];
   longest_notes: NoteWordRef[];
   shortest_notes: NoteWordRef[];

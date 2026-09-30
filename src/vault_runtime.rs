@@ -529,6 +529,20 @@ struct CarriedOverState {
     exclusion: Option<VaultWriteExclusion>,
 }
 
+/// Where a Vault's notes sit in its Git repository (#300).
+pub(crate) enum HistoryLocation {
+    /// A plain folder, which has no history.
+    None,
+    /// The repository's root, and the Vault's folder inside it,
+    /// `/`-separated, when the Vault is not the whole repository.
+    Repository {
+        root: PathBuf,
+        prefix: Option<String>,
+    },
+    /// A Git source whose folder cannot be spelled as repository paths.
+    Unresolvable,
+}
+
 #[derive(Clone)]
 pub struct VaultControlBlock {
     definition: Arc<VaultDefinition>,
@@ -555,6 +569,11 @@ pub struct VaultControlBlock {
     /// Lives here because those two are the only things that touch it and
     /// this is the one per-Vault handle both already hold.
     write_ledger: Arc<crate::git::WriteLedger>,
+    /// When each of this Vault's notes first entered its Git history, walked
+    /// once in the background and reused by every stats read until the
+    /// branch moves (#300). A fresh block starts empty, which is right: a
+    /// definition edit may point the Vault at another repository.
+    note_history: Arc<crate::git::NoteHistory>,
 }
 
 /// Say once, when a Vault's runtime is established, that its filesystem cannot
@@ -663,8 +682,9 @@ impl VaultControlBlock {
         if snapshot.activation == VaultActivationStatus::Active {
             let _ = report_compare_and_swap_support(definition.vault_id(), &vault_path);
         }
+        let active = snapshot.activation == VaultActivationStatus::Active;
         let (cancellation, _) = tokio::sync::watch::channel(false);
-        Self {
+        let block = Self {
             definition: Arc::new(definition),
             vault_path: Arc::new(vault_path),
             snapshot: Arc::new(RwLock::new(snapshot)),
@@ -676,6 +696,59 @@ impl VaultControlBlock {
             watching: watching.cloned(),
             snapshot_cache: snapshot_cache.cloned(),
             write_ledger: prior_writes.unwrap_or_else(|| Arc::new(crate::git::WriteLedger::new())),
+            note_history: Arc::new(crate::git::NoteHistory::default()),
+        };
+        if active {
+            block.start_note_history();
+        }
+        block
+    }
+
+    /// Start dating this Vault's notes from its Git history in the
+    /// background, so the first stats read after startup finds the walk done
+    /// or under way rather than starting it (#300). Nothing for a plain
+    /// folder, or a Git source whose repository is not there yet.
+    fn start_note_history(&self) {
+        let HistoryLocation::Repository { root, .. } = self.history_location() else {
+            return;
+        };
+        let history = Arc::clone(&self.note_history);
+        let _ = std::thread::Builder::new()
+            .name("note-history-start".to_string())
+            .spawn(move || {
+                let _ = history.read(&root, std::time::Duration::ZERO);
+            });
+    }
+
+    /// Where this Vault's notes sit in its Git repository, so their history
+    /// can date them (#300).
+    pub(crate) fn history_location(&self) -> HistoryLocation {
+        use crate::vault_registry::VaultSource;
+
+        let subdirectory = match self.definition.source() {
+            VaultSource::Local { .. } => return HistoryLocation::None,
+            VaultSource::ExistingGit {
+                vault_subdirectory, ..
+            }
+            | VaultSource::ManagedGit {
+                vault_subdirectory, ..
+            } => vault_subdirectory.as_deref(),
+        };
+        let prefix = match subdirectory.map(Path::to_str) {
+            None => None,
+            Some(Some(text)) => Some(text.replace('\\', "/")),
+            Some(None) => return HistoryLocation::Unresolvable,
+        };
+        // The Vault's folder is the repository joined with its subdirectory,
+        // for both kinds of Git source, so the repository is that many
+        // levels up.
+        let depth = subdirectory.map_or(0, |subdirectory| subdirectory.components().count());
+        match self.vault_path.ancestors().nth(depth) {
+            Some(root) => HistoryLocation::Repository {
+                root: root.to_path_buf(),
+                prefix,
+            },
+            None => HistoryLocation::Unresolvable,
         }
     }
 
@@ -700,6 +773,11 @@ impl VaultControlBlock {
     /// control block there.
     pub fn write_ledger(&self) -> Arc<crate::git::WriteLedger> {
         Arc::clone(&self.write_ledger)
+    }
+
+    /// This Vault's cached Git history walk, for dating its notes.
+    pub(crate) fn note_history(&self) -> Arc<crate::git::NoteHistory> {
+        Arc::clone(&self.note_history)
     }
 
     /// Build an authoritative index for an exact read. Collection projections
