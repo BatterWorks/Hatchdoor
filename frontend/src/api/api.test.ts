@@ -150,6 +150,17 @@ describe("web token with site data blocked (#339)", () => {
     expect(getToken()).toBe("secret-token");
   });
 
+  it("uses a new token the browser refused over an old one still stored", () => {
+    window.localStorage.setItem("hatchdoor_web_token", "stale-token");
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+
+    setToken("secret-token");
+
+    expect(getToken()).toBe("secret-token");
+  });
+
   it("follows storage when it works, so a sign-out in another tab still applies", () => {
     setToken("secret-token");
     window.localStorage.removeItem("hatchdoor_web_token");

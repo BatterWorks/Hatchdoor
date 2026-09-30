@@ -32,6 +32,16 @@ const INITIAL_DIVERSITY_OVERFETCH: usize = 4;
 /// Search does not make unbounded KNN or FTS requests while backfilling after
 /// the per-note cap. If this candidate ceiling is all from capped notes,
 /// callers receive the best available cap-compliant partial result set.
+///
+/// Keyword search gained this ceiling in #328; before, it ranked every FTS
+/// hit. ADR-15 justification, recorded since the eval harness covers only
+/// semantic search: the ceiling never changes which hits come back or their
+/// order, because the window is the top of the same BM25 ranking. It can only
+/// return fewer than `limit` results, and only when the 200 best-ranked
+/// chunks all belong to notes already at the per-note cap, which with the
+/// default cap of two means fewer than `limit` notes own the whole top 200.
+/// The unbounded query it replaced let one common word pull every matching
+/// chunk out of SQLite per request, on the unauthenticated demo too.
 const MAX_RANKED_CANDIDATES: usize = 200;
 
 #[cfg(test)]

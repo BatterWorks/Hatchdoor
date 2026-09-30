@@ -3350,7 +3350,13 @@ new field. Contract changes must list the backend serializer and all frontend
 consumers. New feature-local types should remain local unless genuinely shared.
 
 **Invariants:** preserve bearer/header behavior and the deliberate query-token
-fallback (ADR-08). Never log or render tokens.
+fallback (ADR-08). Never log or render tokens. When the browser refuses to
+store the web token, `setToken` keeps it in page memory, prefers it over any
+older stored token, and returns `false`; a caller must then apply it without a
+page reload, which would forget it (Unlock remounts the app in place). The
+unauthorized notification fires only for a 401 answering a request sent with
+the token still current, so answers in flight from before an Unlock cannot
+lock the new session (#339).
 
 **Validation:** API/error tests, affected feature/consumer tests, and typecheck.
 `clientAuditContracts.test.ts` audits UI, PWA, and CSS source contracts; it does

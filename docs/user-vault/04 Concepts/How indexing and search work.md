@@ -33,7 +33,7 @@ Cross-encoder reranking was evaluated too, and dropped for the same reason from 
 
 ## Where layers fit in
 
-A note's [[The layer system|layer]] decides whether Semantic search reaches it by default: the default surface is always embedded, but a demoted layer only gets vectors if `HATCHDOOR_EMBED_LAYERS` is on. Keyword search doesn't care — FTS5 indexes every layer regardless, since exact-text matching costs nothing extra to keep available. With it off, a Semantic search limited to a demoted layer doesn't pretend the layer came back empty: that Vault is reported `not_searchable` and the result is marked partial, so an agent knows to try Keyword instead.
+A note's [[The layer system|layer]] decides whether Semantic search reaches it by default: the default surface is always embedded, but a demoted layer only gets vectors if `HATCHDOOR_EMBED_LAYERS` is on. Keyword search doesn't care — FTS5 indexes every layer regardless, since exact-text matching costs nothing extra to keep available. With it off, a Semantic search that includes a demoted layer doesn't pretend that layer came back empty: that Vault is reported `not_searchable` and the result is marked partial, so an agent or the search dialog knows to try Keyword for those notes.
 
 ---
 

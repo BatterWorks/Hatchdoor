@@ -9,13 +9,14 @@ export const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 // The token for this page only, held when the browser refuses to store it.
 // WebKit with site data blocked throws from every localStorage access, and
 // without this an Unlock would forget the token at once and every request
-// would stay on 401 (#339). Null whenever storage accepted the token, so a
-// sign-out in another tab still applies here.
+// would stay on 401 (#339). It wins over storage, which may still hold an
+// older token it would not let this one replace. Null whenever storage
+// accepted the token, so a sign-out in another tab still applies here.
 let unstoredToken: string | null = null;
 
 export function getToken(): string | null {
   try {
-    return localStorage.getItem(TOKEN_KEY) ?? unstoredToken;
+    return unstoredToken ?? localStorage.getItem(TOKEN_KEY);
   } catch {
     return unstoredToken;
   }
