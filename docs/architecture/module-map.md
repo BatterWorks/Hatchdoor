@@ -3922,7 +3922,8 @@ each island's caption so a demo instance's islands clamp to the amber tier
 the same as every other Vault chrome, #152), the collection client's
 revision (the graph re-reads on every move and folds the answer into the live
 simulation without resetting the view, #336), and `describeVaultsNotDrawn` /
-`describeVaultsStillIndexing` from `lib/vaultParticipants.ts`.
+`joinWithAnd` from `lib/vaultParticipants.ts` (the graph's own "still being
+indexed" empty-field sentence stays in `GraphPage.tsx`).
 
 **Coordination paths:** `App.tsx`, `types.ts`, backend graph wire types/handler,
 `app/vaultSlotLogic.ts`, `lib/vaultParticipants.ts`, `hooks/useVaultScope.ts`,
@@ -4231,7 +4232,9 @@ fresh, and the shared "X did not answer." sentence — is consumed by Vault
 Explorer (`ChangesPanel`, and `useVaultTree` for the tree read's missing
 Vaults), Search (`SearchDialog`), and the Application shell's
 `app/ExplorerPane.tsx` (the tree's trailing line, the accordion's per-Vault
-"did not answer" line and the empty-tree error block, #334). The tree is
+"did not answer" line and the empty-tree error block, #334), and Graph
+(`GraphPage`: `describeVaultsNotDrawn` for Vaults that drew no island, #143,
+and `joinWithAnd` for its empty-field sentence, #336). The tree is
 the third surface, after the Changed on disk list and search results, whose
 `partial` read names the Vaults that did not answer.
 

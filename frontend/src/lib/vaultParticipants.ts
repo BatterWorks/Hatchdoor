@@ -55,15 +55,10 @@ export function describeVaultsNotDrawn(missing: string[]): string {
   return `${joinWithAnd(missing)} could not be drawn.`;
 }
 
-/** "X is still being indexed." / "X and Y are still being indexed." — the
- * graph's empty-field wording while a Vault it drew nothing for is still
- * building its index (#336), so an empty canvas is never read as an empty
- * Vault. */
-export function describeVaultsStillIndexing(names: string[]): string {
-  return `${joinWithAnd(names)} ${names.length === 1 ? "is" : "are"} still being indexed.`;
-}
-
-function joinWithAnd(names: string[]): string {
+/** "X" / "X and Y" / "X, Y, and Z": the Vault-name list every sentence here
+ * is built on, exported so a feature can phrase its own sentence around the
+ * same list. */
+export function joinWithAnd(names: string[]): string {
   if (names.length <= 1) {
     return names[0] ?? "";
   }

@@ -5,7 +5,7 @@ import {
   describeMissingVaults,
   describeNotSearchableVaults,
   describeVaultsNotDrawn,
-  describeVaultsStillIndexing,
+  joinWithAnd,
   missingVaultNames,
   notSearchableVaultNames,
 } from "./vaultParticipants";
@@ -103,13 +103,13 @@ describe("describeVaultsNotDrawn", () => {
   });
 });
 
-describe("describeVaultsStillIndexing", () => {
-  it("agrees in number with the Vaults it names", () => {
-    expect(describeVaultsStillIndexing(["Work"])).toBe(
-      "Work is still being indexed.",
-    );
-    expect(describeVaultsStillIndexing(["Work", "Archive"])).toBe(
-      "Work and Archive are still being indexed.",
+describe("joinWithAnd", () => {
+  it("lists one, two, and three or more Vault names", () => {
+    expect(joinWithAnd([])).toBe("");
+    expect(joinWithAnd(["Work"])).toBe("Work");
+    expect(joinWithAnd(["Work", "Archive"])).toBe("Work and Archive");
+    expect(joinWithAnd(["Work", "Archive", "Journal"])).toBe(
+      "Work, Archive, and Journal",
     );
   });
 });

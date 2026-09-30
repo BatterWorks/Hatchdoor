@@ -9,7 +9,7 @@ import { useVaultScope } from "../../hooks/useVaultScope";
 import { useVaultCollection, useVaultProjection } from "../../vaults";
 import {
   describeVaultsNotDrawn,
-  describeVaultsStillIndexing,
+  joinWithAnd,
 } from "../../lib/vaultParticipants";
 import type {
   GraphData,
@@ -76,6 +76,14 @@ function mergeVaultGraphs(vaultGraphs: VaultGraph[]): GraphData {
  * index turn, a Git poll) re-runs no effect keyed on it (#336). */
 function sameJson<T>(previous: T, next: T): T {
   return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
+/** "X is still being indexed." / "X and Y are still being indexed." — the
+ * empty-field wording while a Vault the graph drew nothing for is still
+ * building its index (#336), so an empty canvas is never read as an empty
+ * Vault. */
+function describeVaultsStillIndexing(names: string[]): string {
+  return `${joinWithAnd(names)} ${names.length === 1 ? "is" : "are"} still being indexed.`;
 }
 
 /** Words for a graph that drew no nodes at all (#336): every other surface
