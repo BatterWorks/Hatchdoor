@@ -1,4 +1,4 @@
-//! Vault-wide tag rename (#242).
+//! Vault-wide tag rename (#242) and tag delete (#258).
 //!
 //! One call plans, a second call applies. The plan is every edit the rename
 //! would make, resolved against the Vault as it stands, and its fingerprint is
@@ -15,8 +15,14 @@
 //! that does not refuses the whole plan. Nothing is written unless every note
 //! can be edited, and a failure partway through the writes restores the notes
 //! already written.
+//!
+//! A delete is the narrow sibling. It removes one exact tag from frontmatter
+//! `tags` values and nothing else, so it refuses while any note carries the tag
+//! inline or carries a tag nested beneath it: either would leave a tag search
+//! for the deleted tag still finding notes. It shares the rename's handshake,
+//! editor, backstop and journal.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -142,8 +148,10 @@ fn rename_tag_with_hook(
 /// The two names, normalised. A leading `#` is accepted on either, since that
 /// is how a tag is written in prose.
 fn validated_names(old_tag: &str, new_tag: &str) -> Result<(String, String), TagRenameError> {
-    let old = tag_name(old_tag, "old_tag")?.to_lowercase();
-    let new = tag_name(new_tag, "new_tag")?;
+    let old = tag_name(old_tag, "old_tag")
+        .map_err(TagRenameError::InvalidTagName)?
+        .to_lowercase();
+    let new = tag_name(new_tag, "new_tag").map_err(TagRenameError::InvalidTagName)?;
     if new.to_lowercase() != new {
         return Err(TagRenameError::InvalidTagName(format!(
             "new_tag '{new}' contains uppercase letters; tags are stored in lowercase, so write it in lowercase"
@@ -164,22 +172,20 @@ fn validated_names(old_tag: &str, new_tag: &str) -> Result<(String, String), Tag
 /// `raw` with one leading `#` removed, refused unless it is a tag the grammar
 /// tag search accepts: letters, digits, `-`, `_`, and `/` between non-empty
 /// segments.
-fn tag_name<'a>(raw: &'a str, field: &str) -> Result<&'a str, TagRenameError> {
+fn tag_name<'a>(raw: &'a str, field: &str) -> Result<&'a str, String> {
     let name = raw.strip_prefix('#').unwrap_or(raw);
     if name.is_empty() {
-        return Err(TagRenameError::InvalidTagName(format!(
-            "{field} cannot be empty"
-        )));
+        return Err(format!("{field} cannot be empty"));
     }
     if let Some(bad) = name.chars().find(|ch| !is_tag_char(*ch)) {
-        return Err(TagRenameError::InvalidTagName(format!(
+        return Err(format!(
             "{field} '{name}' contains '{bad}'; a tag may hold only letters, digits, '-', '_' and '/'"
-        )));
+        ));
     }
     if name.split('/').any(str::is_empty) {
-        return Err(TagRenameError::InvalidTagName(format!(
+        return Err(format!(
             "{field} '{name}' has an empty segment; '/' may only separate two parts of a tag"
-        )));
+        ));
     }
     Ok(name)
 }
@@ -217,40 +223,19 @@ fn plan(index: &VaultIndex, old: &str, new: &str) -> Result<Plan, TagRenameError
     let mut unsupported = Vec::new();
     let mut already_tagged_notes = 0usize;
     for entry in index.ordered_entries() {
-        let bytes = fs::read(&entry.path).map_err(|error| {
-            WriteError::Io(format!(
-                "failed to read note '{}' for tag rename: {error}",
-                entry.relative_path
-            ))
-        })?;
-        let content = match String::from_utf8(bytes) {
-            Ok(content) => content,
-            Err(error) => {
-                // The index reads a note like this lossily, so it may well
-                // report the tag here. It cannot be rewritten without
-                // replacing the bytes that are not text, so it is refused
-                // when it matters and skipped when it does not.
-                let lossy = String::from_utf8_lossy(error.as_bytes()).into_owned();
-                let tags = extract_tags(&lossy);
-                if tags.iter().any(|tag| tag_matches(tag, new)) {
-                    already_tagged_notes += 1;
-                }
-                if tags.iter().any(|tag| tag_matches(tag, old)) {
-                    unsupported.push(UnsupportedTagNote {
-                        relative_path: entry.relative_path.clone(),
-                        reason: "the note is not valid UTF-8 text".to_string(),
-                    });
-                }
-                continue;
-            }
-        };
-        let tags = extract_tags(&content);
+        let note = read_note(&entry, TagOperation::Rename)?;
+        let tags = extract_tags(&note.content);
         if tags.iter().any(|tag| tag_matches(tag, new)) {
             already_tagged_notes += 1;
         }
         if !tags.iter().any(|tag| tag_matches(tag, old)) {
             continue;
         }
+        if !note.utf8 {
+            unsupported.push(non_utf8_note(&entry));
+            continue;
+        }
+        let content = note.content;
         // Renaming `domain/x` to `domain` turns `domain/x/x` into `domain/x`,
         // which is still under `domain/x`, so a second run would rename it
         // again. The names are fine on their own; it is this Vault's tags
@@ -378,7 +363,12 @@ fn rewrite_note(
 
     let frontmatter = match frontmatter_span(content) {
         Some((start, end)) => {
-            match rewrite_frontmatter_tags(&content[start..end], old, new, &entry.relative_path)? {
+            match rewrite_frontmatter_tags(
+                &content[start..end],
+                &entry.relative_path,
+                TagOperation::Rename,
+                |tags| renamed_tag_value(tags, old, new),
+            )? {
                 Some(block) => {
                     rewritten.replace_range(start..end, &block);
                     true
@@ -414,20 +404,20 @@ fn rewrite_note(
     }))
 }
 
-/// The frontmatter block with its `tags` renamed, or `None` when `tags` holds
-/// nothing to rename.
+/// The frontmatter block with its `tags` replaced by what `change` makes of
+/// them, or `None` when `change` has nothing to change.
 ///
 /// The edit goes through the shared in-place editor, which writes a list in
 /// the shape the author used but writes its items its own way. So before
-/// trusting it with the rename, it is handed the list unchanged: if that does
+/// trusting it with the change, it is handed the list unchanged: if that does
 /// not reproduce the block byte for byte, the list is written in a way the
 /// editor would reformat (extra spacing, quotes it would not use, a comment on
 /// the line), and the note is refused rather than restyled.
 fn rewrite_frontmatter_tags(
     block: &str,
-    old: &str,
-    new: &str,
     relative_path: &str,
+    operation: TagOperation,
+    change: impl FnOnce(&Value) -> Option<Value>,
 ) -> Result<Option<String>, String> {
     let Ok(Value::Object(properties)) = serde_yaml_ng::from_str::<Value>(block) else {
         // Not a mapping, so the index read no tags from it through YAML. The
@@ -437,7 +427,7 @@ fn rewrite_frontmatter_tags(
     let Some(tags) = properties.get("tags") else {
         return Ok(None);
     };
-    let Some(renamed_tags) = renamed_tag_value(tags, old, new) else {
+    let Some(changed_tags) = change(tags) else {
         return Ok(None);
     };
     let edit = |value: &Value| {
@@ -453,12 +443,12 @@ fn rewrite_frontmatter_tags(
         }
     };
     if edit(tags)? != block {
-        return Err(
-            "its frontmatter tags are formatted in a way the rename cannot keep, such as quoted items, extra spaces, or a comment on the list"
-                .to_string(),
-        );
+        return Err(format!(
+            "its frontmatter tags are formatted in a way the {} cannot keep, such as quoted items, extra spaces, or a comment on the list",
+            operation.noun()
+        ));
     }
-    edit(&renamed_tags).map(Some)
+    edit(&changed_tags).map(Some)
 }
 
 fn write_error_message(error: &WriteError) -> &str {
@@ -535,8 +525,77 @@ fn renamed_item(item: &str, old: &str, new: &str) -> Option<String> {
 fn apply(
     vault_root: &Path,
     plan: Plan,
-    mut after_write: impl FnMut(usize) -> Result<(), WriteError>,
+    after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<TagRename, TagRenameError> {
+    let affected_paths = write_rewrites(
+        vault_root,
+        &plan.rewrites,
+        TagOperation::Rename,
+        after_write,
+    )?;
+    let mut report = plan.report;
+    for (note, rewrite) in report.notes.iter_mut().zip(&plan.rewrites) {
+        note.content_hash = content_hash(&rewrite.content);
+    }
+    report.applied = true;
+    report.affected_paths = affected_paths;
+    Ok(report)
+}
+
+/// Which Vault-wide tag operation a shared step is serving, for its messages.
+#[derive(Clone, Copy)]
+enum TagOperation {
+    Rename,
+    Delete,
+}
+
+impl TagOperation {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::Delete => "delete",
+        }
+    }
+
+    fn editing(self) -> &'static str {
+        match self {
+            Self::Rename => "renaming its tags",
+            Self::Delete => "removing a tag from it",
+        }
+    }
+}
+
+enum ApplyError {
+    /// A planned note changed since it was read.
+    Stale,
+    Write(WriteError),
+}
+
+impl From<ApplyError> for TagRenameError {
+    fn from(error: ApplyError) -> Self {
+        match error {
+            ApplyError::Stale => Self::StalePlan,
+            ApplyError::Write(error) => Self::Write(error),
+        }
+    }
+}
+
+impl From<ApplyError> for TagDeleteError {
+    fn from(error: ApplyError) -> Self {
+        match error {
+            ApplyError::Stale => Self::StalePlan,
+            ApplyError::Write(error) => Self::Write(error),
+        }
+    }
+}
+
+/// Write every planned note, or none of them. Returns the paths written.
+fn write_rewrites(
+    vault_root: &Path,
+    rewrites: &[PlannedRewrite],
+    operation: TagOperation,
+    mut after_write: impl FnMut(usize) -> Result<(), WriteError>,
+) -> Result<Vec<PathBuf>, ApplyError> {
     // The plan was read under the same lock this write holds, but a person
     // editing the Vault directly is not bound by it. A note that moved on
     // since it was read is not overwritten with text built from the old copy.
@@ -547,21 +606,22 @@ fn apply(
     // time the last note in the loop below is written. Each rewrite carries
     // its own `original_hash` into the commit, and the journal checks that
     // one per note at the moment it writes it (#321).
-    for rewrite in &plan.rewrites {
+    for rewrite in rewrites {
         let current = fs::read_to_string(&rewrite.path).map_err(|error| {
-            WriteError::Io(format!(
-                "failed to re-read '{}' before renaming its tags: {error}",
-                rewrite.path.display()
-            ))
+            ApplyError::Write(WriteError::Io(format!(
+                "failed to re-read '{}' before {}: {error}",
+                rewrite.path.display(),
+                operation.editing()
+            )))
         })?;
         if content_hash(&current) != rewrite.original_hash {
-            return Err(TagRenameError::StalePlan);
+            return Err(ApplyError::Stale);
         }
     }
 
     let mut journal = MutationJournal::new(vault_root);
-    let mut affected_paths = Vec::with_capacity(plan.rewrites.len());
-    for (position, rewrite) in plan.rewrites.iter().enumerate() {
+    let mut affected_paths = Vec::with_capacity(rewrites.len());
+    for (position, rewrite) in rewrites.iter().enumerate() {
         let written = journal
             .apply_rewrites(vec![TextRewrite {
                 path: rewrite.path.clone(),
@@ -571,17 +631,279 @@ fn apply(
             .and_then(|written| after_write(position).map(|()| written));
         match written {
             Ok(written) => affected_paths.extend(written),
-            Err(error) => return Err(TagRenameError::Write(journal.rollback(error))),
+            Err(error) => return Err(ApplyError::Write(journal.rollback(error))),
         }
     }
+    Ok(affected_paths)
+}
 
-    let mut report = plan.report;
-    for (note, rewrite) in report.notes.iter_mut().zip(&plan.rewrites) {
+/// A note's text as the index reads it: lossily when the file is not valid
+/// UTF-8, in which case `utf8` is false.
+struct NoteText {
+    content: String,
+    utf8: bool,
+}
+
+fn read_note(entry: &NoteEntry, operation: TagOperation) -> Result<NoteText, WriteError> {
+    let bytes = fs::read(&entry.path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to read note '{}' for tag {}: {error}",
+            entry.relative_path,
+            operation.noun()
+        ))
+    })?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(content) => NoteText {
+            content,
+            utf8: true,
+        },
+        Err(error) => NoteText {
+            content: String::from_utf8_lossy(error.as_bytes()).into_owned(),
+            utf8: false,
+        },
+    })
+}
+
+/// The index reads a note that is not valid UTF-8 lossily, so it may well
+/// report the tag. It cannot be rewritten without replacing the bytes that are
+/// not text, so it is refused when it carries the tag and skipped otherwise.
+fn non_utf8_note(entry: &NoteEntry) -> UnsupportedTagNote {
+    UnsupportedTagNote {
+        relative_path: entry.relative_path.clone(),
+        reason: "the note is not valid UTF-8 text".to_string(),
+    }
+}
+
+/// A delete that was planned, or planned and applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagDelete {
+    /// The tag being deleted, normalised: no `#`, lowercase.
+    pub tag: String,
+    /// Whether this call wrote the notes below. A plan never does.
+    pub applied: bool,
+    /// Every note whose frontmatter loses the tag, in path order.
+    pub notes: Vec<TagDeleteNote>,
+    /// The plan's fingerprint. `None` when no note carries the tag.
+    pub plan_hash: Option<String>,
+    /// Absolute paths this call wrote. Empty for a plan.
+    pub affected_paths: Vec<PathBuf>,
+}
+
+/// One note the delete changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagDeleteNote {
+    pub slug: String,
+    pub relative_path: String,
+    /// The note's content hash once this call returns: its current hash for a
+    /// plan, the rewritten note's hash once applied.
+    pub content_hash: String,
+}
+
+/// A tag nested under the one being deleted, and how many notes carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedTag {
+    pub tag: String,
+    pub notes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagDeleteError {
+    /// `tag` is not a tag this Vault could hold.
+    InvalidTagName(String),
+    /// Notes carry a tag nested under the one being deleted, and tag search
+    /// would keep finding them under it. Nothing was written.
+    NestedTags(Vec<NestedTag>),
+    /// Notes, by relative path, that carry the tag inline in their body. A
+    /// delete never edits prose. Nothing was written.
+    InlineUse(Vec<String>),
+    /// At least one note carries the tag in a shape the delete cannot edit
+    /// surgically. Nothing was written.
+    UnsupportedShape(Vec<UnsupportedTagNote>),
+    /// `expected_plan_hash` no longer matches the plan. Nothing was written.
+    StalePlan,
+    Write(WriteError),
+}
+
+impl From<WriteError> for TagDeleteError {
+    fn from(error: WriteError) -> Self {
+        Self::Write(error)
+    }
+}
+
+/// Plan the removal of `tag` from every frontmatter `tags` value in the Vault
+/// `index` covers, and, when `expected_plan_hash` is given, apply it if and
+/// only if that hash is still the plan's fingerprint.
+///
+/// Only the exact tag goes. The delete is refused while any note carries a tag
+/// nested under it or carries it inline, so that once it applies, a tag search
+/// for it finds nothing. A list it empties stays behind as `tags: []`.
+pub fn delete_tag(
+    vault_root: &Path,
+    index: &VaultIndex,
+    tag: &str,
+    expected_plan_hash: Option<&str>,
+) -> Result<TagDelete, TagDeleteError> {
+    let tag = tag_name(tag, "tag")
+        .map_err(TagDeleteError::InvalidTagName)?
+        .to_lowercase();
+    let (mut report, rewrites) = plan_delete(index, &tag)?;
+    let Some(expected) = expected_plan_hash else {
+        return Ok(report);
+    };
+    if report.plan_hash.as_deref() != Some(expected.trim()) {
+        return Err(TagDeleteError::StalePlan);
+    }
+    report.affected_paths =
+        write_rewrites(vault_root, &rewrites, TagOperation::Delete, |_| Ok(()))?;
+    for (note, rewrite) in report.notes.iter_mut().zip(&rewrites) {
         note.content_hash = content_hash(&rewrite.content);
     }
     report.applied = true;
-    report.affected_paths = affected_paths;
     Ok(report)
+}
+
+fn plan_delete(
+    index: &VaultIndex,
+    tag: &str,
+) -> Result<(TagDelete, Vec<PlannedRewrite>), TagDeleteError> {
+    let mut nested: BTreeMap<String, usize> = BTreeMap::new();
+    let mut inline = Vec::new();
+    let mut unsupported = Vec::new();
+    let mut notes = Vec::new();
+    let mut rewrites = Vec::new();
+    for entry in index.ordered_entries() {
+        let note = read_note(&entry, TagOperation::Delete)?;
+        let tags = extract_tags(&note.content);
+        for carried in tags.iter().filter(|carried| carried.as_str() != tag) {
+            if tag_matches(carried, tag) {
+                *nested.entry(carried.clone()).or_default() += 1;
+            }
+        }
+        if !tags.contains(tag) {
+            continue;
+        }
+        if inline_tags(&note.content)
+            .iter()
+            .any(|inline| inline.text.to_lowercase() == tag)
+        {
+            inline.push(entry.relative_path.clone());
+            continue;
+        }
+        if !note.utf8 {
+            unsupported.push(non_utf8_note(&entry));
+            continue;
+        }
+        match delete_from_note(&entry, &note.content, &tags, tag) {
+            Ok(rewritten) => {
+                let original_hash = content_hash(&note.content);
+                notes.push(TagDeleteNote {
+                    slug: entry.slug.clone(),
+                    relative_path: entry.relative_path.clone(),
+                    content_hash: original_hash.clone(),
+                });
+                rewrites.push(PlannedRewrite {
+                    path: entry.path.clone(),
+                    original_hash,
+                    content: rewritten,
+                });
+            }
+            Err(reason) => unsupported.push(UnsupportedTagNote {
+                relative_path: entry.relative_path.clone(),
+                reason,
+            }),
+        }
+    }
+    // Nested tags first: clearing a branch bottom-up is the larger job, and a
+    // nested tag's own inline uses are the next delete's business.
+    if !nested.is_empty() {
+        return Err(TagDeleteError::NestedTags(
+            nested
+                .into_iter()
+                .map(|(tag, notes)| NestedTag { tag, notes })
+                .collect(),
+        ));
+    }
+    if !inline.is_empty() {
+        return Err(TagDeleteError::InlineUse(inline));
+    }
+    if !unsupported.is_empty() {
+        return Err(TagDeleteError::UnsupportedShape(unsupported));
+    }
+    let plan_hash = (!notes.is_empty()).then(|| {
+        let mut canonical = format!("delete_tag\0{tag}\0");
+        for (note, rewrite) in notes.iter().zip(&rewrites) {
+            canonical.push_str(&format!(
+                "{}\0{}\0{}\0",
+                note.relative_path,
+                rewrite.original_hash,
+                content_hash(&rewrite.content)
+            ));
+        }
+        content_hash(&canonical)
+    });
+    Ok((
+        TagDelete {
+            tag: tag.to_string(),
+            applied: false,
+            notes,
+            plan_hash,
+            affected_paths: Vec::new(),
+        },
+        rewrites,
+    ))
+}
+
+/// The note's text with `tag` removed from its frontmatter. An `Err` is the
+/// reason the note cannot be edited in place.
+fn delete_from_note(
+    entry: &NoteEntry,
+    content: &str,
+    tags: &HashSet<String>,
+    tag: &str,
+) -> Result<String, String> {
+    let mut rewritten = content.to_string();
+    if let Some((start, end)) = frontmatter_span(content)
+        && let Some(block) = rewrite_frontmatter_tags(
+            &content[start..end],
+            &entry.relative_path,
+            TagOperation::Delete,
+            |tags| without_tag(tags, tag),
+        )?
+    {
+        rewritten.replace_range(start..end, &block);
+    }
+    // The same backstop as a rename: the index must read back every tag the
+    // note had except this one. A tag the edit could not reach, such as one in
+    // a frontmatter block that is not valid YAML, fails here.
+    let promised: BTreeSet<String> = tags
+        .iter()
+        .filter(|carried| carried.as_str() != tag)
+        .cloned()
+        .collect();
+    let read_back: BTreeSet<String> = extract_tags(&rewritten).into_iter().collect();
+    if read_back != promised {
+        return Err(
+            "removing the tag in place would not leave it without the tag; check its frontmatter parses as YAML"
+                .to_string(),
+        );
+    }
+    Ok(rewritten)
+}
+
+/// `tags` without any item that names `tag`, or `None` when none does. A
+/// scalar is a one-item list, so removing it leaves an empty list.
+fn without_tag(tags: &Value, tag: &str) -> Option<Value> {
+    let names = |item: &Value| {
+        item.as_str()
+            .is_some_and(|item| normalized_item(item) == tag)
+    };
+    match tags {
+        Value::String(_) if names(tags) => Some(Value::Array(Vec::new())),
+        Value::Array(items) if items.iter().any(names) => Some(Value::Array(
+            items.iter().filter(|item| !names(item)).cloned().collect(),
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

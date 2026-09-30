@@ -272,6 +272,29 @@ pub struct RenameTagNote {
     pub content_hash: String,
 }
 
+/// `delete_tag`'s answer, for a plan and for an applied delete alike.
+/// `applied` says which. `plan_hash` is the fingerprint to send back as
+/// `expected_plan_hash`; it is absent when no note carries the tag.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DeleteTagResult {
+    pub vault_id: String,
+    pub ok: bool,
+    pub applied: bool,
+    pub tag: String,
+    pub notes_affected: usize,
+    pub plan_hash: Option<String>,
+    pub notes: Vec<DeleteTagNote>,
+}
+
+/// One note a tag delete changes. `content_hash` is the note's hash as it
+/// stands after the call: unchanged for a plan, rewritten once applied.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DeleteTagNote {
+    pub slug: String,
+    pub relative_path: String,
+    pub content_hash: String,
+}
+
 /// `get_frontmatter`'s answer: the note's frontmatter projection — tags,
 /// aliases, and every remaining property — without the Markdown body. A
 /// note with no frontmatter block answers `has_frontmatter: false` with an
@@ -408,6 +431,7 @@ output_schemas! {
     "rename_attachment" => AttachmentWriteResult,
     "delete_attachment" => AttachmentWriteResult,
     "rename_tag" => RenameTagResult,
+    "delete_tag" => DeleteTagResult,
 }
 
 /// Serializes a typed tool result into the value embedded in a tool success
@@ -459,12 +483,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 44,
-            "3 setup + 15 read + 1 batch + 8 management + 17 write tools"
+            total, 45,
+            "3 setup + 15 read + 1 batch + 8 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 44, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 45, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

@@ -234,6 +234,7 @@ pub(super) const WRITE_OPS: &[&str] = &[
     "rename_attachment",
     "delete_attachment",
     "rename_tag",
+    "delete_tag",
 ];
 
 /// Dispatches one write op to its underlying tool function. Shared by the
@@ -267,6 +268,7 @@ pub(super) async fn dispatch_write_tool(
         "rename_attachment" => rename_attachment_tool(state, vault, arguments).await,
         "delete_attachment" => delete_attachment_tool(state, vault, arguments).await,
         "rename_tag" => rename_tag_tool(state, vault, arguments).await,
+        "delete_tag" => delete_tag_tool(state, vault, arguments).await,
         // Unreachable while [`WRITE_OPS`] and the arms above agree, which
         // `write_ops_match_the_advertised_catalogue` enforces. An error rather
         // than a panic anyway: a name that drifts out of step must not be able
@@ -714,6 +716,44 @@ fn rename_tag_result(vault_id: VaultId, outcome: crate::vault::TagRename) -> Val
     ))
 }
 
+pub(super) async fn delete_tag_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: DeleteTagArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid delete_tag arguments: {error}"))
+    })?;
+    let outcome = vault
+        .mutation(args.commit_summary)
+        .delete_tag(&args.tag, args.expected_plan_hash.as_deref())
+        .await
+        .map_err(mutation_error)?;
+    Ok(delete_tag_result(vault.vault_id, outcome))
+}
+
+fn delete_tag_result(vault_id: VaultId, outcome: crate::vault::TagDelete) -> Value {
+    tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::DeleteTagResult {
+            vault_id: vault_id.to_string(),
+            ok: true,
+            applied: outcome.applied,
+            tag: outcome.tag,
+            notes_affected: outcome.notes.len(),
+            plan_hash: outcome.plan_hash,
+            notes: outcome
+                .notes
+                .into_iter()
+                .map(|note| crate::mcp::results::DeleteTagNote {
+                    slug: note.slug,
+                    relative_path: note.relative_path,
+                    content_hash: note.content_hash,
+                })
+                .collect(),
+        },
+    ))
+}
+
 fn attachment_success(vault_id: VaultId, outcome: AttachmentOutcome) -> Value {
     tool_success(crate::mcp::results::result_to_value(
         &crate::mcp::results::AttachmentWriteResult {
@@ -997,6 +1037,21 @@ pub(super) fn write_tools_list() -> Vec<Value> {
             },
             "annotations": write_tool_annotations(true, false)
         }),
+        json!({
+            "name": "delete_tag",
+            "description": "Delete one tag across one whole Vault by removing it from frontmatter tags lists. After a successful delete, a tag search for it finds no notes. Always two calls. Without expected_plan_hash nothing is written: the answer is the plan, listing every note that would change, and its plan_hash. Call again with that plan_hash as expected_plan_hash to apply it; if the Vault changed in between, the call is refused with tag_delete_plan_stale and nothing is written. Only the exact tag is removed, never the tags nested under it, and note bodies are never edited. So the delete is refused, writing nothing, while any note carries a tag nested under it (tag_has_nested_tags, naming each nested tag and how many notes carry it; delete those first, deepest first) or carries the tag inline in its body (tag_used_inline, naming each note; remove it from the text first). Matching ignores case and a leading # is accepted. When a note loses its last tag, it keeps an empty tags: [] list. Only the removed item changes: list shape, key order and every other byte stay as they were. If any note carries the tag in a form that cannot be edited that way, the plan is refused with tag_shape_unsupported, naming each note. A tag no note carries plans zero notes and no plan_hash. If a write fails partway, every note already rewritten is restored. Not allowed inside batch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "minLength": 1, "description": "The tag to delete, with or without a leading #. Matched case-insensitively and exactly: tags nested under it are not deleted."},
+                    "expected_plan_hash": {"type": "string", "minLength": 1, "description": "The plan_hash from a previous call with the same tag. Omit it to plan; supply it to apply that plan."},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["tag"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
     ];
     for tool in &mut tools {
         let schema = tool
@@ -1217,6 +1272,17 @@ struct RenameAttachmentArgs {
 struct DeleteAttachmentArgs {
     vault_id: VaultId,
     source_relative_path: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteTagArgs {
+    vault_id: VaultId,
+    tag: String,
+    #[serde(default)]
+    expected_plan_hash: Option<String>,
     #[serde(default)]
     commit_summary: Option<String>,
 }

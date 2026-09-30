@@ -27,11 +27,11 @@ use crate::cache::SqliteCache;
 use crate::git::WriteRecord;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
-    AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagRename, TagRenameError,
-    VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
-    check_attachment_import_target, create_note, delete_attachment, delete_note, edit_note,
-    import_attachment_bytes, move_attachment, move_or_rename_note, rename_attachment, rename_tag,
-    replace_section, update_note, update_note_frontmatter,
+    AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagDelete, TagDeleteError,
+    TagRename, TagRenameError, VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
+    check_attachment_import_target, create_note, delete_attachment, delete_note, delete_tag,
+    edit_note, import_attachment_bytes, move_attachment, move_or_rename_note, rename_attachment,
+    rename_tag, replace_section, update_note, update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
 use crate::vault_read::VaultReadCore;
@@ -459,6 +459,19 @@ impl<'a> VaultMutationCore<'a> {
             .rename_tag(old_tag, new_tag, expected_plan_hash)
             .await
     }
+
+    /// Plan, or plan and apply, one Vault-wide tag delete, under the same
+    /// whole-call lock as a rename.
+    pub async fn delete_tag(
+        &self,
+        vault_id: VaultId,
+        tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagDelete, VaultOperationError> {
+        let target = self.open(vault_id)?;
+        let _guard = target.acquire_mutation().await?;
+        target.delete_tag(tag, expected_plan_hash).await
+    }
 }
 
 /// This Vault's current source/lifecycle capability: a pull-only managed Git
@@ -588,6 +601,17 @@ impl RecordedWrite for TagRename {
     }
 }
 
+impl RecordedWrite for TagDelete {
+    fn affected_paths(&self) -> &[std::path::PathBuf] {
+        &self.affected_paths
+    }
+
+    fn written_path(&self) -> Option<&str> {
+        // As with a rename, the commit title names the tag, not a note.
+        None
+    }
+}
+
 /// The structured error for a tag rename that did not run. A write failure
 /// takes the same mapping as every other mutation; the three refusals only a
 /// tag rename can give have codes of their own, so a caller can tell "fix
@@ -623,6 +647,76 @@ pub fn tag_rename_error(vault_id: VaultId, error: TagRenameError) -> VaultOperat
             false,
         ),
         TagRenameError::Write(error) => write_operation_error(vault_id, error),
+    }
+}
+
+/// The structured error for a tag delete that did not run. Each refusal has
+/// its own code: a nested tag and an inline use are both "clear these first",
+/// but what to clear differs, and a caller branches on the code.
+pub fn tag_delete_error(vault_id: VaultId, error: TagDeleteError) -> VaultOperationError {
+    match error {
+        TagDeleteError::InvalidTagName(message) => {
+            VaultOperationError::new("invalid_tag_name", message, Some(vault_id), false)
+        }
+        TagDeleteError::NestedTags(nested) => {
+            let listed = nested
+                .iter()
+                .map(|nested| format!("'{}' ({} note(s))", nested.tag, nested.notes))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_has_nested_tags",
+                format!(
+                    "Nothing was deleted: {} tag(s) are nested under this one, and a search for it \
+                     would still find their notes. Delete or rename them first, deepest first: {listed}",
+                    nested.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagDeleteError::InlineUse(notes) => {
+            let listed = notes
+                .iter()
+                .map(|path| format!("'{path}'"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_used_inline",
+                format!(
+                    "Nothing was deleted: {} note(s) carry this tag inline in their body, which \
+                     delete_tag never edits. Remove it from their text first, then plan again: {listed}",
+                    notes.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagDeleteError::UnsupportedShape(notes) => {
+            let listed = notes
+                .iter()
+                .map(|note| format!("'{}' ({})", note.relative_path, note.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_shape_unsupported",
+                format!(
+                    "Nothing was deleted: {} note(s) carry the tag in a form this delete cannot edit in place. \
+                     Fix them in the vault, then plan again: {listed}",
+                    notes.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagDeleteError::StalePlan => VaultOperationError::new(
+            "tag_delete_plan_stale",
+            "Nothing was deleted: the Vault changed since this plan was made, so \
+             expected_plan_hash no longer matches. Call delete_tag without it to see the current plan.",
+            Some(vault_id),
+            false,
+        ),
+        TagDeleteError::Write(error) => write_operation_error(vault_id, error),
     }
 }
 
@@ -1108,6 +1202,28 @@ impl VaultMutation {
                 &new_tag,
                 Some(&expected_plan_hash),
             )
+        })
+        .await
+    }
+
+    /// Delete one exact tag from every frontmatter `tags` value in the Vault.
+    /// Planning and applying work as they do for [`Self::rename_tag`].
+    pub async fn delete_tag(
+        &self,
+        tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagDelete, VaultOperationError> {
+        let catalog = self.authoritative_catalog().await?;
+        let vault_path = self.control.vault_path().to_path_buf();
+        let tag = tag.to_string();
+        let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
+            return offload(move || delete_tag(&vault_path, &catalog, &tag, None))
+                .await
+                .map_err(|error| tag_delete_error(self.vault_id, error));
+        };
+        let addressed = format!("#{}", tag.strip_prefix('#').unwrap_or(&tag).to_lowercase());
+        self.run_recorded("delete tag", &addressed, tag_delete_error, move || {
+            delete_tag(&vault_path, &catalog, &tag, Some(&expected_plan_hash))
         })
         .await
     }
