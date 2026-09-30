@@ -898,14 +898,17 @@ export function NotePage({
 
   // Hold off the service worker's own reload while an edit is in the air
   // (#330). A nightly build activates and reloads the page with no prompt, and
-  // the triggers for pulling it — tab focus, the tab becoming visible — are
-  // exactly the moments an open block is sitting there unsaved. The draft now
-  // survives that reload, but not causing it is better than recovering from it.
+  // the trigger for pulling it — coming back to the tab — is exactly the
+  // moment an open block is sitting there unsaved. The draft now survives
+  // that reload, but not causing it is better than recovering from it.
   // The hold is released the moment the save lands, the block closes, or this
-  // note is left.
+  // note is left. The source editor holds for as long as it is open: its text
+  // reaches the draft on a debounce, so a reload mid-typing still costs the
+  // last few keystrokes (#332).
   const reloadHeld =
     writeEnabled &&
-    (inlineDirty ||
+    (isEditing ||
+      inlineDirty ||
       activeUnit !== null ||
       autosave.status === "saving" ||
       saving);

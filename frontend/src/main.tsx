@@ -32,16 +32,21 @@ registerSW({
       if (isAppReloadHeld()) {
         return;
       }
-      void registration.update();
+      // Rejects whenever the worker script cannot be fetched: every tick while
+      // offline or while the server is down. Nothing to do about it here; the
+      // next tick tries again (#332).
+      registration.update().catch(() => {});
     };
 
     window.setInterval(update, SW_UPDATE_INTERVAL_MS);
+    // Returning to the tab, or resuming the installed app, fires this on every
+    // target. `focus` fires for the same return, so listening to it as well
+    // only doubled the check (#332).
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         update();
       }
     });
-    window.addEventListener("focus", update);
   },
   // `autoUpdate` reloads the page itself the moment a new worker activates,
   // unless this hook takes the decision over. It does, so the reload waits for

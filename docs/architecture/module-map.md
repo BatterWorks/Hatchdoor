@@ -3037,7 +3037,14 @@ collapsed state, the touch-edit hint, the stored bearer token) are untouched.
 (#330). Registration stays `autoUpdate`, but the reload runs through
 `onNeedReload`, and both that and every `registration.update()` ask
 `lib/reloadGuard.ts` first, so a nightly build cannot activate and reload
-across an unsaved edit. The editor takes the hold; nothing else does.
+across an unsaved edit. The editor takes the hold; nothing else does. The
+update check runs on a one-hour interval and when the tab becomes visible
+(not also on `focus`, which fires for the same return), and swallows the
+rejection `update()` gives while offline (#332). `vite.config.ts` keeps
+everything only a Mermaid or PDF.js dynamic import reaches out of the
+install-time precache, found from the bundle graph by `findLazyChunks`, and
+caches those chunks CacheFirst on first use instead; the manifest's splash
+colours are the dark theme's, since the manifest has no light/dark form.
 `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137) and the Vault-less-action
 default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
@@ -3743,7 +3750,8 @@ current hash rather than conflicting on the next keystroke. That flush now
 takes `pendingRef ?? queuedRef`, so an edit parked behind an in-flight save
 leaves with the page too. `lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
-edit is unsaved, a block is open, or a save is in flight, and `main.tsx`
+edit is unsaved, a block is open, the source editor is open (#332), or a save
+is in flight, and `main.tsx`
 (coordination path) asks it before pulling an update and before acting on one
 that has already activated.
 `hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second

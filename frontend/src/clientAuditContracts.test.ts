@@ -40,7 +40,23 @@ describe("client audit launch contracts", () => {
     expect(mainSource).toContain("onRegisteredSW");
     expect(mainSource).toContain("registration.update()");
     expect(mainSource).toContain("visibilitychange");
-    expect(mainSource).toContain("focus");
+  });
+
+  // `update()` rejects whenever the worker script cannot be fetched, which is
+  // every tick while offline (#332). Coming back to the tab fires both `focus`
+  // and `visibilitychange`, so listening to both doubled every check.
+  it("swallows an offline update check and checks once per return to the tab", () => {
+    expect(mainSource).toMatch(/registration\s*\.update\(\)\s*\.catch\(/);
+    expect(mainSource).not.toMatch(/void\s+registration\.update\(\)/);
+    expect(mainSource).not.toMatch(/addEventListener\(\s*"focus"/);
+  });
+
+  // Android Chrome paints the installed app's splash and task-switcher card
+  // from the manifest, which has no media-query form (#332). A dark splash
+  // under a light UI is the milder flash of the two.
+  it("gives the installed PWA a dark splash rather than a light one", () => {
+    expect(viteConfig).toMatch(/background_color:\s*"#0c0c0a"/);
+    expect(viteConfig).toMatch(/theme_color:\s*"#0c0c0a"/);
   });
 
   // `autoUpdate` activates a new worker the moment it installs and reloads the

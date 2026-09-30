@@ -738,6 +738,23 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     await waitFor(() => expect(sent).toHaveLength(1));
     await waitFor(() => expect(isAppReloadHeld()).toBe(false));
   });
+
+  // The full source editor keeps its text in a debounced draft, so a reload
+  // between a keystroke and that write loses it just as surely (#332).
+  it("holds off the service-worker reload while the source editor is open", async () => {
+    const sent = mockVault("Body on disk.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Body being typed." } });
+    expect(isAppReloadHeld()).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await waitFor(() => expect(isAppReloadHeld()).toBe(false));
+  });
 });
 
 describe("NotePage conflict review and editing correctness (#331)", () => {
