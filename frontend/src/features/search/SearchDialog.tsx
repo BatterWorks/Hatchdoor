@@ -248,12 +248,12 @@ export function SearchDialog({
   // did not narrow to, with counts, one click away. A tag tap wins over the
   // scope: it names the Vault the tag was read in.
   //
-  // Both are filtered through the enabled Vaults first. `useVaultScope` reads
-  // the browsing scope straight out of localStorage and never reconciles it
-  // against the collection, so a Vault disabled since it was last browsed
-  // leaves a stale id behind. Seeding on that would open the dialog filtered
-  // to a Vault with no row to click, with nothing selected and the raw id
-  // rendered as a name. All results is the honest fallback.
+  // Both are filtered through the enabled Vaults first. `useVaultScope` only
+  // reconciles the browsing scope once discovery has answered (#335), and a
+  // tag tap can name any Vault, so a Vault disabled since it was last browsed
+  // can still arrive here as a stale id. Seeding on that would open the dialog
+  // filtered to a Vault with no row to click, with nothing selected and the
+  // raw id rendered as a name. All results is the honest fallback.
   const [chosenVaultFilter, setVaultFilter] = useState<VaultId | "all">(() => {
     const preferred = initialVaultFilter ?? scope;
     return vaults.some((vault) => vault.vault_id === preferred)

@@ -109,7 +109,7 @@ function VaultWorkspace({
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
-  const [scope, setScope] = useVaultScope();
+  const [scope, setScope, scopeFallbackNotice] = useVaultScope();
   const {
     vaults,
     demoMode,
@@ -165,6 +165,14 @@ function VaultWorkspace({
     writeNotice,
     setWriteNotice,
   } = useWriteMode(primaryVaultId);
+  // A stored scope whose Vault left the browsing list has already been put
+  // back to All Vaults by `useVaultScope` (#335); the shared notice strip says
+  // why, so the explorer widening on its own is not a mystery.
+  useEffect(() => {
+    if (scopeFallbackNotice) {
+      setWriteNotice(scopeFallbackNotice.message);
+    }
+  }, [scopeFallbackNotice, setWriteNotice]);
   // `demoMode` defaults to `false` until Vault discovery's fetch resolves
   // (#152) — the same gap the "/settings" route itself guards below.
   // Without `!vaultsLoading` here, the sidebar footer's Settings link would

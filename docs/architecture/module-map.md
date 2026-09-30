@@ -3048,7 +3048,14 @@ colours are the dark theme's, since the manifest has no light/dark form.
 `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137) and the Vault-less-action
 default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
-Vault collection client below (#198). `app/ExplorerPane.tsx`'s Scope zone (#138) calls
+Vault collection client below (#198). It reads that client to reconcile the
+stored scope (#335): once discovery has answered with at least one enabled
+Vault and no registry recovery, a scope naming a Vault that is missing,
+paused, or `activation: "unavailable"` reads as `all` in the same render, is
+written back as `all`, and returns a `ScopeFallbackNotice` that `App.tsx`
+shows in the shared notice strip. Every instance (App, Graph, Statistics)
+reconciles itself, and the revision stream re-renders them all, so a Vault
+paused from Settings, another tab, or an MCP agent is caught on its revision. `app/ExplorerPane.tsx`'s Scope zone (#138) calls
 `setScope` on the desktop; `app/AppTopbar.tsx`'s scope row and its bottom
 sheet (#145) call it below 920px, where the Scope zone itself does not
 render. The breakpoint keeps the two callers mutually exclusive — every other
@@ -3174,6 +3181,7 @@ the shell.
 **Validation:** the applicable `App.*.test.tsx` (including
 `App.demo-mode.test.tsx`, #152), `app/ExplorerPane.test.tsx`,
 `app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
+`App.scope-reconcile.test.tsx` (#335),
 `vaults/vaultCollection.test.ts`, `useTheme.test.tsx`, storage tests, then full
 frontend checks. Service-worker and PWA changes (`main.tsx`, `vite.config.ts`)
 also need `pwaPrecache.test.ts` (lazy-chunk precache exclusion and runtime
@@ -3492,10 +3500,10 @@ lifted to `useSearch` — it dies for free because `App.tsx` only mounts
 fresh on every open. It opens on `scope` and a tag tap overrides that, so
 narrowing the sidebar decides what the reader is shown first without
 deciding what was asked. Both seeds are filtered through the enabled Vaults
-and fall back to `all`, because `useVaultScope` returns the stored browsing
-scope without reconciling it against the collection: a Vault disabled since
-it was last browsed would otherwise open the dialog filtered to a row that
-does not exist. The seed runs once, so the chosen filter is also read through
+and fall back to `all`, because `useVaultScope` reconciles the stored browsing
+scope only once discovery has answered and a tag tap can name any Vault: a
+Vault disabled since it was last browsed would otherwise open the dialog
+filtered to a row that does not exist. The seed runs once, so the chosen filter is also read through
 the live collection on every render: a Vault that leaves the collection while
 the dialog is open drops the filter back to `all` rather than leaving the
 control reading "All results" while it hides every row (#334). The panel's

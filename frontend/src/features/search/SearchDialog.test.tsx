@@ -446,9 +446,9 @@ describe("SearchDialog's own Vault filter — never the browsing scope (#144)", 
   });
 
   it("falls back to All results when the browsing scope names a Vault that is gone", () => {
-    // `useVaultScope` reads the scope straight out of localStorage and never
-    // reconciles it, so a Vault disabled since it was last browsed leaves an
-    // id behind that no row can match.
+    // `useVaultScope` reconciles the scope only once discovery has answered,
+    // so a Vault disabled since it was last browsed can still hand the dialog
+    // an id that no row can match.
     renderDialog({
       results: FACET_RESULTS,
       participants: FACET_PARTICIPANTS,
