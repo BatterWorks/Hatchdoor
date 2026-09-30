@@ -104,8 +104,15 @@ that production inventory are still checked for stale paths and duplicates.
   `vault_work`, `managed_git`, `startup_sqlite`, `embedder`,
   `runtime_embedder`, `mcp_tools_changed`), startup or posture
   (`legacy_migration_recovery`, `model_setup`, `model_setup_started`,
-  `web_auth_enabled`, `demo_mode`, `startup`), or live configuration
-  (`runtime_config`).
+  `web_auth_enabled`, `demo_mode`, `startup`), live configuration
+  (`runtime_config`), or process lifecycle (`shutdown`).
+- `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
+  shutting down. `server.rs` stops accepting on it, and every response that
+  would otherwise stay open forever ends on it: the collection events stream
+  in `handlers/vaults.rs`, MCP `subscriptions/listen` in `mcp/adapter.rs`, and
+  legacy MCP sessions through rmcp's cancellation token in `mcp/routes.rs`.
+  Graceful shutdown waits for every open connection, so a new long-lived
+  response must end on it too (#353).
 - `VaultCollectionRuntime` reconstructs disposable background turns at startup
   and, on process shutdown, stops new work and waits only for active
   background-turn and foreground-mutation safe boundaries.

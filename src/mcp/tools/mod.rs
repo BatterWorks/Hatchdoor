@@ -488,6 +488,7 @@ mod tests {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::terms_required(),
             transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
         (state, tmp)
     }

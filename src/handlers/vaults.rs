@@ -392,12 +392,26 @@ fn collection_revision_event(event: &VaultCollectionRevisionEvent) -> Event {
 /// IDs, and a broad change category; carries no Note content. A subscriber
 /// that misses an intermediate advance (the channel keeps only the latest
 /// value) still learns the current revision and should refetch broadly.
+///
+/// The stream ends when the server starts shutting down. Nothing else ends it,
+/// and graceful shutdown waits for it, so without that one open browser tab
+/// kept the process alive until the supervisor killed it (#353). The browser's
+/// `EventSource` reconnects on its own once the server is back.
 pub async fn vault_collection_events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream = WatchStream::new(VaultCollectionManagement::new(&state).subscribe_revisions())
-        .map(|event| Ok(collection_revision_event(&event)));
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let revisions = WatchStream::new(VaultCollectionManagement::new(&state).subscribe_revisions())
+        .map(|event| Some(Ok(collection_revision_event(&event))));
+    let shutdown = state.shutdown.clone();
+    let shutting_down = tokio_stream::once(()).then(move |()| {
+        let shutdown = shutdown.clone();
+        async move {
+            shutdown.wait().await;
+            None
+        }
+    });
+    Sse::new(revisions.merge(shutting_down).map_while(|event| event))
+        .keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]

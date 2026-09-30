@@ -69,6 +69,19 @@ impl HatchdoorMcpTransport {
         // library default but is pinned here so the behavior is explicit and
         // survives an upstream default change.
         config.sse_keep_alive = Some(std::time::Duration::from_secs(15));
+        // A legacy session's standalone GET stream lasts as long as the agent
+        // stays connected, and graceful shutdown waits for it, so shutdown
+        // cancels rmcp's own token, which terminates every session (#353).
+        // `build_router` also runs in synchronous tests, where nothing serves
+        // and there is no runtime to watch from.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = config.cancellation_token.clone();
+            let shutdown = state.shutdown.clone();
+            runtime.spawn(async move {
+                shutdown.wait().await;
+                sessions.cancel();
+            });
+        }
         // The per-token live-subscription budget (#170) shared by every
         // handler instance this service constructs.
         let subscriptions = Arc::new(SubscriptionRegistry::new());
@@ -350,6 +363,7 @@ mod tests {
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
+            shutdown: Default::default(),
         }
     }
 
@@ -3979,6 +3993,52 @@ mod tests {
         let event = next_message(&mut rx).await;
         assert_eq!(event["method"], "notifications/tools/list_changed");
         assert!(event["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"].is_number());
+    }
+
+    /// #353: an agent's open listen stream must not hold graceful shutdown,
+    /// which waits for every open response to end.
+    #[tokio::test]
+    async fn shutdown_ends_an_open_subscription_stream() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut rx = open_listen(&app, json!({"toolsListChanged": true})).await.0;
+        let ack = next_message(&mut rx).await;
+        assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+
+        state.shutdown.trigger();
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the listen stream must end on shutdown");
+    }
+
+    /// #353: a legacy session's standalone GET stream stays open for as long
+    /// as the agent is connected, so it must end on shutdown too.
+    #[tokio::test]
+    async fn shutdown_ends_an_open_legacy_session_stream() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-session-id", session.id));
+        headers.push(("accept", "text/event-stream".into()));
+        let response = send(app.clone(), "GET", headers, None).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "standalone stream opened"
+        );
+        let mut body = response.into_body().into_data_stream();
+
+        state.shutdown.trigger();
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while body.next().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the session stream must end on shutdown");
     }
 
     #[tokio::test]
