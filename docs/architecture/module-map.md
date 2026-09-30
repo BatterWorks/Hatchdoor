@@ -3533,7 +3533,7 @@ container the shell restores scroll position against, not the pane itself. On
 desktop with more than one enabled Vault, the shell-owned Scope zone (#138,
 `app/ExplorerPane.tsx`) pins a fourth zone above the rail; it shares this
 file's CSS but is not part of this capability's owned React contract.
-`ChangesPanel` lists notes changed on disk; it deliberately carries no unread
+`ChangesPanel` lists notes changed on disk, newest first across every Vault in scope with no per-Vault share (#341). `useVaultTree` asks `/recent` for the API's ceiling of 25 while the panel shows 15, because the server returns no total: the rows past 15 are what make its `and N more` line and its head count true. It deliberately carries no unread
 count, because distinguishing external changes from the user's own edits needs
 backend data that does not exist yet. Changed on disk carries the shared
 `VaultPrefix` provenance marker (#140) on each row when scope is `all` and
@@ -3610,8 +3610,8 @@ open/close, the active note's ancestors, and the open-but-empty invariant
 (#305); `app/ExplorerPane.test.tsx` covers the tree and list
 components in composition, including the single-active-highlight invariant.
 `hooks/useVaultTree.test.ts` covers the `/recent` read's partiality at three
-and eight Vaults, the tree read's partiality, a failed `/recent` read, and a
-superseded `all` read answering after the narrowed one (#334).
+and eight Vaults, the tree read's partiality, a failed `/recent` read, a
+superseded `all` read answering after the narrowed one (#334), and the 25-row `/recent` read (#341); `app/ExplorerPane.test.tsx` covers the panel's fifteen rows, `and N more` line and head count (#341).
 
 ### Search dialog
 

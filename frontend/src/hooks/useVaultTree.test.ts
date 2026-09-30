@@ -369,3 +369,35 @@ describe("useVaultTree — superseded reads never land (#334)", () => {
     expect(result.current.treeMissingVaults).toEqual([THREE_VAULTS[1].name]);
   });
 });
+
+describe("useVaultTree — Changed on disk row budget (#341)", () => {
+  it("asks /recent for twenty-five notes and keeps every one it gets", async () => {
+    const notes = Array.from({ length: 25 }, (_, index) => ({
+      vault_id: THREE_VAULTS[index % 3].vault_id,
+      title: `Note ${index}`,
+      slug: `note-${index}`,
+      relative_path: `note-${index}`,
+      mtime_ns: 1_000 - index,
+    }));
+    const fetchMock = mockFetch(
+      collectionEnvelope(
+        "all",
+        notes,
+        THREE_VAULTS.map((vault) => participantFor(vault, "fresh")),
+      ),
+    );
+
+    const { result } = renderHook(() => useVaultTree("all"));
+
+    await waitFor(() => expect(result.current.modifiedNotes).toHaveLength(25));
+    const recentUrl = fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .find((url) => url.includes("/recent"));
+    expect(new URL(recentUrl!, "http://x").searchParams.get("limit")).toBe(
+      "25",
+    );
+    expect(result.current.modifiedNotes.map((note) => note.slug)).toEqual(
+      notes.map((note) => note.slug),
+    );
+  });
+});
