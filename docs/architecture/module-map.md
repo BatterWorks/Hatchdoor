@@ -1243,7 +1243,8 @@ the full backend checks.
 
 **Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`.
 
-**Public contract:** `VaultReadCore`, `BrowseSurface`, explicit `VaultScope`,
+**Public contract:** `VaultReadCore`, `BrowseSurface`, `AssetSurface`,
+`NoteDownload` (#342), explicit `VaultScope`,
 the common `VaultReadProjection` envelope, participant state/error types, and
 Vault-qualified exact-note, tree, statistics, graph, and recent-note
 projections, plus `VaultReadCore::saved_queries` and its wire types
@@ -1316,7 +1317,10 @@ catalog (which has already applied configured and built-in noise exclusions)
 and survive `BrowseSurface` layer selection. A demo therefore cannot bypass
 its default-only Note surface by requesting a demoted, noise, or excluded asset
 directly; ordinary `Everything` reads retain the legacy contained-asset
-behavior.
+behavior. `AssetSurface` is that same decision captured from one index, for a
+caller checking many paths: `asset_on_surface` delegates to it, and the note
+download carries one (#342) so a demo zip never holds an asset the asset route
+refuses.
 `query_notes` (#274) selects the Notes whose tags, path, and frontmatter
 properties satisfy every stated condition, restoring the capability the
 multi-Vault rewrite retired. It selects rather than ranks, and nothing in
@@ -1436,8 +1440,9 @@ Zero enabled Vaults stays the empty projection it has always been. `VaultExplore
 back; `VaultExplorerNote` carries no `vault_id`, because the `VaultTree` around
 it already does. Flat projections that mix Vaults in one list —
 `VaultRecentNote`, search hits — keep theirs.
-`exact_note_for_download` returns a Note together with its containing
-directory from one Vault control-block fetch — required whenever a caller
+`exact_note_for_download` returns a `NoteDownload`: a Note, its containing
+directory, and the Vault's `AssetSurface`, from one Vault control-block fetch
+and one index build. That is required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control
 block rather than mutating the current one in place, so two independent
 `exact_note`/`vault_directory` calls could otherwise observe different Vault
@@ -2643,7 +2648,9 @@ single-configured-Vault readiness gate. Since #188 asset resolution is the
 core's (`VaultReadCore::contained_asset`); what is left in `assets.rs` is this
 route's own wire shaping — the success response's headers and the HTTP status
 each `AssetPathError` carries — and `downloads.rs` still owns export and
-download-response building (`build_note_export`, `download_response`).
+download-response building (`build_note_export`, `download_response`);
+`build_note_export` bundles only the assets its caller admits, and the
+download route admits by the read core's `AssetSurface`.
 
 `vault_collection_reads.rs` owns one-or-all collection reads and search:
 `GET /api/v1/vaults/{scope}/tree`, `.../recent`, `.../stats`, `.../graph`, and

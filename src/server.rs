@@ -6263,6 +6263,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn demo_mode_note_download_bundles_only_assets_on_its_readable_surface() {
+        // #342: the download route must refuse exactly what the asset route
+        // refuses, so a demo zip never carries bytes `/assets/...` answers 404.
+        let (demo, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("download-surface");
+        for directory in ["sources", "private"] {
+            std::fs::create_dir_all(vault_root.join(directory)).expect("create asset directory");
+        }
+        let hidden_only = "# Home\n\n![[sources/hidden.png]]\n![](private/excluded.png)\n";
+        std::fs::write(vault_root.join("Home.md"), hidden_only).expect("write hidden-only note");
+        std::fs::write(
+            vault_root.join("Mixed.md"),
+            "# Mixed\n\n![[visible.png]]\n![[sources/hidden.png]]\n",
+        )
+        .expect("write mixed note");
+        std::fs::write(vault_root.join("visible.png"), b"visible").expect("write visible asset");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"hidden")
+            .expect("write demoted asset");
+        std::fs::write(vault_root.join("private/excluded.png"), b"excluded")
+            .expect("write excluded asset");
+
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Download surface".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_root.clone(),
+                    },
+                    exclude_patterns: vec!["private/".to_string()],
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add vault to registry");
+        let vault_id = snapshot
+            .definitions()
+            .find(|definition| definition.name() == "Download surface")
+            .expect("added vault")
+            .vault_id()
+            .to_string();
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let download = |slug: &str| {
+            demo.clone().oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/{slug}/download"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+        };
+
+        let hidden = download("home").await.expect("response");
+        assert_eq!(hidden.status(), StatusCode::OK);
+        assert_eq!(
+            hidden.headers()["content-type"],
+            "text/markdown; charset=utf-8",
+            "a note whose every asset is refused downloads as plain Markdown"
+        );
+        let markdown = to_bytes(hidden.into_body(), usize::MAX)
+            .await
+            .expect("markdown body");
+        assert_eq!(
+            std::str::from_utf8(&markdown).expect("utf-8 markdown"),
+            hidden_only,
+            "a refused asset's link is left as written, like a missing one"
+        );
+
+        let mixed = download("mixed").await.expect("response");
+        assert_eq!(mixed.status(), StatusCode::OK);
+        assert_eq!(mixed.headers()["content-type"], "application/zip");
+        let zip_bytes = to_bytes(mixed.into_body(), usize::MAX)
+            .await
+            .expect("zip body");
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.to_vec())).expect("read zip");
+        let mut names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["Mixed-assets/visible.png", "Mixed.md"]);
+        let mut markdown = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("Mixed.md").expect("markdown entry"),
+            &mut markdown,
+        )
+        .expect("read markdown entry");
+        assert!(markdown.contains("](Mixed-assets/visible.png)"));
+        assert!(markdown.contains("![[sources/hidden.png]]"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_mode_note_download_still_bundles_assets_under_demoted_layers() {
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, false);
+        let vault_root = tmp.path().join("ordinary-download");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::write(
+            vault_root.join("Home.md"),
+            "# Home\n\n![[sources/hidden.png]]\n",
+        )
+        .expect("write note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"operator asset")
+            .expect("write demoted asset");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home/download"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/zip");
+    }
+
+    #[tokio::test]
     async fn ordinary_mode_retains_access_to_assets_under_demoted_layers() {
         let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, false);
         let vault_root = tmp.path().join("ordinary-layered-assets");
