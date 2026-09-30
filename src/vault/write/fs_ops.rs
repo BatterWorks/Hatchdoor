@@ -1299,7 +1299,6 @@ mod tests {
         assert!(!note.with_extension("md.hatchdoor-tmp").exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_create_refuses_a_file_that_appeared_after_the_existence_check() {
         let dir = tempdir().expect("tempdir");
@@ -1339,6 +1338,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn atomic_write_avoids_a_planted_temporary_sidecar_without_touching_its_target() {
         use std::os::unix::fs::symlink;

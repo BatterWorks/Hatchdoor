@@ -1087,6 +1087,80 @@ async fn an_index_turn_with_no_concurrent_mutation_publishes_fresh() {
     );
 }
 
+/// Issue #329: a snapshot attempt that starts while an Index turn is still
+/// building supersedes that turn, and the turn's publication then writes
+/// nothing. The turn used to count that as a publication and mark its Vault
+/// `Ready` on the strength of rows it never wrote. It now fails retryably,
+/// leaves the row exactly as the newer attempt left it, and does not mark it
+/// stale over that attempt's verdict.
+#[tokio::test]
+async fn a_superseded_index_turn_fails_retryably_and_leaves_the_row_to_the_newer_attempt() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let (entered, release, turn) = fixture.hold_open_mid_embedding();
+    meet_barrier(&entered).await;
+
+    // `mark_vault_snapshot_stale` begins its own snapshot attempt, which is
+    // exactly the concurrent caller the attempt guard exists for. The newer
+    // attempt then decides the row's freshness; setting it `fresh` here makes
+    // any stale mark the superseded turn wrongly applied afterwards visible.
+    fixture
+        .cache
+        .mark_vault_snapshot_stale(fixture.vault_id)
+        .expect("a newer attempt supersedes the running turn");
+    fixture
+        .cache
+        .connection()
+        .expect("open the shared cache")
+        .execute(
+            "UPDATE vault_snapshots SET freshness = 'fresh' WHERE vault_id = ?1",
+            [fixture.vault_id.to_string()],
+        )
+        .expect("the newer attempt settles the row fresh");
+
+    meet_barrier(&release).await;
+    let outcome = turn
+        .await
+        .expect("Index turn task")
+        .expect("Index turn ran");
+    let error = outcome
+        .result
+        .expect_err("a superseded turn published nothing and must not report success");
+    assert_eq!(error.code(), "vault_index_failed");
+    assert!(error.retryable(), "a superseded turn is worth retrying");
+
+    assert_eq!(
+        fixture.snapshot_status(),
+        Some(VaultSnapshotStatus {
+            participating: true,
+            freshness: VaultSnapshotFreshness::Fresh,
+            searchable: true,
+        }),
+        "the superseded turn must not stale the row the newer attempt owns"
+    );
+    assert_eq!(
+        fixture
+            .cache
+            .snapshot_note_content(fixture.vault_id, "home")
+            .expect("read the retained snapshot")
+            .as_deref(),
+        Some("# Home\n\nmelatonin original"),
+        "the superseded turn's candidate was never published"
+    );
+    let runtime = fixture.control().snapshot();
+    assert_ne!(
+        runtime.search,
+        VaultSearchStatus::Ready,
+        "a turn that published nothing must not report its Vault current"
+    );
+    assert_eq!(
+        runtime
+            .search_error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("vault_index_failed")
+    );
+}
+
 /// A managed-Git Vault's control block, activated through the real
 /// registry and collection runtime exactly like production. Uses a
 /// syntactically valid but unreachable `https://` URL — like
