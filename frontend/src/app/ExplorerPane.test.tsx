@@ -1121,6 +1121,67 @@ describe("ExplorerPane accordion (#142)", () => {
     ).toHaveAttribute("open");
   });
 
+  it("opens nested folders three deep inside an unfolded Vault and keeps them open across unfolding another Vault (#305)", async () => {
+    const vaultTrees = THREE_VAULTS.map((vault) => {
+      const entry = vaultTreeFor(vault);
+      entry.tree.folders[0].folders = [
+        {
+          name: "Hosts",
+          folders: [
+            {
+              name: "Rack",
+              folders: [],
+              notes: [
+                {
+                  vault_id: vault.vault_id,
+                  title: `${vault.name} rack`,
+                  slug: `${vault.vault_id}-rack`,
+                },
+              ],
+            },
+          ],
+          notes: [
+            {
+              vault_id: vault.vault_id,
+              title: `${vault.name} host`,
+              slug: `${vault.vault_id}-host`,
+            },
+          ],
+        },
+      ];
+      return entry;
+    });
+    renderStatefulPane({
+      vaults: THREE_VAULTS,
+      vaultTrees,
+      scope: "all",
+      locationPathname: `/v/${THREE_VAULTS[0].vault_id}/n/x`,
+    });
+
+    // Alpha starts unfolded. Folders open the way a click opens them: the
+    // element changes, and the browser (jsdom too) queues the `toggle` event
+    // React hands to FolderNode.
+    const openFolder = async (path: string) => {
+      const details = screen.getByTitle(path).closest("details");
+      if (!details) throw new Error(`No folder ${path}`);
+      details.open = true;
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    };
+    await openFolder("Journal");
+    await openFolder("Journal/Hosts");
+    await openFolder("Journal/Hosts/Rack");
+    expect(screen.getByText("Alpha host")).toBeInTheDocument();
+    expect(screen.getByText("Alpha rack")).toBeInTheDocument();
+
+    fireEvent.click(headFor("Gamma"));
+    fireEvent.click(headFor("Alpha"));
+
+    expect(
+      screen.getByTitle("Journal/Hosts").closest("details"),
+    ).toHaveAttribute("open");
+    expect(screen.getByText("Alpha rack")).toBeInTheDocument();
+  });
+
   it("narrowing to one Vault renders exactly today's explorer, with the count-or-condition slot on the Notes head", () => {
     renderPane({
       vaults: THREE_VAULTS,

@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import type {
   ExplorerFolder,
@@ -150,6 +150,13 @@ export function RecentNotesList({
   );
 }
 
+/** A change to the folder-open record, applied by its owner to the latest
+ * state. Two folders toggling in one batch each get the other's write, which
+ * a whole next record built from a render's snapshot would drop (#305). */
+export type ExpandedFoldersUpdate = (
+  previous: Record<string, boolean>,
+) => Record<string, boolean>;
+
 export function FolderTree({
   root,
   currentPath,
@@ -161,7 +168,7 @@ export function FolderTree({
   root: ExplorerFolder;
   currentPath: string;
   expandedFolders: Record<string, boolean>;
-  onExpandedFoldersChange: (expanded: Record<string, boolean>) => void;
+  onExpandedFoldersChange: (update: ExpandedFoldersUpdate) => void;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
 }) {
@@ -186,7 +193,10 @@ export function FolderTree({
           writeEnabled={writeEnabled}
           onCreateNoteInFolder={onCreateNoteInFolder}
           onToggleFolder={(path, open) =>
-            onExpandedFoldersChange({ ...expandedFolders, [path]: open })
+            onExpandedFoldersChange((previous) => ({
+              ...previous,
+              [path]: open,
+            }))
           }
         />
       ))}
@@ -223,17 +233,28 @@ function FolderNode({
 }) {
   const shouldOpen =
     activePathFolders.has(folderPath) || expandedFolders[folderPath] === true;
+  // What the element itself last reported. The browser opens a <details>
+  // before any state hears about it, so the children follow this as well as
+  // `shouldOpen`: a folder the reader sees open always has its contents
+  // mounted, even if the record never caught up (#305).
+  const [elementOpen, setElementOpen] = useState(shouldOpen);
+  const showChildren = shouldOpen || elementOpen;
 
   return (
     <li className="folder-item">
       <details
         open={shouldOpen}
-        onToggle={(event) =>
-          onToggleFolder(
-            folderPath,
-            (event.currentTarget as HTMLDetailsElement).open,
-          )
-        }
+        onToggle={(event) => {
+          // React dispatches `toggle` through every ancestor with an
+          // `onToggle`, so an enclosing folder sees its descendants' toggles
+          // too. Only this folder's own element speaks for this folder.
+          if (event.target !== event.currentTarget) {
+            return;
+          }
+          const open = event.currentTarget.open;
+          setElementOpen(open);
+          onToggleFolder(folderPath, open);
+        }}
       >
         <summary title={folderPath}>
           <span className="folder-label">{folder.name}</span>
@@ -260,7 +281,7 @@ function FolderNode({
             no longer reaches a note in a collapsed folder on the browsers
             that looked inside one; the in-app search does. */}
         <ul className="tree">
-          {shouldOpen ? (
+          {showChildren ? (
             <>
               {folder.folders.map((child) => (
                 <FolderNode

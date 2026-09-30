@@ -1,6 +1,7 @@
 import { getStoredLastNote, getStoredString } from "../lib/storage";
 import { pathToNoteIdentity } from "../lib/notePath";
 import { LAST_UNFOLDED_VAULT_KEY } from "./constants";
+import type { ExpandedFoldersUpdate } from "../components/Explorer";
 import type { VaultId, VaultSummary } from "../types";
 
 /** A Vault whose activation is "unavailable" keeps its accordion head but
@@ -116,4 +117,20 @@ export function withVaultFolderChange(
     rest[`${prefix}${path}`] = value;
   }
   return rest;
+}
+
+/** Lifts one Vault's folder-open update to the whole shared record. The
+ * Vault's slice is read from the record the update is applied to, never from
+ * a render's snapshot, so updates from several folders in one batch all
+ * survive (#305). */
+export function vaultFolderUpdate(
+  vaultId: VaultId,
+  update: ExpandedFoldersUpdate,
+): ExpandedFoldersUpdate {
+  return (previous) =>
+    withVaultFolderChange(
+      previous,
+      vaultId,
+      update(expandedFoldersForVault(previous, vaultId)),
+    );
 }

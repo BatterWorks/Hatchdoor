@@ -9,7 +9,12 @@ import {
 import { NavLink } from "react-router-dom";
 
 import { ChangesPanel } from "../components/ChangesPanel";
-import { FolderTree, RecentNotesList, SideHead } from "../components/Explorer";
+import {
+  FolderTree,
+  RecentNotesList,
+  SideHead,
+  type ExpandedFoldersUpdate,
+} from "../components/Explorer";
 import {
   BarChartIcon,
   Graph3Icon,
@@ -31,7 +36,7 @@ import {
   resolveInitialUnfoldedVault,
   resolveLandingVaultId,
   setStoredUnfoldedVault,
-  withVaultFolderChange,
+  vaultFolderUpdate,
 } from "./vaultAccordion";
 import type {
   ExplorerFolder,
@@ -357,7 +362,7 @@ function VaultAccordion({
   noteCounts: Record<VaultId, number | undefined>;
   currentPath: string;
   expandedFolders: Record<string, boolean>;
-  onExpandedFoldersChange: (next: Record<string, boolean>) => void;
+  onExpandedFoldersChange: (update: ExpandedFoldersUpdate) => void;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string, vaultId: VaultId) => void;
   /** Whether a tree read has answered for this scope. Before it has, a
@@ -401,13 +406,9 @@ function VaultAccordion({
                   expandedFolders,
                   vault.vault_id,
                 )}
-                onExpandedFoldersChange={(next) =>
+                onExpandedFoldersChange={(update) =>
                   onExpandedFoldersChange(
-                    withVaultFolderChange(
-                      expandedFolders,
-                      vault.vault_id,
-                      next,
-                    ),
+                    vaultFolderUpdate(vault.vault_id, update),
                   )
                 }
                 writeEnabled={writeEnabled}
@@ -523,7 +524,7 @@ type ExplorerPaneProps = {
   expandedFolders: Record<string, boolean>;
   recentCollapsed: boolean;
   onRecentCollapsedChange: (next: boolean) => void;
-  onExpandedFoldersChange: (next: Record<string, boolean>) => void;
+  onExpandedFoldersChange: (update: ExpandedFoldersUpdate) => void;
   onCloseDrawer: () => void;
   onRefreshTree: () => void;
   onScrollTopChange: (top: number) => void;
