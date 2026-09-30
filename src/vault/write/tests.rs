@@ -821,14 +821,11 @@ fn edit_note_replaces_unique_string() {
     )
     .expect("edit");
 
-    assert_eq!(
-        fs::read_to_string(&path).expect("read"),
-        "alpha BETA gamma\n"
-    );
-    assert_eq!(
-        outcome.content_hash,
-        Some(content_hash("alpha BETA gamma\n"))
-    );
+    // The note had no final newline and the edit did not touch its end, so it
+    // still has none (ADR-22, #316).
+    assert_eq!(fs::read_to_string(&path).expect("read"), "alpha BETA gamma");
+    assert_eq!(outcome.content_hash, Some(content_hash("alpha BETA gamma")));
+    assert!(outcome.quality_warnings.is_empty());
 }
 
 #[test]
@@ -871,7 +868,7 @@ fn edit_note_replace_all_replaces_every_occurrence() {
 
     edit_note(entry, "x", "y", &content_hash("x x x"), true).expect("edit");
 
-    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y\n");
+    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y");
 }
 
 #[test]
@@ -1027,6 +1024,492 @@ fn replace_section_rejects_duplicate_heading() {
         Err(WriteError::Conflict(_))
     ));
     assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+/// A CRLF note used by the partial-write line-ending tests (#316).
+const CRLF_NOTE: &str =
+    "# Title\r\nline one\r\n\r\n## Section\r\nold body\r\n\r\n## Last\r\nend\r\n";
+
+/// Write `body` as `Home.md` in a fresh Vault and return the tempdir, the
+/// note's path, and its entry.
+fn partial_write_note(body: &str) -> (TempDir, std::path::PathBuf, crate::vault::NoteEntry) {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home").clone();
+    (tmp, path, entry)
+}
+
+#[test]
+fn edit_note_on_a_crlf_note_swaps_only_the_replaced_text() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = edit_note(
+        &entry,
+        "line one",
+        "line ONE\nline two",
+        &content_hash(CRLF_NOTE),
+        false,
+    )
+    .expect("edit");
+
+    let expected = CRLF_NOTE.replace("line one", "line ONE\r\nline two");
+    assert_eq!(fs::read_to_string(&path).expect("read"), expected);
+    assert_eq!(outcome.content_hash, Some(content_hash(&expected)));
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["converted line endings in the supplied text to CRLF to match the note".to_string()]
+    );
+}
+
+#[test]
+fn edit_note_without_line_breaks_in_the_new_text_reports_nothing() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = edit_note(
+        &entry,
+        "old body",
+        "new body",
+        &content_hash(CRLF_NOTE),
+        false,
+    )
+    .expect("edit");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        CRLF_NOTE.replace("old body", "new body")
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn replace_section_on_a_crlf_note_leaves_every_byte_outside_the_section() {
+    let cases = [
+        (
+            SectionMode::Replace,
+            "# Title\r\nline one\r\n\r\n## Section\r\nnew body\r\n## Last\r\nend\r\n",
+        ),
+        (
+            SectionMode::Before,
+            "# Title\r\nline one\r\n\r\n## Section\r\nnew body\r\n## Section\r\nold body\r\n\r\n## Last\r\nend\r\n",
+        ),
+        (
+            SectionMode::After,
+            "# Title\r\nline one\r\n\r\n## Section\r\nold body\r\n\r\n## Section\r\nnew body\r\n## Last\r\nend\r\n",
+        ),
+    ];
+    for (mode, expected) in cases {
+        let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+        let outcome = replace_section(
+            &entry,
+            "## Section",
+            mode,
+            "## Section\nnew body\n",
+            &content_hash(CRLF_NOTE),
+        )
+        .expect("replace");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            expected,
+            "{mode:?}"
+        );
+        assert_eq!(
+            outcome.content_hash,
+            Some(content_hash(expected)),
+            "{mode:?}"
+        );
+        assert_eq!(
+            outcome.quality_warnings,
+            vec![
+                "converted line endings in the supplied text to CRLF to match the note".to_string()
+            ],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn append_note_on_a_crlf_note_keeps_the_existing_bytes_and_appends_in_crlf() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = append_note(&entry, "more\nlines\n", &content_hash(CRLF_NOTE)).expect("append");
+
+    let written = fs::read_to_string(&path).expect("read");
+    assert_eq!(written, format!("{CRLF_NOTE}more\r\nlines\r\n"));
+    assert_eq!(outcome.content_hash, Some(content_hash(&written)));
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["converted line endings in the supplied text to CRLF to match the note".to_string()]
+    );
+}
+
+#[test]
+fn partial_writes_on_an_earlier_part_leave_a_missing_final_newline_missing() {
+    let body = "## One\nfirst\n## Two\nsecond";
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = edit_note(&entry, "first", "FIRST", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nFIRST\n## Two\nsecond"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = replace_section(
+        &entry,
+        "## One",
+        SectionMode::Replace,
+        "## One\nNEW\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nNEW\n## Two\nsecond"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn append_note_reports_the_separator_and_final_line_ending_it_adds() {
+    let body = "# Note\nlast line";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = append_note(&entry, "appended", &content_hash(body)).expect("append");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Note\nlast line\nappended\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "added a line break before the supplied text".to_string(),
+            "added a line break after the supplied text".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn append_note_to_an_empty_note_adds_no_separator() {
+    let (_tmp, path, entry) = partial_write_note("");
+
+    let outcome = append_note(&entry, "first\n", &content_hash("")).expect("append");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "first\n");
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn replace_section_reports_the_line_break_it_adds_after_the_supplied_text() {
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = replace_section(
+        &entry,
+        "## One",
+        SectionMode::Replace,
+        "## One\nNEW",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nNEW\n## Two\nsecond\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["added a line break after the supplied text".to_string()]
+    );
+}
+
+#[test]
+fn replace_section_at_the_end_keeps_whether_the_note_ended_with_a_line_break() {
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "## Two",
+        SectionMode::Replace,
+        "## Two\nNEW",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Two\nNEW\n"
+    );
+
+    let body = "## One\nfirst\n## Two\nsecond";
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = replace_section(
+        &entry,
+        "## Two",
+        SectionMode::Replace,
+        "## Two\nNEW",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Two\nNEW"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn partial_writes_on_an_lf_note_convert_crlf_input_to_lf() {
+    let body = "# Title\nline one\n## Section\nold\n";
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome =
+        edit_note(&entry, "line one", "a\r\nb", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Title\na\nb\n## Section\nold\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["converted line endings in the supplied text to LF to match the note".to_string()]
+    );
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "## Section",
+        SectionMode::Replace,
+        "## Section\r\nnew\r\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Title\nline one\n## Section\nnew\n"
+    );
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    append_note(&entry, "x\r\ny\r", &content_hash(body)).expect("append");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        format!("{body}x\ny\n")
+    );
+}
+
+#[test]
+fn partial_writes_on_a_mixed_note_keep_untouched_endings_and_follow_the_majority() {
+    // Two CRLF breaks against one lone LF: CRLF is the majority.
+    let body = "one\r\ntwo\nthree\r\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    edit_note(&entry, "two", "2a\n2b", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "one\r\n2a\r\n2b\nthree\r\n"
+    );
+
+    // One CRLF against two lone LFs: LF is the majority.
+    let body = "one\ntwo\r\nthree\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    append_note(&entry, "four\r\nfive\r\n", &content_hash(body)).expect("append");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "one\ntwo\r\nthree\nfour\nfive\n"
+    );
+
+    // A tie means LF.
+    let body = "one\r\ntwo\nthree";
+    let (_tmp, path, entry) = partial_write_note(body);
+    edit_note(&entry, "three", "3a\r\n3b", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "one\r\ntwo\n3a\n3b"
+    );
+}
+
+#[test]
+fn partial_writes_leave_a_stray_lone_cr_outside_the_replaced_text() {
+    let body = "keep\rthis\r\nchange me\r\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    edit_note(&entry, "change me", "changed", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "keep\rthis\r\nchanged\r\n"
+    );
+}
+
+#[test]
+fn append_note_adds_no_separator_after_a_last_line_ending_in_a_lone_cr() {
+    let body = "# Note\nlast\r";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = append_note(&entry, "more\n", &content_hash(body)).expect("append");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Note\nlast\rmore\n"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn replace_section_before_and_after_at_the_end_of_a_note_with_no_final_newline() {
+    let body = "## One\nfirst\n## Two\nsecond";
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = replace_section(
+        &entry,
+        "## Two",
+        SectionMode::After,
+        "## Three\nthird",
+        &content_hash(body),
+    )
+    .expect("after");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Two\nsecond\n## Three\nthird"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["added a line break before the supplied text".to_string()]
+    );
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "## Two",
+        SectionMode::Before,
+        "## Inserted\nx\n",
+        &content_hash(body),
+    )
+    .expect("before");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Inserted\nx\n## Two\nsecond"
+    );
+}
+
+#[test]
+fn edit_note_replace_all_on_a_crlf_note_writes_every_replacement_in_crlf() {
+    let body = "x\r\nmid\r\nx\r\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    edit_note(&entry, "x", "a\nb", &content_hash(body), true).expect("edit");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "a\r\nb\r\nmid\r\na\r\nb\r\n"
+    );
+}
+
+#[test]
+fn replace_section_on_a_mixed_note_keeps_untouched_endings() {
+    // Three CRLF breaks against two lone LFs: CRLF is the majority.
+    let body = "# T\r\nintro\n## S\r\nold\n## Next\r\nend";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    replace_section(
+        &entry,
+        "## S",
+        SectionMode::Replace,
+        "## S\nnew\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# T\r\nintro\n## S\r\nnew\r\n## Next\r\nend"
+    );
+}
+
+#[test]
+fn replace_section_with_empty_content_removes_the_section_and_adds_nothing() {
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = replace_section(
+        &entry,
+        "## One",
+        SectionMode::Replace,
+        "",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "## Two\nsecond\n");
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn create_note_still_normalises_the_whole_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let catalog = build(tmp.path());
+
+    let outcome = create_note(tmp.path(), "Fresh", "a\r\nb\rc", false, &catalog).expect("create");
+
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("Fresh.md")).expect("read"),
+        "a\nb\nc\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "normalized CRLF/CR line endings to LF".to_string(),
+            "added final newline".to_string()
+        ]
+    );
+}
+
+#[test]
+fn partial_writes_refuse_nul_bytes_in_the_supplied_text() {
+    let body = "## One\nfirst\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    let hash = content_hash(body);
+
+    for result in [
+        edit_note(&entry, "first", "a\0b", &hash, false),
+        replace_section(&entry, "## One", SectionMode::Replace, "a\0b", &hash),
+        append_note(&entry, "a\0b", &hash),
+    ] {
+        assert!(matches!(
+            result,
+            Err(WriteError::InvalidInput(message)) if message.contains("NUL")
+        ));
+    }
+    assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
+fn partial_writes_on_a_crlf_note_still_report_frontmatter_warnings() {
+    let body = "---\r\ntags: [a]\r\ntags: [b]\r\n---\r\nbody\r\n";
+    let (_tmp, _path, entry) = partial_write_note(body);
+
+    let outcome = edit_note(&entry, "body", "text", &content_hash(body), false).expect("edit");
+
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["frontmatter has duplicate key: tags".to_string()]
+    );
+}
+
+#[test]
+fn update_note_still_normalises_the_whole_note() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = update_note(&entry, "# New\r\nbody", &content_hash(CRLF_NOTE)).expect("update");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "# New\nbody\n");
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "normalized CRLF/CR line endings to LF".to_string(),
+            "added final newline".to_string()
+        ]
+    );
 }
 
 #[test]

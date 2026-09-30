@@ -1134,9 +1134,14 @@ write API/types, and configuration for archive or upload limits.
   intended merge before anything reaches disk, which is the backstop for a block
   the key scanner reads differently from a YAML parser, an indented top-level
   mapping being the example, and the one case where an unnamed key can refuse a
-  call (#257). Whole-content writes
-  (`update_note`) keep their line-ending and trailing-newline normalisation;
-  ADR-22 constrains partial writes only.
+  call (#257). `append_note`, `edit_note` and `replace_section` never pass the
+  note through the whole-content preparation step: only the caller's text is
+  converted, to the note's majority line ending (CRLF against lone LF, LF on a
+  tie, the rule `LineEnding::of` shares with the frontend's `detectLineEnding`
+  in `frontend/src/lib/sourceMap.ts`, so the two change together), and each converted ending or added separating line break is reported
+  in `quality_warnings` (#316). Whole-content writes
+  (`create_note`, `update_note`) keep their line-ending and trailing-newline
+  normalisation; ADR-22 constrains partial writes only.
 - A tag rename is all or nothing (#242). It plans every edit first and writes
   only when `expected_plan_hash` equals the fingerprint of a plan made again
   under the same lock; the fingerprint is a hash of the edits and of the text
