@@ -3262,7 +3262,8 @@ Vault array and relayout the graph. `VaultSettingsDetail` seeds its editable
 drafts once per Vault but adopts every genuinely new record for display, so it
 cannot describe a Vault the Settings index disagrees with.
 
-**Consumers:** `App.tsx`, `hooks/useVaultTree.ts`,
+**Consumers:** `App.tsx`, `hooks/useVaultTree.ts`, `hooks/useVaultScope.ts`
+(#335, reconciles the persisted browsing scope against the live collection),
 `components/graph/GraphPage.tsx`, `components/StatsPage.tsx`,
 `features/settings/VaultSettingsIndex.tsx`, and
 `features/settings/vaultGitBehavior.ts`.
