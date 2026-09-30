@@ -1,12 +1,15 @@
 import type { VaultId, VaultScope, VaultSummary } from "../types";
 
+/** `count` is `null` when the note count is not known: the stats read has not
+ * answered yet, failed, or left this Vault out of a partial answer. Unknown is
+ * never rendered or announced as 0 (#333). */
 export type VaultSlotState =
-  | { kind: "count"; count: number }
+  | { kind: "count"; count: number | null }
   | { kind: "indexing" }
   /** Browsable but not yet searchable: a real note count, plus a marker that
    * search is still building. Its own kind rather than a `condition` because
    * nothing is wrong — the Vault is usable, just not by search yet. */
-  | { kind: "count-pending-search"; count: number; sentence: string }
+  | { kind: "count-pending-search"; count: number | null; sentence: string }
   | {
       kind: "condition";
       word: string;
@@ -158,21 +161,21 @@ export function deriveVaultSlot(
     }
     return {
       kind: "count-pending-search",
-      count: noteCount ?? 0,
+      count: noteCount ?? null,
       sentence: "Browsing is ready. Search for this Vault is still building.",
     };
   }
   if (vault.search === "indexing" || vault.search === "unavailable") {
     return { kind: "indexing" };
   }
-  return { kind: "count", count: noteCount ?? 0 };
+  return { kind: "count", count: noteCount ?? null };
 }
 
 /**
  * The current scope's count-or-condition, in the same words §27's slot
  * renders, for the shell's polite live region (#146). `null` means not yet
- * known (an indexing Vault) — the live region must never announce a value it
- * does not have.
+ * known (an indexing Vault, or a count the stats read has not supplied) — the
+ * live region must never announce a value it does not have.
  */
 export function describeScopeSlot(
   scope: VaultScope,
@@ -197,6 +200,11 @@ export function describeScopeSlot(
   }
   if (slot.kind === "condition") {
     return slot.word;
+  }
+  if (slot.count === null) {
+    return slot.kind === "count-pending-search"
+      ? "Search still building"
+      : null;
   }
   const notes = `${slot.count} note${slot.count === 1 ? "" : "s"}`;
   return slot.kind === "count-pending-search"

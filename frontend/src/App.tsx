@@ -114,6 +114,8 @@ function VaultWorkspace({
     vaults,
     demoMode,
     loading: vaultsLoading,
+    readState: collectionReadState,
+    error: collectionError,
     recovery: registryRecovery,
     legacyMigrationRecovery,
     noteCounts: vaultNoteCounts,
@@ -402,8 +404,15 @@ function VaultWorkspace({
     }
     // Discovery still in flight means `vaults` is a temporary `[]`, which
     // would read as "the stored Vault is gone" for every stored note. Wait for
-    // the real list before judging it.
-    if (vaultsLoading) {
+    // the real list before judging it. A failed discovery leaves the same
+    // `[]` behind it, and judging that would forget the note over a network
+    // error (#333): wait for a discovery that actually answered, which the
+    // Try again action or the revision stream's reconnect delivers.
+    if (
+      vaultsLoading ||
+      collectionReadState === "loading" ||
+      collectionReadState === "error"
+    ) {
       return;
     }
     restoredLastNoteRef.current = true;
@@ -425,7 +434,7 @@ function VaultWorkspace({
       `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
       { replace: true },
     );
-  }, [location.pathname, navigate, vaults, vaultsLoading]);
+  }, [collectionReadState, location.pathname, navigate, vaults, vaultsLoading]);
 
   useEffect(() => {
     // A departed Vault's remembered note is unusable for the same reason the
@@ -435,11 +444,16 @@ function VaultWorkspace({
     // evidence of that — a broken registry and a paused-everything
     // collection both produce one — so it forgets nothing at all rather than
     // everything.
-    if (vaultsLoading || hasRegistryRecovery || vaults.length === 0) {
+    if (
+      vaultsLoading ||
+      collectionReadState === "error" ||
+      hasRegistryRecovery ||
+      vaults.length === 0
+    ) {
       return;
     }
     pruneStoredLastNotesByVault(vaults.map((vault) => vault.vault_id));
-  }, [hasRegistryRecovery, vaults, vaultsLoading]);
+  }, [collectionReadState, hasRegistryRecovery, vaults, vaultsLoading]);
 
   // Narrowing the browsing scope to one Vault carries the reader with it: the
   // note that Vault was last left on comes back, the same restore the landing
@@ -885,7 +899,18 @@ function VaultWorkspace({
             <Route
               path="/"
               element={
-                vaultsLoading ? null : registryRecovery ? (
+                vaultsLoading ||
+                collectionReadState ===
+                  "loading" ? null : collectionReadState === "error" ? (
+                  // Discovery failed and nothing is known about the
+                  // collection: never the zero-Vault state, which would tell
+                  // the reader their Vaults are gone (#333).
+                  <BrokenStartState
+                    title="Vaults Unavailable"
+                    message={collectionError ?? "Could not load your Vaults."}
+                    onTryAgain={() => void loadVaults()}
+                  />
+                ) : registryRecovery ? (
                   <BrokenStartState
                     message={registryRecovery.message}
                     onTryAgain={() => void loadVaults()}
@@ -1155,11 +1180,12 @@ export function App() {
   const hasRegistryRecovery = Boolean(
     collection.recovery || collection.legacyMigrationRecovery,
   );
+  // Only a discovery that answered can say there are no Vaults; a failed one
+  // (`readState` "error") knows nothing either way.
   const hasNoVaults =
     !collection.loading &&
-    !collection.error &&
-    !hasRegistryRecovery &&
-    collection.vaults.length === 0;
+    collection.readState === "empty" &&
+    !hasRegistryRecovery;
   // The startup route is neither useful nor permitted to poll while the
   // workspace is a zero-Vault or broken-registry recovery surface (#150).
   // Resolve the collection first so either condition can win before a model

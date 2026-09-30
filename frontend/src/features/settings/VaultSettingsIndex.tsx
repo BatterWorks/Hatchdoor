@@ -73,6 +73,8 @@ export function VaultSettingsIndex({
     noteCounts: counts,
     demoMode,
     recovery: registryRecovery,
+    readState,
+    error: discoveryError,
     refresh: loadVaults,
   } = useVaultCollection();
 
@@ -91,6 +93,23 @@ export function VaultSettingsIndex({
           tone="error"
           title="Vault Registry Unavailable"
           description={`${registryRecovery.message} Nothing was changed, and your Markdown is untouched.`}
+          actionLabel="Try again"
+          onAction={() => void loadVaults()}
+        />
+      </section>
+    );
+  }
+
+  // A failed discovery knows nothing about the registry: an empty group with
+  // its Add a Vault action would read as "you have no Vaults" (#333).
+  if (readState === "error") {
+    return (
+      <section className="settings-vault-index" aria-label="Vaults">
+        <p className="settings-index-group">Vaults</p>
+        <StateBlock
+          tone="error"
+          title="Vaults Unavailable"
+          description={`${discoveryError ?? "Could not load your Vaults."} Nothing was changed, and your Markdown is untouched.`}
           actionLabel="Try again"
           onAction={() => void loadVaults()}
         />

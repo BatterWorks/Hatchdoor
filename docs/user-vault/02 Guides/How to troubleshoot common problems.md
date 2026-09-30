@@ -17,6 +17,12 @@ Fix: `docker compose logs hatchdoor | grep HATCHDOOR_WEB_BEARER_TOKEN | tail -1`
 
 A second, rarer startup failure: `HATCHDOOR_MCP_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing`. This only happens if you set `HATCHDOOR_MCP_ENABLED=true` directly in `.env` before ever starting — the normal path is to enable MCP live from **Settings** after the container is already running (see [[Connect your agent]]), which doesn't hit this check at all. Fix: either also set `HATCHDOOR_MCP_BEARER_TOKEN` in `.env`, or remove `HATCHDOOR_MCP_ENABLED` from `.env` and enable MCP from Settings instead.
 
+## The workspace says "Vaults Unavailable"
+
+The browser could not get the list of Vaults from the server: it is offline, the server is restarting, or a proxy in front of it answered with an error such as `502`. Your Vaults and notes are untouched; the app just does not know about them yet, which is why it shows this instead of the "No Vaults Yet" screen. The note you had open is kept and comes back once the list loads. While the server stays unreachable, note counts in the sidebar read `–` (not known) rather than `0`.
+
+Fix: check that Hatchdoor is running (`docker compose ps`) and reachable from this device, then press **Try again**. The app also recovers by itself when its live connection to the server comes back.
+
 ## Browser asks for a token you don't have
 
 You bound Hatchdoor to a non-loopback host and it generated one on first start (see above) — it isn't something you chose, it's printed once to the container logs. Fix: `docker compose logs hatchdoor | grep HATCHDOOR_WEB_BEARER_TOKEN | tail -1`, or if you already saved it to `.env` and just forgot it, read the value straight out of that file — Hatchdoor never displays it back to you once set, by design (revealing an already-known credential grants no new access, but Hatchdoor still won't show a browser session a token it hasn't already proven it holds).

@@ -275,7 +275,13 @@ function vaultsInScope(
 
 export function StatsPage() {
   const [scope] = useVaultScope();
-  const { vaults, loading: loadingVaults } = useVaultCollection();
+  const {
+    vaults,
+    loading: loadingVaults,
+    readState,
+    error: discoveryError,
+    refresh: reloadVaults,
+  } = useVaultCollection();
   const targets = vaultsInScope(scope, vaults);
   // Statistics stay grouped per Vault (#62) and `stats/detail` is an exact
   // single-Vault read, so `all` is N reads presented as N sections rather
@@ -346,6 +352,20 @@ export function StatsPage() {
         <div className="stats-loading-block" />
         <div className="stats-loading-block" />
       </div>
+    );
+  }
+
+  // No Vault list to scope to because discovery failed, not because there are
+  // none (#333).
+  if (readState === "error") {
+    return (
+      <StateBlock
+        tone="error"
+        title="Stats Unavailable"
+        description={discoveryError ?? "Could not load your Vaults."}
+        actionLabel="Try again"
+        onAction={() => void reloadVaults()}
+      />
     );
   }
 

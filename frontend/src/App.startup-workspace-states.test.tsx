@@ -10,6 +10,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App as RootApp, VaultApp as App } from "./App";
+import { LAST_NOTE_KEY } from "./app/constants";
+import { discoveryResponse, THREE_VAULTS } from "./test/fixtures/vaults";
 import type { VaultDiscoveryResponse } from "./types";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -340,5 +342,148 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     expect(
       screen.queryByText("Vault Registry Unavailable"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("VaultApp when Vault discovery fails (#333)", () => {
+  const [ALPHA] = THREE_VAULTS;
+
+  /** The three-Vault instance, reachable only while `network.online` holds;
+   * offline, every request fails the way a browser's fetch does. */
+  function mockThreeVaultServer(network: { online: boolean }) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        if (!network.online) {
+          throw new TypeError("Failed to fetch");
+        }
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse(THREE_VAULTS));
+        }
+        if (url.endsWith("/api/startup-status")) {
+          return jsonResponse({ state: "ready" });
+        }
+        if (url.includes("/tree")) {
+          return jsonResponse({
+            scope: "all",
+            collection_revision: 1,
+            partial: false,
+            participants: [],
+            data: THREE_VAULTS.map((vault) => ({
+              vault_id: vault.vault_id,
+              vault_name: vault.name,
+              tree: { name: vault.name, folders: [], notes: [] },
+            })),
+          });
+        }
+        if (url.includes("/recent") || url.includes("/stats")) {
+          return emptyEnvelope();
+        }
+        if (url.includes("/links")) {
+          return jsonResponse({ outgoing: [], backlinks: [] });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ results: [] });
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({ enabled: false, warnings: [] });
+        }
+        const note = /\/vaults\/([^/]+)\/notes\/([^/?]+)/.exec(url);
+        if (note) {
+          const [, vaultId, slug] = note;
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Alpha Home",
+              slug,
+              relative_path: "Alpha Home",
+              content: "# Alpha Home",
+              content_hash: `hash-${slug}`,
+              layer: null,
+            },
+          });
+        }
+        return jsonResponse({}, 404);
+      },
+    );
+  }
+
+  it("renders a server error as an error with Try again, never as No Vaults Yet", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(
+            { code: "internal_error", message: "Bad gateway" },
+            502,
+          );
+        }
+        return jsonResponse({}, 404);
+      },
+    );
+    renderApp();
+
+    expect(await screen.findByText("Vaults Unavailable")).toBeVisible();
+    expect(screen.getByText(/Bad gateway/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(screen.queryByText("No Vaults Yet")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add a Vault" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the connection error, not No Vaults Yet, when the app is reloaded offline after loading", async () => {
+    const network = { online: true };
+    mockThreeVaultServer(network);
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <RootApp />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Notes Explorer")).toBeVisible();
+
+    // Offline, then reload: the whole app mounts afresh with no server.
+    cleanup();
+    network.online = false;
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <RootApp />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Vaults Unavailable")).toBeVisible();
+    expect(
+      screen.getByText(/Could not reach the Hatchdoor server\./),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(screen.queryByText("No Vaults Yet")).not.toBeInTheDocument();
+
+    // Back online, Try again brings the workspace back.
+    network.online = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Notes Explorer")).toBeVisible();
+    expect(screen.queryByText("Vaults Unavailable")).not.toBeInTheDocument();
+  });
+
+  it("keeps the stored last note through a failed discovery and restores it on recovery", async () => {
+    const stored = JSON.stringify({
+      vaultId: ALPHA.vault_id,
+      slug: "alpha-home",
+    });
+    window.localStorage.setItem(LAST_NOTE_KEY, stored);
+    const network = { online: false };
+    mockThreeVaultServer(network);
+    renderApp();
+
+    expect(await screen.findByText("Vaults Unavailable")).toBeVisible();
+    expect(window.localStorage.getItem(LAST_NOTE_KEY)).toBe(stored);
+
+    network.online = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Alpha Home" }),
+    ).toBeInTheDocument();
+    expect(window.localStorage.getItem(LAST_NOTE_KEY)).toBe(stored);
   });
 });

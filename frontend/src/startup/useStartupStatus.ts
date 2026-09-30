@@ -27,6 +27,19 @@ export type StartupStatus =
   | { state: "failed"; message?: string };
 
 const POLL_INTERVAL_MS = 1_000;
+/** Ceiling for the retry delay while the status route keeps failing. Doubling
+ * from `POLL_INTERVAL_MS` reaches it after five failures. */
+const MAX_FAILURE_BACKOFF_MS = 30_000;
+
+/** The delay before the next poll after `failures` consecutive failed polls:
+ * the normal interval at zero, doubling per failure up to the ceiling, so an
+ * offline or restarting server is not asked once a second forever (#304). */
+export function startupPollDelay(failures: number): number {
+  if (failures <= 0) {
+    return POLL_INTERVAL_MS;
+  }
+  return Math.min(POLL_INTERVAL_MS * 2 ** failures, MAX_FAILURE_BACKOFF_MS);
+}
 const HAS_STEPPED_PAST_GATE_KEY = "hatchdoor:startup-gate-stepped-past";
 
 /**
@@ -38,7 +51,9 @@ const HAS_STEPPED_PAST_GATE_KEY = "hatchdoor:startup-gate-stepped-past";
  *
  * Polling is enabled only after ordinary Vault discovery has resolved, never
  * for zero-Vault or broken-registry workspaces (#150). It stops once the
- * backend reports `ready` or `failed`. A model-setup action
+ * backend reports `ready` or `failed`. A poll that fails (network error or a
+ * non-2xx answer) backs off, doubling the delay up to 30s, and the first poll
+ * that succeeds returns to the 1s interval (#304). A model-setup action
  * (accept/decline/retry) optimistically moves local state to `downloading`
  * and explicitly resumes polling, since the loop would otherwise stay parked
  * at its last terminal state forever — required for a real retry after a
@@ -56,6 +71,7 @@ export function useStartupStatus(enabled = true) {
   const hasSteppedPastGateRef = useRef(hasSteppedPastGate);
   const activeRef = useRef(true);
   const timerRef = useRef<number | undefined>(undefined);
+  const failuresRef = useRef(0);
   // Holds the latest `poll` so the scheduled setTimeout and the model-setup
   // actions below can trigger a re-poll without `poll` referencing itself
   // directly (a stale-closure footgun the react-hooks lint rule now flags).
@@ -72,6 +88,7 @@ export function useStartupStatus(enabled = true) {
       }
       const next = (await response.json()) as StartupStatus;
       if (!activeRef.current) return;
+      failuresRef.current = 0;
       setStatus(next);
       setConnectionIssue(false);
       if (
@@ -86,13 +103,15 @@ export function useStartupStatus(enabled = true) {
       shouldPoll = next.state !== "ready" && next.state !== "failed";
     } catch {
       if (!activeRef.current) return;
+      failuresRef.current += 1;
       setConnectionIssue(true);
     }
 
     if (activeRef.current && shouldPoll) {
+      if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
       timerRef.current = window.setTimeout(
         () => void pollRef.current(),
-        POLL_INTERVAL_MS,
+        startupPollDelay(failuresRef.current),
       );
     }
   }, []);
