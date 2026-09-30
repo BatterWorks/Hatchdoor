@@ -826,7 +826,10 @@ returns recovery. After a successful registry commit, non-empty
 `HATCHDOOR_EXCLUDE` and `HATCHDOOR_GIT_*` environment values are named in a
 restricted recovery UI until removed and the process is restarted; health and
 the web shell remain reachable, but Vault runtime activation and mutation are
-withheld. `VAULT_PATH` remains valid deployment configuration.
+withheld. The composition root's method guard exempts `/mcp`, whose reads and
+handshake are all POSTs; the MCP dispatcher refuses its own state-changing
+tools and batch write items with a structured
+`legacy_environment_cleanup_required` tool error instead (#327). `VAULT_PATH` remains valid deployment configuration.
 The development-only managed-startup variable family is rejected before it can
 silently select another source. Markdown remains authoritative and downgrade
 across the registry cutover is unsupported.
@@ -849,7 +852,10 @@ immediately revokes that credential; web-token admission is independent of MCP
 state in both.
 
 The upload middleware accepts the MCP token only while MCP *and* MCP writes are
-enabled, so a write-mode disable revokes upload capability. The asset-read
+enabled, so a write-mode disable revokes upload capability. With no web token
+configured it admits every request, like the rest of the web API: the MCP
+token can only add access to a gated route, never start demanding one, so
+setting it up cannot 401 the browser's paste-to-upload (#327). The asset-read
 middleware accepts it whenever MCP is enabled, so that `get_attachment`'s
 default `download_url` is fetchable by the client that holds it (#176).
 
@@ -2765,7 +2771,17 @@ list handling from the tool quota, limits tool calls to 120/minute/token and
 concurrency to eight ordinary / two expensive searches, rejects over-limit
 requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
-window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
+window, the concurrency pools, and the POST classification). A `batch` is
+charged for the searches it carries (`limits::charge`, #327): one quota unit
+per `search_notes` item (at least one, at most `BATCH_MAX_READ_ITEMS`), and an
+expensive-search slot for its whole dispatch when any item searches, which
+keeps its sequential searches inside the two-search cap.
+Every `batch` item error carries a string `code` (#327): write mode's per-item
+refusal is `mcp_writes_disabled`, an unwritable target path keeps its core code
+through `JsonRpcFailure::domain_error`, and any other plain-text failure maps
+to a code by JSON-RPC class (`invalid_arguments`, `internal_error`, ...) with
+the number kept as `jsonrpc_code`. `get_attachment`'s base64 size refusal is
+the structured `attachment_too_large_for_base64` tool error. Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
 43-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message

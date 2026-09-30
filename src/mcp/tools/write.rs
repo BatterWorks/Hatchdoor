@@ -176,7 +176,9 @@ fn vault_error(error: VaultReadError) -> JsonRpcFailure {
 fn mutation_error(error: VaultOperationError) -> JsonRpcFailure {
     match error.code.as_str() {
         "noise_excluded_write" | "layer_marker_write" => {
-            JsonRpcFailure::invalid_params(error.message)
+            let domain_error =
+                serde_json::to_value(&error).unwrap_or_else(|_| json!({ "code": error.code }));
+            JsonRpcFailure::invalid_params(error.message).with_domain_error(domain_error)
         }
         "internal_error" => JsonRpcFailure::internal(error.message),
         _ => JsonRpcFailure::not_found(
@@ -1347,10 +1349,17 @@ mod finalize_tests {
             ))
         };
 
-        let noise = map("noise_excluded_write");
-        assert_eq!(noise.code, -32602);
-        assert!(!noise.tool_level);
-        assert_eq!(noise.message, "detail");
+        for code in ["noise_excluded_write", "layer_marker_write"] {
+            let refused = map(code);
+            assert_eq!(refused.code, -32602);
+            assert!(!refused.tool_level);
+            assert_eq!(refused.message, "detail");
+            // #327: the structured error rides along, so a batch item can
+            // report the stable string code instead of -32602.
+            let domain = refused.domain_error.expect("structured domain error");
+            assert_eq!(domain["code"], code);
+            assert_eq!(domain["vault_id"], vault_id.to_string());
+        }
 
         let internal = map("internal_error");
         assert_eq!(internal.code, JsonRpcFailure::INTERNAL_ERROR_CODE);

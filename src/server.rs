@@ -633,23 +633,31 @@ fn traced_uri(uri: &axum::http::Uri) -> String {
 
 /// Environment-cleanup recovery keeps liveness and read-only explanation
 /// surfaces reachable, but it is not an alternate operating mode. Refuse all
-/// state-changing HTTP/MCP requests until the operator removes the named keys
+/// state-changing HTTP requests until the operator removes the named keys
 /// and restarts, regardless of which inner router would otherwise own them.
+///
+/// `/mcp` is exempt (#327). Streamable HTTP MCP sends the handshake, the
+/// discovery and list calls, and every read tool as a POST, so a method-based
+/// guard would kill the whole surface with a body its JSON-RPC framing cannot
+/// parse. The MCP tool dispatcher applies the same refusal per tool instead,
+/// as a structured `legacy_environment_cleanup_required` tool error
+/// (`mcp::tools::environment_cleanup_refusal`), and the transport's own auth
+/// and Origin checks still run first.
 async fn reject_startup_recovery_mutation(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    let is_safe_method = matches!(
+    let is_exempt = matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
-    );
+    ) || request.uri().path() == "/mcp";
     let recovery = state
         .legacy_migration_recovery
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    if !is_safe_method
+    if !is_exempt
         && let Some(recovery) = recovery
         && !recovery.can_start_with_no_vaults()
     {
@@ -2154,17 +2162,71 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// #327: a deployment with no web token serves the upload route openly,
+    /// and a live MCP bearer token must not change that. Before the fix the
+    /// gate counted the MCP token as "a credential is configured" and 401'd
+    /// the browser's paste-to-upload, which has no MCP token to send.
+    #[tokio::test]
+    async fn attachment_route_stays_open_with_an_mcp_token_but_no_web_token() {
+        for write_enabled in [true, false] {
+            let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+                None,
+                Some("mcp-secret".to_string()),
+                write_enabled,
+            );
+            let vault_id = create_vault_with_files(
+                &app,
+                "Attachments",
+                &tmp.path().join("attachments"),
+                &[],
+                0,
+            )
+            .await;
+
+            let response = app
+                .oneshot(attachment_upload_request(
+                    &vault_id,
+                    "Attachments/browser-paste.png",
+                    None,
+                ))
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "MCP writes {write_enabled}: an unauthenticated browser upload stays open"
+            );
+            assert!(
+                tmp.path()
+                    .join("attachments/Attachments/browser-paste.png")
+                    .exists()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn mcp_settings_apply_atomically_and_rotate_attachment_authorization() {
-        let (app, tmp, state) = app_for_tests_with_state();
+        // A web token is configured: with none, the attachment route is open
+        // whatever the MCP settings say (#327), and there would be no MCP
+        // authorization to rotate.
+        let (app, tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
         let vault_root = tmp.path().join("mcp-attachments");
-        let vault_id = create_vault_with_files(&app, "Mcp", &vault_root, &[], 0).await;
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Mcp",
+            &vault_root,
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
 
         let invalid = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2189,6 +2251,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2265,6 +2328,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2295,6 +2359,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2323,6 +2388,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2375,6 +2441,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2406,6 +2473,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -3562,6 +3630,105 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned)
             .expect("initialize issues Mcp-Session-Id")
+    }
+
+    /// #327: environment-cleanup recovery used to refuse every POST, so the
+    /// whole MCP surface, handshake included, answered with a bare 503 body
+    /// no JSON-RPC client can parse. `/mcp` now reaches the dispatcher, which
+    /// serves the reads and refuses each state-changing tool with the same
+    /// structured code the HTTP API uses.
+    #[tokio::test]
+    async fn environment_cleanup_recovery_answers_mcp_in_json_rpc_with_a_structured_code() {
+        let (_unused_app, _tmp, state) = app_for_tests_with_state();
+        state
+            .runtime_config
+            .save([
+                ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
+                (
+                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+                    "mcp-secret".to_string(),
+                ),
+            ])
+            .expect("configure write-enabled MCP");
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") = Some(
+            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
+                "Remove HATCHDOOR_EXCLUDE and restart.",
+            ),
+        );
+        let app = build_router(state, None);
+
+        // The handshake is a POST and must still succeed.
+        initialize_mcp_session(&app, "mcp-secret").await;
+
+        // Discovery explains the recovery.
+        let listed = mcp_tool_call(&app, "mcp-secret", "list_vaults", serde_json::json!({})).await;
+        assert_eq!(listed["result"]["isError"], false, "{listed}");
+        assert_eq!(
+            listed["result"]["structuredContent"]["legacy_migration_recovery"]["code"],
+            "legacy_environment_cleanup_required"
+        );
+
+        // Every state-changing tool is refused with the structured code.
+        let vault_id = crate::vault_registry::VaultId::generate()
+            .expect("generate Vault id")
+            .to_string();
+        for (name, arguments) in [
+            (
+                "create_vault",
+                serde_json::json!({"name": "New", "source": {"kind": "local", "path": "/tmp/x"}}),
+            ),
+            (
+                "create_note",
+                serde_json::json!({"vault_id": vault_id, "relative_path": "A.md", "content": "x"}),
+            ),
+            ("accept_gemma_terms", serde_json::json!({})),
+        ] {
+            let refused = mcp_tool_call(&app, "mcp-secret", name, arguments).await;
+            assert!(refused.get("error").is_none(), "{name}: {refused}");
+            assert_eq!(refused["result"]["isError"], true, "{name}: {refused}");
+            assert_eq!(
+                refused["result"]["structuredContent"]["code"],
+                "legacy_environment_cleanup_required",
+                "{name}: {refused}"
+            );
+        }
+
+        // A batch's write items are refused the same way, item by item.
+        let batch = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "batch",
+            serde_json::json!({"operations": [{"op": "create_note", "arguments": {
+                "vault_id": vault_id, "relative_path": "A.md", "content": "x"
+            }}]}),
+        )
+        .await;
+        assert_eq!(
+            batch["result"]["structuredContent"]["items"][0]["error"]["code"],
+            "legacy_environment_cleanup_required",
+            "{batch}"
+        );
+
+        // Non-MCP mutations keep the HTTP refusal.
+        let http = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(http.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

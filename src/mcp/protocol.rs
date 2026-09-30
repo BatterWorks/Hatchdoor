@@ -18,6 +18,12 @@ pub struct JsonRpcFailure {
     /// than a JSON-RPC protocol error — used for conditions like "note not found"
     /// that read tools already surface as tool errors, so both stay consistent.
     pub tool_level: bool,
+    /// The structured `{code, message, vault_id?, retryable}` domain error
+    /// behind a failure this surface reports at the protocol level (an
+    /// unwritable target path, say). The top-level dispatcher still renders
+    /// such a failure as a JSON-RPC error; a `batch` item renders it as data,
+    /// and needs the stable string code rather than the JSON-RPC number (#327).
+    pub domain_error: Option<Value>,
 }
 
 impl JsonRpcFailure {
@@ -30,6 +36,7 @@ impl JsonRpcFailure {
             code: -32602,
             message: message.into(),
             tool_level: false,
+            domain_error: None,
         }
     }
 
@@ -38,6 +45,7 @@ impl JsonRpcFailure {
             code: -32601,
             message: message.into(),
             tool_level: false,
+            domain_error: None,
         }
     }
 
@@ -46,7 +54,15 @@ impl JsonRpcFailure {
             code: -32603,
             message: message.into(),
             tool_level: false,
+            domain_error: None,
         }
+    }
+
+    /// Attach the structured domain error behind this failure; see
+    /// [`Self::domain_error`].
+    pub fn with_domain_error(mut self, error: Value) -> Self {
+        self.domain_error = Some(error);
+        self
     }
 
     /// A "not found" failure that read and write tools both surface as an
@@ -56,6 +72,7 @@ impl JsonRpcFailure {
             code: -32602,
             message: message.into(),
             tool_level: true,
+            domain_error: None,
         }
     }
 }
