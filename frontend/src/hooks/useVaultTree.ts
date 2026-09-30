@@ -18,6 +18,13 @@ import type {
   WireVaultTree,
 } from "../types";
 
+/** How many changed notes the `/recent` read asks for: the API's ceiling,
+ * newest first across every Vault in scope with no per-Vault share (#341).
+ * Deliberately more than Changed on disk shows, because the server returns no
+ * total and the rows past the panel's own limit are what make its
+ * "and N more" line and its count true. */
+const CHANGED_NOTES_FETCH_LIMIT = 25;
+
 /** Merges every participating Vault's tree into the one `ExplorerFolder`
  * shape narrowed-scope (and single-Vault-instance) explorer rendering uses,
  * unchanged — byte-identical to today. The per-Vault accordion under `all`
@@ -153,7 +160,9 @@ export function useVaultTree(scope: VaultScope) {
     const isCurrent = () =>
       !signal.aborted && request === recentRequestRef.current;
     try {
-      const params = new URLSearchParams({ limit: "5" });
+      const params = new URLSearchParams({
+        limit: String(CHANGED_NOTES_FETCH_LIMIT),
+      });
       const res = await apiFetch(
         `/api/v1/vaults/${encodeURIComponent(scope)}/recent?${params.toString()}`,
         { signal },
@@ -169,7 +178,7 @@ export function useVaultTree(scope: VaultScope) {
       if (!isCurrent()) {
         return;
       }
-      setModifiedNotes(projection.data.slice(0, 5));
+      setModifiedNotes(projection.data);
       setModifiedNotesPartial(projection.partial);
       setModifiedNotesMissingVaults(missingVaultNames(projection.participants));
       setModifiedNotesError(null);

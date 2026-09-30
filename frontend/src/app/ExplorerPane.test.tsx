@@ -269,6 +269,33 @@ describe("ExplorerPane", () => {
       within(panel).getByRole("link", { name: "Finance" }),
     ).toBeInTheDocument();
   });
+
+  it("shows fifteen changed notes and counts the rest (#341)", () => {
+    const modifiedNotes: ModifiedNote[] = Array.from(
+      { length: 25 },
+      (_, index) => ({
+        vault_id: VAULT_ID,
+        title: `Changed ${index}`,
+        slug: `changed-${index}`,
+        relative_path: `changed-${index}`,
+        mtime_ns: 100 - index,
+      }),
+    );
+    renderPane({ modifiedNotes });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Recently changed notes" }),
+    );
+
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
+    expect(within(panel).getAllByRole("link")).toHaveLength(15);
+    expect(within(panel).getByText("Changed 14")).toBeInTheDocument();
+    expect(within(panel).queryByText("Changed 15")).not.toBeInTheDocument();
+    expect(within(panel).getByText("and 10 more")).toBeInTheDocument();
+    expect(within(panel).getByText("25")).toBeInTheDocument();
+  });
 });
 
 /** Scopes a query to the Scope zone alone: with the accordion (#142) also
