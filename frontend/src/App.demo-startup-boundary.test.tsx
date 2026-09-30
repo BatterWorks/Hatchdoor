@@ -10,6 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App as RootApp, VaultApp as App } from "./App";
+import { clearToken } from "./api/api";
 import type { StartupStatus } from "./startup/useStartupStatus";
 import { discoveryResponse, healthyVault } from "./test/fixtures/vaults";
 
@@ -57,6 +58,10 @@ type Server = {
   /** When set, writes and `write-capabilities` are refused `demo_read_only`
    * even though discovery has not reported demo mode yet. */
   refuseWrites: boolean;
+  /** When set, every request without this bearer token is refused 401, as a
+   * deployment with `HATCHDOOR_WEB_BEARER_TOKEN` does. Startup status stays
+   * public there too. */
+  requiredToken?: string;
 };
 
 /** One Vault holding one note, `home`. `server` is live: flip its fields to
@@ -76,6 +81,14 @@ function mockServer(overrides: Partial<Server> = {}): Server {
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
+      if (
+        server.requiredToken &&
+        !url.endsWith("/api/startup-status") &&
+        new Headers(init?.headers).get("Authorization") !==
+          `Bearer ${server.requiredToken}`
+      ) {
+        return jsonResponse({ error: "unauthorized" }, 401);
+      }
       if (url.endsWith("/api/v1/vaults")) {
         return jsonResponse(discoveryResponse([VAULT], server.demo));
       }
@@ -168,6 +181,7 @@ function mockServer(overrides: Partial<Server> = {}): Server {
 
 afterEach(() => {
   cleanup();
+  clearToken();
   window.localStorage.clear();
   vi.restoreAllMocks();
 });
@@ -299,6 +313,54 @@ describe("boot with site data blocked (#339)", () => {
       ).toBeVisible();
     } finally {
       cleanup();
+      if (descriptor) {
+        Object.defineProperty(window, "localStorage", descriptor);
+      }
+    }
+  });
+});
+
+describe("unlock with site data blocked (#339)", () => {
+  it("unlocks in place when the browser refuses to store the token", async () => {
+    mockServer({ requiredToken: "secret-token" });
+    const reload = vi.fn();
+    const location = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...location, reload },
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("The operation is insecure.", "SecurityError");
+      },
+    });
+    try {
+      render(
+        <MemoryRouter initialEntries={[NOTE_ROUTE]}>
+          <RootApp />
+        </MemoryRouter>,
+      );
+      fireEvent.change(await screen.findByPlaceholderText("Bearer token"), {
+        target: { value: "secret-token" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+
+      // A page reload would forget a token only this page holds.
+      expect(reload).not.toHaveBeenCalled();
+      expect(
+        await screen.findByRole("heading", { level: 2, name: "Home" }),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("dialog", { name: "Access token required" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      cleanup();
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: location,
+      });
       if (descriptor) {
         Object.defineProperty(window, "localStorage", descriptor);
       }

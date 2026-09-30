@@ -1209,6 +1209,20 @@ function formatEtaSeconds(seconds: number | undefined): string | null {
 }
 
 export function App() {
+  // Bumped to remount the whole app in place. Unlock does that instead of a
+  // page reload when the browser refused to store the token (#339): a reload
+  // would forget it, and the remount drops every cached 401 all the same,
+  // since the collection store starts over once its last subscriber leaves.
+  const [session, setSession] = useState(0);
+  return (
+    <AppSession
+      key={session}
+      onUnlockInPlace={() => setSession((current) => current + 1)}
+    />
+  );
+}
+
+function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
   const [authRequired, setAuthRequired] = useState(false);
   const collection = useVaultCollection();
   const hasRegistryRecovery = Boolean(
@@ -1238,9 +1252,12 @@ export function App() {
       {authRequired ? (
         <TokenPrompt
           onSubmit={(token) => {
-            setToken(token);
             setAuthRequired(false);
-            window.location.reload();
+            if (setToken(token)) {
+              window.location.reload();
+            } else {
+              onUnlockInPlace();
+            }
           }}
         />
       ) : null}

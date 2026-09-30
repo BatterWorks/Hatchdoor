@@ -299,8 +299,8 @@ export function SearchDialog({
   );
   // Two different reasons a semantic search came back partial, told apart
   // because they ask different things of the reader: a Vault that did not
-  // answer may need attention, while one still building search only needs
-  // time. Both are named when both apply.
+  // answer may need attention, while one whose notes semantic search could
+  // not reach is answered by Keyword search. Both are named when both apply.
   const pendingSearchNames = notSearchableVaultNames(participants);
   const partialSentence = [
     missingVaultNames.length > 0

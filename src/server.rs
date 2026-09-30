@@ -1208,17 +1208,18 @@ pub async fn run_server() {
         runtime_config,
         startup,
         transfer_links: Default::default(),
+        shutdown: Default::default(),
     };
 
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
     let app = build_router(state.clone(), web_bearer_token);
-    let (shutdown_started, mut shutdown_received) = tokio::sync::watch::channel(false);
     let shutdown_task = tokio::spawn({
         let vault_work = vault_work.clone();
+        let shutdown = state.shutdown.clone();
         async move {
             shutdown_signal().await;
             vault_work.shutdown();
-            shutdown_started.send_replace(true);
+            shutdown.trigger();
         }
     });
 
@@ -1289,10 +1290,7 @@ pub async fn run_server() {
         spawn_model_startup(state.clone(), selected_model);
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_received.changed().await;
-        })
+    serve_until_shutdown(listener, app, state.shutdown.clone())
         .await
         .unwrap_or_else(|e| {
             error!("Server error: {e}");
@@ -1314,6 +1312,19 @@ pub async fn run_server() {
     if let Err(error) = shutdown_task.await {
         error!(%error, "Server shutdown task exited unexpectedly");
     }
+}
+
+/// Serve `app` until `shutdown` fires, then stop accepting and return once
+/// every open connection has closed. Responses that would stay open forever
+/// end on the same signal (#353), so this returns promptly.
+async fn serve_until_shutdown(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: crate::app_state::ShutdownSignal,
+) -> std::io::Result<()> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { shutdown.wait().await })
+        .await
 }
 
 /// Forward a per-Vault watcher invalidation to the one shared work queue: a
@@ -1610,6 +1621,52 @@ mod tests {
             !coordinator.has_work(committing, VaultWorkKind::Commit),
             "and asks for no further automatic commit while suppressed"
         );
+    }
+
+    /// Open `path` as a streaming GET on a raw socket and return once the
+    /// response headers have arrived, keeping the connection open.
+    async fn open_stream(addr: std::net::SocketAddr, path: &str) -> tokio::net::TcpStream {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .await
+            .expect("send request");
+        let mut head = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buf).await.expect("read response");
+            assert!(read > 0, "server closed before sending headers");
+            head.extend_from_slice(&buf[..read]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "unexpected response: {head}"
+        );
+        stream
+    }
+
+    /// #353: one open browser tab holds the collection events stream, and
+    /// graceful shutdown waits for every connection, so SIGTERM used to leave
+    /// the process running until the supervisor killed it.
+    #[tokio::test]
+    async fn graceful_shutdown_ends_an_open_collection_events_stream() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(serve_until_shutdown(listener, app, state.shutdown.clone()));
+        let _subscriber = open_stream(addr, "/api/v1/vaults/events").await;
+
+        state.shutdown.trigger();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("shutdown must not wait on an open events subscriber")
+            .expect("server task")
+            .expect("serve");
     }
 
     #[test]
@@ -1910,6 +1967,7 @@ mod tests {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
 
         (
@@ -1993,6 +2051,7 @@ mod tests {
             runtime_config,
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
 
         (build_router(state.clone(), web_bearer_token), tmp, state)

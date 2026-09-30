@@ -222,10 +222,14 @@ pub enum VaultParticipantState {
     /// one published while a write landed, or one left by a failed turn.
     /// Writes since it was built may be missing.
     Stale,
-    /// The Vault's rows are current, but this generation carries no vectors,
-    /// so it contributed nothing to a semantic search. Only semantic search
-    /// reports it: browsing, keyword and tag search all read the same
-    /// structural rows and report `Fresh`.
+    /// Some or all of the notes a semantic search selected in this Vault have
+    /// no vectors, so the Vault's semantic answer is missing them. Either the
+    /// generation has no vectors at all yet (its embedding pass is pending or
+    /// failed, whatever its freshness), or it was built with
+    /// `HATCHDOOR_EMBED_LAYERS=false` and the selection reaches a demoted
+    /// layer, whose notes never get vectors; hits from its embedded notes
+    /// still count (#328). Only semantic search reports it: browsing, keyword
+    /// and tag search read the structural rows every note has.
     ///
     /// Distinct from `Unavailable`, which means there is nothing to read at
     /// all. Collapsing the two would tell a caller its Notes are missing when

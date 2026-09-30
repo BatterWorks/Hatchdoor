@@ -258,7 +258,9 @@ impl ServerHandler for HatchdoorMcpHandler {
     }
 
     /// One established subscription stream. Runs until the request is
-    /// cancelled (client disconnect or explicit cancellation) and forwards
+    /// cancelled (client disconnect or explicit cancellation) or the server
+    /// starts shutting down, which would otherwise wait on it forever (#353),
+    /// and forwards
     /// each `mcp_tools_changed` broadcast as
     /// `notifications/tools/list_changed` carrying the subscription ID
     /// metadata rmcp attaches. A missed batch of events while lagged still
@@ -285,9 +287,11 @@ impl ServerHandler for HatchdoorMcpHandler {
         })?;
 
         let mut tools_changed = self.state.mcp_tools_changed.subscribe();
+        let shutdown = self.state.shutdown.clone();
         loop {
             tokio::select! {
                 _ = context.cancelled() => break,
+                () = shutdown.wait() => break,
                 event = tools_changed.recv() => match event {
                     Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         context.sink().notify_tool_list_changed().await.ok();

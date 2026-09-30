@@ -73,6 +73,19 @@ pub(crate) enum NoteBodies {
     Load,
 }
 
+/// Whether a snapshot read parses each note's frontmatter into
+/// `metadata.properties`.
+///
+/// Search never returns a note's properties, so parsing every note's
+/// frontmatter JSON in every participating Vault on every search bought an
+/// object it then threw away. With `Omit` the column is not selected at all
+/// and `properties` is an empty object. Every other reader loads them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NoteProperties {
+    Omit,
+    Load,
+}
+
 /// One Vault's complete published read snapshot. This is intentionally a
 /// cache-local representation: callers must treat it as disposable data and
 /// keep exact note reads on the authoritative Markdown path.
@@ -470,7 +483,8 @@ impl SqliteCache {
             if !status.participating {
                 return Ok(None);
             }
-            let read = Self::read_vault_snapshot_rows(&snapshot, vault_id, bodies)?;
+            let read =
+                Self::read_vault_snapshot_rows(&snapshot, vault_id, bodies, NoteProperties::Load)?;
             PublishedVaultSnapshot { status, read }
         };
         snapshot.commit()?;
@@ -484,6 +498,7 @@ impl SqliteCache {
         conn: &rusqlite::Connection,
         vault_id: VaultId,
         bodies: NoteBodies,
+        properties: NoteProperties,
     ) -> Result<Option<PublishedVaultSnapshot>, String> {
         let Some(status) = Self::read_snapshot_status(conn, vault_id)? else {
             return Ok(None);
@@ -493,8 +508,29 @@ impl SqliteCache {
         }
         Ok(Some(PublishedVaultSnapshot {
             status,
-            read: Self::read_vault_snapshot_rows(conn, vault_id, bodies)?,
+            read: Self::read_vault_snapshot_rows(conn, vault_id, bodies, properties)?,
         }))
+    }
+
+    /// Whether the published generation embedded its demoted layers, read on
+    /// the caller's pinned transaction. `HATCHDOOR_EMBED_LAYERS=false` builds
+    /// chunk rows for demoted notes but no vectors, so a semantic search over
+    /// such a layer has nothing to rank. The build stamps its setting into the
+    /// generation's metadata; a generation without the stamp predates it and
+    /// was built with the default, which embeds every layer.
+    pub(crate) fn vault_snapshot_embeds_demoted_layers_on(
+        conn: &rusqlite::Connection,
+        vault_id: VaultId,
+    ) -> Result<bool, String> {
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM vault_snapshot_metadata WHERE vault_id = ?1 AND key = 'embed_layers'",
+                params![vault_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("read Vault snapshot embed-layer stamp: {error}"))?;
+        Ok(stamp.as_deref() != Some("false"))
     }
 
     fn read_snapshot_status(
@@ -533,14 +569,19 @@ impl SqliteCache {
         conn: &rusqlite::Connection,
         vault_id: VaultId,
         bodies: NoteBodies,
+        properties: NoteProperties,
     ) -> Result<VaultSnapshotRead, String> {
         let vault_id = vault_id.to_string();
+        let frontmatter_column = match properties {
+            NoteProperties::Load => "frontmatter_json",
+            NoteProperties::Omit => "NULL",
+        };
         let mut notes_statement = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT title, slug, relative_path, size_bytes, mtime_ns, layer, \
-                 aliases_json, frontmatter_json \
-                 FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path",
-            )
+                 aliases_json, {frontmatter_column} \
+                 FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path"
+            ))
             .map_err(|error| format!("prepare Vault snapshot notes: {error}"))?;
         let mut notes = notes_statement
             .query_map(params![&vault_id], |row| {
@@ -562,15 +603,16 @@ impl SqliteCache {
                                 )
                             },
                         )?,
-                        properties: serde_json::from_str(&row.get::<_, String>(7)?).map_err(
-                            |error| {
+                        properties: match row.get::<_, Option<String>>(7)? {
+                            Some(json) => serde_json::from_str(&json).map_err(|error| {
                                 rusqlite::Error::FromSqlConversionFailure(
                                     7,
                                     rusqlite::types::Type::Text,
                                     Box::new(error),
                                 )
-                            },
-                        )?,
+                            })?,
+                            None => serde_json::Value::Object(serde_json::Map::new()),
+                        },
                     },
                 })
             })
