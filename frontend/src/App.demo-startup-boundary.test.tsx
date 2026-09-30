@@ -50,6 +50,13 @@ type Server = {
   startupHold?: Promise<void>;
   treeFetches: number;
   retries: number;
+  /** `write-capabilities` requests seen so far. */
+  capabilityReads: number;
+  /** When set, `write-capabilities` fails as a dropped connection would. */
+  capabilitiesUnreachable: boolean;
+  /** When set, writes and `write-capabilities` are refused `demo_read_only`
+   * even though discovery has not reported demo mode yet. */
+  refuseWrites: boolean;
 };
 
 /** One Vault holding one note, `home`. `server` is live: flip its fields to
@@ -60,6 +67,9 @@ function mockServer(overrides: Partial<Server> = {}): Server {
     startup: { state: "ready" },
     treeFetches: 0,
     retries: 0,
+    capabilityReads: 0,
+    capabilitiesUnreachable: false,
+    refuseWrites: false,
     ...overrides,
   };
   vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -89,9 +99,20 @@ function mockServer(overrides: Partial<Server> = {}): Server {
         return jsonResponse({});
       }
       if (url.includes("/write-capabilities")) {
-        return server.demo
+        server.capabilityReads += 1;
+        if (server.capabilitiesUnreachable) {
+          throw new TypeError("Failed to fetch");
+        }
+        return server.demo || server.refuseWrites
           ? jsonResponse(DEMO_REFUSAL, 403)
           : jsonResponse({ vault_id: VAULT_ID, enabled: true, warnings: [] });
+      }
+      if (
+        server.refuseWrites &&
+        method === "POST" &&
+        url.endsWith(`/api/v1/vaults/${VAULT_ID}/notes`)
+      ) {
+        return jsonResponse(DEMO_REFUSAL, 403);
       }
       if (url.includes("/tree")) {
         server.treeFetches += 1;
@@ -182,6 +203,77 @@ describe("write mode re-derives when the backend flips into demo mode (#339)", (
     expect(
       screen.queryByRole("button", { name: "New note" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("write mode re-reads keep or drop Edit for the right reasons (#339)", () => {
+  it("keeps Edit when a revision-triggered re-read fails on a dropped connection", async () => {
+    const server = mockServer();
+    render(
+      <MemoryRouter initialEntries={[NOTE_ROUTE]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeVisible();
+    const readsBefore = server.capabilityReads;
+
+    server.capabilitiesUnreachable = true;
+    act(() => {
+      window.__hatchdoorEventSources[0].emit(
+        "vault-collection-revision",
+        JSON.stringify({ collection_revision: 9, vault_ids: [VAULT_ID] }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(server.capabilityReads).toBeGreaterThan(readsBefore);
+    });
+    // Let the rejected re-read settle before asserting nothing changed.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByRole("button", { name: "Edit" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "New note" })).toBeVisible();
+  });
+
+  it("re-asks write-capabilities after a demo_read_only refusal and drops Edit once it is refused too", async () => {
+    const server = mockServer();
+    render(
+      <MemoryRouter initialEntries={[NOTE_ROUTE]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeVisible();
+    const readsBefore = server.capabilityReads;
+
+    // The posture moved under the tab, but discovery still says
+    // `demo_mode: false` and no revision arrives: only the refusal itself
+    // can prompt the re-read.
+    server.refuseWrites = true;
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    fireEvent.change(screen.getByLabelText("Note name"), {
+      target: { value: "Refused" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create and open" }));
+
+    expect(
+      await screen.findByText(
+        "This is a public read-only demo, so that change was not saved.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(server.capabilityReads).toBeGreaterThan(readsBefore);
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Edit" }),
+      ).not.toBeInTheDocument();
+    });
   });
 });
 

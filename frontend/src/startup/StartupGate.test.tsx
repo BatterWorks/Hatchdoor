@@ -76,6 +76,22 @@ describe("StartupGate", () => {
     expect(screen.getByText("Private vault")).toBeVisible();
   });
 
+  it("never shows a fresh demo visitor the operator model choice, since the demo server refuses it", () => {
+    renderGate({
+      status: { state: "terms_required" },
+      hasSteppedPastGate: false,
+      demoMode: true,
+    });
+
+    expect(screen.getByText("Private vault")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Accept terms and set up Gemma" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Use Nomic instead" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("mounts the vault immediately once the gate has stepped aside, even mid-scan", () => {
     renderGate({
       status: { state: "scanning" },

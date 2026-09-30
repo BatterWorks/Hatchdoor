@@ -11,8 +11,10 @@ const THEME_ICON = { auto: "◑", light: "○", dark: "●" } as const;
  * state gates only until `hasSteppedPastGate` first flips — after that a
  * retry's re-download shows in the Scope zone slot and the search dialog
  * instead (#339). `terms_required` gates again even after the latch, since
- * nothing else in the app can offer the model choice; a demo instance, whose
- * server refuses the choice, is the exception once it has latched.
+ * nothing else in the app can offer the model choice. A demo instance never
+ * gates on `terms_required`, latched or not: its server 404s both accept and
+ * decline, so the visitor gets the workspace and the search dialog's
+ * visitor-grade "unavailable" sentence instead of dead operator controls.
  *
  * The decision waits for its inputs (#339): until discovery has resolved and
  * the first startup answer has landed, nothing mounts, so the workspace is
@@ -55,8 +57,7 @@ export function StartupGate({
 
   const shouldGate =
     statusExpected &&
-    ((status?.state === "terms_required" &&
-      (!hasSteppedPastGate || !demoMode)) ||
+    ((status?.state === "terms_required" && !demoMode) ||
       (status?.state === "downloading" && !hasSteppedPastGate));
   if (!shouldGate) {
     return children;

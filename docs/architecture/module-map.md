@@ -3355,8 +3355,9 @@ shrinks to exactly the `terms_required`/first-`downloading` model step —
 observed and never re-arms, so a later retry-triggered `downloading` never
 reopens the full-screen gate). `terms_required` is the exception to the
 latch (#339): nothing else in the app can accept or decline Gemma, so it
-gates again after the latch, except for a latched demo visitor, whose server
-404s the choice (`StartupGate` takes the collection's `demoMode`). The gate
+gates again after the latch. A demo instance never gates on `terms_required`,
+latched or not, since its server 404s the choice (`StartupGate` takes the
+collection's `demoMode`); the search dialog's demo sentence covers it. The gate
 also holds its decision until discovery has resolved and the first startup
 answer has landed (#339), rendering a bare `.startup-shell` meanwhile, so the
 workspace is never mounted only to be unmounted a fetch later when that
