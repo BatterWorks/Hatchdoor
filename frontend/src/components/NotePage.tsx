@@ -31,6 +31,7 @@ import {
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import { createEditHistory } from "../lib/editHistory";
 import { holdAppReload } from "../lib/reloadGuard";
+import { isEditableTarget } from "../lib/storage";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -134,6 +135,10 @@ function unwrapLinks(wire: VaultQualifiedLinks): NoteLinks {
   };
 }
 
+function countDocumentLines(content: string): number {
+  return content.split(/\r?\n/).length;
+}
+
 const NOTE_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
 export function NotePage({
   onActiveNoteChange,
@@ -230,7 +235,16 @@ export function NotePage({
   // its own stopped state once a save fails.
   const [autosaveDemoRefusal, setAutosaveDemoRefusal] = useState(false);
   const [conflict, setConflict] = useState(false);
-  const [conflictNote, setConflictNote] = useState<Note | null>(null);
+  // The disk version a conflict review compares against, tagged with the note
+  // it was read for (#331). The route reuses this component across notes, so
+  // an untagged copy outlived navigation and a review opened on one note could
+  // resolve into another: "Keep draft on latest" then saved the second note's
+  // text under the first note's slug and current hash, which the server has
+  // no way to refuse.
+  const [conflictDisk, setConflictDisk] = useState<{
+    noteKey: string;
+    note: Note;
+  } | null>(null);
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [inlineDirty, setInlineDirty] = useState(false);
@@ -261,6 +275,16 @@ export function NotePage({
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
   const noteKey = `${vaultId}:${slug}`;
   const currentNoteKeyRef = useRef(noteKey);
+  // Only ever the open note's own disk version, whatever is left in state.
+  const conflictNote =
+    conflictDisk && conflictDisk.noteKey === noteKey ? conflictDisk.note : null;
+  /** Record the disk version read for `forKey`, unless the user has moved on
+   * to another note while the read was in flight. */
+  const showConflictFor = useCallback((forKey: string, disk: Note) => {
+    if (forKey === currentNoteKeyRef.current) {
+      setConflictDisk({ noteKey: forKey, note: disk });
+    }
+  }, []);
   const lastEditRequestIdRef = useRef(editRequestId);
   // `null` until a revision is known. The first one observed is the revision
   // the open note was already read at, not a change to it.
@@ -389,6 +413,11 @@ export function NotePage({
     };
   }, [writeDraftNow]);
 
+  // Which note `note` was read for. The route reuses this component, so on the
+  // render where the key changes `note` still holds the previous note until
+  // the new one's read lands.
+  const noteLoadedForRef = useRef<string | null>(null);
+
   const notePath = `/api/v1/vaults/${encodeURIComponent(vaultId)}/notes/${encodeURIComponent(slug)}`;
 
   const loadNote = useCallback(
@@ -405,6 +434,7 @@ export function NotePage({
         }
         const json = (await res.json()) as VaultQualifiedNote;
         if (noteKey !== currentNoteKeyRef.current) return;
+        noteLoadedForRef.current = noteKey;
         setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
       } catch (err) {
         if (noteKey !== currentNoteKeyRef.current) return;
@@ -458,6 +488,7 @@ export function NotePage({
     setDraftNotice(null);
     setDraftStale(false);
     setConflict(false);
+    setConflictDisk(null);
     setNoteChangedOnDisk(false);
     setEditorError(null);
     setSaving(false);
@@ -886,8 +917,16 @@ export function NotePage({
   // Seed once per note. Without this, undo before the first edit would restore
   // the empty string the history was constructed with and blank the note.
   const seededSlugRef = useRef<string | null>(null);
+  //
+  // Only from this note's own read: seeded from the previous note, still on
+  // screen for the render where the route changed, the first undo here wrote
+  // that note's whole text over this one (#331).
   useEffect(() => {
-    if (note && seededSlugRef.current !== noteKey) {
+    if (
+      note &&
+      noteLoadedForRef.current === noteKey &&
+      seededSlugRef.current !== noteKey
+    ) {
       seededSlugRef.current = noteKey;
       history.reset(note.content);
     }
@@ -1007,6 +1046,18 @@ export function NotePage({
       if (!isUndo && !isRedo) {
         return;
       }
+      // The listener is on window, and the page stays mounted under the search
+      // dialog, the note-action dialogs and the property fields, all of which
+      // are text fields with an undo of their own (#331). Answering there
+      // rewound the whole note and autosaved it. The document stack is only
+      // for the note body and the block open in it.
+      const target = event.target;
+      if (
+        isEditableTarget(target) &&
+        !(target instanceof Element && target.closest(".block-input"))
+      ) {
+        return;
+      }
       // Always prevented: mixing our stack with the browser's native textarea
       // undo produces behaviour neither of them can explain.
       event.preventDefault();
@@ -1054,24 +1105,12 @@ export function NotePage({
       return;
     }
 
-    // An open block holds its text nowhere else, and its commit rewrites the
-    // whole document from the copy it was seeded with. A drop does not move
-    // focus, so left open it would commit after the write below and overwrite
-    // it, dropping the embed and orphaning the file that was just uploaded.
-    // Blurring commits it synchronously, so everything after this works from
-    // one document rather than two.
-    const focused = document.activeElement;
-    if (
-      focused instanceof HTMLElement &&
-      event.currentTarget.contains(focused)
-    ) {
-      focused.blur();
-    }
-
     // Where it lands is decided before the upload, so the insertion point is
     // the one the user aimed at rather than wherever the page has scrolled to
-    // by the time the request comes back. The commit above replaces a block's
-    // lines in place, so the line numbers collected here still hold.
+    // by the time the request comes back. It is read before the open block is
+    // committed below, while the DOM and the document still describe the same
+    // text: the commit changes the document at once, but the line numbers on
+    // the blocks only after the next render.
     const blocks = Array.from(
       event.currentTarget.querySelectorAll<HTMLElement>(".editable-block"),
     )
@@ -1086,7 +1125,31 @@ export function NotePage({
           ? [{ startLine: start, endLine: end, top, bottom }]
           : [];
       });
-    const line = insertionLineForDrop(blocks, event.clientY);
+    let line = insertionLineForDrop(blocks, event.clientY);
+
+    // An open block holds its text nowhere else, and its commit rewrites the
+    // whole document from the copy it was seeded with. A drop does not move
+    // focus, so left open it would commit after the write below and overwrite
+    // it, dropping the embed and orphaning the file that was just uploaded.
+    // Blurring commits it synchronously, so everything after this works from
+    // one document rather than two.
+    const focused = document.activeElement;
+    if (
+      focused instanceof HTMLElement &&
+      event.currentTarget.contains(focused)
+    ) {
+      const committedRange = activeRange;
+      const linesBefore = countDocumentLines(latestContentRef.current);
+      focused.blur();
+      // The commit need not keep the block's line count: a code block or a
+      // table row takes a plain newline, and so does a multi-line paste into
+      // any block. Everything after the block moves by the difference, and a
+      // drop aimed below it has to move with it (#331).
+      const delta = countDocumentLines(latestContentRef.current) - linesBefore;
+      if (committedRange && line >= committedRange.endLine) {
+        line += delta;
+      }
+    }
 
     try {
       const result = await uploadNoteAttachment(
@@ -1117,12 +1180,13 @@ export function NotePage({
     setEditBaseHash(editBaseHash || (note?.content_hash ?? ""));
     setConflict(true);
     setIsEditing(true);
+    const reviewedKey = noteKey;
     void (async () => {
       try {
         const res = await apiFetch(notePath);
         if (res.ok) {
           const json = (await res.json()) as VaultQualifiedNote;
-          setConflictNote(json.note);
+          showConflictFor(reviewedKey, json.note);
         }
       } catch {
         // The banner already said what happened; source mode still holds the draft.
@@ -1257,7 +1321,7 @@ export function NotePage({
     setRecoveredDraftNotice(null);
     setDraftStale(false);
     setConflict(false);
-    setConflictNote(null);
+    setConflictDisk(null);
     setSaving(false);
     setIsEditing(false);
 
@@ -1277,12 +1341,18 @@ export function NotePage({
   const handleReloadLatest = async () => {
     setSaving(true);
     setEditorError(null);
+    const reloadKey = noteKey;
     try {
       const res = await apiFetch(notePath);
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, "Failed loading note"));
       }
       const json = (await res.json()) as VaultQualifiedNote;
+      // Left for another note mid-read: this version, and the draft rebased
+      // onto it, belong to a note that is no longer open (#331).
+      if (reloadKey !== currentNoteKeyRef.current) {
+        return;
+      }
       setNote(json.note);
       setEditBaseHash(json.note.content_hash);
       saveNoteDraft(vaultId, json.note.slug, {
@@ -1293,7 +1363,7 @@ export function NotePage({
         savedAt: Date.now(),
       });
       setConflict(false);
-      setConflictNote(null);
+      setConflictDisk(null);
       setNoteChangedOnDisk(false);
       setDraftStale(false);
       setDraftNotice(
@@ -1311,6 +1381,9 @@ export function NotePage({
   const handleSave = async () => {
     setSaving(true);
     setEditorError(null);
+    // Everything after the round trip describes this note. If the user has
+    // opened another one meanwhile, none of it may land on that one (#331).
+    const savedKey = noteKey;
 
     try {
       const outcome = await updateNote(
@@ -1319,10 +1392,13 @@ export function NotePage({
         draftContent,
         editBaseHash,
       );
-      cancelDraftWrite();
       clearNoteDraft(vaultId, note.slug);
+      if (savedKey !== currentNoteKeyRef.current) {
+        return;
+      }
+      cancelDraftWrite();
       setConflict(false);
-      setConflictNote(null);
+      setConflictDisk(null);
       setNoteChangedOnDisk(false);
       setDraftStale(false);
       setDraftNotice(null);
@@ -1345,25 +1421,32 @@ export function NotePage({
       await loadNoteLinks();
     } catch (saveError) {
       if (onDemoRefusal?.(saveError)) {
+        if (savedKey !== currentNoteKeyRef.current) {
+          return;
+        }
         setIsEditing(false);
         setInlineDirty(false);
+      } else if (savedKey !== currentNoteKeyRef.current) {
+        // The draft for the note that failed is still in its store.
+        return;
       } else if (
         saveError instanceof Error &&
         saveError.name === "ConflictError"
       ) {
         setConflict(true);
+        // Set before the read below, which the user can outlast by leaving.
+        setEditorError(
+          "This note changed on disk since you started editing. Review the disk version against your draft before saving again.",
+        );
         try {
           const res = await apiFetch(notePath);
           if (res.ok) {
             const json = (await res.json()) as VaultQualifiedNote;
-            setConflictNote(json.note);
+            showConflictFor(savedKey, json.note);
           }
         } catch {
           // The generic conflict error still leaves the draft safe in the editor.
         }
-        setEditorError(
-          "This note changed on disk since you started editing. Review the disk version against your draft before saving again.",
-        );
       } else if (saveError instanceof Error) {
         setEditorError(saveError.message);
       } else {
@@ -1390,7 +1473,7 @@ export function NotePage({
       savedAt: Date.now(),
     });
     setConflict(false);
-    setConflictNote(null);
+    setConflictDisk(null);
     setNoteChangedOnDisk(false);
     setDraftStale(false);
     setEditorError(null);
@@ -1411,7 +1494,7 @@ export function NotePage({
       savedAt: Date.now(),
     });
     setConflict(false);
-    setConflictNote(null);
+    setConflictDisk(null);
     setNoteChangedOnDisk(false);
     setDraftStale(false);
     setEditorError(null);
