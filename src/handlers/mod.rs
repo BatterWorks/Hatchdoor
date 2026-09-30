@@ -19,7 +19,7 @@ pub use settings::{
     MAX_IN_MEMORY_UPLOAD_BYTES, generate_mcp_token_handler, get_settings_handler,
     patch_settings_handler, reveal_mcp_token_handler, reveal_web_token_handler,
 };
-pub use spa::spa_index_handler;
+pub use spa::{spa_index_handler, spa_not_found_handler};
 pub use transfer::{download_transfer_handler, upload_transfer_handler};
 pub use vault_collection_reads::{
     vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,

@@ -31,7 +31,7 @@ use crate::handlers::{
     disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
     enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
     list_vaults_handler, patch_settings_handler, refresh_vault_handler, retry_vault_handler,
-    reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler,
+    reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler, spa_not_found_handler,
     start_with_no_vaults_handler, sync_vault_handler, upload_transfer_handler,
     vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
     vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
@@ -598,7 +598,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )
         .route_service("/sw.js", ServeFile::new("frontend/dist/sw.js"))
         .nest_service("/assets", ServeDir::new("frontend/dist/assets"))
-        .fallback_service(ServeDir::new("frontend/dist"))
+        // An address no route or built file matches still loads the app, which
+        // renders its own not-found state (#302); the reserved prefixes keep a
+        // bare 404.
+        .fallback_service(ServeDir::new("frontend/dist").fallback(get(spa_not_found_handler)))
         .layer(
             TraceLayer::new_for_http()
                 // Custom span so the URI logged never contains the raw web token
@@ -8681,6 +8684,68 @@ mod tests {
                 .await
                 .expect("body");
             assert!(String::from_utf8_lossy(&bytes).contains("Frontend not built"));
+        }
+    }
+
+    async fn get_status_and_body(uri: &str) -> (StatusCode, String) {
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn unrecognised_address_reaches_the_spa_shell_as_a_404() {
+        // Issue #302: a cold load of an address no route matches must reach the
+        // app, which renders its own not-found state, rather than the static
+        // file server's empty 404. The status stays 404 because the address is
+        // not a page. Whether the app is there to serve depends on whether
+        // `frontend/dist` happens to exist (see the canonical Note URL test
+        // above), so only a built frontend pins the body.
+        let built = std::path::Path::new("frontend/dist/index.html").exists();
+        for uri in [
+            "/nope",
+            "/setting",
+            "/v/00000000-0000-4000-8000-000000000000/n/20-projects/Beacon%20Launch.md",
+        ] {
+            let (status, body) = get_status_and_body(uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(
+                body.contains("<div id=\"root\">"),
+                built,
+                "{uri} must be answered with the app shell when it is built, got {body:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_prefixes_keep_their_bare_404() {
+        // The API, Vault asset and health prefixes are never answered with the
+        // app, matching the service worker's navigation denylist.
+        for uri in [
+            "/api/nope",
+            "/api/v1/nope",
+            "/vault-assets/nope.png",
+            "/health/nope",
+            "/healthz",
+        ] {
+            let (status, body) = get_status_and_body(uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert!(
+                !body.contains("<div id=\"root\">"),
+                "{uri} must not be answered with the app shell, got {body:?}"
+            );
         }
     }
 }
