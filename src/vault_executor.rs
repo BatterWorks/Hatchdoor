@@ -24,7 +24,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::app_state::AppState;
 use crate::cache::SqliteCache;
-use crate::cache::vault_snapshots::{MutationGuardHandoff, VaultSnapshotFreshness};
+use crate::cache::vault_snapshots::{
+    MutationGuardHandoff, SnapshotPublication, VaultSnapshotFreshness,
+};
 use crate::embed::Embedder;
 use crate::git::{
     CommitCooldown, ManagedCheckoutLease, ManagedGitOutcome, ManagedGitScheduler,
@@ -565,6 +567,22 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                         VaultWorkError::new("vault_index_failed", message, true),
                         false,
                     )
+                })
+                .and_then(|publication| match publication {
+                    SnapshotPublication::Published => Ok(()),
+                    // A newer snapshot attempt owns this Vault's row now, so
+                    // this turn wrote nothing and must not report the Vault
+                    // current. That attempt decides the row's freshness,
+                    // which is why no stale mark follows.
+                    SnapshotPublication::Superseded => Err((
+                        VaultWorkError::new(
+                            "vault_index_failed",
+                            "a newer snapshot attempt superseded this Index turn before it \
+                             published, so nothing was published",
+                            true,
+                        ),
+                        false,
+                    )),
                 })
         })
         .await

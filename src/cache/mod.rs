@@ -322,7 +322,11 @@ impl SqliteCache {
     }
 
     fn return_read_connection(&self, conn: Connection) {
-        {
+        // A connection still inside a transaction is closed rather than
+        // pooled. A read snapshot whose COMMIT and ROLLBACK both failed would
+        // otherwise pin one WAL generation on this connection, and every later
+        // caller handed it would read that frozen generation forever.
+        if conn.is_autocommit() {
             let mut pool = self
                 .read_pool
                 .lock()
@@ -590,6 +594,28 @@ mod metadata_tests {
         queued.join().expect("queued reader");
 
         cache.read().expect("a released lease must be reusable");
+    }
+
+    #[test]
+    fn a_read_connection_left_inside_a_transaction_is_never_pooled() {
+        let dir = tempdir().expect("temp dir");
+        let cache = SqliteCache::open(dir.path().join("cache.sqlite3"), 384).expect("open");
+
+        // Stands in for a snapshot whose COMMIT and ROLLBACK both failed: the
+        // lease goes back with its read transaction still open.
+        {
+            let lease = cache.read().expect("lease");
+            lease.execute_batch("BEGIN").expect("begin");
+            assert!(!lease.is_autocommit());
+        }
+
+        let next = cache.read().expect("next lease");
+        assert!(
+            next.is_autocommit(),
+            "a pooled connection must never carry an open transaction to its next caller"
+        );
+        drop(next);
+        assert_eq!(cache.active_read_leases(), 0);
     }
 
     #[test]

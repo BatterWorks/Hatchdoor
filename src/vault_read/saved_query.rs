@@ -1011,6 +1011,9 @@ enum ColumnValue {
     /// `file.tags`: the Note's parsed tags, which the frontmatter parser lifts
     /// out of the property map.
     Tags,
+    /// `aliases` as a property: the frontmatter list the parser lifts out of
+    /// the property map, so reading it as a property would find nothing.
+    Aliases,
 }
 
 impl Column {
@@ -1021,6 +1024,7 @@ impl Column {
                 .map(|value| value.into_owned())
                 .unwrap_or(Value::Null),
             ColumnValue::Tags => Value::from(note.metadata.tags.clone()),
+            ColumnValue::Aliases => Value::from(note.metadata.aliases.clone()),
         }
     }
 }
@@ -1240,6 +1244,20 @@ fn column(id: &str) -> Result<Column, SavedQueryRefusal> {
         (member.to_string(), ColumnValue::Subject(subject))
     } else {
         match property_reference(id) {
+            // The frontmatter parser lifts both out of the property map, so a
+            // plain property read would render every Note's cell empty.
+            // `note.tags` is only the frontmatter list in the Bases format,
+            // while the Note's parsed tags also hold its inline tags, so the
+            // one faithful answer is not kept and the column is refused.
+            // `aliases` is kept exactly as written and is answered.
+            Some(name) if name == "tags" => {
+                return Err(refuse(
+                    id,
+                    "The tags property cannot be shown as a column; show file.tags instead, \
+                     which lists the Note's frontmatter and inline tags.",
+                ));
+            }
+            Some(name) if name == "aliases" => (name, ColumnValue::Aliases),
             Some(name) => (name.clone(), ColumnValue::Subject(Subject::Property(name))),
             None => {
                 return Err(refuse(id, format!("The column \"{id}\" is not supported.")));

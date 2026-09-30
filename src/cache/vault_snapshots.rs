@@ -93,6 +93,15 @@ pub(crate) struct VaultSnapshotRead {
     pub(crate) layer_catalog: Vec<crate::search::LayerInfo>,
 }
 
+/// What a snapshot publication did. An attempt superseded by a newer one
+/// publishes nothing, and says so: reporting it as a publication would let an
+/// Index turn mark its Vault current on the strength of rows it never wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotPublication {
+    Published,
+    Superseded,
+}
+
 /// A participant state and every row used to project it, read from one pinned
 /// SQLite snapshot. `None` means there is no currently participating snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,7 +157,7 @@ impl SqliteCache {
         vault_id: VaultId,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-    ) -> Result<(), String> {
+    ) -> Result<SnapshotPublication, String> {
         self.replace_vault_snapshot_with_embed_layers(vault_id, index, embedder, true)
     }
 
@@ -161,7 +170,7 @@ impl SqliteCache {
         index: &VaultIndex,
         embedder: &dyn Embedder,
         embed_layers: bool,
-    ) -> Result<(), String> {
+    ) -> Result<SnapshotPublication, String> {
         self.replace_vault_snapshot_with_embed_layers_and_progress(
             vault_id,
             index,
@@ -184,7 +193,7 @@ impl SqliteCache {
         embed_layers: bool,
         on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
         mutation_guard: Option<MutationGuardHandoff>,
-    ) -> Result<(), String> {
+    ) -> Result<SnapshotPublication, String> {
         let _epoch = self
             .snapshot_model_epoch
             .lock()
@@ -256,7 +265,8 @@ impl SqliteCache {
     /// chunk text) ahead of any embedding work, so browsing a Vault does not
     /// wait on the minutes of vector building that searching it does.
     ///
-    /// Returns whether a generation was published. This is a no-op for a Vault
+    /// Returns whether a generation was published: `false` too when a newer
+    /// snapshot attempt superseded this one. This is a no-op for a Vault
     /// that already has a searchable snapshot: replacing one with a
     /// structure-only generation would take working search away for the length
     /// of a rebuild, which is strictly worse than serving the prior generation
@@ -311,7 +321,7 @@ impl SqliteCache {
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
         }
-        result.map(|()| true)
+        result.map(|publication| publication == SnapshotPublication::Published)
     }
 
     /// Deliberately does not filter on `participating`. Retirement keeps a
@@ -450,28 +460,21 @@ impl SqliteCache {
         vault_id: VaultId,
         bodies: NoteBodies,
     ) -> Result<Option<PublishedVaultSnapshot>, String> {
-        let conn = self.read()?;
-        conn.execute_batch("BEGIN")
-            .map_err(|error| format!("begin Vault snapshot read: {error}"))?;
-        let result = (|| {
-            let Some(status) = Self::read_snapshot_status(&conn, vault_id)? else {
+        // The guard rolls the snapshot back on any early return or panic, so
+        // the connection never goes back to the pool mid-transaction.
+        let mut snapshot = self.read_snapshot()?;
+        let read = {
+            let Some(status) = Self::read_snapshot_status(&snapshot, vault_id)? else {
                 return Ok(None);
             };
             if !status.participating {
                 return Ok(None);
             }
-            let read = Self::read_vault_snapshot_rows(&conn, vault_id, bodies)?;
-            Ok(Some(PublishedVaultSnapshot { status, read }))
-        })();
-        let close = if result.is_ok() {
-            conn.execute_batch("COMMIT")
-                .map_err(|error| format!("commit Vault snapshot read: {error}"))
-        } else {
-            conn.execute_batch("ROLLBACK")
-                .map_err(|error| format!("rollback Vault snapshot read: {error}"))
+            let read = Self::read_vault_snapshot_rows(&snapshot, vault_id, bodies)?;
+            PublishedVaultSnapshot { status, read }
         };
-        close?;
-        result
+        snapshot.commit()?;
+        Ok(Some(read))
     }
 
     /// Read one participating snapshot using the caller's already-pinned
@@ -807,14 +810,14 @@ impl SqliteCache {
         embedder_identity: &str,
         searchable: bool,
         freshness: VaultSnapshotFreshness,
-    ) -> Result<(), String> {
+    ) -> Result<SnapshotPublication, String> {
         let source = candidate.read()?;
         let attempts = self
             .vault_snapshot_attempts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if attempts.get(&vault_id).copied() != Some(attempt) {
-            return Ok(());
+            return Ok(SnapshotPublication::Superseded);
         }
         let vault_id = vault_id.to_string();
         let mut conn = self.connection()?;
@@ -849,6 +852,7 @@ impl SqliteCache {
 
         let result = tx
             .commit()
+            .map(|()| SnapshotPublication::Published)
             .map_err(|error| format!("commit Vault snapshot publication: {error}"));
         drop(attempts);
         result
@@ -1431,8 +1435,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{NoteBodies, VaultSnapshotFreshness, VaultSnapshotStatus};
+    use super::{NoteBodies, SnapshotPublication, VaultSnapshotFreshness, VaultSnapshotStatus};
     use crate::cache::SqliteCache;
+    use crate::cache::{BuildHandles, BuildOptions};
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
     use crate::vault_registry::VaultId;
@@ -2153,6 +2158,49 @@ mod tests {
                 .as_deref(),
             Some("# Home\n\nsecond")
         );
+    }
+
+    #[test]
+    fn a_superseded_publication_reports_that_it_published_nothing() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let vault_id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[("Home.md", "# Home\n\nsuperseded")]);
+        let embedder = StubEmbedder::new(384);
+        let candidate = SqliteCache::in_memory(384).expect("open candidate");
+        candidate
+            .replace_with_options(
+                &index,
+                &embedder,
+                BuildHandles::default(),
+                true,
+                &BuildOptions::default(),
+            )
+            .expect("build candidate");
+
+        let older = cache
+            .begin_vault_snapshot_attempt(vault_id)
+            .expect("begin older attempt");
+        let _newer = cache
+            .begin_vault_snapshot_attempt(vault_id)
+            .expect("begin newer attempt");
+
+        let publication = cache
+            .publish_vault_candidate(
+                vault_id,
+                older,
+                &candidate,
+                &embedder.identity(),
+                true,
+                VaultSnapshotFreshness::Fresh,
+            )
+            .expect("a superseded attempt is not an error");
+        assert_eq!(publication, SnapshotPublication::Superseded);
+        assert_eq!(cache.snapshot_status(vault_id).expect("read status"), None);
+
+        let published = cache
+            .replace_vault_snapshot(vault_id, &index, &embedder)
+            .expect("publish current attempt");
+        assert_eq!(published, SnapshotPublication::Published);
     }
 
     #[test]
