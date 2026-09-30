@@ -1097,13 +1097,19 @@ impl<'a> VaultReadCore<'a> {
         &self,
         vault_id: VaultId,
     ) -> Result<VaultQualifiedStats, VaultReadError> {
+        // Read before the snapshot so a history walk this read starts runs
+        // while the snapshot loads. A Vault the gate below refuses gets no
+        // history read at all.
+        let dating = self.note_dating(vault_id);
         // The one report that counts words rather than rows, so the one read
         // that asks for Markdown text. Every other collection read projects
         // structure alone and never pays for it.
         let projection = self.collection_with(
             VaultScope::One(vault_id),
             NoteBodies::Load,
-            |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot),
+            |_vault_id, _vault_name, snapshot| {
+                detailed_stats_for(snapshot, &dating, chrono::Utc::now())
+            },
         )?;
         let stats = projection
             .data
@@ -1111,6 +1117,29 @@ impl<'a> VaultReadCore<'a> {
             .next()
             .expect("VaultScope::One yields exactly one participant on success");
         Ok(VaultQualifiedStats { vault_id, stats })
+    }
+
+    /// Where this Vault's notes get a created date when they state none
+    /// (#300, ADR-29): its Git history for a Git-backed Vault, the files alone
+    /// for a plain folder. A Vault the read gate would refuse answers `Files`
+    /// and is refused by that gate instead.
+    fn note_dating(&self, vault_id: VaultId) -> NoteDating {
+        use crate::vault_runtime::HistoryLocation;
+
+        let Ok(control) = self.control_block(vault_id) else {
+            return NoteDating::Files;
+        };
+        match control.history_location() {
+            HistoryLocation::None => NoteDating::Files,
+            HistoryLocation::Unresolvable => NoteDating::Git {
+                history: crate::git::HistoryRead::Unavailable,
+                prefix: None,
+            },
+            HistoryLocation::Repository { root, prefix } => NoteDating::Git {
+                history: control.note_history().read(&root, HISTORY_WAIT),
+                prefix,
+            },
+        }
     }
 
     /// The requested Vault's resolved local Markdown directory, gated by the
@@ -1822,7 +1851,11 @@ impl FolderBuilder {
 /// produced `snapshot.notes` supplied, so both describe one published
 /// generation. A withheld note has neither a row nor a body here, because
 /// `restrict` drops both together.
-fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultStatsResponse {
+fn detailed_stats_for(
+    snapshot: &VaultSnapshotRead,
+    dating: &NoteDating,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::api_types::VaultStatsResponse {
     use crate::api_types::{
         FolderStat, LinkedNoteRef, NoteList, NoteRef, NoteWordRef, TagStat, VaultStatsResponse,
     };
@@ -1921,10 +1954,23 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     });
     most_linked.truncate(20);
 
-    let activity_by_month = activity_window(
-        snapshot.notes.iter().map(|note| note.mtime_ns),
-        chrono::Utc::now(),
-    );
+    let mut created_date_status = crate::api_types::CreatedDateStatus::Complete;
+    let created_dates: Vec<i64> = snapshot
+        .notes
+        .iter()
+        .map(|note| {
+            let (created, shortfall) = created_date(note, dating);
+            if let Some(shortfall) = shortfall {
+                // A walk still running outranks a gap it cannot fill: the
+                // first is worth asking again about, the second is not.
+                if created_date_status != crate::api_types::CreatedDateStatus::Reading {
+                    created_date_status = shortfall;
+                }
+            }
+            created
+        })
+        .collect();
+    let activity_by_month = activity_window(created_dates.into_iter(), now);
 
     let mut folder_counts: BTreeMap<String, i64> = BTreeMap::new();
     for note in &snapshot.notes {
@@ -2034,6 +2080,7 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
         top_tags,
         most_linked,
         activity_by_month,
+        created_date_status,
         notes_per_folder,
         longest_notes,
         shortest_notes,
@@ -2050,12 +2097,12 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     }
 }
 
-/// How many calendar months the Writing Activity window spans, counting the
+/// How many calendar months the "Notes created" window spans, counting the
 /// month it ends in. The Stats page names this number in its heading.
 const ACTIVITY_WINDOW_MONTHS: i32 = 6;
 
 /// The `ACTIVITY_WINDOW_MONTHS` UTC calendar months ending at the month `now`
-/// falls in, oldest first, each carrying how many of `mtimes_ns` land in it.
+/// falls in, oldest first, each carrying how many of `created_ns` land in it.
 ///
 /// The window is generated from the calendar rather than harvested from the
 /// data, which is what makes the chart a timeline: a month nobody wrote in
@@ -2070,7 +2117,7 @@ const ACTIVITY_WINDOW_MONTHS: i32 = 6;
 /// the `YYYY-MM` keys sort chronologically, so collecting them into a
 /// `BTreeMap` puts the window in time order for free.
 fn activity_window(
-    mtimes_ns: impl Iterator<Item = i64>,
+    created_ns: impl Iterator<Item = i64>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<crate::api_types::MonthActivity> {
     use chrono::Datelike;
@@ -2087,18 +2134,116 @@ fn activity_window(
             (key, 0)
         })
         .collect();
-    for mtime_ns in mtimes_ns {
-        if let Some(count) = counts.get_mut(&month_key(mtime_ns)) {
+    for created in created_ns {
+        if let Some(count) = counts.get_mut(&month_key(created)) {
             *count += 1;
         }
     }
     counts
         .into_iter()
-        .map(|(month, modified_count)| crate::api_types::MonthActivity {
+        .map(|(month, created_count)| crate::api_types::MonthActivity {
             month,
-            modified_count,
+            created_count,
         })
         .collect()
+}
+
+/// How long a stats read waits for a Vault's history walk before answering
+/// with modification times and [`CreatedDateStatus::Reading`]. Long enough
+/// that an ordinary Vault's first read after a restart is exact, short enough
+/// that a very long history does not hold the page.
+///
+/// [`CreatedDateStatus::Reading`]: crate::api_types::CreatedDateStatus::Reading
+const HISTORY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Where one Vault's notes get a created date when they do not state one.
+enum NoteDating {
+    /// A plain folder: modification time is all there is.
+    Files,
+    /// A Git-backed Vault. `prefix` is the Vault's subdirectory inside the
+    /// repository, `/`-separated, which turns a note's Vault path into the
+    /// repository path its history is kept under.
+    Git {
+        history: crate::git::HistoryRead,
+        prefix: Option<String>,
+    },
+}
+
+/// A note's created date in nanoseconds since the Unix epoch (#300, ADR-29),
+/// and why it is only an estimate when it is one.
+///
+/// A `created` property that reads as a date wins, then the commit that first
+/// added the note, then its modification time. The shortfall is reported only
+/// when history should have dated the note and could not; a plain folder
+/// falling back to modification time, or a note nobody has committed yet, is
+/// the normal answer rather than a gap.
+fn created_date(
+    note: &crate::cache::vault_snapshots::VaultSnapshotNote,
+    dating: &NoteDating,
+) -> (i64, Option<crate::api_types::CreatedDateStatus>) {
+    use crate::api_types::CreatedDateStatus;
+    use crate::git::{FirstAdd, HistoryRead};
+
+    if let Some(stated) = note
+        .metadata
+        .properties
+        .get("created")
+        .and_then(serde_json::Value::as_str)
+        .and_then(stated_date)
+    {
+        return (stated, None);
+    }
+    let NoteDating::Git { history, prefix } = dating else {
+        return (note.mtime_ns, None);
+    };
+    match history {
+        HistoryRead::Ready(first_adds) => {
+            // A snapshot note's path is Vault-relative and drops the `.md`
+            // its file, and so its history, carries.
+            let path = match prefix {
+                Some(prefix) => format!("{prefix}/{}.md", note.relative_path),
+                None => format!("{}.md", note.relative_path),
+            };
+            match first_adds.lookup(&path) {
+                FirstAdd::Known(created) => (created, None),
+                FirstAdd::Uncommitted => (note.mtime_ns, None),
+                FirstAdd::Unknown => (note.mtime_ns, Some(CreatedDateStatus::Estimated)),
+            }
+        }
+        HistoryRead::Reading => (note.mtime_ns, Some(CreatedDateStatus::Reading)),
+        HistoryRead::Unavailable => (note.mtime_ns, Some(CreatedDateStatus::Estimated)),
+    }
+}
+
+/// A `created` property's date as nanoseconds since the Unix epoch, or `None`
+/// for text that is not a date.
+///
+/// The calendar day is kept as written, whatever zone the value names:
+/// `2026-03-01T00:30:00+01:00` is a note started on the first of March, which
+/// is what its author meant, even though it is still February in UTC.
+fn stated_date(text: &str) -> Option<i64> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
+
+    let text = text.trim();
+    let written = NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .or_else(|| {
+            [
+                "%Y-%m-%dT%H:%M:%S%.f",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S%.f",
+                "%Y-%m-%d %H:%M",
+            ]
+            .into_iter()
+            .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
+        })
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(text)
+                .ok()
+                .map(|instant| instant.naive_local())
+        })?;
+    written.and_utc().timestamp_nanos_opt()
 }
 
 /// The zero-padded `YYYY-MM` UTC month a nanosecond Unix timestamp falls in,
@@ -2303,7 +2448,7 @@ mod parsing_tests {
     fn months(window: &[crate::api_types::MonthActivity]) -> Vec<(&str, i64)> {
         window
             .iter()
-            .map(|entry| (entry.month.as_str(), entry.modified_count))
+            .map(|entry| (entry.month.as_str(), entry.created_count))
             .collect()
     }
 
@@ -2364,6 +2509,183 @@ mod parsing_tests {
         );
     }
 
+    /// A snapshot note at `relative_path`, which like every snapshot path
+    /// leaves off the `.md`.
+    fn dated_note(
+        relative_path: &str,
+        mtime_ns: i64,
+        created: Option<&str>,
+    ) -> crate::cache::vault_snapshots::VaultSnapshotNote {
+        let mut note = snapshot_note(relative_path, None);
+        note.relative_path = relative_path.to_string();
+        note.mtime_ns = mtime_ns;
+        if let Some(created) = created {
+            note.metadata.properties = serde_json::json!({ "created": created });
+        }
+        note
+    }
+
+    fn git_dating(history: crate::git::HistoryRead, prefix: Option<&str>) -> NoteDating {
+        NoteDating::Git {
+            history,
+            prefix: prefix.map(str::to_string),
+        }
+    }
+
+    fn ready(dates: &[(&str, Option<i64>)]) -> crate::git::HistoryRead {
+        crate::git::HistoryRead::Ready(Arc::new(crate::git::FirstAdds::from_dates(
+            dates.iter().copied(),
+        )))
+    }
+
+    /// A `created` property the author wrote beats the history and the file,
+    /// in a plain folder and a Git-backed Vault alike (ADR-29).
+    #[test]
+    fn a_stated_created_date_wins_over_history_and_the_file() {
+        let note = dated_note("Idea", mtime(2026, 9, 18), Some("2024-05-03"));
+        let expected = mtime(2024, 5, 3) - 12 * 3_600 * 1_000_000_000;
+
+        assert_eq!(created_date(&note, &NoteDating::Files), (expected, None));
+        let git = git_dating(ready(&[("Idea.md", Some(mtime(2026, 2, 1)))]), None);
+        assert_eq!(created_date(&note, &git), (expected, None));
+    }
+
+    /// Text that is not a date is passed over rather than failing the note.
+    #[test]
+    fn an_unreadable_created_date_falls_through_to_the_next_source() {
+        let note = dated_note("Idea", mtime(2026, 9, 18), Some("not-a-date"));
+
+        assert_eq!(
+            created_date(&note, &NoteDating::Files),
+            (mtime(2026, 9, 18), None)
+        );
+        let git = git_dating(ready(&[("Idea.md", Some(mtime(2026, 2, 1)))]), None);
+        assert_eq!(created_date(&note, &git), (mtime(2026, 2, 1), None));
+    }
+
+    /// A Vault that is one folder of a bigger repository looks its notes up
+    /// under that folder.
+    #[test]
+    fn a_git_vault_dates_notes_from_history_under_its_subdirectory() {
+        let note = dated_note("ideas/Idea", mtime(2026, 9, 18), None);
+        let git = git_dating(
+            ready(&[("notes/ideas/Idea.md", Some(mtime(2026, 4, 2)))]),
+            Some("notes"),
+        );
+
+        assert_eq!(created_date(&note, &git), (mtime(2026, 4, 2), None));
+    }
+
+    /// Falling back to the file is only a shortfall when history should have
+    /// had the answer: never for a plain folder or a note not committed yet.
+    #[test]
+    fn only_missing_history_marks_a_fallback_as_an_estimate() {
+        use crate::api_types::CreatedDateStatus;
+        let note = dated_note("Idea", mtime(2026, 9, 18), None);
+        let file = mtime(2026, 9, 18);
+
+        assert_eq!(created_date(&note, &NoteDating::Files), (file, None));
+        assert_eq!(
+            created_date(&note, &git_dating(ready(&[]), None)),
+            (file, None),
+            "an uncommitted note is simply new"
+        );
+        assert_eq!(
+            created_date(&note, &git_dating(ready(&[("Idea.md", None)]), None)),
+            (file, Some(CreatedDateStatus::Estimated)),
+            "a note from a shallow clone's graft point"
+        );
+        assert_eq!(
+            created_date(
+                &note,
+                &git_dating(crate::git::HistoryRead::Unavailable, None)
+            ),
+            (file, Some(CreatedDateStatus::Estimated))
+        );
+        assert_eq!(
+            created_date(&note, &git_dating(crate::git::HistoryRead::Reading, None)),
+            (file, Some(CreatedDateStatus::Reading))
+        );
+    }
+
+    /// The report charts created dates, and says when some were estimated. A
+    /// walk still running outranks a gap, because asking again helps.
+    #[test]
+    fn the_report_charts_created_dates_and_reports_the_weakest_source() {
+        use crate::api_types::CreatedDateStatus;
+        let read =
+            |notes: Vec<crate::cache::vault_snapshots::VaultSnapshotNote>| VaultSnapshotRead {
+                notes,
+                links: Vec::new(),
+                tags_by_note: BTreeMap::new(),
+                note_bodies: BTreeMap::new(),
+                layer_catalog: Vec::new(),
+            };
+        let now = utc(2026, 9, 18);
+        // Every file was touched in September, the way a fresh clone leaves it.
+        let snapshot = read(vec![
+            dated_note("a", mtime(2026, 9, 10), None),
+            dated_note("b", mtime(2026, 9, 10), None),
+            dated_note("c", mtime(2026, 9, 10), Some("2026-06-15")),
+        ]);
+        let history = ready(&[
+            ("a.md", Some(mtime(2026, 4, 1))),
+            ("b.md", Some(mtime(2026, 4, 20))),
+        ]);
+
+        let stats = detailed_stats_for(&snapshot, &git_dating(history, None), now);
+
+        assert_eq!(
+            months(&stats.activity_by_month),
+            vec![
+                ("2026-04", 2),
+                ("2026-05", 0),
+                ("2026-06", 1),
+                ("2026-07", 0),
+                ("2026-08", 0),
+                ("2026-09", 0),
+            ]
+        );
+        assert_eq!(stats.created_date_status, CreatedDateStatus::Complete);
+        assert_eq!(
+            stats.modified_this_week.count, 0,
+            "the recent lists still follow modification time"
+        );
+
+        let estimated =
+            detailed_stats_for(&snapshot, &git_dating(ready(&[("a.md", None)]), None), now);
+        assert_eq!(estimated.created_date_status, CreatedDateStatus::Estimated);
+
+        let reading = detailed_stats_for(
+            &snapshot,
+            &git_dating(crate::git::HistoryRead::Reading, None),
+            now,
+        );
+        assert_eq!(reading.created_date_status, CreatedDateStatus::Reading);
+
+        let plain = detailed_stats_for(&snapshot, &NoteDating::Files, now);
+        assert_eq!(plain.created_date_status, CreatedDateStatus::Complete);
+    }
+
+    /// A stated date keeps the calendar day its author wrote, whatever zone it
+    /// names, in every shape the query language already accepts.
+    #[test]
+    fn a_stated_created_date_keeps_the_day_as_written() {
+        let midnight = |year, month, day| mtime(year, month, day) - 12 * 3_600 * 1_000_000_000;
+
+        assert_eq!(stated_date("2026-03-01"), Some(midnight(2026, 3, 1)));
+        assert_eq!(stated_date(" 2026-03-01 "), Some(midnight(2026, 3, 1)));
+        assert_eq!(stated_date("2026-03-01T12:00"), Some(mtime(2026, 3, 1)));
+        assert_eq!(stated_date("2026-03-01 12:00:00"), Some(mtime(2026, 3, 1)));
+        assert_eq!(
+            stated_date("2026-03-01T00:30:00+01:00").map(month_key),
+            Some("2026-03".to_string()),
+            "still February in UTC, but the author wrote March"
+        );
+        assert_eq!(stated_date("yesterday"), None);
+        assert_eq!(stated_date("2026-13-01"), None);
+    }
+
     /// A Vault with nothing in it still has a calendar, so the chart still has
     /// six columns to draw.
     #[test]
@@ -2371,7 +2693,7 @@ mod parsing_tests {
         let window = activity_window(std::iter::empty(), utc(2026, 9, 18));
 
         assert_eq!(window.len(), 6);
-        assert!(window.iter().all(|entry| entry.modified_count == 0));
+        assert!(window.iter().all(|entry| entry.created_count == 0));
         assert_eq!(window.last().expect("six entries").month, "2026-09");
     }
 }
@@ -3361,7 +3683,7 @@ mod tests {
         let window: Vec<(&str, i64)> = stats
             .activity_by_month
             .iter()
-            .map(|entry| (entry.month.as_str(), entry.modified_count))
+            .map(|entry| (entry.month.as_str(), entry.created_count))
             .collect();
         assert_eq!(window.len(), 6);
         let mut ascending: Vec<&str> = window.iter().map(|(month, _)| *month).collect();
@@ -3380,6 +3702,137 @@ mod tests {
         // and the five earlier columns are honest zeroes.
         assert_eq!(window.last().expect("six entries").1, 2);
         assert_eq!(window.iter().map(|(_, count)| count).sum::<i64>(), 2);
+    }
+
+    /// A Git-backed Vault charts its notes by the commit that first added
+    /// them, through a rename into the Vault's subdirectory, while a stated
+    /// `created` date still wins and an uncommitted note is dated by its file
+    /// (#300, ADR-29).
+    #[test]
+    fn statistics_detail_charts_a_git_vault_by_first_commit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("repository");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = std::fs::canonicalize(&root).expect("canonical repository");
+        let repository = git2::Repository::init(&root).expect("init");
+
+        let now = chrono::Utc::now();
+        let started = now - chrono::Duration::days(95);
+        let stated = (now - chrono::Duration::days(40)).date_naive();
+        let commit = |when: chrono::DateTime<chrono::Utc>| {
+            let mut index = repository.index().expect("index");
+            index
+                .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
+            index.update_all(["*"], None).expect("stage removals");
+            index.write().expect("write index");
+            let tree = repository
+                .find_tree(index.write_tree().expect("tree"))
+                .expect("find tree");
+            let signature =
+                git2::Signature::new("A", "a@example.com", &git2::Time::new(when.timestamp(), 0))
+                    .expect("signature");
+            let parent = repository
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+            let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+            repository
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "change",
+                    &tree,
+                    &parents,
+                )
+                .expect("commit");
+        };
+
+        write_files(
+            &root,
+            &[(
+                "inbox/Idea.md",
+                "# Idea\n\nA thought worth keeping, written down in full.\n",
+            )],
+        );
+        commit(started);
+        std::fs::create_dir_all(root.join("vault")).expect("vault directory");
+        std::fs::rename(root.join("inbox/Idea.md"), root.join("vault/Idea.md")).expect("move");
+        write_files(
+            &root,
+            &[(
+                "vault/Stated.md",
+                &format!("---\ncreated: {stated}\n---\n# Stated\n"),
+            )],
+        );
+        commit(now);
+        write_files(&root, &[("vault/Draft.md", "# Draft\n")]);
+
+        let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Git".to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path: root.clone(),
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: Some("vault".into()),
+                        mode: crate::vault_registry::VaultGitMode::LocalHistory,
+                        poll_interval_secs: 60,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault");
+        let vault_id = snapshot
+            .definitions()
+            .next()
+            .expect("definition")
+            .vault_id();
+        let vaults = VaultCollectionRuntime::new();
+        vaults.reconcile(&store, &snapshot);
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let index = VaultIndex::build(root.join("vault")).expect("index");
+        cache
+            .replace_vault_snapshot(vault_id, &index, &StubEmbedder::new(384))
+            .expect("publish snapshot");
+
+        let stats = VaultReadCore::new(&cache, &vaults)
+            .statistics_detail(vault_id)
+            .expect("statistics detail succeeds")
+            .stats;
+
+        let counts: BTreeMap<String, i64> = stats
+            .activity_by_month
+            .iter()
+            .map(|entry| (entry.month.clone(), entry.created_count))
+            .collect();
+        let month = |instant: chrono::DateTime<chrono::Utc>| instant.format("%Y-%m").to_string();
+        let mut expected: BTreeMap<String, i64> = BTreeMap::new();
+        *expected.entry(month(started)).or_default() += 1;
+        *expected
+            .entry(stated.format("%Y-%m").to_string())
+            .or_default() += 1;
+        *expected.entry(month(chrono::Utc::now())).or_default() += 1;
+        for (month, count) in &expected {
+            assert_eq!(
+                counts.get(month),
+                Some(count),
+                "month {month} in {counts:?}"
+            );
+        }
+        assert_eq!(counts.values().sum::<i64>(), 3);
+        assert_eq!(
+            stats.created_date_status,
+            crate::api_types::CreatedDateStatus::Complete
+        );
     }
 
     #[test]
