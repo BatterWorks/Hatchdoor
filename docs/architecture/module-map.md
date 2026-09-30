@@ -802,7 +802,13 @@ with no Vaults writes an ordinary revisioned zero-Vault registry.
 **Consumers:** startup runtime composition calls this isolated adapter before
 opening the disposable cache and activating Vault runtimes. Safe imports become
 ordinary enabled definitions; migration or environment-cleanup recovery activates no Vault and remains in
-`AppState` for later setup/management surfaces.
+`AppState` for later setup/management surfaces. The MCP dispatcher
+(`src/mcp/tools/mod.rs` `environment_cleanup_refusal`, reached from
+`handle_tools_call` and `batch`'s per-item write gate) reads
+`AppState.legacy_migration_recovery` and uses
+`LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE`, `can_start_with_no_vaults`,
+and `message` to refuse state-changing tools during environment-cleanup
+recovery (#327).
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs`
 turns migrated or now-ignored per-Vault environment keys into a restricted,
@@ -2873,7 +2879,11 @@ read core's own `VaultReads` offload rather than a per-adapter prologue.
 **Consumed dependencies:** `AppState`, the four Vault-qualified cores
 (`VaultReadCore`/`VaultReads`, `VaultSearchCore`, the Vault mutation core, and
 Vault collection management), Vault registry/runtime, model setup, attachment
-limits, and the live configuration snapshot bound at each request. No HTTP
+limits, the live configuration snapshot bound at each request, and the Legacy
+single-Vault import's recovery state (`AppState.legacy_migration_recovery`,
+read through `LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE`,
+`can_start_with_no_vaults`, and `message`) for the environment-cleanup refusal
+(#327). No HTTP
 adapter is consumed: since #188 no file under `src/mcp/` imports
 `crate::handlers`, and ADR-19's MCP-to-handler proxying debt is retired.
 
