@@ -25,6 +25,11 @@ pub enum VaultWorkKind {
     /// together would let a due sync swallow a pending commit, or the other
     /// way round.
     Commit,
+    /// Publishing a Two-way Vault's side of a sync conflict to its recovery
+    /// branch, on an operator's request (ADR-30). A kind of its own so it
+    /// never coalesces with a scheduled sync: a sync due at the same moment
+    /// must not swallow the request, nor the request a sync.
+    Recovery,
     /// Index construction, including embedding work.
     Index,
     /// Explicit repair work.

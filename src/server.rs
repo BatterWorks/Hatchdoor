@@ -30,12 +30,12 @@ use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
     disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
     enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
-    list_vaults_handler, patch_settings_handler, refresh_vault_handler, retry_vault_handler,
-    reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler, spa_not_found_handler,
-    start_with_no_vaults_handler, sync_vault_handler, upload_transfer_handler,
-    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
-    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
-    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    list_vaults_handler, patch_settings_handler, publish_recovery_branch_handler,
+    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
+    spa_index_handler, spa_not_found_handler, start_with_no_vaults_handler, sync_vault_handler,
+    upload_transfer_handler, vault_collection_events_handler, vault_scope_graph_handler,
+    vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
+    vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
     vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
@@ -376,6 +376,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/retry",
                 post(retry_vault_handler).layer(demo_guard.clone()),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/recovery-branch",
+                post(publish_recovery_branch_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/refresh",
@@ -5949,6 +5953,7 @@ mod tests {
             "search_error",
             "git_error",
             "watcher_error",
+            "recovery_branch",
         ] {
             assert!(
                 vaults[0].get(absent).is_none(),

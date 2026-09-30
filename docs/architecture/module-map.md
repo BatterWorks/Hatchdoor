@@ -321,6 +321,9 @@ flavour of it (#267) precisely so the two coalesce independently: a purely
 local commit costs nothing and can run on every change, while talking to a
 remote costs a round trip and stays on the Vault's schedule, and folding them
 together would let a due sync swallow a pending commit or the reverse.
+`VaultWorkKind::Recovery` (ADR-30) is its own kind for the same reason: an
+operator's request to publish a conflicted Vault's recovery branch must
+neither swallow nor be swallowed by a sync due at the same moment.
 A stopped worker returns `None` rather than waiting for discarded work.
 `VaultWorkCoordinator::request_if_idle` is `request` for an automatic,
 unattended producer: it admits a turn only when that kind is neither active
@@ -492,6 +495,20 @@ small public surface — no trait, no framework, no second execution lane.
   run on the poll interval and commits on every save, so the earlier rule,
   a commit clears everything, erased a conflict within one save of it
   appearing.
+- `dispatch_recovery_turn` executes a `VaultWorkKind::Recovery` turn
+  (ADR-30): it re-checks the Vault's `publish_recovery` capability (a sync may
+  have resolved the conflict while the request waited), then
+  `plan_recovery_turn` resolves a Two-way source to
+  `git::run_existing_git_recovery_turn` or `git::run_managed_recovery_turn`
+  (lease for the managed one), both under the mutation lock and through the
+  same `run_planned_turn` shell, which is generic over the turn's output for
+  this reason. `finish_recovery_turn` publishes only the Vault's
+  `recovery_branch` status, keeping an earlier publication's fields on a
+  refusal for the same branch: it never touches Git status, never feeds
+  `ManagedGitScheduler`, and never requests an Index turn, because a publish
+  is not a check of the remote and the conflict stays the Vault's failure.
+  `publish_managed_git_turn_outcome` clears `recovery_branch` on a successful
+  sync.
 - `publish_managed_git_turn_outcome` is the single publication path every Git
   turn exit reaches: Git status always, plus authoritative local-content
   availability on success (`activation_snapshot` only stats `vault_path` once,
@@ -1645,6 +1662,11 @@ remote, and a `VaultWorkKind::Commit` request (plus a clear of that Vault's
 case suppression must not swallow) for one that keeps history but has no
 remote. `capability_unavailable` narrowed with it: it now names only a Vault
 with no Git at all, not every Vault with no remote.
+`publish_recovery` (ADR-30) admits a `VaultWorkKind::Recovery` request only
+while the Vault's runtime reports the `publish_recovery` capability, refusing
+with `capability_unavailable` otherwise, and `VaultSummary` carries the
+runtime's `recovery_branch` status on an authenticated read and withholds it
+from the demo projection.
 
 `VaultSummary` carries two optional RFC 3339 UTC timestamps
 alongside the status fields — `last_checked_at` and `next_attempt_at`, read
@@ -1706,7 +1728,9 @@ notify_definition_changed, subscribe_revisions}`,
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
 `mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
 `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`,
-`retry_vault`, `refresh_vault`). `POST /api/v1/vaults/{vault_id}/refresh` and
+`retry_vault`, `publish_recovery_branch`, `refresh_vault`).
+`POST /api/v1/vaults/{vault_id}/recovery-branch` and `publish_recovery_branch`
+pair onto `publish_recovery` the same way. `POST /api/v1/vaults/{vault_id}/refresh` and
 the `refresh_vault` MCP tool (#228) are the same single call onto `refresh`,
 the way sync and retry pair across the two surfaces. Each is a wire-shaping
 adapter: it parses transport input, calls this core once, and maps the typed
@@ -2343,6 +2367,20 @@ what lets an `ExistingGit` Vault with no configured branch commit without
 resolving one. Neither reaches `ManagedGitScheduler`: a commit is not a check
 of the remote and must not move the schedule that governs one.
 
+`publish_recovery_branch` (`managed_sync.rs`, ADR-30) pushes a Two-way
+checkout's local head to `recovery_branch_name(branch, vault_id)`,
+`hatchdoor-recovery/<branch>/<vault id>`, after committing pending drift the
+way a sync does. It goes through `push_refspec`, the one non-forcing push the
+configured-branch `push` also uses, and renames its failures:
+a non-fast-forward is `RecoveryDiverged` (someone added to the branch) and a
+refused ref is `RecoveryRejected` with the sanitized remote reason. It never
+names the configured branch as a push destination and never deletes a ref.
+`run_managed_recovery_turn` (reusing the existing checkout, with credentials)
+and `run_existing_git_recovery_turn` (resolving an unconfigured branch like the
+remote turn) wrap it, returning a `RecoveryResult` whose `RecoveryFailure`
+carries the branch when it was known. `CONFLICT_CODE` is the one Git status
+code a publish is admitted from.
+
 `CommitCooldown`, `DEFAULT_COMMIT_COOLDOWN` (5 minutes),
 `COMMIT_COOLDOWN_TICK_INTERVAL`, and `spawn_commit_cooldown_tick`
 (`commit_cooldown.rs`) are what stops a standing commit failure becoming one
@@ -2860,6 +2898,14 @@ eighteenth write tool, shaped exactly like `rename_tag`: in `WRITE_OPS`, in
 `NOT_BATCHABLE_WRITE_OPS`, answering `DeleteTagResult`, with its refusals as
 structured tool errors carrying their own codes. Catalogue grows to 45,
 purely additive.
+ADR-30 adds `publish_recovery_branch`, the ninth Vault management tool: a
+write-gated mapping onto the collection management core's `publish_recovery`,
+answering `PublishRecoveryBranchResult` (`VaultScheduleResponse`), rejected
+inside `batch` like every management tool, and in
+`is_collection_management_tool` like `sync_vault`, since publishing needs no
+search model. `list_vaults` gains `recovery_branch` and the
+`publish_recovery` capability through the shared `VaultSummary`. Catalogue
+grows to 46, purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -3309,6 +3355,12 @@ takes `demoMode`: the escalation banner itself still renders in demo mode
 (an honest signal, same as every other Vault condition staying visible), but
 never repeats the Vault's own operator-facing Git diagnostic to a visitor
 who was never going to attempt the save it warns about.
+`noteInSyncConflict` (`vaultSlotLogic.ts`, ADR-30) answers whether an open
+note is on the Vault's current `managed_git_conflict` file list, restoring the
+`.md` extension and the Vault's repository subfolder that note reads drop;
+`NotePage.tsx`'s `SyncConflictNotice` renders a non-blocking notice from it.
+It deliberately does not feed `writeBlockReason`: a conflicted note stays
+editable.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -4209,6 +4261,12 @@ renders one of nine failure sentences off `git_error.code` (plus an
 unrecognised-code fallback) — the two carrying an affected-file list
 (`managed_git_dirty_working_copy`, `managed_git_conflict`) render it from
 `git_error.detail`'s `affected_paths` data, not from the message string.
+While the Vault's `capabilities.publish_recovery` is true, the console also
+renders `RecoveryBranchPanel` (ADR-30): the recovery branch name
+(`recoveryBranchName`) with a copy control, a host link for an HTTPS remote
+(`recoveryBranchUrl`), the last published commit, and
+`describeRecoveryFailure`'s sentence for a refused publish, with a button
+calling `POST .../recovery-branch`.
 This page owns all of this wording itself; the server sends only codes
 (matching this page's existing reindex/Git-init confirmation copy).
 `vaultGitBehavior.ts` holds every pure helper above (behaviour derivation,

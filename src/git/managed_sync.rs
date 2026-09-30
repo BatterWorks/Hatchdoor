@@ -9,6 +9,7 @@ use git2::{
 
 use super::managed_checkout::ManagedHttpsCredentials;
 use super::message::WriteLedger;
+use crate::vault_registry::VaultId;
 
 /// The two managed remote behaviors that share checkout synchronization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +86,17 @@ pub enum ManagedSyncError {
     OperationInProgress {
         files: Vec<String>,
     },
+    /// The remote's recovery branch holds commits the local head does not,
+    /// usually because someone started resolving the conflict on it. A
+    /// publish is a fast-forward or nothing, so it refuses rather than
+    /// overwrite that work (ADR-30).
+    RecoveryDiverged,
+    /// The remote refused to create or update the recovery branch: a token
+    /// that may not create branches, a hook, a protected pattern. Carries the
+    /// remote's own one-line reason, sanitized like [`Self::PushRejected`].
+    RecoveryRejected {
+        reason: String,
+    },
     /// The remote rejected the supplied (or absent) credentials. Distinct from
     /// `Remote` so a caller can wait for a credential change or manual retry
     /// rather than backing off and retrying blindly.
@@ -129,6 +141,16 @@ impl std::fmt::Display for ManagedSyncError {
                 "managed checkout has an unfinished merge with conflicts in: {}",
                 files.join(", ")
             ),
+            Self::RecoveryDiverged => formatter.write_str(
+                "the recovery branch on the remote has commits this Vault does not; \
+                 Hatchdoor will not overwrite them",
+            ),
+            Self::RecoveryRejected { reason } => {
+                write!(
+                    formatter,
+                    "the remote refused the recovery branch: {reason}"
+                )
+            }
             Self::Authentication => formatter.write_str("managed checkout authentication failed"),
             Self::Remote => formatter.write_str("managed checkout remote operation failed"),
         }
@@ -187,6 +209,77 @@ pub fn commit_managed_checkout(
         }
     } else {
         ManagedSyncOutcome::UpToDate
+    })
+}
+
+/// What one recovery-branch publish pushed (ADR-30).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryPublication {
+    /// The branch on the remote, without `refs/heads/`.
+    pub branch: String,
+    /// The local commit the recovery branch now points at.
+    pub published_commit: String,
+    /// The configured branch's tip as last fetched: the remote side of the
+    /// conflict. Absent when this checkout has never fetched it.
+    pub conflicting_commit: Option<String>,
+}
+
+/// The recovery branch a Vault publishes to: one per Vault and configured
+/// branch, named by the immutable Vault ID so Vaults and instances sharing a
+/// repository never collide and a rename changes nothing (ADR-30).
+pub fn recovery_branch_name(branch: &str, vault_id: VaultId) -> String {
+    format!("hatchdoor-recovery/{branch}/{vault_id}")
+}
+
+/// Publish this checkout's local head to the Vault's recovery branch on the
+/// remote, so a conflict can be resolved on the Git host (ADR-30).
+///
+/// Commits the Vault's pending drift first, exactly as a sync would, so the
+/// branch carries every save made so far. The push is a fast-forward of the
+/// recovery branch and nothing else: it never force-pushes, never names the
+/// configured branch, and never deletes a remote branch. A recovery branch
+/// someone has added to is refused as [`ManagedSyncError::RecoveryDiverged`].
+///
+/// Like [`synchronize_managed_checkout`], the caller holds the checkout
+/// lease and serializes this with Vault writes.
+pub fn publish_recovery_branch(
+    config: &ManagedSyncConfig,
+    vault_id: VaultId,
+    ledger: &WriteLedger,
+) -> Result<RecoveryPublication, ManagedSyncError> {
+    if config.mode != ManagedSyncMode::TwoWay {
+        return Err(ManagedSyncError::Validation);
+    }
+    let repository = open_validated_repository(config)?;
+    prepare_two_way_worktree(&repository, config, ledger)?;
+
+    let branch = recovery_branch_name(&config.branch, vault_id);
+    if !git2::Reference::is_valid_name(&format!("refs/heads/{branch}")) {
+        return Err(ManagedSyncError::Validation);
+    }
+    let published = repository
+        .refname_to_id(&format!("refs/heads/{}", config.branch))
+        .map_err(|_| ManagedSyncError::Validation)?;
+    let remote_name = managed_remote_name(&repository, config)?;
+    let conflicting = repository
+        .refname_to_id(&format!("refs/remotes/{remote_name}/{}", config.branch))
+        .ok();
+
+    push_refspec(
+        &repository,
+        config,
+        &format!("refs/heads/{}:refs/heads/{branch}", config.branch),
+    )
+    .map_err(|error| match error {
+        ManagedSyncError::PushRace => ManagedSyncError::RecoveryDiverged,
+        ManagedSyncError::PushRejected { reason } => ManagedSyncError::RecoveryRejected { reason },
+        other => other,
+    })?;
+
+    Ok(RecoveryPublication {
+        branch,
+        published_commit: published.to_string(),
+        conflicting_commit: conflicting.map(|oid| oid.to_string()),
     })
 }
 
@@ -885,6 +978,23 @@ fn merge_written_paths(repository: &Repository) -> Result<Vec<PathBuf>, ManagedS
 }
 
 fn push(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), ManagedSyncError> {
+    push_refspec(
+        repository,
+        config,
+        &format!("refs/heads/{0}:refs/heads/{0}", config.branch),
+    )
+}
+
+/// Push one non-forcing `refspec` to the managed remote. A push the remote
+/// cannot take as a fast-forward is [`ManagedSyncError::PushRace`], and a
+/// ref the remote refused is [`ManagedSyncError::PushRejected`]; callers
+/// pushing something other than the configured branch rename those.
+fn push_refspec(
+    repository: &Repository,
+    config: &ManagedSyncConfig,
+    refspec: &str,
+) -> Result<(), ManagedSyncError> {
+    debug_assert!(!refspec.starts_with('+'), "a managed push never forces");
     let remote_name = managed_remote_name(repository, config)?;
     let mut remote = repository
         .find_remote(&remote_name)
@@ -905,10 +1015,7 @@ fn push(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Manag
     });
     let mut options = PushOptions::new();
     options.remote_callbacks(callbacks);
-    let pushed = remote.push(
-        &[&format!("refs/heads/{0}:refs/heads/{0}", config.branch)],
-        Some(&mut options),
-    );
+    let pushed = remote.push(&[refspec], Some(&mut options));
     drop(options);
     pushed.map_err(|error| {
         if error.code() == git2::ErrorCode::NotFastForward {
@@ -1915,5 +2022,275 @@ mod tests {
         let long = push_rejection_reason(&"x".repeat(500));
         assert_eq!(long.chars().count(), 201);
         assert!(long.ends_with('…'));
+    }
+
+    fn recovery_vault_id() -> VaultId {
+        "00000000-0000-4000-8000-0000000000aa"
+            .parse()
+            .expect("test Vault ID")
+    }
+
+    /// Put `config`'s checkout into the state a conflicting sync leaves: the
+    /// local and remote sides both changed `vault/Home.md`, the merge was
+    /// aborted, and the local commit is the checkout's head.
+    fn conflicted(root: &Path, config: &ManagedSyncConfig) {
+        conflicted_as(root, config, "remote side");
+    }
+
+    fn conflicted_as(root: &Path, config: &ManagedSyncConfig, label: &str) {
+        remote_commit(root, "vault/Home.md", "remote change\n", label);
+        std::fs::write(config.vault_path.join("Home.md"), "local change\n").expect("local edit");
+        let error =
+            synchronize_managed_checkout(config, &WriteLedger::new()).expect_err("merge conflict");
+        assert!(matches!(error, ManagedSyncError::Conflict { .. }));
+    }
+
+    fn remote_ref(root: &Path, reference: &str) -> Option<git2::Oid> {
+        Repository::open_bare(root.join("remote.git"))
+            .expect("remote")
+            .refname_to_id(reference)
+            .ok()
+    }
+
+    fn local_head(config: &ManagedSyncConfig) -> git2::Oid {
+        Repository::open(&config.repository_path)
+            .expect("checkout")
+            .refname_to_id("refs/heads/master")
+            .expect("local branch")
+    }
+
+    const RECOVERY_REF: &str =
+        "refs/heads/hatchdoor-recovery/master/00000000-0000-4000-8000-0000000000aa";
+
+    #[test]
+    fn a_recovery_branch_is_named_by_configured_branch_and_vault_id() {
+        assert_eq!(
+            recovery_branch_name("main", recovery_vault_id()),
+            "hatchdoor-recovery/main/00000000-0000-4000-8000-0000000000aa"
+        );
+    }
+
+    #[test]
+    fn publishing_puts_the_local_head_on_the_recovery_branch_and_leaves_the_configured_branch_alone()
+     {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        conflicted(root.path(), &config);
+        let remote_master = remote_ref(root.path(), "refs/heads/master").expect("remote master");
+
+        let published = publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect("publish");
+
+        assert_eq!(
+            published.branch,
+            "hatchdoor-recovery/master/00000000-0000-4000-8000-0000000000aa"
+        );
+        assert_eq!(published.published_commit, local_head(&config).to_string());
+        assert_eq!(
+            published.conflicting_commit,
+            Some(remote_master.to_string()),
+            "the remote side of the conflict is the configured branch's fetched tip"
+        );
+        assert_eq!(
+            remote_ref(root.path(), RECOVERY_REF),
+            Some(local_head(&config))
+        );
+        assert_eq!(
+            remote_ref(root.path(), "refs/heads/master"),
+            Some(remote_master),
+            "the configured branch on the remote is untouched"
+        );
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(file_at_head(&checkout, "vault/Home.md"), "local change\n");
+        assert_eq!(checkout.state(), git2::RepositoryState::Clean);
+    }
+
+    #[test]
+    fn publishing_again_commits_pending_saves_and_fast_forwards_the_same_branch() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        conflicted(root.path(), &config);
+        let first = publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect("first publish");
+        std::fs::write(config.vault_path.join("Later.md"), "later save\n").expect("later save");
+
+        let second = publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect("second publish");
+
+        assert_eq!(first.branch, second.branch);
+        assert_ne!(first.published_commit, second.published_commit);
+        let head = local_head(&config);
+        assert_eq!(second.published_commit, head.to_string());
+        assert_eq!(remote_ref(root.path(), RECOVERY_REF), Some(head));
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(file_at_head(&checkout, "vault/Later.md"), "later save\n");
+        assert!(
+            checkout
+                .graph_descendant_of(head, first.published_commit.parse().expect("oid"))
+                .expect("graph"),
+            "the second publish extends the first"
+        );
+    }
+
+    #[test]
+    fn a_recovery_branch_someone_added_to_is_refused_and_left_as_it_is() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        conflicted(root.path(), &config);
+        publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect("first publish");
+
+        // Someone starts resolving on the recovery branch itself.
+        let actor_path = root.path().join("actor-on-recovery");
+        let actor = Repository::clone(
+            root.path()
+                .join("remote.git")
+                .to_str()
+                .expect("remote path"),
+            &actor_path,
+        )
+        .expect("actor checkout");
+        let recovery = actor
+            .refname_to_id(
+                "refs/remotes/origin/hatchdoor-recovery/master/00000000-0000-4000-8000-0000000000aa",
+            )
+            .expect("recovery branch fetched");
+        actor
+            .branch("work", &actor.find_commit(recovery).expect("commit"), false)
+            .expect("branch");
+        actor.set_head("refs/heads/work").expect("switch");
+        actor
+            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .expect("checkout");
+        commit(&actor, "vault/Home.md", "half resolved\n", "resolving");
+        actor
+            .find_remote("origin")
+            .expect("origin")
+            .push(
+                &[
+                    "refs/heads/work:refs/heads/hatchdoor-recovery/master/00000000-0000-4000-8000-0000000000aa",
+                ],
+                None,
+            )
+            .expect("actor push");
+        let theirs = remote_ref(root.path(), RECOVERY_REF).expect("recovery tip");
+
+        std::fs::write(config.vault_path.join("Later.md"), "later save\n").expect("later save");
+        let error = publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect_err("diverged");
+
+        assert_eq!(error, ManagedSyncError::RecoveryDiverged);
+        assert_eq!(remote_ref(root.path(), RECOVERY_REF), Some(theirs));
+    }
+
+    #[test]
+    fn once_the_configured_branch_holds_the_resolution_the_next_sync_succeeds_and_the_branch_stays()
+    {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        conflicted(root.path(), &config);
+        publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect("publish");
+
+        // Resolve on the Git host: merge the recovery branch into master.
+        let actor_path = root.path().join("actor-resolving");
+        let actor = Repository::clone(
+            root.path()
+                .join("remote.git")
+                .to_str()
+                .expect("remote path"),
+            &actor_path,
+        )
+        .expect("actor checkout");
+        let ours = actor.refname_to_id("refs/heads/master").expect("master");
+        let theirs = actor
+            .refname_to_id(
+                "refs/remotes/origin/hatchdoor-recovery/master/00000000-0000-4000-8000-0000000000aa",
+            )
+            .expect("recovery branch");
+        std::fs::write(actor_path.join("vault/Home.md"), "resolved\n").expect("resolve");
+        let mut index = actor.index().expect("index");
+        index.add_path(Path::new("vault/Home.md")).expect("stage");
+        index.write().expect("write index");
+        let tree = actor
+            .find_tree(index.write_tree().expect("tree"))
+            .expect("tree");
+        let signature = Signature::now("Resolver", "resolver@example.test").expect("signature");
+        actor
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Merge recovery branch",
+                &tree,
+                &[
+                    &actor.find_commit(ours).expect("ours"),
+                    &actor.find_commit(theirs).expect("theirs"),
+                ],
+            )
+            .expect("merge commit");
+        actor
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("push resolution");
+        // A save made after publishing, on a note the resolution did not touch.
+        std::fs::write(config.vault_path.join("Later.md"), "later save\n").expect("later save");
+
+        synchronize_managed_checkout(&config, &WriteLedger::new()).expect("sync resumes");
+
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(file_at_head(&checkout, "vault/Home.md"), "resolved\n");
+        assert_eq!(file_at_head(&checkout, "vault/Later.md"), "later save\n");
+        assert_eq!(
+            remote_ref(root.path(), "refs/heads/master"),
+            Some(local_head(&config))
+        );
+        assert_eq!(
+            remote_ref(root.path(), RECOVERY_REF),
+            Some(theirs),
+            "Hatchdoor never deletes or moves the recovery branch on its own"
+        );
+
+        // The next conflict publishes to the same branch as a fast-forward.
+        conflicted_as(root.path(), &config, "second remote side");
+        publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect("a later conflict reuses the branch");
+        assert_eq!(
+            remote_ref(root.path(), RECOVERY_REF),
+            Some(local_head(&config))
+        );
+    }
+
+    #[test]
+    fn a_recovery_branch_the_remote_refuses_reports_its_reason_and_lands_nothing() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        conflicted(root.path(), &config);
+        let refs = root
+            .path()
+            .join("remote.git/refs/heads/hatchdoor-recovery/master");
+        std::fs::create_dir_all(&refs).expect("recovery ref directory");
+        std::fs::write(
+            refs.join("00000000-0000-4000-8000-0000000000aa.lock"),
+            "held\n",
+        )
+        .expect("hold the recovery branch lock");
+        let remote_master = remote_ref(root.path(), "refs/heads/master");
+
+        let error = publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new())
+            .expect_err("a refused branch is not published");
+
+        let ManagedSyncError::RecoveryRejected { reason } = &error else {
+            panic!("expected a recovery rejection, got {error:?}");
+        };
+        assert!(!reason.is_empty());
+        assert_eq!(remote_ref(root.path(), RECOVERY_REF), None);
+        assert_eq!(remote_ref(root.path(), "refs/heads/master"), remote_master);
+    }
+
+    #[test]
+    fn a_pull_only_checkout_never_publishes() {
+        let (root, config) = fixture(ManagedSyncMode::PullOnly);
+        assert_eq!(
+            publish_recovery_branch(&config, recovery_vault_id(), &WriteLedger::new()),
+            Err(ManagedSyncError::Validation)
+        );
+        assert_eq!(remote_ref(root.path(), RECOVERY_REF), None);
     }
 }

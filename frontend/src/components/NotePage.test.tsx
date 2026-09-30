@@ -252,6 +252,73 @@ describe("NotePage write escalation (#141)", () => {
   });
 });
 
+describe("NotePage sync conflict notice (ADR-30)", () => {
+  function conflictedVault(paths: string[]) {
+    return {
+      ...staleVault("Conflicted"),
+      search: "ready" as const,
+      search_error: undefined,
+      git: "unavailable" as const,
+      git_error: {
+        code: "managed_git_conflict",
+        message: "managed checkout merge conflict",
+        retryable: false,
+        detail: {
+          kind: "affected_paths" as const,
+          paths,
+          total: paths.length,
+        },
+      },
+    };
+  }
+
+  function serveHome(vaultId: string) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "Body",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: vaultId, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+  }
+
+  it("warns on a note the conflict lists, and leaves it editable", async () => {
+    const vault = conflictedVault(["Home.md"]);
+    serveHome(vault.vault_id);
+    renderNote(vault.vault_id, { vaults: [vault] });
+    expect(
+      await screen.findByText(/This note is part of a sync conflict/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+  });
+
+  it("says nothing on a note the conflict does not list", async () => {
+    const vault = conflictedVault(["Other.md"]);
+    serveHome(vault.vault_id);
+    renderNote(vault.vault_id, { vaults: [vault] });
+    await screen.findByRole("button", { name: "Edit" });
+    expect(
+      screen.queryByText(/This note is part of a sync conflict/),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("NotePage tag taps hand over this note's own Vault (#144)", () => {
   it("calls onTagSelect with the tag and the open note's Vault", async () => {
     const vaultId = "vault-work";

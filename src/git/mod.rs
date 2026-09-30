@@ -18,13 +18,14 @@ pub use managed_checkout::{
     ManagedHttpsCredentials,
 };
 pub use managed_sync::{
-    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome,
+    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome, RecoveryPublication,
     synchronize_managed_checkout,
 };
 pub use managed_task::{
-    DEFAULT_POLL_INTERVAL, DEFAULT_TICK_INTERVAL, GitPollingClock, ManagedGitOutcome,
-    ManagedGitScheduler, ManagedGitTurnConfig, run_existing_git_commit_turn,
-    run_existing_git_remote_turn, run_managed_git_commit_turn, run_managed_git_turn,
+    CONFLICT_CODE, DEFAULT_POLL_INTERVAL, DEFAULT_TICK_INTERVAL, GitPollingClock,
+    ManagedGitOutcome, ManagedGitScheduler, ManagedGitTurnConfig, RecoveryFailure, RecoveryResult,
+    run_existing_git_commit_turn, run_existing_git_recovery_turn, run_existing_git_remote_turn,
+    run_managed_git_commit_turn, run_managed_git_turn, run_managed_recovery_turn,
     spawn_scheduler_tick,
 };
 pub use message::{WriteLedger, WriteRecord, build_commit_message};

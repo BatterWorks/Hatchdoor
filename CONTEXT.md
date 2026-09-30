@@ -79,6 +79,10 @@ _Avoid_: Reindex, rebuild, refresh (when meant instance-wide)
 One unit of background Git work for exactly one vault, requested through the same work coordinator by the managed-Git scheduler, a manual sync or retry, or activation, and run under that vault's mutation lock. The vault source and Git mode select the operation: acquire or reuse and synchronise a managed checkout, synchronise an existing checkout with its remote, or commit local history.
 _Avoid_: Sync task, git sync, debounce (when meant instance-wide)
 
+**Recovery branch**:
+The branch on a vault's remote that holds the vault's side of a sync conflict, published only when an operator asks, so the conflict can be resolved on the Git host. There is one per vault; the vault's configured branch is never it.
+_Avoid_: Conflict branch, backup branch, rescue branch
+
 **Slug**:
 A note's address within one vault: a short lowercase form of its name, unique in that vault, by which browsers and agents ask for the note. Unlike a Vault ID it is derived rather than assigned, so renaming a note moves its address.
 _Avoid_: Note ID, permalink, handle, key

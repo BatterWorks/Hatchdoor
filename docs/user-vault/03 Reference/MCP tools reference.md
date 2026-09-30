@@ -35,7 +35,7 @@ Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — thes
 
 ## Vault collection: discovery and management
 
-`list_vaults` is always available. The other eight require `HATCHDOOR_MCP_WRITE_ENABLED`; without it they return the same "MCP write tools are disabled" error as content write tools.
+`list_vaults` is always available. The other nine require `HATCHDOOR_MCP_WRITE_ENABLED`; without it they return the same "MCP write tools are disabled" error as content write tools.
 
 A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps describing its Git schedule: `last_checked_at`, when Hatchdoor last tried to check the remote — whether that check succeeded or failed, so read it alongside the Vault's Git status rather than as a successful sync — and `next_attempt_at`, when the next scheduled check is due. `last_checked_at` is absent until the first check completes; both are absent for a Vault with no remote and in demo mode. They are described in full under **Git schedule fields on a listed Vault** in [[HTTP API reference]], whose Vault shape `list_vaults` returns verbatim.
 
@@ -49,6 +49,7 @@ A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps de
 | `disconnect_vault` | Write mode | Remove a Vault from the registry without deleting local files, checkouts, Git history, or credentials outside the registry record. |
 | `sync_vault` | Write mode | Request one Vault's Git work now: a remote sync if it has a remote, a local commit if it only keeps history. |
 | `retry_vault` | Write mode | Retry that same operation for one eligible Vault. |
+| `publish_recovery_branch` | Write mode | Publish a Two-way Vault's side of a sync conflict to its recovery branch, so the conflict can be resolved on the Git host. |
 | `refresh_vault` | Write mode | Request one Vault's next index turn, so the snapshot the collection reads project from is rebuilt from its Markdown. |
 
 ### `create_vault`
@@ -88,6 +89,16 @@ All three take just `vault_id` and `expected_registry_revision`.
 Both take just `vault_id`. On a Vault with a remote, `sync_vault` requests an immediate poll instead of waiting for `poll_interval_secs`, and `retry_vault` retries an operation the scheduler admitted but that failed (say a transient network error), rather than waiting for its own backoff.
 
 On a Vault with no remote but with Git history (an `existing_git` Vault in `local_history` mode), both request an immediate local commit instead. No remote is contacted, and asking explicitly also lifts the five-minute pause that follows a failed commit. Only a Vault with no Git at all (a plain `local` source) is refused, with `capability_unavailable`. For rebuilding the search index of any Vault, Git-backed or not, use `refresh_vault`.
+
+### `publish_recovery_branch`
+
+Takes just `vault_id`. When a Two-way Vault's sync stops on a conflict (`git_error.code` is `managed_git_conflict`), Hatchdoor keeps its own side only in its checkout. This tool pushes that side to a branch of its own on the Vault's remote, `hatchdoor-recovery/<configured branch>/<vault_id>`, so a person or an agent with access to the Git host can merge it into the configured branch. Once the configured branch contains the resolution, the Vault's next sync goes through on its own; `retry_vault` makes that happen now.
+
+It is allowed only while the Vault's `capabilities.publish_recovery` is true, and refused with `capability_unavailable` otherwise. Pending saves are committed first, so the branch carries everything written so far. The push only ever fast-forwards the recovery branch: it never force-pushes, never touches the configured branch, and never deletes a branch, including after the conflict clears. Calling it again later publishes newer saves to the same branch.
+
+Like `sync_vault`, it returns as soon as the request is admitted (`schedule` is `queued`, or `coalesced` with a request already pending). Read the outcome from `list_vaults`: the Vault's `recovery_branch` names the `branch`, the `published_commit`, the `conflicting_commit` on the remote and `published_at`, or carries an `error`. `managed_git_recovery_diverged` means someone added commits to the recovery branch, so Hatchdoor left it alone rather than overwrite them; `managed_git_recovery_push_rejected` carries the remote's own reason, such as a token that may not create branches. `recovery_branch` clears once a sync succeeds, and is not kept across a restart.
+
+The tool is not allowed inside `batch`.
 
 ### `refresh_vault`
 
@@ -353,7 +364,7 @@ Any read or write refused this way says so twice: `isError` is true on the resul
 }
 ```
 
-**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. `rename_tag` and `delete_tag` are the exceptions: each touches every note carrying a tag and promises all or nothing, which a best-effort batch cannot keep, so call them on their own. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
+**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. `rename_tag` and `delete_tag` are the exceptions: each touches every note carrying a tag and promises all or nothing, which a best-effort batch cannot keep, so call them on their own. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `publish_recovery_branch`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
 
 **Best-effort, in order, no rollback.** Items run one after another; an item that fails never stops the ones after it, and nothing already written is undone. There is no mid-batch visibility either — an item sees the Vault, not the batch's own bookkeeping, apart from the hash chaining below.
 

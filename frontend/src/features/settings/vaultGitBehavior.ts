@@ -320,7 +320,7 @@ const GIT_FAILURE_COPY: Record<
     tier: "error",
     files: true,
     sentence: () =>
-      "The files below conflict between this Vault and its remote. Nothing was lost — both versions still exist. Resolve the listed files, then press Try again.",
+      "The files below conflict between this Vault and its remote. Nothing was lost; both versions still exist. Publish this Vault's side to a branch and merge it on your Git host, then press Try again.",
   },
   managed_git_push_race_exhausted: {
     label: "push race",
@@ -369,6 +369,72 @@ export function describeGitFailure(
     description.filesTotal = error.detail.total;
   }
   return description;
+}
+
+/** The Git half of a Vault's source, or `undefined` for a plain folder. */
+export function gitSource(
+  source: VaultSource | undefined,
+): Exclude<VaultSource, { type: "local" }> | undefined {
+  return source?.type === "local" ? undefined : source;
+}
+
+/** The branch a Vault's side of a conflict is published to (ADR-30): the one
+ * the last publish reported, else the name the server will use. That name is
+ * `recovery_branch_name` in `src/git/managed_sync.rs`, built from the
+ * configured branch and the Vault's ID. `null` when the branch is not
+ * configured and nothing has been published yet, since only the server knows
+ * the branch a clone resolved. */
+export function recoveryBranchName(vault: VaultSummary): string | null {
+  if (vault.recovery_branch?.branch) return vault.recovery_branch.branch;
+  const branch = gitSource(vault.source)?.branch;
+  return branch ? `hatchdoor-recovery/${branch}/${vault.vault_id}` : null;
+}
+
+/** A link to `branch` on the remote's web view, for an HTTPS remote. Built
+ * as `<repository>/tree/<branch>`, which GitHub, Forgejo, Gitea and GitLab
+ * all answer; any other host gets the name alone. */
+export function recoveryBranchUrl(
+  source: VaultSource | undefined,
+  branch: string,
+): string | null {
+  const url = gitSource(source)?.repository_url;
+  if (!url) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password)
+    return null;
+  const repository = `${parsed.origin}${parsed.pathname}`
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "");
+  return `${repository}/tree/${branch.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/** What each way a publish can publish nothing says, keyed by code like
+ * `GIT_FAILURE_COPY` above. */
+const RECOVERY_FAILURE_COPY: Record<
+  string,
+  (error: VaultRuntimeError) => string
+> = {
+  managed_git_recovery_diverged: () =>
+    "Someone added commits to this branch on the remote, so Hatchdoor left it alone. Merge it as it is, or delete it on your Git host and publish again.",
+  managed_git_recovery_push_rejected: (error) =>
+    `The remote refused the branch, so nothing was published. ${error.message}`,
+  managed_git_authentication_failed: () =>
+    "The remote rejected this Vault's sign-in, so nothing was published. Check the token under Sign-in.",
+  managed_git_remote_unreachable: () =>
+    "Hatchdoor could not reach the remote, so nothing was published. Try again in a moment.",
+  capability_unavailable: () =>
+    "This Vault's sync was no longer stopped on a conflict, so there was nothing to publish.",
+};
+
+/** The sentence for a publish that published nothing. */
+export function describeRecoveryFailure(error: VaultRuntimeError): string {
+  const copy = RECOVERY_FAILURE_COPY[error.code];
+  return copy ? copy(error) : `Nothing was published: ${error.message}`;
 }
 
 /** The one condition allowed to persist across visits (issue #121): a Vault

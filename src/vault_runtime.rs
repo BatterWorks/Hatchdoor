@@ -86,6 +86,10 @@ pub struct VaultCapabilities {
     /// console offering **Sync now** from one that can only offer **Commit
     /// now**, and definition-derived for the same reason as `commit`.
     pub sync: bool,
+    /// Whether this Vault's side of a sync conflict can be published to its
+    /// recovery branch now: a Two-way Vault whose Git status reports
+    /// `managed_git_conflict` (ADR-30).
+    pub publish_recovery: bool,
 }
 
 impl VaultCapabilities {
@@ -103,6 +107,7 @@ impl VaultCapabilities {
             retry: false,
             commit: false,
             sync: false,
+            publish_recovery: false,
         }
     }
 
@@ -128,6 +133,7 @@ impl VaultCapabilities {
             retry: false,
             commit: false,
             sync: false,
+            publish_recovery: false,
             ..self
         }
     }
@@ -404,6 +410,31 @@ pub enum VaultWatcherStatus {
     Unavailable,
 }
 
+/// What the last request to publish this Vault's recovery branch achieved
+/// (ADR-30). In memory only: after a restart the Vault reports its conflict
+/// again and the next publish fills this back in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
+pub struct RecoveryBranchStatus {
+    /// The branch on the remote, without `refs/heads/`. Absent only when a
+    /// publish failed before the Vault's branch could be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The local commit the branch was last published at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_commit: Option<String>,
+    /// The remote commit on the configured branch that local history
+    /// conflicts with, as of that publish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_commit: Option<String>,
+    /// When the branch was last published, RFC 3339 UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    /// Why the latest request published nothing. A refusal leaves the
+    /// earlier publication's fields in place, since that branch still stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<VaultRuntimeError>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CollectionVaultSnapshot {
     pub vault_id: VaultId,
@@ -423,6 +454,8 @@ pub struct CollectionVaultSnapshot {
     pub git_error: Option<VaultRuntimeError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watcher_error: Option<VaultRuntimeError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_branch: Option<RecoveryBranchStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -527,6 +560,9 @@ struct CarriedOverState {
     /// The retiring block's write exclusion, so an edit can never put two
     /// live mutexes on one Vault directory (#321).
     exclusion: Option<VaultWriteExclusion>,
+    /// The retiring block's recovery-branch status, which describes a branch
+    /// on the remote that an edit to this Vault does not move (ADR-30).
+    recovery: Option<RecoveryBranchStatus>,
 }
 
 /// Where a Vault's notes sit in its Git repository (#300).
@@ -661,6 +697,7 @@ impl VaultControlBlock {
             git: prior_git,
             writes: prior_writes,
             exclusion: prior_exclusion,
+            recovery: prior_recovery,
         } = carried_over;
         let mut snapshot = activation_snapshot(
             &definition,
@@ -668,6 +705,7 @@ impl VaultControlBlock {
             snapshot_cache.map(Arc::as_ref),
             prior_git,
         );
+        snapshot.recovery_branch = prior_recovery;
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
             watching.and_then(|watching| {
                 let (watcher, status, error) = start_watcher(&definition, &vault_path, watching);
@@ -1150,6 +1188,24 @@ impl VaultControlBlock {
         Ok(())
     }
 
+    /// Publish the outcome of a recovery-branch request, or clear it once
+    /// the conflict it was about is gone (ADR-30).
+    pub fn set_recovery_branch(
+        &self,
+        status: Option<RecoveryBranchStatus>,
+    ) -> Result<(), VaultRuntimeError> {
+        self.ensure_accepting_operations()?;
+        let mut snapshot = self.write_snapshot();
+        let changed = snapshot.recovery_branch != status;
+        snapshot.recovery_branch = status;
+        drop(snapshot);
+        if changed {
+            self.revisions
+                .bump(self.definition.vault_id(), VaultChangeCategory::Status);
+        }
+        Ok(())
+    }
+
     /// Publish a `Definition`-category revision bump for this Vault without
     /// changing its runtime status snapshot. `reconcile()` retains this same
     /// `VaultControlBlock` unchanged whenever `VaultDefinition` equality
@@ -1492,6 +1548,7 @@ impl VaultCollectionRuntime {
                             let prior_snapshot = runtime.snapshot();
                             CarriedOverState {
                                 git: Some((prior_snapshot.git, prior_snapshot.git_error.clone())),
+                                recovery: prior_snapshot.recovery_branch.clone(),
                                 writes: Some(runtime.write_ledger()),
                                 exclusion: Some(runtime.write_exclusion()),
                             }
@@ -2055,6 +2112,7 @@ fn activation_snapshot(
         search_error: None,
         git_error,
         watcher_error: None,
+        recovery_branch: None,
     };
     snapshot.capabilities = collection_capabilities(definition, &snapshot);
     snapshot
@@ -2242,6 +2300,7 @@ fn disabled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapshot {
         search_error: None,
         git_error: None,
         watcher_error: None,
+        recovery_branch: None,
     }
 }
 
@@ -2284,6 +2343,11 @@ fn collection_capabilities(
         .any(|error| error.retryable),
         commit: crate::git::source_commits(source),
         sync: crate::git::source_syncs_remote(source),
+        publish_recovery: git_mode == Some(VaultGitMode::TwoWay)
+            && snapshot
+                .git_error
+                .as_ref()
+                .is_some_and(|error| error.code == crate::git::CONFLICT_CODE),
     }
 }
 

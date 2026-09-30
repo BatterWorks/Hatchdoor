@@ -27,8 +27,9 @@ use super::managed_checkout::{
     acquire_or_reuse, reuse_existing_checkout,
 };
 use super::managed_sync::{
-    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome,
-    commit_managed_checkout, synchronize_managed_checkout,
+    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome, RecoveryPublication,
+    commit_managed_checkout, publish_recovery_branch, recovery_branch_name,
+    synchronize_managed_checkout,
 };
 use super::message::WriteLedger;
 
@@ -409,6 +410,145 @@ pub fn run_existing_git_remote_turn(
     })
 }
 
+/// Why a recovery-branch publish published nothing, with the branch it was
+/// for when the turn got far enough to know it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryFailure {
+    pub branch: Option<String>,
+    pub error: VaultWorkError,
+}
+
+impl From<VaultWorkError> for RecoveryFailure {
+    fn from(error: VaultWorkError) -> Self {
+        Self {
+            branch: None,
+            error,
+        }
+    }
+}
+
+/// One recovery-branch publish, as the executor publishes it (ADR-30).
+pub type RecoveryResult = Result<RecoveryPublication, RecoveryFailure>;
+
+/// Publish a managed-Git Vault's side of a sync conflict to its recovery
+/// branch (ADR-30).
+///
+/// Reuses the checkout that is already there, like
+/// [`run_managed_git_commit_turn`], and never clones: a Vault that reached a
+/// conflict has one. Carries the Vault's credentials, unlike a commit,
+/// because the push talks to the remote.
+///
+/// Must run from `spawn_blocking`.
+pub fn run_managed_recovery_turn(
+    config: &ManagedGitTurnConfig,
+    lease: &ManagedCheckoutLease,
+    ledger: &WriteLedger,
+) -> RecoveryResult {
+    if config.mode != VaultGitMode::TwoWay {
+        return Err(recovery_mode_error().into());
+    }
+    let credentials = config
+        .credentials
+        .as_ref()
+        .map(|credentials| ManagedHttpsCredentials {
+            username: credentials.username.clone(),
+            token: credentials.token.clone(),
+        });
+    let request = ManagedCheckoutRequest {
+        state_directory: config.state_directory.clone(),
+        vault_id: config.vault_id,
+        repository_url: config.repository_url.clone(),
+        branch: config.branch.clone(),
+        vault_subdirectory: config.vault_subdirectory.clone(),
+        credentials: credentials.clone(),
+    };
+    let checkout = reuse_existing_checkout(lease, &request)
+        .map_err(classify_checkout_error)?
+        .ok_or_else(|| classify_sync_error(ManagedSyncError::Validation))?;
+    publish(
+        &ManagedSyncConfig {
+            repository_path: checkout.repository_path,
+            vault_path: checkout.vault_path,
+            repository_url: config.repository_url.clone(),
+            branch: checkout.resolved_branch,
+            mode: ManagedSyncMode::TwoWay,
+            credentials,
+            author_name: config.author_name.clone(),
+            author_email: config.author_email.clone(),
+        },
+        config.vault_id,
+        ledger,
+    )
+}
+
+/// Publish an `ExistingGit` Two-way Vault's side of a sync conflict to its
+/// recovery branch (ADR-30). The branch is resolved the way
+/// [`run_existing_git_remote_turn`] resolves it, so the recovery branch is
+/// named after the same branch the sync that conflicted used.
+///
+/// Must run from `spawn_blocking`.
+#[allow(clippy::too_many_arguments)] // The remote turn's inputs plus the Vault ID.
+pub fn run_existing_git_recovery_turn(
+    repository_path: PathBuf,
+    vault_path: PathBuf,
+    repository_url: Option<String>,
+    branch: Option<String>,
+    credentials: Option<HttpsCredentials>,
+    author_name: String,
+    author_email: String,
+    vault_id: VaultId,
+    ledger: &WriteLedger,
+) -> RecoveryResult {
+    let Some(repository_url) = repository_url else {
+        return Err(classify_sync_error(ManagedSyncError::Validation).into());
+    };
+    let branch = match branch {
+        Some(branch) => branch,
+        None => resolve_checked_out_branch(&repository_path).map_err(|_| {
+            VaultWorkError::new(
+                "existing_git_branch_unresolved",
+                "cannot determine the currently checked-out branch of this Vault's Git checkout",
+                false,
+            )
+        })?,
+    };
+    publish(
+        &ManagedSyncConfig {
+            repository_path,
+            vault_path,
+            repository_url,
+            branch,
+            mode: ManagedSyncMode::TwoWay,
+            credentials: credentials.map(|credentials| ManagedHttpsCredentials {
+                username: credentials.username,
+                token: credentials.token,
+            }),
+            author_name,
+            author_email,
+        },
+        vault_id,
+        ledger,
+    )
+}
+
+fn publish(config: &ManagedSyncConfig, vault_id: VaultId, ledger: &WriteLedger) -> RecoveryResult {
+    publish_recovery_branch(config, vault_id, ledger).map_err(|error| RecoveryFailure {
+        branch: Some(recovery_branch_name(&config.branch, vault_id)),
+        error: classify_sync_error(error),
+    })
+}
+
+/// The failure [`run_managed_recovery_turn`] reports when handed a mode that
+/// has no recovery branch. A caller bug: admission requires a Two-way Vault,
+/// and the existing-checkout turn is only ever planned for one.
+fn recovery_mode_error() -> VaultWorkError {
+    VaultWorkError::new(
+        "vault_recovery_mode_has_no_branch",
+        "recovery branch requested for a Vault that is not in Two-way mode",
+        false,
+    )
+}
+
 /// The branch currently checked out at `repository_path`, used by
 /// [`run_existing_git_remote_turn`] when an `ExistingGit` Vault has no
 /// configured `branch`. Fails rather than guessing on a detached HEAD or an
@@ -458,6 +598,10 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
     VaultWorkError::new(code, error.to_string(), retryable)
 }
 
+/// The Git status code a sync that hit a merge conflict reports, and the one
+/// state a recovery branch can be published from (ADR-30).
+pub const CONFLICT_CODE: &str = "managed_git_conflict";
+
 /// Classify a synchronization failure. See [`classify_checkout_error`] for
 /// the retryable/non-retryable split rationale.
 ///
@@ -481,7 +625,7 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
             Some(VaultWorkErrorDetail::LocalCommitsAhead(ahead)),
         ),
         Conflict { files } => (
-            "managed_git_conflict",
+            CONFLICT_CODE,
             false,
             Some(VaultWorkErrorDetail::AffectedPaths(files)),
         ),
@@ -499,6 +643,11 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
             false,
             (!files.is_empty()).then_some(VaultWorkErrorDetail::AffectedPaths(files)),
         ),
+        // Both come only from a recovery-branch publish (ADR-30), which
+        // reports them on the Vault's recovery status, never as its Git
+        // status: the conflict they are about stays the Vault's failure.
+        RecoveryDiverged => ("managed_git_recovery_diverged", false, None),
+        RecoveryRejected { .. } => ("managed_git_recovery_push_rejected", false, None),
         Authentication => ("managed_git_authentication_failed", false, None),
         Remote => ("managed_git_remote_unreachable", true, None),
     };

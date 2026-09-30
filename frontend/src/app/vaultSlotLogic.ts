@@ -244,3 +244,26 @@ export function deriveVaultAggregate(
     tier: worstTier,
   };
 }
+
+/** Whether the note at `relativePath` (Vault-relative and without `.md`, as
+ * note reads report it) is one of the files the Vault's current sync conflict
+ * lists (ADR-30). The conflict names repository-relative file paths, so the
+ * note's path gets its extension back and, for a Vault kept in a folder of
+ * its repository, that folder in front. A conflict listing more files than it
+ * names can only match the ones it names. */
+export function noteInSyncConflict(
+  vault: VaultSummary | undefined,
+  relativePath: string | undefined,
+): boolean {
+  if (!vault || !relativePath) return false;
+  const error = vault.git_error;
+  if (error?.code !== "managed_git_conflict") return false;
+  if (error.detail?.kind !== "affected_paths") return false;
+  const subdirectory =
+    vault.source?.type === "local"
+      ? undefined
+      : vault.source?.vault_subdirectory?.replace(/^\/+|\/+$/g, "");
+  const file = `${relativePath}.md`;
+  const repositoryPath = subdirectory ? `${subdirectory}/${file}` : file;
+  return error.detail.paths.includes(repositoryPath);
+}

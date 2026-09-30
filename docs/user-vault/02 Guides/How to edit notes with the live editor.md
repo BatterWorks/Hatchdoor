@@ -61,6 +61,7 @@ Hatchdoor also waits before updating itself. A new version installs in the backg
 - **"Edits aren't saving"** with nothing else to go on, or a save that fails repeatedly for no visible reason — this is a problem on the server rather than in your browser, and the server log now records every failed save with its cause. See [[How to troubleshoot common problems]].
 - **"Edits aren't saving. Hatchdoor could not reach the vault."** — a connectivity problem. It retries once the connection is back.
 - **"This note changed on disk while your edit was waiting to save."** — the note moved somewhere else while your edit was stuck (a Vault that has stopped syncing, a connection that is down). Nothing of yours is written over: open **Edit** to put the two versions side by side and decide.
+- **"This note is part of a sync conflict with the Vault's remote."** — the Vault's last sync stopped because this note changed both here and on the remote. You can still edit it, but an edit made before the conflict is resolved may cause the same conflict again. [[How to troubleshoot common problems#Resolving a sync conflict]] explains how to resolve it from the Vault's settings.
 - **"This note's source and rendered lines don't line up, so inline editing is off here."** — a rare safety guard that disables inline editing for that specific note rather than risk misplacing an edit. Use **Edit** to open Source mode instead.
 - If the Vault is read-only, or you're on a demo deployment, no block is clickable at all — the note behaves as a plain reader.
 

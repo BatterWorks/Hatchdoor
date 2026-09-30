@@ -30,8 +30,9 @@ use crate::cache::vault_snapshots::{
 use crate::embed::Embedder;
 use crate::git::{
     CommitCooldown, ManagedCheckoutLease, ManagedGitOutcome, ManagedGitScheduler,
-    ManagedGitTurnConfig, run_existing_git_commit_turn, run_existing_git_remote_turn,
-    run_managed_git_commit_turn, run_managed_git_turn,
+    ManagedGitTurnConfig, RecoveryFailure, RecoveryResult, run_existing_git_commit_turn,
+    run_existing_git_recovery_turn, run_existing_git_remote_turn, run_managed_git_commit_turn,
+    run_managed_git_turn, run_managed_recovery_turn,
 };
 use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
 use crate::startup::StartupTracker;
@@ -39,10 +40,11 @@ use crate::vault_registry::{
     VaultGitMode, VaultId, VaultRegistryStore, VaultSource as RegistryVaultSource,
 };
 use crate::vault_runtime::{
-    CollectionVaultSnapshot, LocalContentStatus, VaultActivationStatus, VaultCollectionRuntime,
-    VaultControlBlock, VaultGitStatus, VaultRuntimeError, VaultRuntimeErrorDetail,
-    VaultSearchStatus, stat_local_content,
+    CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
+    VaultCollectionRuntime, VaultControlBlock, VaultGitStatus, VaultRuntimeError,
+    VaultRuntimeErrorDetail, VaultSearchStatus, stat_local_content,
 };
+use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{
     TURN_PANICKED, VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkOutcome,
     VaultWorkRequest,
@@ -217,6 +219,20 @@ impl VaultWorkExecutor {
                     &self.registry,
                     &self.managed_git,
                     &self.commit_cooldown,
+                    &author_name,
+                    &author_email,
+                    request,
+                )
+                .await
+            }
+            VaultWorkKind::Recovery => {
+                // Read per turn for the same reason the Git arm above does:
+                // a publish commits pending saves before it pushes.
+                let (author_name, author_email) = git_author_defaults(&snapshot);
+                dispatch_recovery_turn(
+                    &self.vaults,
+                    &self.registry,
+                    &self.managed_git,
                     &author_name,
                     &author_email,
                     request,
@@ -687,7 +703,7 @@ fn managed_git_mutation_error(error: VaultRuntimeError) -> VaultWorkError {
 /// and in the blocking function they close over; everything else — the
 /// mutation-lock hold, `spawn_blocking`, panic mapping, outcome publication —
 /// is the shell's, once (issue #128).
-struct GitTurnPlan {
+struct GitTurnPlan<T = ManagedGitOutcome> {
     /// Whether the turn runs under the Vault's foreground mutation lock. Only
     /// `LocalHistory` runs without it: it commits already-settled drift in
     /// the working tree and never checks out, resets, or merges over a
@@ -696,45 +712,37 @@ struct GitTurnPlan {
     /// The error code a panic inside the blocking work is reported as.
     panic_code: &'static str,
     /// The blocking `git2` work itself, run off the async runtime.
-    work: GitTurnWork,
+    work: GitTurnWork<T>,
 }
 
 /// The blocking half of a Git turn, and whether it needs this Vault's checkout
 /// lease. The two shapes are distinct types rather than one closure taking an
 /// `Option<&ManagedCheckoutLease>`, so a turn that needs a lease cannot be
 /// built — or run — without one.
-enum GitTurnWork {
+enum GitTurnWork<T> {
     /// Runs against a checkout Hatchdoor does not own: an `ExistingGit`
     /// Vault's own working copy, in either remote-sync or Local-history mode.
     /// See `run_existing_git_remote_turn` for why `ManagedCheckoutLease` does
     /// not apply to an operator-owned checkout.
-    Unleased(Box<dyn FnOnce() -> Result<ManagedGitOutcome, VaultWorkError> + Send + 'static>),
+    Unleased(Box<dyn FnOnce() -> Result<T, VaultWorkError> + Send + 'static>),
     /// Runs against the managed checkout under `state_directory`, holding that
     /// Vault's lease for the whole turn (issue #95).
     #[allow(clippy::type_complexity)]
     Leased {
         state_directory: PathBuf,
-        run: Box<
-            dyn FnOnce(&ManagedCheckoutLease) -> Result<ManagedGitOutcome, VaultWorkError>
-                + Send
-                + 'static,
-        >,
+        run: Box<dyn FnOnce(&ManagedCheckoutLease) -> Result<T, VaultWorkError> + Send + 'static>,
     },
 }
 
 /// [`GitTurnWork`] with its checkout lease, if any, already acquired — the
 /// state between "the lease is obtained" and "the mutation lock is taken",
 /// which is the order those two must always be acquired in.
-enum PreparedGitTurn {
-    Unleased(Box<dyn FnOnce() -> Result<ManagedGitOutcome, VaultWorkError> + Send + 'static>),
+enum PreparedGitTurn<T> {
+    Unleased(Box<dyn FnOnce() -> Result<T, VaultWorkError> + Send + 'static>),
     #[allow(clippy::type_complexity)]
     Leased {
         lease: ManagedCheckoutLease,
-        run: Box<
-            dyn FnOnce(&ManagedCheckoutLease) -> Result<ManagedGitOutcome, VaultWorkError>
-                + Send
-                + 'static,
-        >,
+        run: Box<dyn FnOnce(&ManagedCheckoutLease) -> Result<T, VaultWorkError> + Send + 'static>,
     },
 }
 
@@ -841,12 +849,12 @@ where
 /// run the blocking `git2` work off the async runtime, and hand the lease
 /// back. Publication is the caller's, because a Git turn and a commit turn
 /// conclude different things from the same result.
-async fn run_planned_turn(
+async fn run_planned_turn<T: Send + 'static>(
     control_block: &VaultControlBlock,
     managed_git: &ManagedGitScheduler,
     vault_id: VaultId,
-    plan: GitTurnPlan,
-) -> Result<ManagedGitOutcome, VaultWorkError> {
+    plan: GitTurnPlan<T>,
+) -> Result<T, VaultWorkError> {
     // Obtain this Vault's checkout lease — reused from a previous turn if
     // `ManagedGitScheduler` is already holding one, or freshly acquired
     // otherwise (only the first turn since activation pays that one-time,
@@ -970,6 +978,191 @@ pub(crate) async fn dispatch_commit_turn(
     finish_commit_turn(&control_block, commit_cooldown, vault_id, result)
 }
 
+/// Execute one `VaultWorkKind::Recovery` turn: publish this Vault's side of
+/// a sync conflict to its recovery branch, and report the outcome on the
+/// Vault's `recovery_branch` status (ADR-30).
+///
+/// Runs through the same shell as every Git turn, so it holds the checkout
+/// lease and the Vault's mutation lock and never overlaps a sync or commit.
+/// It publishes nothing to the Vault's Git status and does not feed the
+/// managed-Git scheduler: a publish is not a check of the remote, and the
+/// conflict it is about stays the Vault's failure until a sync resolves it.
+///
+/// A no-op returning `Ok(())` when the Vault has since been retired or has
+/// no recovery branch to publish.
+pub(crate) async fn dispatch_recovery_turn(
+    collection: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    managed_git: &ManagedGitScheduler,
+    author_name: &str,
+    author_email: &str,
+    request: VaultWorkRequest,
+) -> Result<(), VaultWorkError> {
+    let vault_id = request.vault_id();
+    let Some(control_block) = collection.runtime(vault_id) else {
+        return Ok(());
+    };
+    // Admission checked this too, but a sync that ran while the request
+    // waited may have resolved the conflict or changed it.
+    if !control_block.snapshot().capabilities.publish_recovery {
+        return finish_recovery_turn(
+            &control_block,
+            vault_id,
+            Err(VaultWorkError::new(
+                "capability_unavailable",
+                "This Vault's sync is no longer stopped on a conflict, so there is nothing to \
+                 publish",
+                false,
+            )
+            .into()),
+        );
+    }
+    let (author_name, author_email) = crate::git::config::resolve_commit_identity(
+        control_block.definition().commit_identity(),
+        author_name,
+        author_email,
+    );
+    let plan = match plan_recovery_turn(
+        &control_block,
+        registry,
+        vault_id,
+        author_name,
+        author_email,
+    ) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Ok(()),
+        Err(error) => return finish_recovery_turn(&control_block, vault_id, Err(error.into())),
+    };
+    let result = run_planned_turn(&control_block, managed_git, vault_id, plan)
+        .await
+        .unwrap_or_else(|error| Err(error.into()));
+    finish_recovery_turn(&control_block, vault_id, result)
+}
+
+/// Resolve the source-specific parts of one recovery turn, or `Ok(None)` for
+/// a Vault with no recovery branch: anything that is not Two-way.
+fn plan_recovery_turn(
+    control_block: &VaultControlBlock,
+    registry: &VaultRegistryStore,
+    vault_id: VaultId,
+    author_name: String,
+    author_email: String,
+) -> Result<Option<GitTurnPlan<RecoveryResult>>, VaultWorkError> {
+    let write_ledger = control_block.write_ledger();
+    match control_block.definition().source() {
+        RegistryVaultSource::ExistingGit {
+            mode: VaultGitMode::TwoWay,
+            repository_path,
+            repository_url,
+            branch,
+            ..
+        } => {
+            let repository_path = repository_path.clone();
+            let repository_url = repository_url.clone();
+            let branch = branch.clone();
+            let vault_path = control_block.vault_path().to_path_buf();
+            let credentials = git_credentials(registry, vault_id)?;
+            Ok(Some(GitTurnPlan {
+                holds_mutation_lock: true,
+                panic_code: "existing_git_recovery_task_panicked",
+                work: GitTurnWork::Unleased(Box::new(move || {
+                    Ok(run_existing_git_recovery_turn(
+                        repository_path,
+                        vault_path,
+                        repository_url,
+                        branch,
+                        credentials,
+                        author_name,
+                        author_email,
+                        vault_id,
+                        &write_ledger,
+                    ))
+                })),
+            }))
+        }
+        RegistryVaultSource::ManagedGit {
+            repository_url,
+            branch,
+            vault_subdirectory,
+            mode: VaultGitMode::TwoWay,
+            poll_interval_secs: _,
+        } => {
+            let credentials = git_credentials(registry, vault_id)?;
+            let state_directory = managed_state_directory(registry);
+            let config = ManagedGitTurnConfig {
+                vault_id,
+                state_directory: state_directory.clone(),
+                repository_url: repository_url.clone(),
+                branch: branch.clone(),
+                vault_subdirectory: vault_subdirectory.clone(),
+                mode: VaultGitMode::TwoWay,
+                credentials,
+                author_name,
+                author_email,
+            };
+            Ok(Some(GitTurnPlan {
+                holds_mutation_lock: true,
+                panic_code: "managed_git_recovery_task_panicked",
+                work: GitTurnWork::Leased {
+                    state_directory,
+                    run: Box::new(move |lease| {
+                        Ok(run_managed_recovery_turn(&config, lease, &write_ledger))
+                    }),
+                },
+            }))
+        }
+        RegistryVaultSource::ExistingGit { .. }
+        | RegistryVaultSource::ManagedGit { .. }
+        | RegistryVaultSource::Local { .. } => Ok(None),
+    }
+}
+
+/// Publish one recovery turn's outcome on the Vault's `recovery_branch`
+/// status. A refusal keeps the earlier publication's fields when it was for
+/// the same branch, because that branch still stands on the remote.
+fn finish_recovery_turn(
+    control_block: &VaultControlBlock,
+    vault_id: VaultId,
+    result: RecoveryResult,
+) -> Result<(), VaultWorkError> {
+    match result {
+        Ok(publication) => {
+            info!(
+                %vault_id,
+                branch = %publication.branch,
+                commit = %publication.published_commit,
+                "Vault recovery branch published"
+            );
+            let _ = control_block.set_recovery_branch(Some(RecoveryBranchStatus {
+                branch: Some(publication.branch),
+                published_commit: Some(publication.published_commit),
+                conflicting_commit: publication.conflicting_commit,
+                published_at: Some(format_timestamp(std::time::SystemTime::now())),
+                error: None,
+            }));
+            Ok(())
+        }
+        Err(RecoveryFailure { branch, error }) => {
+            let mut status = control_block
+                .snapshot()
+                .recovery_branch
+                .filter(|previous| branch.is_none() || previous.branch == branch)
+                .unwrap_or_default();
+            if branch.is_some() {
+                status.branch = branch;
+            }
+            status.error = Some(VaultRuntimeError {
+                code: error.code().to_string(),
+                message: error.message().to_string(),
+                retryable: error.retryable(),
+                detail: error.detail().map(VaultRuntimeErrorDetail::from),
+            });
+            let _ = control_block.set_recovery_branch(Some(status));
+            Err(error)
+        }
+    }
+}
+
 /// Resolve the source-specific parts of one commit turn, or `None` when this
 /// Vault's mode makes no local commits: a Pull-only Vault, which refuses
 /// writes and must leave its operator's own drift alone, or a plain local
@@ -1047,10 +1240,7 @@ fn plan_commit_turn(
             mode: VaultGitMode::TwoWay,
             poll_interval_secs: _,
         } => {
-            let state_directory = registry
-                .path()
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let state_directory = managed_state_directory(registry);
             let config = ManagedGitTurnConfig {
                 vault_id,
                 state_directory: state_directory.clone(),
@@ -1227,10 +1417,7 @@ where
         } => {
             let credentials = git_credentials(registry, vault_id)?;
             let write_ledger = control_block.write_ledger();
-            let state_directory = registry
-                .path()
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let state_directory = managed_state_directory(registry);
             let config = ManagedGitTurnConfig {
                 vault_id,
                 state_directory: state_directory.clone(),
@@ -1254,6 +1441,14 @@ where
         // `Local` has no Git turn at all.
         RegistryVaultSource::Local { .. } => Ok(None),
     }
+}
+
+/// The directory managed checkouts live under: the registry file's own.
+fn managed_state_directory(registry: &VaultRegistryStore) -> PathBuf {
+    registry
+        .path()
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 /// Read a Vault's stored HTTPS credentials, mapping an unreachable registry
@@ -1321,6 +1516,10 @@ fn publish_managed_git_turn_outcome(
             // `VaultWorkExecutor::publish_outcome`) plus per-Vault status.
             info!(%vault_id, ?outcome, "Vault Git turn completed");
             let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
+            // A sync that went through means the conflict a recovery branch
+            // was published for is resolved. The branch stays on the remote
+            // (ADR-30); only this Vault's report of it is done.
+            let _ = control_block.set_recovery_branch(None);
             publish_local_content_after_git_success(control_block);
             if control_block.is_accepting_operations()
                 && matches!(

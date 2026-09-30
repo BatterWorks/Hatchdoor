@@ -67,6 +67,7 @@ pub type DisableVaultResult = VaultMutationResponse;
 pub type DisconnectVaultResult = VaultMutationResponse;
 pub type SyncVaultResult = VaultScheduleResponse;
 pub type RetryVaultResult = VaultScheduleResponse;
+pub type PublishRecoveryBranchResult = VaultScheduleResponse;
 pub type RefreshVaultResult = VaultScheduleResponse;
 
 // ---------------------------------------------------------------------------
@@ -412,6 +413,7 @@ output_schemas! {
     "disconnect_vault" => DisconnectVaultResult,
     "sync_vault" => SyncVaultResult,
     "retry_vault" => RetryVaultResult,
+    "publish_recovery_branch" => PublishRecoveryBranchResult,
     "refresh_vault" => RefreshVaultResult,
     // Note/attachment write tools
     "create_note" => NoteWriteResult,
@@ -483,12 +485,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 45,
-            "3 setup + 15 read + 1 batch + 8 management + 18 write tools"
+            total, 46,
+            "3 setup + 15 read + 1 batch + 9 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 45, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 46, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
@@ -703,7 +705,7 @@ mod schema_tests {
                 "search": "ready",
                 "git": "disabled",
                 "watcher": "running",
-                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false, "commit": false, "sync": false}
+                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false, "commit": false, "sync": false, "publish_recovery": false}
             },
             "registry_revision": 3,
             "collection_revision": 9

@@ -885,6 +885,20 @@ pub(super) async fn retry_vault_tool(
     )
 }
 
+/// Admits one recovery-branch publish (ADR-30); the outcome is read back
+/// from `list_vaults`' `recovery_branch`, the way `sync_vault`'s is read
+/// from `git`/`git_error`.
+pub(super) async fn publish_recovery_branch_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultIdArgs = parse("publish_recovery_branch", arguments)?;
+    let core = VaultCollectionManagement::new(&state);
+    management_result::<results::PublishRecoveryBranchResult>(
+        management_vault_id(&args.vault_id).and_then(|vault_id| core.publish_recovery(vault_id)),
+    )
+}
+
 /// Unlike `sync_vault`/`retry_vault` above, this one talks to no Git remote:
 /// it admits the Vault's next Index turn, which is what republishes the
 /// snapshot every collection read projects from. It is the only MCP path to
@@ -1184,6 +1198,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         ),
         json!({"name":"sync_vault","description":"Request immediate managed-Git synchronization for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"publish_recovery_branch","description":"Publish exactly one Two-way Vault's side of a sync conflict to its recovery branch, hatchdoor-recovery/<branch>/<vault_id> on the Vault's remote, so the conflict can be resolved on the Git host or in another clone. Only allowed while the Vault's capabilities.publish_recovery is true, which means its git_error is managed_git_conflict. Pending saves are committed first. The push only ever fast-forwards the recovery branch: it never force-pushes, never touches the configured branch, and never deletes a branch. If someone added commits to the recovery branch, the publish is refused rather than overwriting them. Returns once admitted (schedule queued, or coalesced with a request already pending); read the outcome from list_vaults, whose recovery_branch names the branch and the published commit, or carries an error explaining a refusal. Once the configured branch contains the resolution, the Vault's next sync resumes on its own and recovery_branch clears; the branch itself stays on the remote.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified, search_notes and query_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
 }
