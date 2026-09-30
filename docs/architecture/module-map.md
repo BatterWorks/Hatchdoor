@@ -2681,6 +2681,15 @@ and generated note-download responses so these convenience endpoints are not
 unbounded transfer buffers; an over-limit asset or export receives the shared
 `VaultApiError` shape and `413 Payload Too Large`.
 
+`spa.rs` serves the built app: `spa_index_handler` answers the app's own routes
+with `200`, and `spa_not_found_handler` is the static directory's fallback
+(#302), so an address no route or built file matches still loads the app with a
+`404` status and the app renders its not-found state. Paths under
+`SPA_RESERVED_PREFIXES` (`/api/`, `/vault-assets/`, and anything starting
+`/health`) keep a bare `404`. That list mirrors the service worker's
+`navigateFallbackDenylist` in `frontend/vite.config.ts`, and a test in `spa.rs`
+fails if the two drift.
+
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,

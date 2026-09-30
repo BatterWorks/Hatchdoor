@@ -40,6 +40,15 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 | GET | `/ready` | `200 ready` once the search model is set up and every active Vault's first index has settled, else `503 not ready`. A Vault that failed to index, or has no folder, counts as settled: its problem shows on that Vault (`GET /api/v1/vaults`), not here. Once `200`, it stays `200` through later reindexing. |
 | GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). `Cache-Control: no-store`. |
 
+## Browser app
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/`, `/stats`, `/graph`, `/settings`, `/v/{vault_id}/n/{slug}` | The browser app, `200`. |
+| GET | any other path, outside `/api/`, `/vault-assets/` and paths starting `/health` | The browser app with a `404` status, when no built file matches. The app shows a not-found page with a way back to your notes. |
+
+Paths under `/api/` and `/vault-assets/`, and any path starting `/health`, never get the app. An unknown one there is a plain `404`, so a script calling a mistyped API path gets an error, not a page of HTML.
+
 ## Model setup
 
 First-run embedding model selection. Not present in demo mode.
