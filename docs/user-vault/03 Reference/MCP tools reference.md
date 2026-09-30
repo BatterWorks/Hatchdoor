@@ -158,7 +158,7 @@ Available whenever MCP is enabled, independent of write mode.
 
 | Tool | Required parameters | Purpose |
 | --- | --- | --- |
-| `search_notes` | `scope`, `query` | Search one Vault or all enabled Vaults. Optional: `mode` (`semantic` default or `keyword`), `limit` (1–50, default 10), `per_note_cap` (1–10, default 2), `layers` (array of layer names to include). |
+| `search_notes` | `scope`, `query` | Search one Vault or all enabled Vaults. Optional: `mode` (`semantic` default or `keyword`), `limit` (1–50, default 10), `per_note_cap` (1–10, default 2), `layers` (array of layer names to include). Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query starting with `#` is a tag match and every hit scores 1. |
 | `get_note` | `vault_id`, `slug` | Read one exact note's authoritative Markdown. Also lists the note's saved queries under `saved_queries`, by name, without evaluating them. |
 | `get_note_links` | `vault_id`, `slug` | Outgoing links and backlinks for one exact note. |
 | `resolve_wikilink` | `vault_id`, `target` | Resolve a wikilink target within one Vault. |

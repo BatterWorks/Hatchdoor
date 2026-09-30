@@ -174,7 +174,7 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 | GET | `/api/v1/vaults/{scope}/recent?limit=` | Recently modified notes, flattened across Vaults. `limit` clamped 1–25, default 5. |
 | GET | `/api/v1/vaults/{scope}/stats` | Lean per-Vault statistics projection (for the exact/rich version, see `stats/detail` above). |
 | GET | `/api/v1/vaults/{scope}/graph` | Note-link graph, grouped per Vault; edges never cross a Vault boundary. |
-| GET | `/api/v1/vaults/{scope}/search?q=&mode=&limit=&per_note_cap=&layers=` | One global ranking flattened across every usable participant. `mode` is `semantic` (default) or `keyword`. `limit` clamped 1–50 (default 10), `per_note_cap` clamped 1–10 (default 2). `layers` is a comma-separated list of layer names, or `all`/`default`; a demo instance always sees the default surface regardless of this parameter. |
+| GET | `/api/v1/vaults/{scope}/search?q=&mode=&limit=&per_note_cap=&layers=` | One global ranking flattened across every usable participant. `mode` is `semantic` (default) or `keyword`. `limit` clamped 1–50 (default 10), `per_note_cap` clamped 1–10 (default 2). `layers` is a comma-separated list of layer names, or `all`/`default`; a demo instance always sees the default surface regardless of this parameter. Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query starting with `#` is a tag match and every hit scores 1. |
 
 ## Vault-scoped mutations
 
