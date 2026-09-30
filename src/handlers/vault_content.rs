@@ -34,8 +34,8 @@ use crate::handlers::vaults::{
     query_rejection_response,
 };
 use crate::vault_read::{
-    AssetPathError, AssetReadError, OffloadedReadError, VaultReadError, VaultReads,
-    VaultResolveResponse,
+    AssetPathError, AssetReadError, OffloadedReadError, ResolvedVaultNote, VaultReadError,
+    VaultReads, VaultResolveResponse,
 };
 use crate::vault_registry::VaultId;
 
@@ -50,6 +50,8 @@ pub struct VaultResolveBatchResponse {
     /// Empty unless the request carried `asset_targets` (#158), so a client
     /// resolving note links only sees exactly what it saw before.
     pub asset_results: Vec<ResolveAssetResult>,
+    /// Empty unless the request carried `note_link_targets` (ADR-28).
+    pub note_link_results: Vec<ResolveTargetResult>,
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +314,9 @@ pub async fn vault_scoped_resolve_batch_handler(
         Ok(payload) => payload,
         Err(error) => return json_rejection_response(error),
     };
-    if payload.targets.len() + payload.asset_targets.len() > MAX_RESOLVE_BATCH {
+    if payload.targets.len() + payload.asset_targets.len() + payload.note_link_targets.len()
+        > MAX_RESOLVE_BATCH
+    {
         return VaultApiError::new(
             "resolve_batch_too_large",
             format!("Too many targets (max {MAX_RESOLVE_BATCH})"),
@@ -345,10 +349,11 @@ pub async fn vault_scoped_resolve_batch_handler(
                 .as_deref()
                 .map(note_parent_dir)
                 .unwrap_or_default();
-            let (resolved, resolved_assets) = core.resolve_batch(
+            let (resolved, resolved_assets, resolved_note_links) = core.resolve_batch(
                 vault_id,
                 &payload.targets,
                 &payload.asset_targets,
+                &payload.note_link_targets,
                 &note_dir,
             )?;
             let asset_results = payload
@@ -357,11 +362,8 @@ pub async fn vault_scoped_resolve_batch_handler(
                 .zip(resolved_assets)
                 .map(|(target, path)| ResolveAssetResult { target, path })
                 .collect::<Vec<_>>();
-            let results = payload
-                .targets
-                .into_iter()
-                .zip(resolved)
-                .map(|(target, resolved)| match resolved {
+            let note_result =
+                |(target, resolved): (String, Option<ResolvedVaultNote>)| match resolved {
                     Some(resolved) => ResolveTargetResult {
                         target,
                         slug: Some(resolved.slug),
@@ -372,19 +374,31 @@ pub async fn vault_scoped_resolve_batch_handler(
                         slug: None,
                         archived: false,
                     },
-                })
+                };
+            let results = payload
+                .targets
+                .into_iter()
+                .zip(resolved)
+                .map(note_result)
                 .collect::<Vec<_>>();
-            Ok((results, asset_results))
+            let note_link_results = payload
+                .note_link_targets
+                .into_iter()
+                .zip(resolved_note_links)
+                .map(note_result)
+                .collect::<Vec<_>>();
+            Ok((results, asset_results, note_link_results))
         })
         .await;
 
     match result {
-        Ok((results, asset_results)) => (
+        Ok((results, asset_results, note_link_results)) => (
             StatusCode::OK,
             Json(VaultResolveBatchResponse {
                 vault_id,
                 results,
                 asset_results,
+                note_link_results,
             }),
         )
             .into_response(),

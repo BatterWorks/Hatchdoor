@@ -4333,6 +4333,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_scoped_resolve_batch_resolves_markdown_note_links_by_path() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("markdown");
+        let vault_id = create_vault_with_files(
+            &app,
+            "Markdown",
+            &vault_root,
+            &[
+                (
+                    "00-inbox/Home.md",
+                    "[x](../20-projects/Beacon%20Launch.md)\n",
+                ),
+                ("20-projects/Beacon Launch.md", "# Beacon\n"),
+                ("a/Plan.md", "a\n"),
+                ("b/Plan.md", "b\n"),
+            ],
+            0,
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/resolve-batch"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"targets":[],"note_link_targets":["../20-projects/Beacon%20Launch.md","../b/Plan.md","Nope.md"],"note_path":"00-inbox/Home"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        assert_eq!(payload["results"], serde_json::json!([]));
+        let results = payload["note_link_results"]
+            .as_array()
+            .expect("note link results array");
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["slug"], "beacon-launch");
+        assert_eq!(results[0]["archived"], false);
+        assert_eq!(
+            results[1]["slug"], "plan-2",
+            "a path names its own folder's note, never the first namesake"
+        );
+        assert!(results[2]["slug"].is_null());
+    }
+
+    #[tokio::test]
     async fn vault_scoped_resolve_batch_oversized_json_body_reports_413_not_400() {
         // Finding 3 (#101): `vault_scoped_resolve_batch_handler` imports the
         // shared `json_rejection_response` from `vaults.rs`, which used to

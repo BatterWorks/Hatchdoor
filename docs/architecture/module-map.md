@@ -1002,6 +1002,7 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/index.rs`
 - `src/vault/layers.rs`
 - `src/vault/links.rs`
+- `src/vault/markdown_links.rs`
 - `src/vault/paths.rs`
 - `src/vault/seed.rs`
 - `src/vault/types.rs`
@@ -1026,6 +1027,12 @@ embed in a vault using one top-level attachments folder (#158). `is_servable_ass
 is shared with the read core's contained-resource seam
 (`src/vault_read/assets.rs`), so resolution can never name a path the asset
 route or the MCP `get_attachment` tool would refuse.
+`resolve_note_link` answers a Markdown note link (ADR-28) through the same
+path ladder (`resolve_path_ladder` in `paths.rs`, which `resolve_asset` now
+calls too) over `note_paths`, the catalogue's notes keyed by path and by
+filename. `markdown_links.rs` is the one scanner for Markdown links: the link
+graph reads it, and so does the write layer's rename, move and delete
+rewriting, through `rewrite_note_links`.
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
 currently supplies content hashing to the index and, since #248, the shared
@@ -1050,6 +1057,13 @@ watching, and application startup.
   resolution. `src/vault/paths.rs` is the single home for that split, shared
   with the write layer's rewriters, and no escape reaches
   `normalize_link_target`, which would read it as a path separator (#252).
+- A note link is a wikilink or a Markdown link whose destination, once any
+  `#anchor` is removed, ends `.md` (ADR-28), and both feed the same outgoing
+  and backlink records. A Markdown target resolves by path from the linking
+  note's folder, never by the wikilink title rule, and the two rules must not
+  be merged. Links in code, image syntax and unused reference definitions do
+  not count. `frontend/src/components/note-page/markdownLinks.ts` repeats the
+  recognition for the renderer and has to change with `markdown_links.rs`.
 
 **Validation:** `cargo test vault` and the full backend checks.
 
@@ -1165,6 +1179,19 @@ write API/types, and configuration for archive or upload limits.
   exactly one note, and falls back to the full path otherwise (#235). An escaped alias pipe is part of that form: the
   rewrite retargets `[[Old\|alias]]` and hands the escape back, so the table
   cell it protects stays valid Markdown (#252).
+- Markdown note links are retargeted in the same pass as wikilinks, so one
+  file gets one rewrite (ADR-28). A retargeted path keeps the author's form
+  wherever that form still reaches the note after the move, checked against a
+  relocated copy of the note-path catalogue: bare stays bare, `/`-anchored
+  stays anchored, a path from the Vault root stays so, and a note-relative
+  path is recomputed from the linking note's folder; otherwise the
+  note-relative path, then the anchored one, is written. Only the path part
+  changes, never the link text, anchor or title; a reference link changes
+  through its definition line. The moving note's own Markdown links are
+  repointed from its destination folder. Delete removes each link to the note
+  and keeps its text as plain prose, removing a reference definition's line
+  along with its uses. A written path escapes only whitespace, `%`, `#`,
+  brackets and parentheses.
 - The note being renamed or moved is one more note holding links to the target,
   so its own body follows that same rule (#254). Its rewrite is keyed to the
   note's destination path, because the note has already moved by the time
@@ -2586,9 +2613,12 @@ Markdown and its rows from the published snapshot, so its participant state
 reports the rows' freshness), `GET .../resolve`,
 `POST .../resolve-batch` (whose request additionally takes optional
 `asset_targets` and `note_path`, answered by an `asset_results` array of
-`{target, path}`, `path` null when nothing matched — additive, so a client
-resolving note links only sees exactly what it saw before, and the batch cap
-counts both target lists), `GET .../assets/{*path}` (serving both embedded
+`{target, path}`, `path` null when nothing matched, and optional
+`note_link_targets`, Markdown note-link destinations as written, answered by
+a `note_link_results` array shaped like `results` and resolved by path from
+`note_path`'s folder (ADR-28) — both additive, so a client resolving
+wikilinks only sees exactly what it saw before, and the batch cap counts all
+three target lists), `GET .../assets/{*path}` (serving both embedded
 assets and imported attachments, which share one containment rule; mounted
 outside `vaults_v1`'s web-token-only gate, under
 `require_web_or_live_mcp_read_token`, so `get_attachment`'s advertised
@@ -3698,6 +3728,7 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/components/note-page/RendererComponents.tsx`
 - `frontend/src/components/note-page/SavedQueryBlock.tsx`
 - `frontend/src/components/note-page/dom.ts`
+- `frontend/src/components/note-page/markdownLinks.ts`
 - `frontend/src/components/note-page/paragraphs.ts`
 - `frontend/src/components/note-page/renderers.tsx`
 - `frontend/src/components/note-page/savedQueries.ts`
@@ -3716,7 +3747,11 @@ wikilink resolution — `useResolvedWikilinks` now sends embed and PDF targets t
 them to the resolved Vault-relative path (#158), keeping the note-relative
 reading as the fallback for anything unresolved, including the first render
 before the batch returns; its asset cache is keyed by note path as well as
-target, because the same filename in notes at two depths can be two files — heading/search-hit navigation, Markdown transformations,
+target, because the same filename in notes at two depths can be two files; it
+also sends Markdown note links (ADR-28, found by `markdownLinks.ts`, which
+skips code, images and wikilinks) as `note_link_targets` and rewrites each
+destination to the same note route, archived route or `/__missing__/` form a
+wikilink gets, so `renderers.tsx` needs no branch for them — heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the editable-block component map produced by
 `createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one

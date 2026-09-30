@@ -60,6 +60,9 @@ pub struct VaultIndex {
     /// This is what makes Obsidian's bare-filename embeds resolvable: they name
     /// a file, not a location.
     pub assets_by_name: HashMap<String, Vec<String>>,
+    /// Notes by path and by filename, for Markdown note links (ADR-28), which
+    /// name a note by path rather than by title.
+    pub(crate) note_paths: super::markdown_links::NotePaths,
     pub outgoing_by_slug: HashMap<String, Vec<String>>,
     pub backlinks_by_slug: HashMap<String, Vec<String>>,
     pub layers: super::layers::LayerMap,

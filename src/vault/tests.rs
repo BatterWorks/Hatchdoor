@@ -649,3 +649,136 @@ fn resolve_wikilink_resolves_an_escaped_alias_pipe_like_the_unescaped_form() {
         expected.slug
     );
 }
+
+/// A small Vault shaped like the #293 report: an inbox note linking into a
+/// projects folder, plus two notes named Plan in different folders.
+fn markdown_link_vault(home: &str) -> tempfile::TempDir {
+    let dir = tempdir().expect("temp dir");
+    let root = dir.path();
+    for folder in ["00-inbox", "20-projects", "a", "b"] {
+        fs::create_dir_all(root.join(folder)).expect("folder");
+    }
+    fs::write(root.join("00-inbox/Home.md"), home).expect("home");
+    fs::write(root.join("20-projects/Beacon Launch.md"), "# Beacon").expect("beacon");
+    fs::write(root.join("a/Plan.md"), "a plan").expect("a plan");
+    fs::write(root.join("b/Plan.md"), "b plan").expect("b plan");
+    dir
+}
+
+fn outgoing_slugs(vault: &VaultIndex, slug: &str) -> Vec<String> {
+    vault
+        .note_links(slug)
+        .expect("links")
+        .outgoing
+        .into_iter()
+        .map(|link| link.slug)
+        .collect()
+}
+
+#[test]
+fn markdown_note_links_resolve_by_path_in_every_spelling() {
+    let dir = markdown_link_vault("");
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    for written in [
+        "../20-projects/Beacon%20Launch.md",
+        "/20-projects/Beacon%20Launch.md",
+        "../20-projects/Beacon Launch.md",
+        "20-projects/Beacon%20Launch.md",
+        "Beacon%20Launch.md",
+        "../20-projects/Beacon%20Launch.md#Goals",
+    ] {
+        assert_eq!(
+            vault
+                .resolve_note_link(written, "00-inbox")
+                .map(|note| note.slug.as_str()),
+            Some("beacon-launch"),
+            "{written}"
+        );
+    }
+    assert!(vault.resolve_note_link("Nope.md", "00-inbox").is_none());
+    assert!(vault.resolve_note_link("report.pdf", "00-inbox").is_none());
+    assert!(
+        vault
+            .resolve_note_link("https://example.com/Beacon%20Launch.md", "00-inbox")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_markdown_path_never_falls_back_to_a_namesake_title() {
+    let dir = markdown_link_vault("");
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    // The wikilink rule would answer `../b/Plan.md` with whichever Plan came
+    // first; the path names b's, and a path to nowhere names nothing.
+    assert_eq!(
+        vault
+            .resolve_note_link("../b/Plan.md", "a")
+            .unwrap()
+            .relative_path,
+        "b/Plan"
+    );
+    assert_eq!(
+        vault
+            .resolve_note_link("../a/Plan.md", "b")
+            .unwrap()
+            .relative_path,
+        "a/Plan"
+    );
+    assert!(vault.resolve_note_link("../c/Plan.md", "a").is_none());
+    // A bare name picks the nearest namesake.
+    assert_eq!(
+        vault
+            .resolve_note_link("Plan.md", "b")
+            .unwrap()
+            .relative_path,
+        "b/Plan"
+    );
+}
+
+#[test]
+fn a_bare_percent_in_a_markdown_link_is_literal() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("Save 20% now.md"), "sale").expect("sale");
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    for written in [
+        "Save%2020%%20now.md",
+        "Save%2020%25%20now.md",
+        "Save 20% now.md",
+    ] {
+        assert!(vault.resolve_note_link(written, "").is_some(), "{written}");
+    }
+}
+
+#[test]
+fn markdown_note_links_count_as_links_alongside_wikilinks() {
+    let dir = markdown_link_vault(concat!(
+        "[x](../20-projects/Beacon%20Launch.md) and [[Beacon Launch]]\n",
+        "[plan][p] but not ![img](../a/Plan.md) or [pdf](x.pdf)\n",
+        "`[code](../b/Plan.md)`\n",
+        "```\n[fenced](../b/Plan.md)\n```\n",
+        "[p]: ../a/Plan.md\n",
+        "[unused]: ../b/Plan.md\n",
+    ));
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    assert_eq!(
+        outgoing_slugs(&vault, "home"),
+        vec!["beacon-launch".to_string(), "plan".to_string()],
+        "a wikilink and a Markdown link to one note count once; only a used definition counts"
+    );
+    let beacon = vault.note_links("beacon-launch").expect("beacon links");
+    assert_eq!(beacon.backlinks.len(), 1);
+    assert_eq!(beacon.backlinks[0].slug, "home");
+    let b_plan = vault
+        .by_slug
+        .values()
+        .find(|entry| entry.relative_path == "b/Plan")
+        .expect("b plan");
+    assert!(
+        vault.note_links(&b_plan.slug).unwrap().backlinks.is_empty(),
+        "links in code and unused definitions are not links"
+    );
+}

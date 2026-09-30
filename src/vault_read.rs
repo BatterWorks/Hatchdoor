@@ -343,10 +343,14 @@ pub struct VaultQualifiedLinks {
     pub backlinks: Vec<VaultQualifiedLink>,
 }
 
-/// One batch's resolutions, positionally matching the note targets and the
-/// asset targets that were asked for. Assets carry a Vault-relative path
-/// because they have no slug to name them by.
-pub type ResolvedVaultTargets = (Vec<Option<ResolvedVaultNote>>, Vec<Option<String>>);
+/// One batch's resolutions, positionally matching the note targets, the asset
+/// targets and the Markdown note-link targets that were asked for. Assets
+/// carry a Vault-relative path because they have no slug to name them by.
+pub type ResolvedVaultTargets = (
+    Vec<Option<ResolvedVaultNote>>,
+    Vec<Option<String>>,
+    Vec<Option<ResolvedVaultNote>>,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct ResolvedVaultNote {
@@ -782,7 +786,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         raw_targets: &[String],
     ) -> Result<Vec<Option<ResolvedVaultNote>>, VaultReadError> {
-        Ok(self.resolve_batch(vault_id, raw_targets, &[], "")?.0)
+        Ok(self.resolve_batch(vault_id, raw_targets, &[], &[], "")?.0)
     }
 
     /// Resolve a note's wikilink targets — notes and assets alike — against one
@@ -794,25 +798,40 @@ impl<'a> VaultReadCore<'a> {
     /// the Vault-relative directory of the note the targets were written in,
     /// which decides both the relative reading and which of several namesakes
     /// is nearest; `""` is the Vault root.
+    ///
+    /// `note_link_targets` are Markdown note-link destinations as written
+    /// (ADR-28). They name a note by path, so they resolve from `note_dir` by
+    /// the same ladder as assets, never by the wikilink title rule.
     pub fn resolve_batch(
         &self,
         vault_id: VaultId,
         note_targets: &[String],
         asset_targets: &[String],
+        note_link_targets: &[String],
         note_dir: &str,
     ) -> Result<ResolvedVaultTargets, VaultReadError> {
         let index = self.authoritative_index(vault_id)?;
+        let visible = |note: &crate::vault::NoteEntry| ResolvedVaultNote {
+            vault_id,
+            slug: note.slug.clone(),
+            relative_path: note.relative_path.clone(),
+        };
         let notes = note_targets
             .iter()
             .map(|raw_target| {
                 index
                     .resolve_wikilink(raw_target)
                     .filter(|note| !self.surface.hides(note.layer.as_deref()))
-                    .map(|note| ResolvedVaultNote {
-                        vault_id,
-                        slug: note.slug.clone(),
-                        relative_path: note.relative_path.clone(),
-                    })
+                    .map(visible)
+            })
+            .collect();
+        let note_links = note_link_targets
+            .iter()
+            .map(|raw_target| {
+                index
+                    .resolve_note_link(raw_target, note_dir)
+                    .filter(|note| !self.surface.hides(note.layer.as_deref()))
+                    .map(visible)
             })
             .collect();
         // Assets carry no layer, so the browse surface has nothing to hide
@@ -826,7 +845,7 @@ impl<'a> VaultReadCore<'a> {
                     .map(str::to_string)
             })
             .collect();
-        Ok((notes, assets))
+        Ok((notes, assets, note_links))
     }
 
     /// Whether this surface withholds `slug` entirely, so a caller answers the
@@ -3442,11 +3461,12 @@ mod tests {
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         let first = workspace.vault_ids[0];
 
-        let (notes, assets) = reads
+        let (notes, assets, _) = reads
             .resolve_batch(
                 first,
                 &["Shared".to_string()],
                 &["Some document.pdf".to_string(), "Absent.png".to_string()],
+                &[],
                 "97_Notes",
             )
             .expect("resolve batch");

@@ -3,7 +3,12 @@ use std::io;
 use std::path::Path;
 
 use crate::cache::parse::{content_hash, parse_fence_marker};
-use crate::vault::paths::{normalize_link_target, normalize_title, split_wikilink_note_body};
+use crate::vault::markdown_links::{
+    NoteLinkEdit, NotePaths, note_dir, relative_note_path, rewrite_note_links,
+};
+use crate::vault::paths::{
+    LinkForm, normalize_link_target, normalize_title, split_wikilink_note_body,
+};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::types::{TextRewrite, WriteError};
@@ -37,6 +42,11 @@ pub(super) struct MovedTo<'a> {
 /// not land. `destination: None` is delete: the link is removed from every
 /// other note, and the trashed body's link to itself is left as written
 /// because it is moot there.
+///
+/// Markdown note links (ADR-28) are rewritten in the same pass, so a file
+/// holding both forms gets one rewrite: see [`retarget_markdown_link`] for
+/// how a path keeps its form, and on delete each link is removed with its
+/// text kept.
 pub(super) fn backlink_rewrite_plan(
     index: &VaultIndex,
     moved_slug: &str,
@@ -46,6 +56,14 @@ pub(super) fn backlink_rewrite_plan(
     let entries = index.ordered_entries();
     let bare_new_target =
         new_target.and_then(|target| unambiguous_bare_title(&entries, moved_slug, target));
+    // How every path resolves once the note has moved, which is what a
+    // retargeted Markdown link has to resolve under.
+    let moved_from = index
+        .find_by_slug(moved_slug)
+        .map(|entry| entry.relative_path.as_str())
+        .unwrap_or_default();
+    let paths_after =
+        new_target.map(|target| index.note_paths.relocated(moved_slug, moved_from, target));
     let mut rewrites = Vec::new();
     for entry in entries {
         let rewrite_path = match moved_to {
@@ -74,6 +92,45 @@ pub(super) fn backlink_rewrite_plan(
                 _ => new_target.map(ToOwned::to_owned),
             }
         });
+        let source_moves = entry.slug == moved_slug;
+        let folder_before = note_dir(&entry.relative_path);
+        let rewritten = rewrite_note_links(&rewritten, |link| {
+            let Some((slug, form)) = index.note_paths.resolve(&link.path, folder_before) else {
+                return NoteLinkEdit::Keep;
+            };
+            let target_moves = slug == moved_slug;
+            let (Some(new_target), Some(paths_after)) = (new_target, paths_after.as_ref()) else {
+                return if target_moves {
+                    NoteLinkEdit::Unlink
+                } else {
+                    NoteLinkEdit::Keep
+                };
+            };
+            if !target_moves && !source_moves {
+                return NoteLinkEdit::Keep;
+            }
+            let target_after = if target_moves {
+                new_target
+            } else {
+                match index.find_by_slug(slug) {
+                    Some(target) => target.relative_path.as_str(),
+                    None => return NoteLinkEdit::Keep,
+                }
+            };
+            let folder_after = if source_moves {
+                note_dir(new_target)
+            } else {
+                folder_before
+            };
+            retarget_markdown_link(
+                paths_after,
+                &link.path,
+                form,
+                folder_after,
+                slug,
+                target_after,
+            )
+        });
         if rewritten != content {
             rewrites.push(TextRewrite {
                 path: rewrite_path,
@@ -87,6 +144,57 @@ pub(super) fn backlink_rewrite_plan(
         }
     }
     Ok(rewrites)
+}
+
+/// The path a Markdown note link should carry once a move has happened.
+///
+/// A path that still reaches the note from where the linking note will be is
+/// kept exactly as written, so a rename leaves `./Other.md` or a
+/// differently-cased path alone. Otherwise the author's form wins wherever it
+/// still reaches the same note: a bare
+/// filename stays bare, a `/`-anchored path stays anchored, a path written from
+/// the Vault root stays so, and a note-relative path is recomputed from the
+/// linking note's folder. Each candidate is checked against `paths_after`, the
+/// index as it will be after the move, so a form that would now land on a
+/// namesake falls back to the note-relative path and then the anchored one.
+fn retarget_markdown_link(
+    paths_after: &NotePaths,
+    written: &str,
+    form: LinkForm,
+    folder_after: &str,
+    target_slug: &str,
+    target_after: &str,
+) -> NoteLinkEdit {
+    let reaches_target = |path: &str| {
+        paths_after
+            .resolve(path, folder_after)
+            .is_some_and(|(slug, _)| slug == target_slug)
+    };
+    if reaches_target(written) {
+        return NoteLinkEdit::Keep;
+    }
+    let name = target_after.rsplit('/').next().unwrap_or(target_after);
+    let preferred = if !written.contains(['/', '\\']) {
+        format!("{name}.md")
+    } else {
+        match form {
+            LinkForm::Root => format!("/{target_after}.md"),
+            LinkForm::VaultRelative => format!("{target_after}.md"),
+            LinkForm::NoteRelative | LinkForm::ByName => {
+                relative_note_path(folder_after, target_after)
+            }
+        }
+    };
+    let candidates = [
+        preferred,
+        relative_note_path(folder_after, target_after),
+        format!("/{target_after}.md"),
+    ];
+    let chosen = candidates
+        .iter()
+        .find(|candidate| reaches_target(candidate))
+        .unwrap_or(&candidates[2]);
+    NoteLinkEdit::Retarget(chosen.clone())
 }
 
 /// The moved note's new bare title, when no *other* note in the pre-move index

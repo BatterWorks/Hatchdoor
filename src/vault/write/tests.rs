@@ -4315,3 +4315,243 @@ fn renaming_a_tag_leaves_the_retagged_notes_modification_time_alone() {
     assert_eq!(read(root, "Note.md"), "---\ntags: [projects]\n---\nBody\n");
     assert_eq!(modified_time(&root.join("Note.md")), february_first());
 }
+
+/// The #293 layout: a note in `00-inbox` linking to `20-projects/Beacon
+/// Launch.md` in Markdown form.
+fn markdown_link_vault(inbox: &str) -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("00-inbox")).expect("inbox");
+    fs::create_dir_all(root.join("20-projects")).expect("projects");
+    fs::write(root.join("00-inbox/Home.md"), inbox).expect("home");
+    fs::write(root.join("20-projects/Beacon Launch.md"), "# Beacon").expect("beacon");
+    tmp
+}
+
+#[test]
+fn renaming_a_note_retargets_markdown_links_and_keeps_their_text() {
+    let tmp = markdown_link_vault(concat!(
+        "[see the plan](../20-projects/Beacon%20Launch.md) and ",
+        "[Beacon Launch](/20-projects/Beacon%20Launch.md#Goals \"t\")\n",
+        "[angle](<../20-projects/Beacon Launch.md>) [bare](Beacon%20Launch.md)\n",
+        "`[code](../20-projects/Beacon%20Launch.md)`\n",
+    ));
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Beacon Kickoff (v2).md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        concat!(
+            "[see the plan](../20-projects/Beacon%20Kickoff%20%28v2%29.md) and ",
+            "[Beacon Launch](/20-projects/Beacon%20Kickoff%20%28v2%29.md#Goals \"t\")\n",
+            "[angle](<../20-projects/Beacon Kickoff (v2).md>) [bare](Beacon%20Kickoff%20%28v2%29.md)\n",
+            "`[code](../20-projects/Beacon%20Launch.md)`\n",
+        ),
+        "only paths change: text, anchor, title and code stay as written"
+    );
+}
+
+#[test]
+fn moving_a_note_recomputes_relative_markdown_links_from_each_linking_note() {
+    let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md)\n");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("30-areas/deep")).expect("deep");
+    fs::write(
+        root.join("30-areas/deep/Other.md"),
+        "[y](../../20-projects/Beacon%20Launch.md) [z](20-projects/Beacon%20Launch.md)\n",
+    )
+    .expect("other");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "90-archive/Beacon Launch.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "[x](../90-archive/Beacon%20Launch.md)\n"
+    );
+    assert_eq!(
+        read(root, "30-areas/deep/Other.md"),
+        "[y](../../90-archive/Beacon%20Launch.md) [z](90-archive/Beacon%20Launch.md)\n",
+        "a path written from the Vault root stays written from the Vault root"
+    );
+}
+
+#[test]
+fn moving_the_linking_note_repoints_its_own_markdown_links() {
+    let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md) [[Beacon Launch]]\n");
+    let root = tmp.path();
+    let index = build(root);
+    let home = index.find_by_slug("home").expect("home");
+    let body = read(root, "00-inbox/Home.md");
+
+    move_or_rename_note(
+        root,
+        &index,
+        home,
+        "10-daily/2026/Home.md",
+        &content_hash(&body),
+    )
+    .expect("move");
+
+    assert_eq!(
+        read(root, "10-daily/2026/Home.md"),
+        "[x](../../20-projects/Beacon%20Launch.md) [[Beacon Launch]]\n"
+    );
+}
+
+#[test]
+fn a_rename_touching_both_link_forms_in_one_file_writes_once() {
+    let tmp = markdown_link_vault(
+        "[[20-projects/Beacon Launch]] and [x](../20-projects/Beacon%20Launch.md)\n",
+    );
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "[[20-projects/Kickoff]] and [x](../20-projects/Kickoff.md)\n"
+    );
+}
+
+#[test]
+fn a_rename_touching_a_reference_link_changes_only_the_definition() {
+    let body =
+        "Read [the plan][bl] and [bl].\n\n[bl]: ../20-projects/Beacon%20Launch.md \"Plan\"\n";
+    let tmp = markdown_link_vault(body);
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "Read [the plan][bl] and [bl].\n\n[bl]: ../20-projects/Kickoff.md \"Plan\"\n"
+    );
+}
+
+#[test]
+fn a_bare_markdown_link_stays_bare_only_while_its_name_is_unique() {
+    let tmp = markdown_link_vault("[x](Beacon%20Launch.md)\n");
+    let root = tmp.path();
+    // A namesake beside the linking note, which a bare `Kickoff.md` would reach
+    // first.
+    fs::write(root.join("00-inbox/Kickoff.md"), "another kickoff").expect("namesake");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    // `Kickoff.md` alone would now land on the inbox namesake, so the path is
+    // written instead.
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "[x](../20-projects/Kickoff.md)\n"
+    );
+}
+
+#[test]
+fn deleting_a_note_unlinks_markdown_links_and_keeps_their_text() {
+    let tmp = markdown_link_vault(concat!(
+        "see [the plan](../20-projects/Beacon%20Launch.md) today\n",
+        "and [again][bl]\n",
+        "[bl]: ../20-projects/Beacon%20Launch.md\n",
+    ));
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    delete_note(root, &index, entry, &content_hash("# Beacon")).expect("delete");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "see the plan today\nand again\n"
+    );
+}
+
+#[test]
+fn a_markdown_link_to_a_different_note_survives_a_rename_byte_for_byte() {
+    let body = "[a](../20-projects/Other%20Note.md) [b](Nope.md) [c](x.pdf)\n";
+    let tmp = markdown_link_vault(body);
+    let root = tmp.path();
+    fs::write(root.join("20-projects/Other Note.md"), "other").expect("other");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(read(root, "00-inbox/Home.md"), body);
+}
+
+#[test]
+fn renaming_a_note_in_place_leaves_its_own_links_to_other_notes_as_written() {
+    let tmp = markdown_link_vault("");
+    let root = tmp.path();
+    let body = "[a](./Other.md) [b](other.md) [c](x/../Other.md) [d](../00-inbox/Home.md)\n";
+    fs::write(root.join("20-projects/Other.md"), "other").expect("other");
+    fs::write(root.join("20-projects/Beacon Launch.md"), body).expect("beacon");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash(body),
+    )
+    .expect("rename");
+
+    assert_eq!(read(root, "20-projects/Kickoff.md"), body);
+}
