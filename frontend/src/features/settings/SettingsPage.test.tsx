@@ -116,6 +116,16 @@ const settings = [
     class: "instant",
     kind: "text",
   },
+  {
+    // The retired instance-wide Git switch, at its shipped default. The page
+    // hides it and must not let it hide anything else (#340).
+    key: "HATCHDOOR_GIT_SYNC_ENABLED",
+    value: "false",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "mode",
+  },
 ] as const;
 
 const json = (body: unknown) =>
@@ -274,6 +284,22 @@ describe("SettingsPage", () => {
     const requested = mockedApiFetch.mock.calls.map((call) => String(call[0]));
     expect(requested).not.toContain("/api/index-status");
     expect(requested).not.toContain("/api/git-status");
+  });
+
+  it("offers the server commit identity with Git sync at its default (#340)", async () => {
+    mockPage();
+    renderSettingsPage();
+
+    // Every Vault without its own commit identity falls back to these two, so
+    // they stay editable however the retired instance-wide Git switch reads.
+    expect(await screen.findByLabelText("Recorded as (name)")).toHaveValue(
+      "Server author",
+    );
+    expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
+      "author@example.test",
+    );
+    // The footer counts the rows the page renders: all eleven, none hidden.
+    expect(screen.getByText(/11 editable here, 0 set in/)).toBeVisible();
   });
 
   it("offers the public address under Agent access", async () => {
