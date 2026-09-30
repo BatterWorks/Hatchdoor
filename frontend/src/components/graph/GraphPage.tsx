@@ -7,13 +7,18 @@ import { readErrorMessage } from "../../api/apiError";
 import { type VaultSlotState } from "../../app/vaultSlotLogic";
 import { useVaultScope } from "../../hooks/useVaultScope";
 import { useVaultCollection, useVaultProjection } from "../../vaults";
-import { describeVaultsNotDrawn } from "../../lib/vaultParticipants";
+import {
+  describeVaultsNotDrawn,
+  describeVaultsStillIndexing,
+} from "../../lib/vaultParticipants";
 import type {
   GraphData,
   GraphNode,
   VaultGraph,
   VaultParticipant,
   VaultReadProjection,
+  VaultScope,
+  VaultSummary,
 } from "../../types";
 import { StateBlock } from "../ui";
 import {
@@ -24,6 +29,7 @@ import {
   hitTest as hitTestNodes,
   nodeKey,
   nodeRadius,
+  replaceSimulationGraph,
   settleSimulationSync,
   type GraphIsland,
   type SimLink,
@@ -62,6 +68,52 @@ function mergeVaultGraphs(vaultGraphs: VaultGraph[]): GraphData {
   return {
     nodes: vaultGraphs.flatMap((vaultGraph) => vaultGraph.nodes),
     edges: vaultGraphs.flatMap((vaultGraph) => vaultGraph.edges),
+  };
+}
+
+/** A refresh that says nothing new keeps the value React already holds, so a
+ * collection revision that moved for an unrelated reason (another Vault's
+ * index turn, a Git poll) re-runs no effect keyed on it (#336). */
+function sameJson<T>(previous: T, next: T): T {
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
+/** Words for a graph that drew no nodes at all (#336): every other surface
+ * answers an empty result with a `StateBlock`, and a bare grid reads as
+ * broken. Says why when it can — a Vault still indexing, or one that could
+ * not be drawn — and otherwise that there are simply no notes yet. */
+function describeEmptyGraph(
+  scope: VaultScope,
+  vaultGraphs: VaultGraph[],
+  participants: VaultParticipant[],
+  vaults: VaultSummary[],
+): { title: string; description: string } {
+  const participating = new Set(participants.map((p) => p.vault_id));
+  const indexing = vaults
+    .filter((v) => participating.has(v.vault_id) && v.search === "indexing")
+    .map((v) => v.name);
+  if (indexing.length > 0) {
+    return {
+      title: "Nothing to Draw Yet",
+      description: describeVaultsStillIndexing(indexing),
+    };
+  }
+  const drawn = new Set(vaultGraphs.map((vg) => vg.vault_id));
+  const notDrawn = participants
+    .filter((p) => !drawn.has(p.vault_id))
+    .map((p) => p.vault_name);
+  if (vaultGraphs.length === 0 && notDrawn.length > 0) {
+    return {
+      title: "Nothing to Draw",
+      description: describeVaultsNotDrawn(notDrawn),
+    };
+  }
+  return {
+    title: "No Notes Yet",
+    description:
+      scope === "all" && vaultGraphs.length > 1
+        ? "None of these Vaults has any notes yet. Notes and the links between them appear here as they are written."
+        : "This Vault has no notes yet. Notes and the links between them appear here as they are written.",
   };
 }
 
@@ -130,7 +182,11 @@ interface RenderIsland extends GraphIsland {
 export function GraphPage() {
   const navigate = useNavigate();
   const [scope] = useVaultScope();
-  const { vaults, loading: loadingVaults } = useVaultCollection();
+  const {
+    vaults,
+    loading: loadingVaults,
+    revision: collectionRevision,
+  } = useVaultCollection();
   const vaultProjection = useVaultProjection();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -162,6 +218,16 @@ export function GraphPage() {
   // worse than no fit at all.
   const pendingFitRef = useRef(false);
   const viewInitialisedRef = useRef(false);
+  // Whether the reader has panned, zoomed, or dragged since the current layout
+  // was built. A resize re-fits an island field only while this is false.
+  const viewTouchedRef = useRef(false);
+  // The canvas's last CSS size, so a resize can keep the world point at the
+  // centre of the view where it is instead of pinning the old pixel offset.
+  const lastSizeRef = useRef<{ w: number; h: number } | null>(null);
+  // Which layout the live simulation holds (scope and island mode). A data
+  // refresh within it updates the simulation in place; only a change of
+  // layout builds a new one and resets the view (#336).
+  const layoutKeyRef = useRef<string | null>(null);
   const hoveredRef = useRef<SimNode | null>(null);
   const selectedRef = useRef<SimNode | null>(null);
   const activeTagsRef = useRef<Set<string>>(new Set());
@@ -199,24 +265,40 @@ export function GraphPage() {
 
   // ── data fetch ──────────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      setLoading(true);
-      setError(null);
+  // The collection revision the loaded graph reflects, from the envelope. A
+  // note write anywhere moves the revision, and the graph re-reads then so the
+  // note appears; the layout effect below folds the answer into the live
+  // simulation rather than rebuilding it (#336).
+  const loadedRevisionRef = useRef<number | null>(null);
+  const loadInFlightRef = useRef<Promise<void> | null>(null);
+  const scopeControllerRef = useRef<AbortController | null>(null);
+  const graphRequestRef = useRef(0);
+
+  const loadGraph = useCallback(
+    async (signal: AbortSignal, background: boolean) => {
+      const request = ++graphRequestRef.current;
+      const isCurrent = () =>
+        !signal.aborted && request === graphRequestRef.current;
+      if (!background) {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const res = await apiFetch(
           `/api/v1/vaults/${encodeURIComponent(scope)}/graph`,
+          { signal },
         );
         if (!res.ok)
           throw new Error(await readErrorMessage(res, "Graph fetch failed"));
         const projection = (await res.json()) as VaultReadProjection<
           VaultGraph[]
         >;
-        if (cancelled) return;
+        if (!isCurrent()) return;
 
-        setVaultGraphs(projection.data);
-        setParticipants(projection.participants);
+        loadedRevisionRef.current = projection.collection_revision;
+        setError(null);
+        setVaultGraphs((prev) => sameJson(prev, projection.data));
+        setParticipants((prev) => sameJson(prev, projection.participants));
 
         const nodes = projection.data.flatMap((vg) => vg.nodes);
         setNodeCount(nodes.length);
@@ -231,18 +313,49 @@ export function GraphPage() {
               .filter((t): t is string => t !== null),
           ),
         ).sort();
-        setAllTags(tags);
+        setAllTags((prev) => sameJson(prev, tags));
       } catch (err) {
-        if (!cancelled)
+        // A background refresh that fails keeps the graph already on screen:
+        // the next revision retries, and replacing a working picture with an
+        // error block for a transient miss is worse than a moment's lag.
+        if (isCurrent() && !background)
           setError(err instanceof Error ? err.message : "Failed to load graph");
       } finally {
-        if (!cancelled) setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
+    },
+    [scope],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    scopeControllerRef.current = controller;
+    loadedRevisionRef.current = null;
+    // Another scope's graph is a different layout; drop it rather than
+    // briefly laying out the old data under the new scope.
+    setVaultGraphs(null);
+    const running = loadGraph(controller.signal, false);
+    loadInFlightRef.current = running;
+    return () => controller.abort();
+  }, [loadGraph]);
+
+  useEffect(() => {
+    if (collectionRevision === null) return;
+    void (async () => {
+      // A read already open may be about to answer at exactly this revision.
+      await loadInFlightRef.current;
+      const controller = scopeControllerRef.current;
+      if (
+        !controller ||
+        controller.signal.aborted ||
+        loadedRevisionRef.current === collectionRevision
+      )
+        return;
+      const running = loadGraph(controller.signal, true);
+      loadInFlightRef.current = running;
+      await running;
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [scope]);
+  }, [loadGraph, collectionRevision]);
 
   // ── hit test ────────────────────────────────────────────────────────────────
 
@@ -770,73 +883,142 @@ export function GraphPage() {
 
   // ── simulation setup ─────────────────────────────────────────────────────────
 
-  // Waits on vault discovery too so islands can be ordered and captioned in
-  // one pass — the same trade-off StatsPage makes, and #143's layout has
-  // nothing sensible to draw before both are in anyway.
+  // Island mode is a property of the instance — under "all" scope with more
+  // than one *enabled* Vault — not of how many happened to answer this
+  // particular read. A Vault going down doesn't collapse the shape back to
+  // plain: it stays an island field with one fewer island and a line naming
+  // the gap (#118's resolution: "no threshold, no fallback"). A genuine
+  // single-Vault instance, or any narrowed scope, is always the byte-identical
+  // plain single-graph path instead.
+  const islandModeWanted = scope === "all" && vaults.length > 1;
+  // The layout reads only the Vaults' order, never their status: keyed on the
+  // whole list, every index turn and Git poll anywhere re-ran it (#336).
+  const vaultOrderKey = vaults.map((v) => v.vault_id).join("\n");
+
+  // Waits on vault discovery too so islands can be ordered in one pass — the
+  // same trade-off StatsPage makes, and #143's layout has nothing sensible to
+  // draw before both are in anyway.
+  //
+  // A new graph for the layout already on screen (a note written, a link
+  // added) is folded into the live simulation: surviving notes keep their node
+  // objects and positions, new ones arrive beside a neighbour, and the view is
+  // left where the reader put it (#336). Only a change of scope or island mode
+  // builds a new simulation and re-frames the view.
   useEffect(() => {
     if (!vaultGraphs || loadingVaults) return;
 
-    const vaultOrder = new Map(vaults.map((v, i) => [v.vault_id, i]));
+    const vaultOrder = new Map(
+      vaultOrderKey.split("\n").map((id, i) => [id, i] as const),
+    );
     const ordered = [...vaultGraphs].sort(
       (a, b) =>
         (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
     );
+    setIslandMode(islandModeWanted);
 
-    // A Vault absent from the response (unavailable — never a fresh-but-
-    // stale participant, which still contributes its component) draws no
-    // island and is named instead (#118's resolution).
-    const drawnIds = new Set(ordered.map((vg) => vg.vault_id));
-    const missingNames = participants
-      .filter((p) => !drawnIds.has(p.vault_id))
-      .sort(
-        (a, b) =>
-          (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
-      )
-      .map((p) => p.vault_name);
+    const layoutKey = `${scope}\n${String(islandModeWanted)}`;
+    const liveSim = simRef.current;
+    const refresh = liveSim !== null && layoutKeyRef.current === layoutKey;
+    layoutKeyRef.current = layoutKey;
+    const previous = refresh
+      ? new Map(simNodesRef.current.map((n) => [nodeKey(n), n]))
+      : undefined;
 
-    // Island mode is a property of the instance — under "all" scope with
-    // more than one *enabled* Vault — not of how many happened to answer
-    // this particular read. A Vault going down doesn't collapse the shape
-    // back to plain: it stays an island field with one fewer island and a
-    // line naming the gap (#118's resolution: "no threshold, no fallback").
-    // A genuine single-Vault instance, or any narrowed scope, is always the
-    // byte-identical plain single-graph path instead.
-    const nextIslandMode = scope === "all" && vaults.length > 1;
-    setIslandMode(nextIslandMode);
-    setNotDrawnVaultNames(nextIslandMode ? missingNames : []);
+    // Nodes live in world space centred at (0,0). The canvas transform maps
+    // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
+    // using them caused a double-shift that put every node off-screen.
+    let islands: GraphIsland[] = [];
+    let nodes: SimNode[];
+    let links: SimLink[];
+    if (islandModeWanted) {
+      ({ islands, nodes, links } = buildIslandGraphs(ordered, { previous }));
+    } else {
+      ({ nodes, links } = buildSimulationGraph(mergeVaultGraphs(ordered), {
+        previous,
+      }));
+    }
+    simNodesRef.current = nodes;
+    simLinksRef.current = links;
+    // Captions are filled by the effect below, which runs in this same commit;
+    // until then an island keeps the caption it already had.
+    const slots = new Map(
+      islandsRef.current.map((island) => [island.vaultId, island.slot]),
+    );
+    islandsRef.current = islands.map((island) => ({
+      ...island,
+      slot: slots.get(island.vaultId) ?? {
+        kind: "count",
+        count: island.nodeCount,
+      },
+    }));
 
-    // Centre transform on the canvas. The canvas is already sized by the
-    // ResizeObserver so clientWidth/Height are reliable here.
+    // A note that left the graph can no longer be hovered or selected.
+    const liveKeys = new Set(nodes.map(nodeKey));
+    if (hoveredRef.current && !liveKeys.has(nodeKey(hoveredRef.current)))
+      hoveredRef.current = null;
+    if (selectedRef.current && !liveKeys.has(nodeKey(selectedRef.current)))
+      selectedRef.current = null;
+
+    if (refresh && liveSim) {
+      replaceSimulationGraph(liveSim, nodes, links);
+      if (prefersReducedMotion()) settleSimulationSync(liveSim);
+      else liveSim.restart();
+      requestRender();
+      return;
+    }
+
+    // A new layout: centre the world origin on the canvas. The canvas is
+    // already sized by the ResizeObserver so clientWidth/Height are reliable.
     const canvas = canvasRef.current;
     const W = canvas?.clientWidth ?? 800;
     const H = canvas?.clientHeight ?? 600;
     transformRef.current = { x: W / 2, y: H / 2, k: 0.9 };
+    viewTouchedRef.current = false;
 
-    simRef.current?.stop();
-
-    if (!nextIslandMode) {
-      islandsRef.current = [];
-
-      // Nodes live in world space centred at (0,0). The canvas transform maps
-      // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
-      // using them caused a double-shift that put every node off-screen.
-      const { nodes, links } = buildSimulationGraph(mergeVaultGraphs(ordered));
-      simNodesRef.current = nodes;
-      simLinksRef.current = links;
-
-      const sim = createGraphSimulation(nodes, links);
-      simRef.current = activateSimulation(sim);
-      requestRender();
-      return () => {
-        sim.stop();
-      };
+    liveSim?.stop();
+    const sim = islandModeWanted
+      ? createIslandSimulation(nodes, links)
+      : createGraphSimulation(nodes, links);
+    simRef.current = activateSimulation(sim);
+    pendingFitRef.current = islandModeWanted;
+    // Reduced motion settles synchronously, so the layout is already final and
+    // there is no later frame to fit on — frame it now and paint once.
+    if (islandModeWanted && sim.alpha() <= sim.alphaMin()) {
+      pendingFitRef.current = false;
+      fitIslandsToView();
     }
+    requestRender();
+  }, [
+    vaultGraphs,
+    loadingVaults,
+    scope,
+    islandModeWanted,
+    vaultOrderKey,
+    requestRender,
+    fitIslandsToView,
+  ]);
 
+  // The simulation outlives data refreshes, so it is stopped on unmount only.
+  // Under StrictMode's mount-unmount-mount the layout effect above takes the
+  // refresh path on its second run and restarts it.
+  useEffect(
+    () => () => {
+      simRef.current?.stop();
+    },
+    [],
+  );
+
+  // Island captions and the "could not be drawn" line follow the Vaults'
+  // status, which moves on every index turn and Git poll. They are written
+  // onto the live islands in place and repainted, never by rebuilding the
+  // layout (#336).
+  useEffect(() => {
+    if (!vaultGraphs || loadingVaults) return;
+
+    const vaultOrder = new Map(vaults.map((v, i) => [v.vault_id, i]));
     const vaultById = new Map(vaults.map((v) => [v.vault_id, v]));
-    const { islands, nodes, links } = buildIslandGraphs(ordered);
-    simNodesRef.current = nodes;
-    simLinksRef.current = links;
-    islandsRef.current = islands.map((island) => {
+    // Same node objects, new caption slots: nothing here moves the layout.
+    islandsRef.current = islandsRef.current.map((island) => {
       const vault = vaultById.get(island.vaultId);
       // The island's own node count is the count source here — the graph
       // reports what it drew, not what the Vault holds.
@@ -846,28 +1028,29 @@ export function GraphPage() {
       return { ...island, slot };
     });
 
-    const sim = createIslandSimulation(nodes, links);
-    simRef.current = activateSimulation(sim);
-    pendingFitRef.current = true;
-    // Reduced motion settles synchronously, so the layout is already final and
-    // there is no later frame to fit on — frame it now and paint once.
-    if (sim.alpha() <= sim.alphaMin()) {
-      pendingFitRef.current = false;
-      fitIslandsToView();
-    }
+    // A Vault absent from the response (unavailable — never a fresh-but-
+    // stale participant, which still contributes its component) draws no
+    // island and is named instead (#118's resolution).
+    const drawnIds = new Set(vaultGraphs.map((vg) => vg.vault_id));
+    const missingNames = participants
+      .filter((p) => !drawnIds.has(p.vault_id))
+      .sort(
+        (a, b) =>
+          (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+      )
+      .map((p) => p.vault_name);
+    setNotDrawnVaultNames((prev) =>
+      sameJson(prev, islandModeWanted ? missingNames : []),
+    );
     requestRender();
-    return () => {
-      sim.stop();
-    };
   }, [
     vaultGraphs,
     vaults,
     vaultProjection,
     loadingVaults,
     participants,
-    scope,
+    islandModeWanted,
     requestRender,
-    fitIslandsToView,
   ]);
 
   // ── canvas resize ───────────────────────────────────────────────────────────
@@ -881,10 +1064,12 @@ export function GraphPage() {
       const dpr = window.devicePixelRatio || 1;
       const rect = wrap.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
       canvas.style.width = `${rect.width}px`;
       canvas.style.height = `${rect.height}px`;
+      const previousSize = lastSizeRef.current;
+      lastSizeRef.current = { w: rect.width, h: rect.height };
       // Re-centre the world origin on first valid size so the graph is always
       // visible regardless of when the sim initialised. Tracked in a ref, not a
       // local: this effect re-runs whenever `requestRender` changes identity,
@@ -897,14 +1082,54 @@ export function GraphPage() {
           y: rect.height / 2,
           k: 0.9,
         };
+      } else if (
+        previousSize &&
+        (previousSize.w !== rect.width || previousSize.h !== rect.height)
+      ) {
+        // The transform is in canvas pixels, so without this a rotation or a
+        // sidebar drag leaves the field at the old geometry's offset — off
+        // the new canvas's edge. Keep the world point at the centre of the
+        // view at the centre (#336).
+        transformRef.current = {
+          ...transformRef.current,
+          x: transformRef.current.x + (rect.width - previousSize.w) / 2,
+          y: transformRef.current.y + (rect.height - previousSize.h) / 2,
+        };
+        zoomAnimRef.current = null;
+        // An island field the reader has not framed themselves is re-fitted
+        // to the new aspect ratio rather than left cropped.
+        if (islandsRef.current.length > 0 && !viewTouchedRef.current)
+          pendingFitRef.current = true;
       }
       requestRender();
     };
 
+    // A move to a display of another density leaves the CSS size alone, so
+    // the ResizeObserver never fires and an idle render loop never re-sizes
+    // the buffer. A `resolution` query matching the current ratio fires
+    // `change` once the ratio moves; it is re-made at the new ratio each time.
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => {
+      watchDpr();
+      resize();
+    };
+    const watchDpr = () => {
+      dprQuery?.removeEventListener("change", onDprChange);
+      dprQuery =
+        window.matchMedia?.(
+          `(resolution: ${window.devicePixelRatio || 1}dppx)`,
+        ) ?? null;
+      dprQuery?.addEventListener("change", onDprChange);
+    };
+
     resize();
+    watchDpr();
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      dprQuery?.removeEventListener("change", onDprChange);
+    };
   }, [requestRender]);
 
   // ── start render loop ────────────────────────────────────────────────────────
@@ -953,9 +1178,40 @@ export function GraphPage() {
       return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
     };
 
+    // The one way a drag or pan ends, whatever ended it (#336). A dragged node
+    // is pinned (`fx`/`fy`) and the simulation held warm (`alphaTarget`); an
+    // exit that skipped this left the node frozen and the layout never
+    // cooling, so both the render loop and d3's timer ran at 60fps until the
+    // page was left.
+    const releaseDrag = () => {
+      const drag = dragRef.current;
+      dragRef.current = null;
+      panRef.current = null;
+      if (drag) {
+        drag.node.fx = null;
+        drag.node.fy = null;
+        simRef.current?.alphaTarget(0).restart();
+      }
+    };
+
+    // The reader has taken the view: cancel any pending auto-fit, and stop
+    // re-fitting on resize until the next layout.
+    const takeView = () => {
+      pendingFitRef.current = false;
+      viewTouchedRef.current = true;
+    };
+
     // window-level move handler used during drag/pan so events keep firing
     // even when the cursor leaves the canvas element.
     const onWindowMouseMove = (e: MouseEvent) => {
+      if (!panRef.current && !dragRef.current) return;
+      // The button came up somewhere the mouseup never reached us (outside
+      // the browser window, say): the gesture is over.
+      if ((e.buttons & 1) === 0) {
+        releaseDrag();
+        requestRender();
+        return;
+      }
       const { cx, cy } = getPos(e);
 
       if (panRef.current) {
@@ -992,8 +1248,7 @@ export function GraphPage() {
     };
 
     const onMouseDown = (e: MouseEvent) => {
-      // The reader has taken the view; cancel any pending auto-fit.
-      pendingFitRef.current = false;
+      takeView();
       if (e.button !== 0) return;
       const { cx, cy } = getPos(e);
       const hit = hitTest(cx, cy);
@@ -1043,10 +1298,7 @@ export function GraphPage() {
           }
         }
 
-        dragRef.current.node.fx = null;
-        dragRef.current.node.fy = null;
-        simRef.current?.alphaTarget(0).restart();
-        dragRef.current = null;
+        releaseDrag();
       } else if (panRef.current) {
         const movedX = Math.abs(cx - panRef.current.startX);
         const movedY = Math.abs(cy - panRef.current.startY);
@@ -1054,7 +1306,7 @@ export function GraphPage() {
           selectedRef.current = null;
           lastClickKeyRef.current = null;
         }
-        panRef.current = null;
+        releaseDrag();
       }
 
       canvas.style.cursor = hitTest(cx, cy) ? "pointer" : "grab";
@@ -1062,8 +1314,7 @@ export function GraphPage() {
     };
 
     const onWheel = (e: WheelEvent) => {
-      // The reader has taken the view; cancel any pending auto-fit.
-      pendingFitRef.current = false;
+      takeView();
       e.preventDefault();
       const { cx, cy } = getPos(e);
       // Proportional factor: works naturally for both mouse wheels (~120/notch)
@@ -1075,10 +1326,20 @@ export function GraphPage() {
       requestRender();
     };
 
-    const onMouseLeave = () => {
+    // Leaving the canvas with the button still held is not the end of a drag:
+    // the window-level listeners keep it following the cursor until the
+    // button comes up. Leaving with no button held is, and releases it.
+    const onMouseLeave = (e: MouseEvent) => {
       hoveredRef.current = null;
-      dragRef.current = null;
-      panRef.current = null;
+      if ((e.buttons & 1) === 0) releaseDrag();
+      requestRender();
+    };
+
+    // Switching away mid-gesture (alt-tab, a system dialog) delivers no
+    // mouseup or touchend at all.
+    const onWindowBlur = () => {
+      releaseDrag();
+      pinchRef.current = null;
       requestRender();
     };
 
@@ -1090,15 +1351,13 @@ export function GraphPage() {
     };
 
     const onTouchStart = (e: TouchEvent) => {
-      // The reader has taken the view; cancel any pending auto-fit.
-      pendingFitRef.current = false;
+      takeView();
       e.preventDefault();
       requestRender();
 
       if (e.touches.length === 2) {
-        // Begin pinch — cancel any ongoing pan/drag
-        dragRef.current = null;
-        panRef.current = null;
+        // Begin pinch — end any ongoing pan/drag, releasing a held node.
+        releaseDrag();
         zoomAnimRef.current = null;
         const a = getTouchPos(e.touches[0]);
         const b = getTouchPos(e.touches[1]);
@@ -1181,6 +1440,7 @@ export function GraphPage() {
 
       if (e.touches.length >= 1) {
         // One finger lifted while two were down — transition to single-finger pan
+        releaseDrag();
         pinchRef.current = null;
         const { cx, cy } = getTouchPos(e.touches[0]);
         panRef.current = {
@@ -1223,10 +1483,7 @@ export function GraphPage() {
           }
         }
 
-        dragRef.current.node.fx = null;
-        dragRef.current.node.fy = null;
-        simRef.current?.alphaTarget(0).restart();
-        dragRef.current = null;
+        releaseDrag();
       } else if (panRef.current) {
         const moved =
           Math.abs(cx - panRef.current.startX) > 8 ||
@@ -1235,8 +1492,16 @@ export function GraphPage() {
           selectedRef.current = null;
           lastClickKeyRef.current = null;
         }
-        panRef.current = null;
+        releaseDrag();
       }
+    };
+
+    // The system took the touch (iOS home-indicator swipe, an incoming call,
+    // Android's notification shade): no touchend follows.
+    const onTouchCancel = () => {
+      releaseDrag();
+      pinchRef.current = null;
+      requestRender();
     };
 
     canvas.addEventListener("mousemove", onMouseMove);
@@ -1248,6 +1513,8 @@ export function GraphPage() {
     canvas.addEventListener("touchstart", onTouchStart, { passive: false });
     canvas.addEventListener("touchmove", onTouchMove, { passive: false });
     canvas.addEventListener("touchend", onTouchEnd, { passive: false });
+    canvas.addEventListener("touchcancel", onTouchCancel);
+    window.addEventListener("blur", onWindowBlur);
 
     return () => {
       canvas.removeEventListener("mousemove", onMouseMove);
@@ -1259,6 +1526,10 @@ export function GraphPage() {
       canvas.removeEventListener("touchstart", onTouchStart);
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
+      canvas.removeEventListener("touchcancel", onTouchCancel);
+      window.removeEventListener("blur", onWindowBlur);
+      // Unmounting mid-gesture is an exit path too.
+      releaseDrag();
     };
   }, [hitTest, navigate, requestRender]);
 
@@ -1311,6 +1582,13 @@ export function GraphPage() {
   );
 
   const effectiveLoading = loading || loadingVaults;
+  const emptyGraph =
+    !effectiveLoading &&
+    !error &&
+    vaultGraphs !== null &&
+    vaultGraphs.every((vg) => vg.nodes.length === 0)
+      ? describeEmptyGraph(scope, vaultGraphs, participants, vaults)
+      : null;
 
   return (
     <div className="graph-page">
@@ -1396,6 +1674,15 @@ export function GraphPage() {
             <StateBlock
               title="Graph Unavailable"
               description={error ?? "Could not load graph data."}
+            />
+          </div>
+        )}
+
+        {emptyGraph && (
+          <div className="graph-overlay">
+            <StateBlock
+              title={emptyGraph.title}
+              description={emptyGraph.description}
             />
           </div>
         )}

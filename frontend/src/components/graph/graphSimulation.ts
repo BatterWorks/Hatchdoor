@@ -11,6 +11,7 @@ import {
   forceSimulation,
   forceX,
   forceY,
+  type ForceLink,
   type Simulation,
   type SimulationLinkDatum,
   type SimulationNodeDatum,
@@ -61,24 +62,57 @@ export function nodeRadius(backlinks: number): number {
 /** Initial random scatter half-extent for freshly placed nodes (world units). */
 export const DEFAULT_SPREAD = 500;
 
+/** Scatter half-extent (world units) for a note that joins a live layout next
+ * to a neighbour already on screen: close enough to read as "arrived beside
+ * this", far enough that collision does not fling the pair apart. */
+const NEIGHBOUR_JITTER = 30;
+
+export interface BuildGraphOptions {
+  spread?: number;
+  random?: () => number;
+  /** World point a fresh scatter is centred on. Defaults to the origin. */
+  origin?: { x: number; y: number };
+  /** Nodes already in the live simulation, by `nodeKey` (#336). A datum whose
+   * key is here reuses that very object — position, velocity and any drag pin
+   * intact — with its display fields refreshed, so a data refresh updates the
+   * picture instead of re-scattering it. A new datum linked to a reused node
+   * is placed beside it rather than at a random point in the field. */
+  previous?: ReadonlyMap<string, SimNode>;
+}
+
 /**
- * Build simulation nodes and links from API graph data. Nodes are scattered
- * around the origin (0,0) — never in canvas-pixel space — using `random` so
- * tests can inject a deterministic sequence. Links whose endpoints are missing
- * (danglers) are dropped, mirroring the resolved-only edges the API returns.
+ * Build simulation nodes and links from API graph data. Fresh nodes are
+ * scattered around `origin` (default (0,0)) — never in canvas-pixel space —
+ * using `random` so tests can inject a deterministic sequence. Links whose
+ * endpoints are missing (danglers) are dropped, mirroring the resolved-only
+ * edges the API returns.
  */
 export function buildSimulationGraph(
   data: GraphData,
   {
     spread = DEFAULT_SPREAD,
     random = Math.random,
-  }: { spread?: number; random?: () => number } = {},
+    origin = { x: 0, y: 0 },
+    previous,
+  }: BuildGraphOptions = {},
 ): { nodes: SimNode[]; links: SimLink[] } {
-  const nodes: SimNode[] = data.nodes.map((n) => ({
-    ...n,
-    x: (random() - 0.5) * spread,
-    y: (random() - 0.5) * spread,
-  })) as SimNode[];
+  const fresh = new Set<SimNode>();
+  const nodes: SimNode[] = data.nodes.map((n) => {
+    const kept = previous?.get(nodeKey(n));
+    if (kept) {
+      kept.title = n.title;
+      kept.primary_tag = n.primary_tag;
+      kept.backlink_count = n.backlink_count;
+      return kept;
+    }
+    const node = {
+      ...n,
+      x: origin.x + (random() - 0.5) * spread,
+      y: origin.y + (random() - 0.5) * spread,
+    } as SimNode;
+    fresh.add(node);
+    return node;
+  });
 
   const nodeByKey = new Map<string, SimNode>(nodes.map((n) => [nodeKey(n), n]));
 
@@ -91,7 +125,47 @@ export function buildSimulationGraph(
     })
     .filter((l): l is SimLink => l !== null);
 
+  // Only a refresh has anything to sit beside; a first build is untouched.
+  if (previous && previous.size > 0 && fresh.size > 0) {
+    for (const link of links) {
+      const [node, anchor] = fresh.has(link.source)
+        ? [link.source, link.target]
+        : [link.target, link.source];
+      if (!fresh.has(node) || fresh.has(anchor)) continue;
+      node.x = anchor.x + (random() - 0.5) * NEIGHBOUR_JITTER;
+      node.y = anchor.y + (random() - 0.5) * NEIGHBOUR_JITTER;
+      fresh.delete(node);
+    }
+  }
+
   return { nodes, links };
+}
+
+/** How warm a refreshed layout is made (#336): enough for new or removed notes
+ * to find their place, far below a fresh build's alpha of 1, so the notes
+ * already on screen shift a little rather than re-settling from scratch. */
+export const REFRESH_ALPHA = 0.3;
+
+/**
+ * Swap a live simulation's nodes and links in place (#336) rather than
+ * building a new one, so every node object the reader is looking at, dragging
+ * or has selected stays the same object. Forces are re-initialised against
+ * the new node list, and the layout is re-warmed to `REFRESH_ALPHA` (never
+ * cooled if it is already warmer). The caller restarts or settles it.
+ */
+export function replaceSimulationGraph(
+  sim: Simulation<SimNode, SimLink>,
+  nodes: SimNode[],
+  links: SimLink[],
+): void {
+  const linkForce = sim.force("link") as
+    ForceLink<SimNode, SimLink> | undefined;
+  // Empty the link force first: `nodes()` re-initialises every force, and the
+  // link force would otherwise index the old links against the new node list.
+  linkForce?.links([]);
+  sim.nodes(nodes);
+  linkForce?.links(links);
+  sim.alpha(Math.max(sim.alpha(), REFRESH_ALPHA));
 }
 
 /** Bound on synchronous ticks `settleSimulationSync` will spend advancing a
@@ -258,21 +332,26 @@ export interface GraphIsland {
  */
 export function buildIslandGraphs(
   vaultGraphs: VaultGraph[],
-  { random = Math.random }: { random?: () => number } = {},
+  {
+    random = Math.random,
+    previous,
+  }: {
+    random?: () => number;
+    /** As `buildSimulationGraph`'s: live nodes to reuse on a refresh (#336). */
+    previous?: ReadonlyMap<string, SimNode>;
+  } = {},
 ): { islands: GraphIsland[]; nodes: SimNode[]; links: SimLink[] } {
   const centers = computeIslandCenters(
     vaultGraphs.map((vaultGraph) => vaultGraph.nodes.length),
   );
   const islands: GraphIsland[] = vaultGraphs.map((vaultGraph, i) => {
     const spread = Math.max(120, 40 * Math.sqrt(vaultGraph.nodes.length || 1));
+    const { cx, cy } = centers[i];
     const { nodes, links } = buildSimulationGraph(
       { nodes: vaultGraph.nodes, edges: vaultGraph.edges },
-      { spread, random },
+      { spread, random, origin: { x: cx, y: cy }, previous },
     );
-    const { cx, cy } = centers[i];
     for (const node of nodes) {
-      node.x += cx;
-      node.y += cy;
       node.islandCx = cx;
       node.islandCy = cy;
     }

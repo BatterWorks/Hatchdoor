@@ -3919,8 +3919,10 @@ is byte-identical to the narrowed single-Vault graph (#118's resolution).
 `d3-force`, `useVaultDiscovery` (Vault-management order, `demoMode`, and
 per-Vault condition, reused via `deriveVaultSlot(vault, count, demoMode)` for
 each island's caption so a demo instance's islands clamp to the amber tier
-the same as every other Vault chrome, #152), and `describeVaultsNotDrawn`
-from `lib/vaultParticipants.ts`.
+the same as every other Vault chrome, #152), the collection client's
+revision (the graph re-reads on every move and folds the answer into the live
+simulation without resetting the view, #336), and `describeVaultsNotDrawn` /
+`describeVaultsStillIndexing` from `lib/vaultParticipants.ts`.
 
 **Coordination paths:** `App.tsx`, `types.ts`, backend graph wire types/handler,
 `app/vaultSlotLogic.ts`, `lib/vaultParticipants.ts`, `hooks/useVaultScope.ts`,

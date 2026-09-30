@@ -5,6 +5,7 @@ import {
   describeMissingVaults,
   describeNotSearchableVaults,
   describeVaultsNotDrawn,
+  describeVaultsStillIndexing,
   missingVaultNames,
   notSearchableVaultNames,
 } from "./vaultParticipants";
@@ -99,5 +100,16 @@ describe("describeVaultsNotDrawn", () => {
     expect(
       describeVaultsNotDrawn(["Field Station", "Archive", "Journal"]),
     ).toBe("Field Station, Archive, and Journal could not be drawn.");
+  });
+});
+
+describe("describeVaultsStillIndexing", () => {
+  it("agrees in number with the Vaults it names", () => {
+    expect(describeVaultsStillIndexing(["Work"])).toBe(
+      "Work is still being indexed.",
+    );
+    expect(describeVaultsStillIndexing(["Work", "Archive"])).toBe(
+      "Work and Archive are still being indexed.",
+    );
   });
 });

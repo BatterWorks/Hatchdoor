@@ -9,7 +9,10 @@ import {
   createGraphSimulation,
   createIslandSimulation,
   hitTest,
+  nodeKey,
   nodeRadius,
+  REFRESH_ALPHA,
+  replaceSimulationGraph,
   settleSimulationSync,
   type SimNode,
 } from "./graphSimulation";
@@ -89,6 +92,115 @@ describe("buildSimulationGraph", () => {
     });
     expect(nodes[0].x).toBeCloseTo(-50);
     expect(nodes[0].y).toBeCloseTo(50);
+  });
+});
+
+describe("buildSimulationGraph — refreshing a live layout (#336)", () => {
+  function byKey(nodes: SimNode[]): Map<string, SimNode> {
+    return new Map(nodes.map((n) => [nodeKey(n), n]));
+  }
+
+  it("reuses the live node objects, keeping their positions and refreshing their fields", () => {
+    const first = buildSimulationGraph(DATA, {
+      random: sequenceRandom([0.1, 0.9]),
+    });
+    const alpha = first.nodes[0];
+    alpha.x = 123;
+    alpha.y = -45;
+    alpha.fx = 123;
+    const renamed: GraphData = {
+      ...DATA,
+      nodes: DATA.nodes.map((n) =>
+        n.slug === "a" ? { ...n, title: "Alpha 2", backlink_count: 9 } : n,
+      ),
+    };
+
+    const second = buildSimulationGraph(renamed, {
+      random: sequenceRandom([0.5]),
+      previous: byKey(first.nodes),
+    });
+
+    expect(second.nodes[0]).toBe(alpha);
+    expect(alpha).toMatchObject({ x: 123, y: -45, fx: 123 });
+    expect(alpha.title).toBe("Alpha 2");
+    expect(alpha.backlink_count).toBe(9);
+    expect(second.links[0].source).toBe(alpha);
+  });
+
+  it("places a new note beside the live note it links to, not at a random spot", () => {
+    const first = buildSimulationGraph(DATA, { random: sequenceRandom([0.5]) });
+    const bravo = first.nodes[1];
+    bravo.x = 400;
+    bravo.y = 300;
+    const grown: GraphData = {
+      nodes: [
+        ...DATA.nodes,
+        {
+          vault_id: VAULT_ID,
+          slug: "d",
+          title: "Delta",
+          primary_tag: null,
+          backlink_count: 0,
+        },
+      ],
+      edges: [
+        ...DATA.edges,
+        { vault_id: VAULT_ID, source_slug: "d", target_slug: "b" },
+      ],
+    };
+
+    const second = buildSimulationGraph(grown, {
+      random: sequenceRandom([0.0]),
+      previous: byKey(first.nodes),
+    });
+
+    const delta = second.nodes[3];
+    expect(Math.abs(delta.x - 400)).toBeLessThanOrEqual(15);
+    expect(Math.abs(delta.y - 300)).toBeLessThanOrEqual(15);
+    expect(second.nodes.slice(0, 3)).toEqual(first.nodes);
+  });
+
+  it("keeps island nodes where they are across a refresh", () => {
+    const first = buildIslandGraphs(VAULT_GRAPHS, {
+      random: sequenceRandom([0.2, 0.7]),
+    });
+    const before = first.nodes.map((n) => ({ x: n.x, y: n.y }));
+    const second = buildIslandGraphs(VAULT_GRAPHS, {
+      random: sequenceRandom([0.5]),
+      previous: byKey(first.nodes),
+    });
+    second.nodes.forEach((n, i) => {
+      expect(n).toBe(first.nodes[i]);
+      expect({ x: n.x, y: n.y }).toEqual(before[i]);
+    });
+  });
+});
+
+describe("replaceSimulationGraph (#336)", () => {
+  it("swaps nodes and links into the same simulation and re-warms it gently", () => {
+    const first = buildSimulationGraph(DATA, {
+      random: sequenceRandom([0.3, 0.6]),
+    });
+    const sim = createGraphSimulation(first.nodes, first.links);
+    try {
+      settleSimulationSync(sim);
+      const next = buildSimulationGraph(
+        { nodes: DATA.nodes.slice(0, 2), edges: DATA.edges.slice(0, 1) },
+        { previous: new Map(first.nodes.map((n) => [nodeKey(n), n])) },
+      );
+
+      replaceSimulationGraph(sim, next.nodes, next.links);
+
+      expect(sim.nodes()).toEqual(next.nodes);
+      expect(sim.nodes()[0]).toBe(first.nodes[0]);
+      const linkForce = sim.force("link") as unknown as { links(): unknown[] };
+      expect(linkForce.links()).toEqual(next.links);
+      expect(sim.alpha()).toBeCloseTo(REFRESH_ALPHA);
+      settleSimulationSync(sim);
+      expect(Number.isFinite(sim.nodes()[0].x)).toBe(true);
+    } finally {
+      sim.stop();
+    }
   });
 });
 
