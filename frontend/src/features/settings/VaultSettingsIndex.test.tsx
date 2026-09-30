@@ -1305,3 +1305,57 @@ describe("VaultSettingsIndex — the creation flow entry point (#153)", () => {
     );
   });
 });
+
+describe("VaultSettingsDetail — the note count in the blurb (#333)", () => {
+  function mockStats(stats: () => Response) {
+    // The stats route is listed first: the discovery pattern is a prefix of it.
+    mockRoutes({
+      "/api/v1/vaults/all/stats": stats,
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [baseVault({ type: "local", path: "/notes" })],
+          demo_mode: false,
+        }),
+      [`/api/v1/vaults/${VAULT_ID}/recent?limit=1`]: () =>
+        json({ data: [{ mtime_ns: 0 }] }),
+    });
+  }
+
+  function renderDetail() {
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+  }
+
+  it("shows the count the stats read supplied", async () => {
+    mockStats(() => json({ data: [{ vault_id: VAULT_ID, note_count: 12 }] }));
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(await screen.findByText(/· 12 notes ·/)).toBeVisible();
+  });
+
+  it("marks the count unknown, never 0, when a partial read left this Vault out", async () => {
+    mockStats(() =>
+      json({
+        data: [],
+        partial: true,
+        participants: [{ vault_id: VAULT_ID, state: "unavailable" }],
+      }),
+    );
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+    await vi.waitFor(() =>
+      expect(mockedApiFetch).toHaveBeenCalledWith("/api/v1/vaults/all/stats"),
+    );
+    const marker = await screen.findByLabelText("Note count not known");
+    expect(marker).toHaveTextContent("–");
+    expect(marker.parentElement).toHaveTextContent(/– notes/);
+    expect(screen.queryByText(/\b0 notes\b/)).not.toBeInTheDocument();
+  });
+});

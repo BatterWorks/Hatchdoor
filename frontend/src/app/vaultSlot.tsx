@@ -5,11 +5,13 @@ const UNKNOWN_COUNT_MARK = "–";
 const UNKNOWN_COUNT_LABEL = "Note count not known";
 
 /** A count the stats read has not supplied (#333): a neutral dash in the
- * count's own ink, so it is never mistaken for an empty Vault's 0. */
-function UnknownCount() {
+ * count's own ink, so it is never mistaken for an empty Vault's 0. `inline`
+ * drops the slot's own type so the dash can sit inside running text (the
+ * Settings Vault detail's blurb) and take that text's ink instead. */
+export function UnknownCount({ inline = false }: { inline?: boolean }) {
   return (
     <span
-      className="side-count"
+      className={inline ? undefined : "side-count"}
       title={UNKNOWN_COUNT_LABEL}
       aria-label={UNKNOWN_COUNT_LABEL}
     >

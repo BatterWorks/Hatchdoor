@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../../api/api";
-import { VaultSlot } from "../../app/vaultSlot";
+import { UnknownCount, VaultSlot } from "../../app/vaultSlot";
 import type { VaultSlotState } from "../../app/vaultSlotLogic";
 import { StateBlock } from "../../components/ui";
 import type { VaultId, VaultSource, VaultSummary } from "../../types";
@@ -610,7 +610,8 @@ export function VaultSettingsDetail({
         <div>
           <h2 className="settings-sec-title">{vault.name}</h2>
           <p className="settings-sec-blurb">
-            {sourceLabel(vault.source)} · {count ?? 0} notes ·{" "}
+            {sourceLabel(vault.source)} ·{" "}
+            {count === undefined ? <UnknownCount inline /> : count} notes ·{" "}
             {lastChanged(changed)}
           </p>
         </div>

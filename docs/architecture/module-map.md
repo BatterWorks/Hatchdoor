@@ -3193,11 +3193,26 @@ depends on real cascade behavior that jsdom does not reproduce.
 - `frontend/src/vaults/vaultProjection.ts`
 
 **Public contract:** `frontend/src/vaults/index.ts` is the only import path.
-It exposes the collection snapshot (`vaults`, the enabled browsing list;
-`allVaults`, the registry list Vault management renders; `demoMode`,
+It exposes the collection snapshot (`readState`, the derived read state
+`loading`/`error`/`empty`/`partial`/`ready`; `vaults`, the enabled browsing
+list; `allVaults`, the registry list Vault management renders; `demoMode`,
 `loading`, `error`, `recovery`, `legacyMigrationRecovery`, `registryRevision`,
-`revision`, `noteCounts`), `refresh`, `fetchRegistryRevision`, and the
-demo-aware slot projection (`slotFor`, `describeScope`).
+`revision`, `noteCounts`, `noteCountsPartial`), `refresh`,
+`fetchRegistryRevision`, and the demo-aware slot projection (`slotFor`,
+`describeScope`).
+
+`readState` (#333) is what a surface branches on to tell a failed read from an
+empty collection. `error` means discovery failed and none has ever succeeded;
+`empty` means discovery answered with no enabled Vaults (a broken registry is
+also `empty`, and `recovery`/`legacyMigrationRecovery` say which); `partial`
+means the list is known but `noteCountsPartial` is set, because the stats read
+failed, answered `partial`, or left out an enabled Vault; `ready` means
+everything answered. A refresh that fails after a successful discovery keeps
+the last known list and sets the `error` field, but `readState` stays `empty`,
+`partial` or `ready`. The `"/"` landing route, the Settings Vault index and the
+Statistics page render `error` as "Vaults Unavailable" with a Try again that
+calls `refresh`. `noteCounts` merges each stats answer into the counts already
+held, so a Vault missing from a partial answer keeps its last known count.
 
 **Contract and responsibility:** one module owns everything about the Vault
 collection that more than one surface reads (#198): the Vault list, the
@@ -3247,7 +3262,11 @@ cannot describe a Vault the Settings index disagrees with.
 in `"all"`; counts are always read at `"all"` scope regardless of the browsing
 scope; exactly one `/api/v1/vaults/events` subscription exists per app;
 nothing outside this directory fetches `GET /api/v1/vaults` or
-`GET /api/v1/vaults/all/stats`. `VaultSettingsDetail`'s
+`GET /api/v1/vaults/all/stats`. A `readState` of `error` is never an empty
+collection: no surface renders it as the zero-Vault state, and no consumer
+takes its empty lists as evidence that a stored Vault or last note has left
+the collection. A Vault with no `noteCounts` entry has an unknown count, which
+every surface renders as the unknown marker, never as `0`. `VaultSettingsDetail`'s
 `expected_registry_revision` is deliberately not one of these: it is a
 mutation-sequencing token advanced by each step's own response, seeded from
 the client and then owned locally.
@@ -3301,7 +3320,9 @@ not verify Rust-to-TypeScript wire compatibility.
 **Public contract:** `StartupGate` (a pure, prop-driven presentational
 component — it no longer polls itself) and `useStartupStatus`, the shared
 hook that polls `/api/startup-status` and owns the model-setup actions
-(accept/decline Gemma, retry). Production `App.tsx` resolves Vault discovery
+(accept/decline Gemma, retry). The poll runs once a second while it succeeds;
+after a failed or unreachable poll it backs off (`startupPollDelay`: 2s, 4s,
+8s, capped at 30s) and returns to 1s on the first success (#333). Production `App.tsx` resolves Vault discovery
 before enabling this polling, so broken-registry and zero-Vault workspaces
 never poll or gate; it passes the resulting discovery plus startup
 `status`/`retryModelSetup` to its internal `VaultWorkspace` composition and

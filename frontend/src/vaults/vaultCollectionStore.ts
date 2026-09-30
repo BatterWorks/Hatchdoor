@@ -45,8 +45,9 @@ import type {
  * - `ready`: everything answered.
  *
  * A refresh that fails after a discovery has succeeded keeps the last known
- * list and sets `error` without dropping back to `error`: the list it shows is
- * still the best answer there is.
+ * list and sets the `error` field, but `readState` stays `empty`, `partial` or
+ * `ready` rather than dropping back to `"error"`: the list it shows is still
+ * the best answer there is.
  *
  * `noteCounts` holds only counts actually read. A Vault with no entry has an
  * unknown count, which the slot renders as unknown, never as 0.
