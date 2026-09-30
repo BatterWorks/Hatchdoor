@@ -174,6 +174,9 @@ pub async fn handle_tools_call(
         }
         "sync_vault" if config.write_enabled => read::sync_vault_tool(state, arguments).await,
         "retry_vault" if config.write_enabled => read::retry_vault_tool(state, arguments).await,
+        "publish_recovery_branch" if config.write_enabled => {
+            read::publish_recovery_branch_tool(state, arguments).await
+        }
         "refresh_vault" if config.write_enabled => read::refresh_vault_tool(state, arguments).await,
         write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
             let vault = write::scoped_vault(&state, &arguments)?;
@@ -186,10 +189,15 @@ pub async fn handle_tools_call(
         write_op if write::WRITE_OPS.contains(&write_op) => {
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
         }
-        "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
-        | "sync_vault" | "retry_vault" | "refresh_vault" => {
-            Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
-        }
+        "create_vault"
+        | "edit_vault"
+        | "enable_vault"
+        | "disable_vault"
+        | "disconnect_vault"
+        | "sync_vault"
+        | "retry_vault"
+        | "publish_recovery_branch"
+        | "refresh_vault" => Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE)),
         other => Err(JsonRpcFailure::invalid_params(format!(
             "Unknown MCP tool: {other}"
         ))),
@@ -393,6 +401,7 @@ fn is_collection_management_tool(name: &str) -> bool {
             | "disconnect_vault"
             | "sync_vault"
             | "retry_vault"
+            | "publish_recovery_branch"
     )
 }
 

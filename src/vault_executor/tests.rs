@@ -3233,3 +3233,332 @@ async fn a_turn_that_panics_holding_its_vaults_status_lock_does_not_stop_the_dis
     executor.publish_outcome(&next);
     assert!(executor.startup.collection_indexes_ready());
 }
+
+/// Drive one Git turn for `vault_id` through `dispatch_git_turn`.
+async fn run_one_git_turn(
+    collection: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    coordinator: &VaultWorkCoordinator,
+    managed_git: &ManagedGitScheduler,
+    worker: &mut crate::vault_work::VaultWorkWorker,
+    vault_id: VaultId,
+) -> Result<(), VaultWorkError> {
+    coordinator.request(vault_id, VaultWorkKind::Git);
+    worker
+        .run_next(|request| {
+            dispatch_git_turn(
+                collection,
+                registry,
+                coordinator,
+                managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("Git turn dequeued")
+        .result
+}
+
+async fn run_one_recovery_turn(
+    collection: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    coordinator: &VaultWorkCoordinator,
+    managed_git: &ManagedGitScheduler,
+    worker: &mut crate::vault_work::VaultWorkWorker,
+    vault_id: VaultId,
+) -> Result<(), VaultWorkError> {
+    coordinator.request(vault_id, VaultWorkKind::Recovery);
+    worker
+        .run_next(|request| {
+            assert_eq!(request.kind(), VaultWorkKind::Recovery);
+            dispatch_recovery_turn(
+                collection,
+                registry,
+                managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("recovery turn dequeued")
+        .result
+}
+
+fn push_as_actor(remote_path: &Path, actor_path: &Path, path: &str, contents: &str) {
+    let actor = git2::Repository::clone(remote_path.to_str().expect("remote path"), actor_path)
+        .expect("actor checkout");
+    commit_file(&actor, path, contents, "their change");
+    actor
+        .find_remote("origin")
+        .expect("origin")
+        .push(&["refs/heads/master:refs/heads/master"], None)
+        .expect("actor push");
+}
+
+fn remote_ref(remote_path: &Path, reference: &str) -> Option<git2::Oid> {
+    git2::Repository::open_bare(remote_path)
+        .expect("remote")
+        .refname_to_id(reference)
+        .ok()
+}
+
+/// ADR-30 end to end through the executor: a Two-way Vault stops on a
+/// conflict, a recovery turn publishes its side without touching the Vault's
+/// Git status or the configured branch, and the sync that follows a
+/// resolution on the Git host clears the report while the branch stays.
+#[tokio::test]
+async fn a_recovery_turn_publishes_the_vaults_side_and_the_next_sync_after_a_resolution_clears_it()
+{
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Conflicted",
+        repository_path.clone(),
+        VaultGitMode::TwoWay,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+
+    push_as_actor(
+        &remote_path,
+        &directory.path().join("actor"),
+        "vault/Home.md",
+        "theirs\n",
+    );
+    std::fs::write(repository_path.join("vault/Home.md"), "mine\n").expect("local edit");
+    let conflict = run_one_git_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect_err("the sync conflicts");
+    assert_eq!(conflict.code(), "managed_git_conflict");
+    let conflicted = control_block.snapshot();
+    assert!(conflicted.capabilities.publish_recovery);
+    assert!(conflicted.recovery_branch.is_none());
+    let remote_master = remote_ref(&remote_path, "refs/heads/master");
+
+    run_one_recovery_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect("the recovery branch is published");
+
+    let branch = format!("hatchdoor-recovery/master/{vault_id}");
+    let local_head = git2::Repository::open(&repository_path)
+        .expect("checkout")
+        .refname_to_id("refs/heads/master")
+        .expect("local head");
+    let published = control_block.snapshot();
+    let status = published.recovery_branch.expect("recovery status");
+    assert_eq!(status.branch.as_deref(), Some(branch.as_str()));
+    assert_eq!(status.published_commit, Some(local_head.to_string()));
+    assert_eq!(
+        status.conflicting_commit,
+        remote_master.map(|oid| oid.to_string())
+    );
+    assert!(status.published_at.is_some());
+    assert!(status.error.is_none());
+    assert_eq!(
+        published.git_error.map(|error| error.code),
+        Some("managed_git_conflict".to_string()),
+        "the conflict stays the Vault's Git failure until a sync resolves it"
+    );
+    assert_eq!(
+        remote_ref(&remote_path, &format!("refs/heads/{branch}")),
+        Some(local_head)
+    );
+    assert_eq!(
+        remote_ref(&remote_path, "refs/heads/master"),
+        remote_master,
+        "the configured branch on the remote is untouched"
+    );
+
+    // Resolve on the Git host by merging the recovery branch into master.
+    let resolver_path = directory.path().join("resolver");
+    let resolver =
+        git2::Repository::clone(remote_path.to_str().expect("remote path"), &resolver_path)
+            .expect("resolver checkout");
+    let ours = resolver.refname_to_id("refs/heads/master").expect("master");
+    let theirs = resolver
+        .refname_to_id(&format!("refs/remotes/origin/{branch}"))
+        .expect("recovery branch");
+    std::fs::write(resolver_path.join("vault/Home.md"), "resolved\n").expect("resolve");
+    let mut index = resolver.index().expect("index");
+    index.add_path(Path::new("vault/Home.md")).expect("stage");
+    index.write().expect("write index");
+    let tree = resolver
+        .find_tree(index.write_tree().expect("tree"))
+        .expect("tree");
+    let signature = git2::Signature::now("Resolver", "r@example.test").expect("signature");
+    resolver
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Merge recovery branch",
+            &tree,
+            &[
+                &resolver.find_commit(ours).expect("ours"),
+                &resolver.find_commit(theirs).expect("theirs"),
+            ],
+        )
+        .expect("merge commit");
+    resolver
+        .find_remote("origin")
+        .expect("origin")
+        .push(&["refs/heads/master:refs/heads/master"], None)
+        .expect("push the resolution");
+
+    run_one_git_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect("the sync resumes on its own");
+    let resolved = control_block.snapshot();
+    assert!(resolved.git_error.is_none());
+    assert!(resolved.recovery_branch.is_none());
+    assert!(!resolved.capabilities.publish_recovery);
+    assert_eq!(
+        std::fs::read_to_string(repository_path.join("vault/Home.md")).expect("note"),
+        "resolved\n"
+    );
+    assert_eq!(
+        remote_ref(&remote_path, &format!("refs/heads/{branch}")),
+        Some(theirs),
+        "Hatchdoor never deletes the recovery branch"
+    );
+}
+
+/// A publish is a Git turn like any other: it waits for a foreground write
+/// holding the Vault's mutation lock instead of pushing mid-write (ADR-18).
+#[tokio::test]
+async fn a_recovery_turn_waits_for_a_concurrent_foreground_mutation_to_release_the_lock() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Locked",
+        repository_path.clone(),
+        VaultGitMode::TwoWay,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    push_as_actor(
+        &remote_path,
+        &directory.path().join("actor"),
+        "vault/Home.md",
+        "theirs\n",
+    );
+    std::fs::write(repository_path.join("vault/Home.md"), "mine\n").expect("local edit");
+    run_one_git_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect_err("the sync conflicts");
+
+    let mutation_guard = control_block
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation lock");
+    coordinator.request(vault_id, VaultWorkKind::Recovery);
+    let dispatch = worker.run_next(|request| {
+        dispatch_recovery_turn(
+            &collection,
+            &registry,
+            &managed_git,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+            request,
+        )
+    });
+    tokio::pin!(dispatch);
+    let raced = tokio::time::timeout(std::time::Duration::from_millis(200), &mut dispatch).await;
+    assert!(
+        raced.is_err(),
+        "the recovery turn must block on the foreground mutation lock"
+    );
+    assert!(
+        remote_ref(
+            &remote_path,
+            &format!("refs/heads/hatchdoor-recovery/master/{vault_id}")
+        )
+        .is_none(),
+        "nothing was pushed while the write held the lock"
+    );
+    drop(mutation_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), dispatch)
+        .await
+        .expect("the recovery turn proceeds once the lock is released")
+        .expect("recovery turn dequeued")
+        .result
+        .expect("the recovery branch is published");
+}
+
+/// A request admitted during a conflict that a sync resolved before the
+/// request's turn came up publishes nothing and says why on the status.
+#[tokio::test]
+async fn a_recovery_turn_for_a_vault_no_longer_in_conflict_publishes_nothing() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Healthy",
+        repository_path,
+        VaultGitMode::TwoWay,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+
+    let error = run_one_recovery_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect_err("nothing to publish");
+
+    assert_eq!(error.code(), "capability_unavailable");
+    let status = control_block
+        .snapshot()
+        .recovery_branch
+        .expect("the refusal is reported");
+    assert_eq!(
+        status.error.map(|error| error.code),
+        Some("capability_unavailable".to_string())
+    );
+    assert!(status.published_commit.is_none());
+    assert!(
+        remote_ref(
+            &remote_path,
+            &format!("refs/heads/hatchdoor-recovery/master/{vault_id}")
+        )
+        .is_none()
+    );
+}

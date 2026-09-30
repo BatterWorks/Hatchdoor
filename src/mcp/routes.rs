@@ -1785,6 +1785,7 @@ mod tests {
             "edit_vault",
             "disable_vault",
             "sync_vault",
+            "publish_recovery_branch",
             "refresh_vault",
         ] {
             assert!(
@@ -1871,6 +1872,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["vault_id"],
             "refresh_vault takes vault_id and nothing else"
+        );
+    }
+
+    /// `publish_recovery_branch` (ADR-30) is a Vault control like
+    /// `sync_vault`: write mode only, one `vault_id`, not destructive (it only
+    /// ever fast-forwards its own branch) and idempotent (a repeat publishes
+    /// to the same branch).
+    #[tokio::test]
+    async fn publish_recovery_branch_is_advertised_as_a_write_mode_vault_control() {
+        let (state, _tmp) = write_state();
+        let tool = tool_named(&tools_list_result(&state).await, "publish_recovery_branch").clone();
+        assert_eq!(tool["annotations"]["readOnlyHint"], false, "{tool:#}");
+        assert_eq!(tool["annotations"]["destructiveHint"], false, "{tool:#}");
+        assert_eq!(tool["annotations"]["idempotentHint"], true, "{tool:#}");
+        assert_eq!(tool["inputSchema"]["required"], json!(["vault_id"]));
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert!(tool["outputSchema"].is_object());
+
+        let (read_only, _tmp) = test_state();
+        let body = tools_list_result(&read_only).await;
+        assert!(
+            !body["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "publish_recovery_branch")
+        );
+        let rejected = call_tool(&read_only, "publish_recovery_branch", json!({})).await;
+        assert_eq!(rejected["error"]["code"], -32602);
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("write tools are disabled")
+        );
+    }
+
+    /// A Vault whose sync is not stopped on a conflict has no side to
+    /// publish, and the refusal is the structured `capability_unavailable`
+    /// every other ineligible Vault control returns.
+    #[tokio::test]
+    async fn publish_recovery_branch_refuses_a_vault_that_is_not_in_conflict() {
+        let (state, _tmp) = write_state();
+        let body = call_tool(&state, "publish_recovery_branch", json!({})).await;
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(
+            body["result"]["structuredContent"]["code"], "capability_unavailable",
+            "{body:#}"
         );
     }
 

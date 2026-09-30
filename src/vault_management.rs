@@ -41,9 +41,9 @@ use crate::vault_registry::{
     VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState, VaultSource,
 };
 use crate::vault_runtime::{
-    CollectionVaultSnapshot, LocalContentStatus, VaultActivationStatus, VaultCapabilities,
-    VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus, VaultRuntimeError,
-    VaultSearchStatus, VaultWatcherStatus,
+    CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
+    VaultCapabilities, VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus,
+    VaultRuntimeError, VaultSearchStatus, VaultWatcherStatus,
 };
 use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{ScheduleResult, VaultWorkKind};
@@ -98,6 +98,12 @@ pub struct VaultSummary {
     pub git_error: Option<VaultRuntimeError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_error: Option<VaultRuntimeError>,
+    /// The outcome of the latest request to publish this Vault's side of a
+    /// sync conflict to its recovery branch (ADR-30). Absent until one is
+    /// made, once the conflict clears, and on a read that withholds operator
+    /// detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_branch: Option<RecoveryBranchStatus>,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
@@ -445,6 +451,7 @@ fn unreconciled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapsho
         search_error: None,
         git_error: None,
         watcher_error: None,
+        recovery_branch: None,
     }
 }
 
@@ -476,6 +483,7 @@ fn vault_summary(
         search_error: snapshot.search_error.clone(),
         git_error: snapshot.git_error.clone(),
         watcher_error: snapshot.watcher_error.clone(),
+        recovery_branch: snapshot.recovery_branch.clone(),
     }
 }
 
@@ -527,6 +535,7 @@ fn public_vault_summary(
         search_error: None,
         git_error: None,
         watcher_error: None,
+        recovery_branch: None,
     }
 }
 
@@ -809,6 +818,39 @@ impl<'a> VaultCollectionManagement<'a> {
     /// named entry point (mirrors `ManagedGitScheduler::retry_now`).
     pub fn retry(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
         self.managed_git_control(vault_id, true)
+    }
+
+    /// Admit a request to publish this Vault's side of a sync conflict to its
+    /// recovery branch (ADR-30). Only a Two-way Vault whose Git status
+    /// reports a conflict is eligible, which is exactly its
+    /// `publish_recovery` capability. The publish runs later, as a Git turn
+    /// of its own under the Vault's mutation lock, and reports on the Vault's
+    /// `recovery_branch` status rather than here.
+    pub fn publish_recovery(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultScheduleResponse, VaultOperationError> {
+        self.enabled_definition(vault_id)?;
+        let eligible = self
+            .state
+            .vaults
+            .runtime(vault_id)
+            .is_some_and(|runtime| runtime.snapshot().capabilities.publish_recovery);
+        if !eligible {
+            return Err(VaultOperationError::new(
+                "capability_unavailable",
+                "A recovery branch can only be published for a Two-way Vault whose sync \
+                 stopped on a conflict",
+                Some(vault_id),
+                false,
+            ));
+        }
+        schedule_response(
+            vault_id,
+            self.state
+                .vault_work
+                .request(vault_id, VaultWorkKind::Recovery),
+        )
     }
 
     /// Admit one manual Git operation, choosing it from what this Vault
@@ -1423,6 +1465,7 @@ mod tests {
                 retry: true,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "the authenticated projection keeps reporting the derived capabilities"
         );
@@ -1437,6 +1480,7 @@ mod tests {
                 retry: true,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "an unavailable Vault browses nowhere but is worth retrying"
         );
@@ -1451,6 +1495,7 @@ mod tests {
                 retry: false,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "a Vault mid-index browses but does not search"
         );
@@ -1494,6 +1539,7 @@ mod tests {
                 retry: false,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "a demo reports what an unauthenticated visitor may do"
         );
@@ -1516,6 +1562,7 @@ mod tests {
                 retry: false,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "a demo passes browse and search through untouched"
         );

@@ -347,6 +347,22 @@ pub async fn retry_vault_handler(
     }
 }
 
+/// `POST /api/v1/vaults/{vault_id}/recovery-branch` — ask for this Vault's
+/// side of a sync conflict to be published to its recovery branch (ADR-30).
+/// Admits the turn and returns; the outcome lands on the Vault's
+/// `recovery_branch` status.
+pub async fn publish_recovery_branch_handler(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Response {
+    match parse_vault_id(&raw_id)
+        .and_then(|vault_id| VaultCollectionManagement::new(&state).publish_recovery(vault_id))
+    {
+        Ok(response) => schedule_response(response),
+        Err(error) => management_error_response(error),
+    }
+}
+
 /// `POST /api/v1/vaults/{vault_id}/refresh` — request one Vault's next Index
 /// turn. The route only admits work to the shared FIFO; the runtime worker
 /// performs the authoritative Markdown scan and atomic snapshot publication.
@@ -579,5 +595,103 @@ mod tests {
 
         let sync = sync_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
         assert_eq!(sync.status(), StatusCode::ACCEPTED);
+    }
+
+    /// `POST .../recovery-branch` admits a publish only while a Two-way
+    /// Vault's sync is stopped on a conflict (ADR-30), and says so with the
+    /// same `409 capability_unavailable` every other ineligible control uses.
+    #[tokio::test]
+    async fn a_recovery_branch_is_admitted_only_for_a_two_way_vault_in_conflict() {
+        let (state, _worker, directory) = test_state();
+        let repository_path = directory.path().join("existing-two-way-repo");
+        std::fs::create_dir_all(&repository_path).expect("create repo directory");
+        git2::Repository::init(&repository_path).expect("init git repo");
+        let created = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Two way".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: Some("https://example.test/owner/notes.git".to_string()),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        let refused =
+            publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(refused.into_body(), usize::MAX)
+                .await
+                .expect("refusal body"),
+        )
+        .expect("refusal JSON");
+        assert_eq!(body["code"], "capability_unavailable");
+
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("active runtime")
+            .set_git_status(
+                crate::vault_runtime::VaultGitStatus::Unavailable,
+                Some(crate::vault_runtime::VaultRuntimeError {
+                    code: "managed_git_conflict".to_string(),
+                    message: "managed checkout merge conflict: Home.md".to_string(),
+                    retryable: false,
+                    detail: None,
+                }),
+            )
+            .expect("publish the conflict");
+
+        let listed = list_vaults_handler(State(state.clone())).await;
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(listed.into_body(), usize::MAX)
+                .await
+                .expect("discovery body"),
+        )
+        .expect("discovery JSON");
+        assert_eq!(body["vaults"][0]["capabilities"]["publish_recovery"], true);
+
+        let admitted =
+            publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(admitted.into_body(), usize::MAX)
+                .await
+                .expect("schedule body"),
+        )
+        .expect("schedule JSON");
+        assert_eq!(body["schedule"], "queued");
+
+        let again =
+            publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(again.into_body(), usize::MAX)
+                .await
+                .expect("schedule body"),
+        )
+        .expect("schedule JSON");
+        assert_eq!(
+            body["schedule"], "coalesced",
+            "a second request joins the pending publish"
+        );
     }
 }

@@ -213,7 +213,7 @@ fn note_write_result(vault_id: VaultId, outcome: NoteWriteOutcome) -> Value {
 /// `write_ops_match_the_advertised_catalogue` fails if it is added to the
 /// catalogue and forgotten here.
 ///
-/// Vault-management tools (`create_vault` through `retry_vault`) are deliberately
+/// Vault-management tools (`create_vault` through `publish_recovery_branch`) are deliberately
 /// absent: they mutate the registry, not a Vault's content, and are dispatched
 /// and gated separately.
 pub(super) const WRITE_OPS: &[&str] = &[
