@@ -1088,10 +1088,7 @@ fn plan_recovery_turn(
             poll_interval_secs: _,
         } => {
             let credentials = git_credentials(registry, vault_id)?;
-            let state_directory = registry
-                .path()
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let state_directory = managed_state_directory(registry);
             let config = ManagedGitTurnConfig {
                 vault_id,
                 state_directory: state_directory.clone(),
@@ -1243,10 +1240,7 @@ fn plan_commit_turn(
             mode: VaultGitMode::TwoWay,
             poll_interval_secs: _,
         } => {
-            let state_directory = registry
-                .path()
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let state_directory = managed_state_directory(registry);
             let config = ManagedGitTurnConfig {
                 vault_id,
                 state_directory: state_directory.clone(),
@@ -1423,10 +1417,7 @@ where
         } => {
             let credentials = git_credentials(registry, vault_id)?;
             let write_ledger = control_block.write_ledger();
-            let state_directory = registry
-                .path()
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            let state_directory = managed_state_directory(registry);
             let config = ManagedGitTurnConfig {
                 vault_id,
                 state_directory: state_directory.clone(),
@@ -1450,6 +1441,14 @@ where
         // `Local` has no Git turn at all.
         RegistryVaultSource::Local { .. } => Ok(None),
     }
+}
+
+/// The directory managed checkouts live under: the registry file's own.
+fn managed_state_directory(registry: &VaultRegistryStore) -> PathBuf {
+    registry
+        .path()
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 /// Read a Vault's stored HTTPS credentials, mapping an unreachable registry

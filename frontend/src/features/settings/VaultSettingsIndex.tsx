@@ -20,6 +20,7 @@ import {
   describeGitFailure,
   describeRecoveryFailure,
   fetchRegistryRevision,
+  gitSource,
   type GitBehavior,
   isRecoveryPending,
   isRemoteBacked,
@@ -266,9 +267,8 @@ function RecoveryBranchPanel({
   const status = vault.recovery_branch;
   const branch = recoveryBranchName(vault);
   const url = branch ? recoveryBranchUrl(vault.source, branch) : null;
-  const configured =
-    vault.source?.type === "local" ? undefined : vault.source?.branch;
-  const published = status?.published_commit
+  const configuredBranch = gitSource(vault.source)?.branch;
+  const publishedLine = status?.published_commit
     ? `Published ${status.published_commit.slice(0, 7)}${
         status.published_at ? ` ${formatWhen(status.published_at)}` : ""
       }. Saves made since then are not on the branch until you publish again.`
@@ -277,9 +277,9 @@ function RecoveryBranchPanel({
     <div className="settings-console-recovery">
       <p>
         Publish this Vault&rsquo;s side to its own branch on the remote, merge
-        that branch into {configured ?? "the synced branch"} with your usual Git
-        tools, and syncing picks up again by itself. Hatchdoor never overwrites
-        or deletes the branch.
+        that branch into {configuredBranch ?? "the synced branch"} with your
+        usual Git tools, and syncing picks up again by itself. Hatchdoor never
+        overwrites or deletes the branch.
       </p>
       {branch ? (
         <div className="settings-console-recovery-branch">
@@ -300,7 +300,7 @@ function RecoveryBranchPanel({
           ) : null}
         </div>
       ) : null}
-      {published ? <p>{published}</p> : null}
+      {publishedLine ? <p>{publishedLine}</p> : null}
       {status?.error ? (
         <p role="alert">{describeRecoveryFailure(status.error)}</p>
       ) : null}

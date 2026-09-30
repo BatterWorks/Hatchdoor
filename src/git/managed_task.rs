@@ -538,8 +538,9 @@ fn publish(config: &ManagedSyncConfig, vault_id: VaultId, ledger: &WriteLedger) 
     })
 }
 
-/// The failure both recovery turns report when handed a mode that has no
-/// recovery branch. A caller bug: admission requires a Two-way Vault.
+/// The failure [`run_managed_recovery_turn`] reports when handed a mode that
+/// has no recovery branch. A caller bug: admission requires a Two-way Vault,
+/// and the existing-checkout turn is only ever planned for one.
 fn recovery_mode_error() -> VaultWorkError {
     VaultWorkError::new(
         "vault_recovery_mode_has_no_branch",

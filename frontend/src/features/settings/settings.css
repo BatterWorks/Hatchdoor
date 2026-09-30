@@ -432,14 +432,14 @@
 .settings-console-recovery {
   flex-basis: 100%;
   display: grid;
-  gap: 0.5rem;
+  gap: var(--space-2);
   justify-items: start;
 }
 
 .settings-console-recovery-branch {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: var(--space-2);
   flex-wrap: wrap;
   font-size: 0.82rem;
 }

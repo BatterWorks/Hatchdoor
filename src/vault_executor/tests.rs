@@ -3562,3 +3562,102 @@ async fn a_recovery_turn_for_a_vault_no_longer_in_conflict_publishes_nothing() {
         .is_none()
     );
 }
+
+/// A refused publish reports on `recovery_branch` and nowhere else: the
+/// earlier publication's fields stay, because that branch still stands, and
+/// the conflict stays the Vault's Git failure (ADR-30).
+#[tokio::test]
+async fn a_refused_recovery_publish_keeps_the_earlier_publication_and_the_conflict() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Diverged",
+        repository_path.clone(),
+        VaultGitMode::TwoWay,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    push_as_actor(
+        &remote_path,
+        &directory.path().join("actor"),
+        "vault/Home.md",
+        "theirs\n",
+    );
+    std::fs::write(repository_path.join("vault/Home.md"), "mine\n").expect("local edit");
+    run_one_git_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect_err("the sync conflicts");
+    run_one_recovery_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect("first publish");
+    let first = control_block.snapshot().recovery_branch.expect("published");
+
+    // Someone starts resolving on the recovery branch itself.
+    let branch = format!("hatchdoor-recovery/master/{vault_id}");
+    let resolver_path = directory.path().join("resolver");
+    let resolver =
+        git2::Repository::clone(remote_path.to_str().expect("remote path"), &resolver_path)
+            .expect("resolver checkout");
+    let tip = resolver
+        .refname_to_id(&format!("refs/remotes/origin/{branch}"))
+        .expect("recovery branch");
+    resolver
+        .branch("work", &resolver.find_commit(tip).expect("tip"), false)
+        .expect("work branch");
+    resolver.set_head("refs/heads/work").expect("switch");
+    resolver
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .expect("checkout");
+    commit_file(&resolver, "vault/Home.md", "half resolved\n", "resolving");
+    resolver
+        .find_remote("origin")
+        .expect("origin")
+        .push(
+            &[format!("refs/heads/work:refs/heads/{branch}").as_str()],
+            None,
+        )
+        .expect("push to the recovery branch");
+    std::fs::write(repository_path.join("vault/Later.md"), "later\n").expect("later save");
+
+    let error = run_one_recovery_turn(
+        &collection,
+        &registry,
+        &coordinator,
+        &managed_git,
+        &mut worker,
+        vault_id,
+    )
+    .await
+    .expect_err("diverged");
+
+    assert_eq!(error.code(), "managed_git_recovery_diverged");
+    let after = control_block.snapshot();
+    let status = after.recovery_branch.expect("refusal reported");
+    assert_eq!(
+        status.error.map(|error| error.code),
+        Some("managed_git_recovery_diverged".to_string())
+    );
+    assert_eq!(status.branch, first.branch);
+    assert_eq!(status.published_commit, first.published_commit);
+    assert_eq!(status.published_at, first.published_at);
+    assert_eq!(
+        after.git_error.map(|error| error.code),
+        Some("managed_git_conflict".to_string())
+    );
+    assert!(after.capabilities.publish_recovery);
+}

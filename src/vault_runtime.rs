@@ -2347,7 +2347,7 @@ fn collection_capabilities(
             && snapshot
                 .git_error
                 .as_ref()
-                .is_some_and(|error| error.code == crate::git::managed_task::CONFLICT_CODE),
+                .is_some_and(|error| error.code == crate::git::CONFLICT_CODE),
     }
 }
 

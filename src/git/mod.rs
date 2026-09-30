@@ -22,8 +22,8 @@ pub use managed_sync::{
     synchronize_managed_checkout,
 };
 pub use managed_task::{
-    DEFAULT_POLL_INTERVAL, DEFAULT_TICK_INTERVAL, GitPollingClock, ManagedGitOutcome,
-    ManagedGitScheduler, ManagedGitTurnConfig, RecoveryFailure, RecoveryResult,
+    CONFLICT_CODE, DEFAULT_POLL_INTERVAL, DEFAULT_TICK_INTERVAL, GitPollingClock,
+    ManagedGitOutcome, ManagedGitScheduler, ManagedGitTurnConfig, RecoveryFailure, RecoveryResult,
     run_existing_git_commit_turn, run_existing_git_recovery_turn, run_existing_git_remote_turn,
     run_managed_git_commit_turn, run_managed_git_turn, run_managed_recovery_turn,
     spawn_scheduler_tick,

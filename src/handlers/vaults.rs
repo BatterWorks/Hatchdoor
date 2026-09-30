@@ -694,4 +694,70 @@ mod tests {
             "a second request joins the pending publish"
         );
     }
+
+    /// Only Two-way has a recovery branch: a Pull-only or Local-history Vault
+    /// is refused even while its status names a conflict (ADR-30).
+    #[tokio::test]
+    async fn a_recovery_branch_is_refused_for_pull_only_and_local_history_vaults() {
+        for (name, mode, url) in [
+            (
+                "Pull only",
+                VaultGitMode::PullOnly,
+                Some("https://example.test/owner/pull.git".to_string()),
+            ),
+            ("Local history", VaultGitMode::LocalHistory, None),
+        ] {
+            let (state, _worker, directory) = test_state();
+            let repository_path = directory.path().join("repo");
+            std::fs::create_dir_all(&repository_path).expect("create repo directory");
+            git2::Repository::init(&repository_path).expect("init git repo");
+            let created = create_vault_handler(
+                State(state.clone()),
+                Ok(Json(CreateVaultRequest {
+                    expected_registry_revision: 0,
+                    name: name.to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path,
+                        repository_url: url,
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode,
+                        poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                })),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::CREATED, "{name}");
+            let VaultRegistryState::Ready(snapshot) =
+                state.vault_registry.load().expect("load registry")
+            else {
+                panic!("registry entered recovery");
+            };
+            let vault_id = snapshot.vault_ids().next().expect("one Vault");
+            state
+                .vaults
+                .runtime(vault_id)
+                .expect("active runtime")
+                .set_git_status(
+                    crate::vault_runtime::VaultGitStatus::Unavailable,
+                    Some(crate::vault_runtime::VaultRuntimeError {
+                        code: "managed_git_conflict".to_string(),
+                        message: "conflict".to_string(),
+                        retryable: false,
+                        detail: None,
+                    }),
+                )
+                .expect("publish the conflict");
+
+            let refused =
+                publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string()))
+                    .await;
+            assert_eq!(refused.status(), StatusCode::CONFLICT, "{name}");
+        }
+    }
 }

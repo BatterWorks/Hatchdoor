@@ -720,7 +720,6 @@ export function NotePage({
     () => linesMatch(parsed.body, markdown),
     [parsed.body, markdown],
   );
-
   const inlineEditingEnabled =
     writeEnabled && !isEditing && lineMappingIntact && !!note;
 
