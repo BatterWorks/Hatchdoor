@@ -48,6 +48,8 @@ Two HTTP routes accept the MCP bearer token as well as the web one, so an agent 
 
 The MCP token is header-only on both. Only the web token may ride in an `access_token` query parameter, because only the browser needs it to.
 
+These gates exist only on a deployment with a web token. With none, both routes are open to anyone who can reach the server, like the rest of the web API, and setting an MCP token does not change that: the MCP token only ever adds a way in, and never starts asking the browser for a credential it does not have.
+
 On the download route the MCP credential is deliberately held to the **same limits it has over `/mcp`**, so the URL isn't a way around them:
 
 - **Size.** It can read up to `HATCHDOOR_MCP_MAX_BASE64_BYTES` (5 MiB by default), the same ceiling `get_attachment`'s base64 encoding enforces — not the route's own much larger bound. An attachment over that returns `413`. Lower the setting and both paths tighten together.

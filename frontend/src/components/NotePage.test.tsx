@@ -1,5 +1,6 @@
 import {
   cleanup,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -7,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { act } from "react";
 import { EditorView } from "@codemirror/view";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
@@ -736,5 +737,386 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     fireEvent.blur(screen.getByRole("textbox"));
     await waitFor(() => expect(sent).toHaveLength(1));
     await waitFor(() => expect(isAppReloadHeld()).toBe(false));
+  });
+
+  // The full source editor keeps its text in a debounced draft, so a reload
+  // between a keystroke and that write loses it just as surely (#332).
+  it("holds off the service-worker reload while the source editor is open", async () => {
+    const sent = mockVault("Body on disk.\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Body being typed." } });
+    expect(isAppReloadHeld()).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await waitFor(() => expect(isAppReloadHeld()).toBe(false));
+  });
+});
+
+describe("NotePage conflict review and editing correctness (#331)", () => {
+  type Sent = { url: string; init: RequestInit };
+  type DiskNote = { content: string; hash: string };
+
+  /**
+   * A Vault holding `home` and `other`. Reads return whatever `disk` holds at
+   * the time, so a test can move a note on disk mid-edit; a PUT answers 409
+   * whenever its expected hash is not the one on disk.
+   */
+  function mockTwoNotes(disk: Record<string, DiskNote>): Sent[] {
+    const sent: Sent[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: "vault-1", results: [] });
+        }
+        if (url.includes("/attachments") && init?.method === "POST") {
+          sent.push({ url, init });
+          return jsonResponse({
+            vault_id: "vault-1",
+            attachment: { relative_path: "Attachments/scan.pdf" },
+          });
+        }
+        const slug = Object.keys(disk).find((name) =>
+          url.includes(`/notes/${name}`),
+        );
+        if (!slug) {
+          return jsonResponse({ error: "not found" }, 404);
+        }
+        if (url.endsWith("/links")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (init?.method === "PUT") {
+          sent.push({ url, init });
+          const body = JSON.parse(String(init.body)) as {
+            content: string;
+            expected_content_hash?: string;
+          };
+          if (
+            body.expected_content_hash &&
+            body.expected_content_hash !== disk[slug].hash
+          ) {
+            return jsonResponse({ error: "changed on disk" }, 409);
+          }
+          disk[slug] = { content: body.content, hash: `${slug}-saved` };
+          return jsonResponse({
+            vault_id: "vault-1",
+            ok: true,
+            slug,
+            relative_path: `${slug}.md`,
+            content_hash: disk[slug].hash,
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
+        }
+        return jsonResponse({
+          vault_id: "vault-1",
+          note: {
+            title: slug,
+            slug,
+            relative_path: `${slug}.md`,
+            content: disk[slug].content,
+            content_hash: disk[slug].hash,
+            layer: null,
+          },
+        });
+      },
+    );
+    return sent;
+  }
+
+  function renderWithNav(extra?: React.ReactNode) {
+    return render(
+      <MemoryRouter initialEntries={["/v/vault-1/n/home"]}>
+        <Link to="/v/vault-1/n/other">Go to other</Link>
+        {extra}
+        <Routes>
+          <Route
+            path="/v/:vaultId/n/:slug"
+            element={
+              <NotePage
+                onActiveNoteChange={vi.fn()}
+                onTagSelect={vi.fn()}
+                propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
+                vaultRevision={null}
+                writeEnabled={true}
+                editRequestId={0}
+                vaults={[]}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  function openBlock(): HTMLElement {
+    const block = document.querySelector<HTMLElement>(
+      ".block-input .cm-content",
+    );
+    if (!block) {
+      throw new Error("no block is open");
+    }
+    return block;
+  }
+
+  function typeInOpenBlock(text: string): void {
+    const view = EditorView.findFromDOM(openBlock());
+    if (!view) {
+      throw new Error("no CodeMirror view is mounted on the active block");
+    }
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+      });
+    });
+  }
+
+  it("drops the conflict review when the user navigates to another note", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    renderWithNav();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.change(await screen.findByRole("textbox"), {
+      target: { value: "Home body, edited here.\n" },
+    });
+    // Someone else writes the note while the editor is open.
+    disk.home = { content: "Home body, edited elsewhere.\n", hash: "home-2" };
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(
+      await screen.findByRole("region", { name: "Conflict review" }),
+    ).toBeInTheDocument();
+
+    // Leave without resolving it. The editor for the other note must not
+    // inherit a review of home's disk version against other's text.
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    expect(await screen.findByText("Other body.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("textbox");
+    expect(
+      screen.queryByRole("region", { name: "Conflict review" }),
+    ).not.toBeInTheDocument();
+
+    // And nothing ever wrote home's slug with other's text.
+    const puts = sent.filter((entry) => entry.init.method === "PUT");
+    expect(puts).toHaveLength(1);
+    expect(disk.home.content).toBe("Home body, edited elsewhere.\n");
+  });
+
+  it("drops a conflict fetch that lands after the user has left the note", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    mockTwoNotes(disk);
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const realImpl = fetchMock.getMockImplementation()!;
+    let releaseConflictRead: () => void = () => {};
+    let putSeen = false;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (init?.method === "PUT") {
+        putSeen = true;
+      } else if (putSeen && url.endsWith("/notes/home")) {
+        // Hold the disk read that follows the 409 until the user has moved on.
+        putSeen = false;
+        await new Promise<void>((resolve) => {
+          releaseConflictRead = resolve;
+        });
+      }
+      return realImpl(input, init);
+    });
+    renderWithNav();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.change(await screen.findByRole("textbox"), {
+      target: { value: "Home body, edited here.\n" },
+    });
+    disk.home = { content: "Home body, edited elsewhere.\n", hash: "home-2" };
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(putSeen).toBe(false));
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    expect(await screen.findByText("Other body.")).toBeInTheDocument();
+    await act(async () => {
+      releaseConflictRead();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("textbox");
+    expect(
+      screen.queryByRole("region", { name: "Conflict review" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not run document undo for Ctrl+Z typed into another text field", async () => {
+    const disk = {
+      home: { content: "First paragraph.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    renderWithNav(
+      <>
+        <input aria-label="Search box" />
+        <textarea aria-label="Property box" />
+      </>,
+    );
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, edited.");
+    fireEvent.blur(openBlock());
+    await screen.findByText("First paragraph, edited.");
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    const input = screen.getByLabelText("Search box");
+    const inputUndo = fireEvent.keyDown(input, { key: "z", ctrlKey: true });
+    const textareaUndo = fireEvent.keyDown(
+      screen.getByLabelText("Property box"),
+      { key: "z", metaKey: true },
+    );
+
+    // The field keeps its own native undo, and the note is left alone.
+    expect(inputUndo).toBe(true);
+    expect(textareaUndo).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText("First paragraph, edited.")).toBeInTheDocument();
+    expect(sent).toHaveLength(1);
+
+    // Outside any field, document undo still answers.
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    expect(await screen.findByText("First paragraph.")).toBeInTheDocument();
+  });
+
+  it("never restores a draft older than the last inline save into source mode", async () => {
+    // A source-mode draft left behind against a version that has since moved.
+    saveNoteDraft("vault-1", "home", {
+      vaultId: "vault-1",
+      slug: "home",
+      content: "An old source-mode draft.",
+      baseContentHash: "home-0",
+      savedAt: Date.now() - 60_000,
+    });
+    const disk = {
+      home: { content: "First paragraph.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    renderWithNav();
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, saved inline.");
+    fireEvent.blur(screen.getByRole("textbox"));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await waitFor(() =>
+      expect(disk.home.content).toBe("First paragraph, saved inline.\n"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const textarea = (await screen.findByRole(
+      "textbox",
+    )) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("First paragraph, saved inline.\n");
+    expect(screen.queryByText(/Restored an earlier draft/)).toBeNull();
+  });
+
+  it("places a dropped attachment after the block aimed at when the open block gained lines", async () => {
+    const disk = {
+      home: {
+        content: "First paragraph.\n\nSecond paragraph.\n",
+        hash: "home-1",
+      },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    // jsdom lays nothing out, so each block is given a band by its first line.
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        const start = Number(this.dataset.startLine);
+        const top = Number.isFinite(start) ? start * 100 : 0;
+        return {
+          top,
+          bottom: top + 50,
+          left: 0,
+          right: 100,
+          width: 100,
+          height: 50,
+          x: 0,
+          y: top,
+          toJSON: () => ({}),
+        } as DOMRect;
+      },
+    );
+    const { container } = renderWithNav();
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    // Still open when the file lands: the drop's own blur commits it, and the
+    // commit turns one line into two.
+    typeInOpenBlock("First line.\nAn added line.");
+
+    const file = new File(["%PDF-1.4"], "scan.pdf", {
+      type: "application/pdf",
+    });
+    const dropZone = container.querySelector(".note-body-drop")!;
+    // jsdom has no DragEvent, so the coordinates are put on by hand.
+    const drop = createEvent.drop(dropZone);
+    Object.defineProperty(drop, "clientY", { value: 320 });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+    fireEvent(dropZone, drop);
+
+    await waitFor(() =>
+      expect(
+        sent.filter((entry) => entry.init.method === "PUT").length,
+      ).toBeGreaterThan(0),
+    );
+    await waitFor(() =>
+      expect(disk.home.content).toContain("![[Attachments/scan.pdf]]"),
+    );
+    expect(disk.home.content).toBe(
+      "First line.\nAn added line.\n\nSecond paragraph.\n\n![[Attachments/scan.pdf]]\n",
+    );
+  });
+
+  // Found in the live pass for #331: the history for the note just opened was
+  // seeded while the page still held the previous note, so undoing the first
+  // edit there wrote the previous note's whole text over this one.
+  it("never undoes into the text of the note that was open before", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    renderWithNav();
+
+    await screen.findByText("Home body.");
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    fireEvent.click(await screen.findByText("Other body."));
+    typeInOpenBlock("Other body, edited.");
+    fireEvent.blur(openBlock());
+    await waitFor(() =>
+      expect(disk.other.content).toBe("Other body, edited.\n"),
+    );
+
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(sent).toHaveLength(2));
+    await waitFor(() => expect(disk.other.content).toBe("Other body.\n"));
+    expect(disk.home.content).toBe("Home body.\n");
   });
 });

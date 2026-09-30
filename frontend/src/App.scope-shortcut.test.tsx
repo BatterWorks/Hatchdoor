@@ -49,6 +49,18 @@ function mockThreeVaultFetch() {
       if (url.includes("/recent")) {
         return collectionEnvelope([]);
       }
+      if (url.endsWith("/api/v1/vaults/all/stats")) {
+        return collectionEnvelope(
+          THREE_VAULTS.map((vault, index) => ({
+            vault_id: vault.vault_id,
+            vault_name: vault.name,
+            note_count: index + 3,
+            tag_count: 0,
+            link_count: 0,
+            vault_size_bytes: 0,
+          })),
+        );
+      }
       return jsonResponse({ error: "not found" }, 404);
     },
   );
@@ -257,7 +269,7 @@ describe("App scope shortcut (#146)", () => {
     fireEvent.click(alphaRow);
 
     await waitFor(() => {
-      expect(screen.getByText(/^Alpha\./)).toBeInTheDocument();
+      expect(screen.getByText("Alpha. 3 notes")).toBeInTheDocument();
     });
   });
 });

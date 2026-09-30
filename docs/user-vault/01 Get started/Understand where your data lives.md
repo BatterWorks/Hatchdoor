@@ -23,7 +23,7 @@ Hatchdoor keeps destructive operations recoverable:
 - [x] The trash folder is excluded from indexing.
 - [x] Archiving moves notes under `90-archive/` by default.
 
-Keep generated cache data outside the Vault. That way a backup or Git history
+Keep generated cache data outside the Vault. Hatchdoor enforces the reverse: it refuses a Vault folder that is, contains, or sits inside the state, cache or settings directory. That way a backup or Git history
 contains your notes and attachments, not a disposable index.
 
 You have completed the agent-first path. Return to [[Home]] for the growing

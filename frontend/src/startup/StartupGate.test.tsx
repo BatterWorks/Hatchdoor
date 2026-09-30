@@ -29,10 +29,67 @@ function renderGate(
 }
 
 describe("StartupGate", () => {
-  it("mounts the workspace before the first status answer lands", () => {
+  it("holds the workspace unmounted until the first status answer lands (#339)", () => {
+    // Mounting it now would only have it torn down a fetch later if that
+    // answer is a model step, discarding its state and fetches.
     renderGate({ status: null });
 
+    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
+  });
+
+  it("releases the hold when the first status poll fails, so a missing answer never locks anyone out", () => {
+    renderGate({ status: null, connectionIssue: true });
+
     expect(screen.getByText("Private vault")).toBeVisible();
+  });
+
+  it("never holds a zero-Vault or broken-registry workspace, which never polls", () => {
+    renderGate({ status: null, hasNoVaults: true });
+    expect(screen.getByText("Private vault")).toBeVisible();
+
+    cleanup();
+    renderGate({ status: null, hasRegistryRecovery: true });
+    expect(screen.getByText("Private vault")).toBeVisible();
+  });
+
+  it("offers the model choice again when terms are required after the gate has stepped aside (#339)", () => {
+    // Nothing else in the app can accept or decline Gemma: a latched client
+    // must not be left with search silently dead.
+    renderGate({
+      status: { state: "terms_required" },
+      hasSteppedPastGate: true,
+    });
+
+    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Accept terms and set up Gemma" }),
+    ).toBeVisible();
+  });
+
+  it("does not re-gate a latched demo visitor on terms, since the demo server refuses the choice", () => {
+    renderGate({
+      status: { state: "terms_required" },
+      hasSteppedPastGate: true,
+      demoMode: true,
+    });
+
+    expect(screen.getByText("Private vault")).toBeVisible();
+  });
+
+  it("never shows a fresh demo visitor the operator model choice, since the demo server refuses it", () => {
+    renderGate({
+      status: { state: "terms_required" },
+      hasSteppedPastGate: false,
+      demoMode: true,
+    });
+
+    expect(screen.getByText("Private vault")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Accept terms and set up Gemma" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Use Nomic instead" }),
+    ).not.toBeInTheDocument();
   });
 
   it("mounts the vault immediately once the gate has stepped aside, even mid-scan", () => {
@@ -129,7 +186,12 @@ describe("StartupGate", () => {
   it("waits for registry discovery and lets a recovery state override a model gate", () => {
     const modelSetup = { status: { state: "terms_required" as const } };
     renderGate({ ...modelSetup, discoveryLoading: true });
-    expect(screen.getByText("Private vault")).toBeVisible();
+    // Undecided rather than gated or mounted: discovery may yet turn up a
+    // recovery state that overrides the model step.
+    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Set up multilingual search" }),
+    ).not.toBeInTheDocument();
 
     cleanup();
     renderGate({ ...modelSetup, hasRegistryRecovery: true });

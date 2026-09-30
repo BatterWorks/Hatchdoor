@@ -27,6 +27,22 @@ const LEGACY_STORED_KEYS: [&str; 9] = [
     "HATCHDOOR_GIT_AUTHOR_EMAIL",
 ];
 
+/// The migrated keys no post-migration code reads: the retired instance-wide
+/// Git lane's inputs, the token among them. Once any registry exists they are
+/// inert, so every boot on an existing registry removes them again (#325): a
+/// crash or transient failure between the import's registry commit and its
+/// one-shot cleanup must not leave a plaintext token in settings for good.
+/// `HATCHDOOR_EXCLUDE` and the two author keys are left alone because they
+/// still have live readers (the commit-identity fallback among them).
+const RETIRED_LEGACY_STORED_KEYS: [&str; 6] = [
+    "HATCHDOOR_GIT_SYNC_ENABLED",
+    "HATCHDOOR_GIT_HTTPS_TOKEN",
+    "HATCHDOOR_GIT_REMOTE",
+    "HATCHDOOR_GIT_BRANCH",
+    "HATCHDOOR_GIT_HTTPS_USERNAME",
+    "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
+];
+
 /// Legacy deployment inputs captured once before collection runtime starts.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LegacyMigrationInput {
@@ -142,6 +158,19 @@ pub fn migrate_legacy_vault(
     let ignored_environment_keys = ignored_legacy_environment_keys(&input.environment);
     match fs::symlink_metadata(registry.path()) {
         Ok(_) => {
+            // Only the settings half of the legacy cleanup is retried here. The
+            // disposable-cache half is deliberately one-shot: once a registry
+            // exists, `cache_db_path` is the live multi-Vault cache, which
+            // `is_recognized_legacy_cache` cannot tell apart from a legacy one,
+            // so deleting it on every start would wipe the live index. A legacy
+            // cache left by an interrupted import holds no secret and is
+            // adopted and rebuilt by `SqliteCache::open` on that same boot.
+            if let Err(error) = runtime_config.remove_stored(RETIRED_LEGACY_STORED_KEYS) {
+                tracing::warn!(
+                    %error,
+                    "could not remove retired legacy Git settings; retrying on the next start"
+                );
+            }
             return Ok(LegacyMigrationOutcome::ExistingRegistry {
                 state: registry.load()?,
                 ignored_environment_keys,
@@ -801,6 +830,113 @@ mod tests {
             std::fs::read(&cache_db_path).expect("cache retained"),
             b"legacy cache must remain"
         );
+    }
+
+    /// #325: the import's settings cleanup used to run exactly once, so a
+    /// crash between the registry commit and `remove_stored` left the legacy
+    /// plaintext token in settings for good. Every boot on an existing
+    /// registry now removes the retired Git keys again, leaving settings that
+    /// still have live readers alone.
+    #[test]
+    fn an_existing_registry_retries_the_retired_legacy_settings_cleanup() {
+        let root = tempdir().expect("temporary deployment");
+        let registry_path = root.path().join("state/vaults.json");
+        let registry = VaultRegistryStore::new(&registry_path);
+        registry
+            .initialize_empty(0)
+            .expect("registry committed before the crash");
+        let settings_path = root.path().join("cache/settings.json");
+        let runtime_config = RuntimeConfig::load(
+            &settings_path,
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+        runtime_config
+            .save([
+                (
+                    "HATCHDOOR_GIT_HTTPS_TOKEN".to_string(),
+                    "legacy-secret-token".to_string(),
+                ),
+                ("HATCHDOOR_GIT_SYNC_ENABLED".to_string(), "on".to_string()),
+                (
+                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                    "Kept Author".to_string(),
+                ),
+                (
+                    "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                    "archive/".to_string(),
+                ),
+            ])
+            .expect("settings left behind by the interrupted cleanup");
+
+        migrate_legacy_vault(
+            &registry,
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path: root.path().join("vault"),
+                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
+                environment: BTreeMap::new(),
+            },
+        )
+        .expect("existing registry wins");
+
+        let stored = std::fs::read_to_string(&settings_path).expect("settings file");
+        assert!(!stored.contains("legacy-secret-token"), "{stored}");
+        assert!(!stored.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{stored}");
+        let restarted = RuntimeConfig::load(
+            &settings_path,
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration after cleanup");
+        let snapshot = restarted.snapshot();
+        assert_eq!(
+            snapshot
+                .required("HATCHDOOR_GIT_AUTHOR_NAME")
+                .expect("author"),
+            "Kept Author"
+        );
+        assert_eq!(
+            snapshot
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("archive prefix"),
+            "archive/"
+        );
+    }
+
+    #[test]
+    fn an_existing_registry_never_deletes_the_live_cache() {
+        let root = tempdir().expect("temporary deployment");
+        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
+        registry
+            .initialize_empty(0)
+            .expect("registry committed on an earlier boot");
+        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
+        drop(crate::cache::SqliteCache::open(&cache_db_path, 768).expect("live cache"));
+        assert!(
+            crate::cache::is_recognized_legacy_cache(&cache_db_path),
+            "the live cache is indistinguishable from a legacy one, which is why the cache cleanup is never retried"
+        );
+        let runtime_config = RuntimeConfig::load(
+            root.path().join("cache/settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+
+        migrate_legacy_vault(
+            &registry,
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path: root.path().join("vault"),
+                cache_db_path: cache_db_path.clone(),
+                environment: BTreeMap::new(),
+            },
+        )
+        .expect("existing registry wins");
+
+        assert!(cache_db_path.is_file(), "the live cache survives a restart");
     }
 
     #[test]

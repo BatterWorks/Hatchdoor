@@ -37,7 +37,7 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness probe; also used by the container's own `--healthcheck`. Returns `200 ok` plaintext. |
-| GET | `/ready` | `200 ready` once legacy single-Vault startup (model + first index) is complete, else `503 not ready`. |
+| GET | `/ready` | `200 ready` once the search model is set up and every active Vault's first index has settled, else `503 not ready`. A Vault that failed to index, or has no folder, counts as settled: its problem shows on that Vault (`GET /api/v1/vaults`), not here. Once `200`, it stays `200` through later reindexing. |
 | GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). `Cache-Control: no-store`. |
 
 ## Model setup

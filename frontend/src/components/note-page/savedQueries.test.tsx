@@ -596,3 +596,84 @@ describe("useSavedQueries", () => {
     );
   });
 });
+
+describe("useSavedQueries evaluates once per change (#334)", () => {
+  const notePath = "/api/v1/vaults/vault-1/notes/dashboard";
+  const markdown = `\`\`\`base\n${CHEAP}\n\`\`\``;
+
+  function answerAt(revision: number) {
+    return new Response(
+      JSON.stringify({
+        scope: "vault-1",
+        collection_revision: revision,
+        partial: false,
+        participants: [],
+        data: {
+          vault_id: "vault-1",
+          slug: "dashboard",
+          queries: [CHEAP_RESULT],
+          marker_problems: [],
+        },
+      }),
+      { status: 200 },
+    );
+  }
+
+  it("does not refetch when the first revision lands while the first read is still open", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockedApiFetch.mockImplementation(async () => {
+      await gate;
+      return answerAt(5);
+    });
+    const { result, rerender } = renderHook(
+      ({ revision }: { revision: number | null }) =>
+        useSavedQueries(notePath, markdown, "hash-1", revision),
+      { initialProps: { revision: null as number | null } },
+    );
+    rerender({ revision: 5 });
+    release();
+
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches when the revision moves past the one already evaluated", async () => {
+    mockedApiFetch.mockImplementation(async () => answerAt(5));
+    const { result, rerender } = renderHook(
+      ({ revision }: { revision: number | null }) =>
+        useSavedQueries(notePath, markdown, "hash-1", revision),
+      { initialProps: { revision: 5 as number | null } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    mockedApiFetch.mockImplementation(async () => answerAt(6));
+    rerender({ revision: 6 });
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
+  });
+
+  it("evaluates nothing while the editor is open, and keeps what was shown", async () => {
+    mockedApiFetch.mockImplementation(async () => answerAt(5));
+    const { result, rerender } = renderHook(
+      ({ hash, revision, enabled }) =>
+        useSavedQueries(notePath, markdown, hash, revision, enabled),
+      { initialProps: { hash: "hash-1", revision: 5, enabled: true } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    // An autosave moves both the content hash and the revision.
+    rerender({ hash: "hash-2", revision: 6, enabled: false });
+    rerender({ hash: "hash-3", revision: 7, enabled: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("ready");
+
+    // Closing the editor evaluates the content it left behind, once.
+    mockedApiFetch.mockImplementation(async () => answerAt(7));
+    rerender({ hash: "hash-3", revision: 7, enabled: true });
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
+  });
+});

@@ -30,6 +30,7 @@ services:
       - ${HOST_STATE_PATH:-./data/state}:/data/state
       - ${HOST_MODELS_PATH:-./models}:/models
     restart: unless-stopped
+    stop_grace_period: 3m
     healthcheck:
       test: ["CMD", "/app/hatchdoor", "--healthcheck"]
       interval: 30s
@@ -40,6 +41,9 @@ services:
 
 > [!note]
 > `HOST: 0.0.0.0` makes Hatchdoor reachable through Docker's internal network. The `127.0.0.1:42824:42824` port mapping keeps it accessible only from the machine running Docker.
+
+> [!note]
+> `stop_grace_period: 3m` lets Hatchdoor finish shutting down cleanly. On `docker compose down` or a restart, it waits for any Git sync that is running to finish or fail. A remote that stops answering is given up on after 15 seconds to connect or 120 seconds without data. Without the setting, Docker waits only 10 seconds and then kills the process mid-sync.
 
 > [!tip]
 > Using Podman instead of Docker? Everything on this page works unchanged — swap `docker` / `docker compose` for `podman` / `podman compose`, but also change the image to `battermanz/hatchdoor:podman-latest` (or `podman-<version>`); the plain `latest` tag above is Docker-only. The `chown` step further down needs `podman unshare` too — see the note there.

@@ -82,6 +82,23 @@ function buildFacetRows(
     });
 }
 
+/** Whether `element` takes part in layout, checked against its computed
+ * style up to `boundary` rather than its box, so the answer is the same in
+ * a browser and in a DOM without layout. */
+function isRendered(element: HTMLElement, boundary: HTMLElement): boolean {
+  for (
+    let node: HTMLElement | null = element;
+    node && node !== boundary.parentElement;
+    node = node.parentElement
+  ) {
+    const style = window.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") {
+      return false;
+    }
+  }
+  return true;
+}
+
 const EMPTY_EXPANDED_SLUGS = new Set<string>();
 
 /** Groups by `(vault_id, note_slug)` — a slug is only unique within its own
@@ -132,6 +149,11 @@ function stripSnippet(raw: string): string {
   return (lastSpace > 150 ? cut.slice(0, lastSpace) : cut) + "…";
 }
 
+/** What a demo visitor reads when search's model is missing or failed: no
+ * operator diagnostic and nothing to act on (#339), the same posture
+ * `vaultSlotLogic.ts` takes for Vault conditions in demo mode (#152). */
+const DEMO_SEARCH_UNAVAILABLE = "Search is unavailable on this demo right now.";
+
 export function SearchDialog({
   query,
   includeContent,
@@ -147,6 +169,7 @@ export function SearchDialog({
   inputRef,
   startupStatus,
   onRetryModelSetup,
+  demoMode = false,
   onClose,
   onQueryChange,
   onIncludeContentChange,
@@ -178,6 +201,11 @@ export function SearchDialog({
    * instead of blocking the whole app. Typing stays live either way. */
   startupStatus: StartupStatus | null;
   onRetryModelSetup: () => void;
+  /** A public demo (#339): model-setup trouble is described in a visitor's
+   * words, never the server's operator diagnostic, and offers no retry — the
+   * server 404s `/api/model/retry` in demo mode, so the button could never
+   * do anything. */
+  demoMode?: boolean;
   onClose: () => void;
   onQueryChange: (value: string) => void;
   onIncludeContentChange: (value: boolean) => void;
@@ -189,6 +217,13 @@ export function SearchDialog({
   const startupPercent =
     startupStatus?.state === "indexing" ? startupStatus.percent : null;
   const startupFailed = startupStatus?.state === "failed";
+  const startupDownloading = startupStatus?.state === "downloading";
+  const startupDownloadPercent =
+    startupStatus?.state === "downloading" &&
+    startupStatus.percent !== undefined
+      ? startupStatus.percent
+      : null;
+  const startupTermsRequired = startupStatus?.state === "terms_required";
   const vaultName = (vaultId: string) =>
     vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId;
   const resultsListRef = useRef<HTMLUListElement | null>(null);
@@ -231,18 +266,27 @@ export function SearchDialog({
   // did not narrow to, with counts, one click away. A tag tap wins over the
   // scope: it names the Vault the tag was read in.
   //
-  // Both are filtered through the enabled Vaults first. `useVaultScope` reads
-  // the browsing scope straight out of localStorage and never reconciles it
-  // against the collection, so a Vault disabled since it was last browsed
-  // leaves a stale id behind. Seeding on that would open the dialog filtered
-  // to a Vault with no row to click, with nothing selected and the raw id
-  // rendered as a name. All results is the honest fallback.
-  const [vaultFilter, setVaultFilter] = useState<VaultId | "all">(() => {
+  // Both are filtered through the enabled Vaults first. `useVaultScope` only
+  // reconciles the browsing scope once discovery has answered (#335), and a
+  // tag tap can name any Vault, so a Vault disabled since it was last browsed
+  // can still arrive here as a stale id. Seeding on that would open the dialog
+  // filtered to a Vault with no row to click, with nothing selected and the
+  // raw id rendered as a name. All results is the honest fallback.
+  const [chosenVaultFilter, setVaultFilter] = useState<VaultId | "all">(() => {
     const preferred = initialVaultFilter ?? scope;
     return vaults.some((vault) => vault.vault_id === preferred)
       ? preferred
       : "all";
   });
+  // The seed above runs once, but the collection can lose a Vault while the
+  // dialog is open. Read the choice through the live collection on every
+  // render, so a departed Vault never leaves the control reading "All
+  // results" while it still suppresses every result (#334).
+  const vaultFilter: VaultId | "all" =
+    chosenVaultFilter === "all" ||
+    vaults.some((vault) => vault.vault_id === chosenVaultFilter)
+      ? chosenVaultFilter
+      : "all";
   // No Vault has been asked yet — the query is still too short, or the first
   // answer has not landed. Counts would all read `0`, which is a claim about
   // the collection rather than about this search.
@@ -320,11 +364,15 @@ export function SearchDialog({
         onKeyDown={(event) => {
           if (event.key !== "Tab") return;
           const panel = event.currentTarget;
+          // Only controls that are actually rendered: the phone field strip
+          // is always in the DOM but `display: none` on desktop, and a hidden
+          // last stop meant the wrap never fired and Tab left the modal
+          // (#334).
           const focusable = Array.from(
             panel.querySelectorAll<HTMLElement>(
               "button:not([disabled]), input:not([disabled]), select:not([disabled])",
             ),
-          );
+          ).filter((element) => isRendered(element, panel));
           if (focusable.length === 0) return;
           const first = focusable[0];
           const last = focusable[focusable.length - 1];
@@ -442,17 +490,45 @@ export function SearchDialog({
                 : `Building the search index (${startupPercent}%). Results will appear once it's ready.`
             }
           />
-        ) : startupFailed ? (
+        ) : startupDownloading ? (
+          // A model download after the gate has stepped aside, most often
+          // the one "Retry setup" starts (#339). Search cannot answer until
+          // it lands, and "No matching notes" would be a wrong answer.
           <StateBlock
-            tone="error"
             title="Could Not Load"
             description={
-              (startupStatus?.state === "failed" && startupStatus.message) ||
-              "The search model could not be downloaded or loaded."
+              startupDownloadPercent === null
+                ? "Downloading the search model. Results will appear once it's ready."
+                : `Downloading the search model (${startupDownloadPercent}%). Results will appear once it's ready.`
             }
-            actionLabel="Retry setup"
-            onAction={onRetryModelSetup}
           />
+        ) : startupTermsRequired ? (
+          <StateBlock
+            title="Could Not Load"
+            description={
+              demoMode
+                ? DEMO_SEARCH_UNAVAILABLE
+                : "Search is waiting for a search model to be chosen. Reload the page to choose one."
+            }
+          />
+        ) : startupFailed ? (
+          demoMode ? (
+            <StateBlock
+              title="Could Not Load"
+              description={DEMO_SEARCH_UNAVAILABLE}
+            />
+          ) : (
+            <StateBlock
+              tone="error"
+              title="Could Not Load"
+              description={
+                (startupStatus?.state === "failed" && startupStatus.message) ||
+                "The search model could not be downloaded or loaded."
+              }
+              actionLabel="Retry setup"
+              onAction={onRetryModelSetup}
+            />
+          )
         ) : (
           <>
             {loading ? <p>Searching…</p> : null}

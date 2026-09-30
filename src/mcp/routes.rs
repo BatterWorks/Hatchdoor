@@ -25,7 +25,7 @@ use crate::app_state::AppState;
 use super::adapter::HatchdoorMcpHandler;
 use super::auth::{reject_unsupported_protocol_version, validate_mcp_request};
 use super::config::McpConfig;
-use super::limits::{self, RateLimiter, RequestClass};
+use super::limits::{self, RateLimiter, ToolCallCharge};
 use super::protocol::jsonrpc_error_response;
 use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
 
@@ -213,16 +213,18 @@ async fn authorize_mcp_transport(
         // happen here — before dispatch — so they carry HTTP 429 with a
         // Retry-After header instead of a JSON-RPC error.
         if config.rate_limits_enabled
-            && let Some(class) = classify_post_body(&body)
+            && let Some(charge) = classify_post_body(&body)
             && let Some(token) = parts.extensions.get::<McpBearerToken>()
         {
             // Concurrency first, so a busy-rejected call does not also spend
             // quota budget on a request that never dispatched.
-            let guard = match limiter.try_acquire(class).await {
+            let guard = match limiter.try_acquire(charge.class).await {
                 Ok(guard) => guard,
                 Err(retry_in) => return too_many_requests(limits::retry_after_seconds(retry_in)),
             };
-            if let Err(retry_in) = limiter.check_quota(token, std::time::Instant::now()) {
+            if let Err(retry_in) =
+                limiter.check_quota_units(token, std::time::Instant::now(), charge.quota_units)
+            {
                 return too_many_requests(limits::retry_after_seconds(retry_in));
             }
             // The guard is deliberately held across dispatch: its Drop is what
@@ -244,23 +246,25 @@ async fn authorize_mcp_transport(
 /// Classify a buffered POST body for layered limiting (#171): `None` for
 /// exempt traffic (protocol lifecycle, discovery, list handling, notifications,
 /// and anything unparseable — which downstream JSON-RPC framing rejects
-/// without ever reaching a tool). Only `tools/call` bodies yield a class.
+/// without ever reaching a tool). Only `tools/call` bodies yield a charge,
+/// and a `batch` is charged for the searches it carries (`limits::charge`,
+/// #327).
 /// The raw-byte scan is only used to *skip* work when it cannot hide a call:
 /// a body with no backslash decodes every character literally, so an absent
 /// marker there proves absence. Anything else falls back to parsing so an
 /// escaped method name (`"\\u0074ools/call"`) cannot slip past the quota.
-fn classify_post_body(body: &[u8]) -> Option<RequestClass> {
+fn classify_post_body(body: &[u8]) -> Option<ToolCallCharge> {
     const MARKER: &[u8] = b"tools/call";
     let marker_absent = !body.windows(MARKER.len()).any(|window| window == MARKER);
     if marker_absent && !body.contains(&b'\\') {
         return None;
     }
     let parsed: Value = serde_json::from_slice(body).ok()?;
-    let class = limits::classify(
+    limits::charge(
         parsed.get("method").and_then(Value::as_str),
         parsed["params"]["name"].as_str(),
-    );
-    (class != RequestClass::Exempt).then_some(class)
+        parsed["params"].get("arguments"),
+    )
 }
 
 /// The over-limit rejection (#171): HTTP 429 plus `Retry-After` in whole
@@ -1557,8 +1561,8 @@ mod tests {
         let escaped =
             br#"{"jsonrpc":"2.0","id":1,"method":"\u0074ools/call","params":{"name":"get_note"}}"#;
         assert_eq!(
-            classify_post_body(escaped),
-            Some(RequestClass::ToolCall),
+            classify_post_body(escaped).map(|charge| charge.class),
+            Some(super::super::limits::RequestClass::ToolCall),
             "an escaped method name must not bypass the quota"
         );
         assert_eq!(
@@ -1585,6 +1589,102 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("429 carries Retry-After");
         assert!(retry_after.parse::<u64>().is_ok());
+    }
+
+    /// A modern-stateless `batch` call carrying `searches` `search_notes`
+    /// items and one `get_tree`.
+    async fn modern_batch_call(
+        app: Router,
+        state: &AppState,
+        id: u64,
+        searches: usize,
+    ) -> Response {
+        let vault_id = vault_id_of(state).to_string();
+        let mut operations: Vec<Value> = (0..searches)
+            .map(|_| json!({"op": "search_notes", "arguments": {"scope": vault_id, "query": "alpha"}}))
+            .collect();
+        operations.push(json!({"op": "get_tree", "arguments": {"scope": vault_id}}));
+        modern_post(
+            app,
+            "tools/call",
+            Some("batch"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"batch",
+                    "arguments":{"operations": operations}
+                }
+            }),
+        )
+        .await
+    }
+
+    /// #327: a batch used to cost one quota unit whatever it carried, so 50
+    /// searches rode on one unit. Each search item now spends its own.
+    #[tokio::test]
+    async fn batch_search_items_each_spend_a_quota_unit() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        for id in 1..=(TOOL_CALLS_PER_MINUTE as u64 - 3) {
+            let response = modern_cheap_tool_call(app.clone(), id).await;
+            assert_eq!(response.status(), StatusCode::OK, "call {id} admitted");
+        }
+        let over = modern_batch_call(app.clone(), &state, 500, 4).await;
+        assert_eq!(
+            over.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "four searches do not fit in the three units left"
+        );
+        assert!(over.headers().contains_key(axum::http::header::RETRY_AFTER));
+        let fits = modern_batch_call(app.clone(), &state, 501, 3).await;
+        assert_eq!(fits.status(), StatusCode::OK, "three searches fit exactly");
+        let body = response_message(fits).await;
+        assert_eq!(body["result"]["structuredContent"]["failed"], 0, "{body}");
+        let full = modern_cheap_tool_call(app, 502).await;
+        assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS, "quota spent");
+    }
+
+    /// #327: a batch's searches ran under an ordinary slot only, so up to
+    /// eight could run at once past the two-search cap. A batch carrying a
+    /// search now needs a search slot, like a standalone search does.
+    #[tokio::test]
+    async fn a_batch_carrying_a_search_needs_an_expensive_search_slot() {
+        let (state, _tmp) = test_state();
+        let transport_instance = HatchdoorMcpTransport::new(state.clone());
+        let limiter = transport_instance.limiter();
+        let app = transport_instance
+            .router(&state)
+            .layer(axum::extract::DefaultBodyLimit::max(
+                McpConfig::maximum_request_body_limit(),
+            ))
+            .with_state(state.clone());
+
+        let mut busy = Vec::new();
+        for _ in 0..super::super::limits::MAX_CONCURRENT_EXPENSIVE_SEARCHES {
+            busy.push(
+                limiter
+                    .try_acquire(super::super::limits::RequestClass::ExpensiveSearch)
+                    .await
+                    .expect("search slot"),
+            );
+        }
+        let refused = modern_batch_call(app.clone(), &state, 600, 1).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "every search slot is busy"
+        );
+        let no_search = modern_batch_call(app.clone(), &state, 601, 0).await;
+        assert_eq!(
+            no_search.status(),
+            StatusCode::OK,
+            "a batch with no search needs only an ordinary slot"
+        );
+        drop(busy);
+        let admitted = modern_batch_call(app, &state, 602, 1).await;
+        assert_eq!(admitted.status(), StatusCode::OK, "a freed slot admits it");
     }
 
     #[tokio::test]
@@ -2951,12 +3051,19 @@ mod tests {
             json!({"relative_path": "clip.png", "encoding": "base64"}),
         )
         .await;
-        assert_eq!(body["error"]["code"], -32602);
+        // #327: a structured tool error with a stable code, like the core's
+        // own too-large refusal, not a bare JSON-RPC -32602.
+        assert!(body.get("error").is_none(), "not a JSON-RPC error: {body}");
+        assert_eq!(body["result"]["isError"], true);
+        let error = &body["result"]["structuredContent"];
+        assert_eq!(error["code"], "attachment_too_large_for_base64");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["vault_id"], json!(vault_id_of(&state).to_string()));
         assert!(
-            body["error"]["message"]
+            error["message"]
                 .as_str()
                 .unwrap()
-                .contains("exceeds max size for base64 encoding")
+                .contains("encoding \"url\"")
         );
     }
 
@@ -4494,6 +4601,107 @@ mod tests {
                 .unwrap()
                 .contains("write tools are disabled")
         );
+    }
+
+    /// Every item error in a `batch` result: each must be a failure whose
+    /// `error.code` is a string and whose `retryable` is a boolean.
+    fn assert_every_item_error_is_structured(body: &Value) -> Vec<String> {
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body}"));
+        items
+            .iter()
+            .map(|item| {
+                assert_eq!(item["ok"], false, "item should fail: {item}");
+                let error = &item["error"];
+                assert!(error["code"].is_string(), "string code: {item}");
+                assert!(error["retryable"].is_boolean(), "boolean retryable: {item}");
+                assert!(error["message"].is_string(), "message: {item}");
+                error["code"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    /// #327 contract: agents are told to branch on `code`, never on message
+    /// text, so every refusal path a batch item can take must report a stable
+    /// string code. Before the fix, the write-disabled refusal, argument-parse
+    /// failures, a missing or malformed `vault_id`, and an unwritable target
+    /// path all reported the JSON-RPC integer -32602 instead.
+    #[tokio::test]
+    async fn every_batch_item_refusal_carries_a_stable_string_code() {
+        // Write mode off: the per-item gate, plus the read-side refusals.
+        let (state, _tmp) = layered_test_state();
+        let vault_id = vault_id_of(&state).to_string();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "wiki/New.md", "content": "x"
+                }},
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "missing-note"}},
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "bogus_field": true}},
+                {"op": "get_note", "arguments": {"vault_id": "not-a-vault", "slug": "x"}},
+            ]}),
+        )
+        .await;
+        let codes = assert_every_item_error_is_structured(&body);
+        assert_eq!(codes[0], "mcp_writes_disabled");
+        assert_eq!(codes[1], "note_not_found");
+        assert_eq!(codes[2], "invalid_arguments");
+        assert_eq!(codes[3], "invalid_vault_id");
+
+        // Write mode on: the write-side refusals.
+        let (state, _tmp) = layered_write_state();
+        let vault_id = vault_id_of(&state).to_string();
+        std::fs::write(
+            registered_vault_path(&state).join("big.png"),
+            b"more than four",
+        )
+        .expect("attachment");
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "4".to_string(),
+            )])
+            .expect("lower the base64 cap");
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "notes/scratch.tmp", "content": "x"
+                }},
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "wiki/.hatchdoor-layer", "content": "x"
+                }},
+                {"op": "create_note", "arguments": {"relative_path": "wiki/A.md", "content": "x"}},
+                {"op": "create_note", "arguments": {
+                    "vault_id": "not-a-vault", "relative_path": "wiki/A.md", "content": "x"
+                }},
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "wiki/A.md", "content": "x",
+                    "bogus_field": true
+                }},
+                {"op": "update_note", "arguments": {
+                    "vault_id": vault_id, "slug": "page", "content": "x",
+                    "expected_content_hash": "fnv1a64:0"
+                }},
+                {"op": "get_attachment", "arguments": {
+                    "vault_id": vault_id, "relative_path": "big.png", "encoding": "base64"
+                }},
+            ]}),
+        )
+        .await;
+        let codes = assert_every_item_error_is_structured(&body);
+        assert_eq!(codes[0], "noise_excluded_write");
+        assert_eq!(codes[1], "layer_marker_write");
+        assert_eq!(codes[2], "invalid_arguments");
+        assert_eq!(codes[3], "invalid_arguments");
+        assert_eq!(codes[4], "invalid_arguments");
+        assert_eq!(codes[5], "write_conflict");
+        assert_eq!(codes[6], "attachment_too_large_for_base64");
     }
 
     // ---------------------------------------------------------------------------

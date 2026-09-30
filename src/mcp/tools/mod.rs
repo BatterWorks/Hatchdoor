@@ -24,6 +24,47 @@ use crate::app_state::AppState;
 pub(super) const WRITE_DISABLED_MESSAGE: &str =
     "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED";
 
+/// The stable code a `batch` item carries when write mode refuses it (#327).
+/// A standalone write tool still answers that refusal as a JSON-RPC
+/// invalid-params error; a batch item reports it as data, so it needs a code
+/// an agent can branch on rather than the JSON-RPC number.
+pub(super) const WRITE_DISABLED_CODE: &str = "mcp_writes_disabled";
+
+/// The environment-cleanup recovery refusal (#327), when one is pending.
+///
+/// While `.env` still carries retired per-Vault keys, the HTTP composition
+/// root refuses every state-changing request with this same code. `/mcp` is
+/// exempt from that method-based guard, because every MCP request, reads and
+/// the handshake included, is a POST: the MCP surface refuses its own
+/// state-changing tools here instead, so an agent still reaches `list_vaults`
+/// (which explains the recovery) and gets a structured code for the rest.
+/// A pending *legacy migration* recovery that may start with no Vaults is not
+/// refused here, matching the HTTP guard; its own cores refuse what they must.
+pub(super) fn environment_cleanup_refusal(
+    state: &AppState,
+) -> Option<crate::vault_error::VaultOperationError> {
+    let recovery = state
+        .legacy_migration_recovery
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()?;
+    (!recovery.can_start_with_no_vaults()).then(|| {
+        crate::vault_error::VaultOperationError::new(
+            crate::vault_migration::LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE,
+            recovery.message(),
+            None,
+            false,
+        )
+    })
+}
+
+/// Whether a tool may run while [`environment_cleanup_refusal`] is pending:
+/// the reads, collection discovery, and `batch` (which refuses its own write
+/// items). Everything else changes state.
+fn runs_during_environment_cleanup(name: &str) -> bool {
+    READ_OPS.contains(&name) || matches!(name, "list_vaults" | "batch")
+}
+
 pub async fn handle_tools_call(
     state: AppState,
     params: Option<Value>,
@@ -44,6 +85,14 @@ pub async fn handle_tools_call(
         return Ok(tool_success(crate::mcp::results::result_to_value(
             &model_setup_status_result(&state),
         )));
+    }
+
+    if !runs_during_environment_cleanup(name)
+        && let Some(refusal) = environment_cleanup_refusal(&state)
+    {
+        return Ok(tool_structured_error(
+            serde_json::to_value(&refusal).unwrap_or_else(|_| json!({ "code": refusal.code })),
+        ));
     }
 
     // While model setup is still pending, only the explicit model-setup calls

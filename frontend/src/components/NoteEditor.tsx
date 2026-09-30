@@ -506,22 +506,30 @@ function ConflictReviewPanel({
         {diffConflictLines(
           conflictReview.diskContent,
           conflictReview.draftContent,
-        ).map((line, index) => (
-          <div
-            // Diff rows can repeat, so the index is the stable row identity.
-            key={index}
-            className={`note-editor-conflict-line ${line.kind}`}
-          >
-            <span className="note-editor-conflict-marker">
-              {line.kind === "same"
-                ? "same"
-                : line.kind === "disk"
-                  ? "disk"
-                  : "draft"}
-            </span>
-            <code>{line.text}</code>
-          </div>
-        ))}
+        ).map((line, index) =>
+          line.kind === "skip" ? (
+            <div
+              // Diff rows can repeat, so the index is the stable row identity.
+              key={index}
+              className="note-editor-conflict-line skip"
+            >
+              <span className="note-editor-conflict-marker">…</span>
+              <span className="note-editor-conflict-marker">
+                {line.count === 1
+                  ? "1 unchanged line"
+                  : `${line.count} unchanged lines`}
+              </span>
+            </div>
+          ) : (
+            <div
+              key={index}
+              className={`note-editor-conflict-line ${line.kind}`}
+            >
+              <span className="note-editor-conflict-marker">{line.kind}</span>
+              <code>{line.text}</code>
+            </div>
+          ),
+        )}
       </div>
     </section>
   );

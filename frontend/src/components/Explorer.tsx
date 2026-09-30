@@ -5,7 +5,6 @@ import type {
   ExplorerFolder,
   ExplorerNote,
   RecentNote,
-  VaultScope,
   VaultSummary,
 } from "../types";
 import { AddIcon } from "./icons";
@@ -78,14 +77,12 @@ export function RecentNotesList({
   collapsed,
   onToggleCollapsed,
   vaults,
-  scope,
 }: {
   notes: RecentNote[];
   onNavigate: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   vaults: VaultSummary[];
-  scope: VaultScope;
 }) {
   // A note whose Vault has left the collection cannot be opened — its link
   // resolves to "Vault definition was not found" — and it has no name to show
@@ -102,8 +99,11 @@ export function RecentNotesList({
     return null;
   }
   const recent = known.slice(0, 5);
-  // Provenance only where the list can actually span Vaults (#140).
-  const showVaultPrefix = scope === "all" && vaults.length > 1;
+  // This is a viewing history, not a collection read: it spans Vaults
+  // whatever the browsing scope is, so provenance follows the Vault count
+  // alone. Keying it to `scope === "all"` stripped the prefix at a narrowed
+  // scope while other Vaults' rows stayed listed (#334).
+  const showVaultPrefix = vaults.length > 1;
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
@@ -118,7 +118,8 @@ export function RecentNotesList({
       {collapsed ? null : (
         <ul id="recent-notes-list" className="tree root-tree">
           {recent.map((note, index) => (
-            <li key={note.slug} className="note-item">
+            // A slug is unique only within its Vault (#137).
+            <li key={`${note.vaultId}-${note.slug}`} className="note-item">
               {/* No active-note class here. The highlight is canonical in the
                   tree only; applying it in several lists at once is the bug
                   issue #12 reported. */}

@@ -294,6 +294,26 @@ impl VaultRuntime {
         snapshot.error = None;
     }
 
+    /// [`Self::set_indexing`], unless the phase is already `Ready`. Decided
+    /// under the one write lock, so a concurrent `set_ready` cannot be undone
+    /// by a progress report that read the phase just before it.
+    pub fn set_indexing_unless_ready(&self, progress: IndexingProgressSnapshot) {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .expect("vault runtime snapshot poisoned");
+        if snapshot.phase == VaultPhase::Ready {
+            return;
+        }
+        snapshot.phase = VaultPhase::Indexing;
+        snapshot.capabilities = VaultCapabilities::derive(snapshot.mode, snapshot.phase);
+        snapshot.model = None;
+        snapshot.downloaded_bytes = None;
+        snapshot.total_bytes = None;
+        snapshot.indexing = Some(progress);
+        snapshot.error = None;
+    }
+
     pub fn set_ready(&self) {
         self.set_phase(VaultPhase::Ready);
     }
@@ -521,6 +541,14 @@ pub struct VaultControlBlock {
     cancellation: tokio::sync::watch::Sender<bool>,
     revisions: CollectionRevisionPublisher,
     watcher: Arc<RwLock<Option<VaultWatcherHandle>>>,
+    /// What a watcher for this Vault is started with, kept so one can be
+    /// started later when the Vault only becomes Active after activation (a
+    /// managed checkout cloned by its first Git turn), and so a foreground
+    /// write can report its change on the same intent channel (#324).
+    watching: Option<WatcherContext>,
+    /// The shared read model, so a foreground write can mark this Vault's
+    /// published snapshot stale the moment it changes the Markdown (#324).
+    snapshot_cache: Option<Arc<SqliteCache>>,
     /// This Vault's writes waiting to be named by their Git commit. The
     /// mutation core appends one record per successful write; the Vault's
     /// next Git turn takes the batch to build its commit message (#249).
@@ -557,12 +585,54 @@ fn report_compare_and_swap_support(vault_id: VaultId, vault_path: &Path) -> bool
     true
 }
 
+/// Start one Vault's change watcher, and say what its status is.
+///
+/// Used where a Vault is activated already Active, and again where it only
+/// becomes Active later (#324), so the two can never disagree on what a
+/// failed start publishes.
+fn start_watcher(
+    definition: &VaultDefinition,
+    vault_path: &Path,
+    watching: &WatcherContext,
+) -> (
+    Option<VaultWatcherHandle>,
+    VaultWatcherStatus,
+    Option<VaultRuntimeError>,
+) {
+    let unavailable = |message: String| {
+        (
+            None,
+            VaultWatcherStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: "vault_watcher_unavailable".to_string(),
+                message,
+                retryable: true,
+                detail: None,
+            }),
+        )
+    };
+    let exclude = match crate::vault::ExcludeMatcher::new(definition.exclude_patterns()) {
+        Ok(exclude) => exclude,
+        Err(error) => return unavailable(error),
+    };
+    match spawn_vault_change_watcher(
+        definition.vault_id(),
+        vault_path.to_path_buf(),
+        watching.cache_db_path.as_ref().clone(),
+        exclude,
+        watching.changes.clone(),
+    ) {
+        Ok(watcher) => (Some(watcher), VaultWatcherStatus::Running, None),
+        Err(error) => unavailable(error),
+    }
+}
+
 impl VaultControlBlock {
     fn activate(
         definition: VaultDefinition,
         vault_path: PathBuf,
         watching: Option<&WatcherContext>,
-        snapshot_cache: Option<&SqliteCache>,
+        snapshot_cache: Option<&Arc<SqliteCache>>,
         revisions: CollectionRevisionPublisher,
         // What this activation inherits when it replaces a live control
         // block, rather than starting a genuinely new or re-enabled Vault.
@@ -573,45 +643,18 @@ impl VaultControlBlock {
             writes: prior_writes,
             exclusion: prior_exclusion,
         } = carried_over;
-        let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache, prior_git);
+        let mut snapshot = activation_snapshot(
+            &definition,
+            &vault_path,
+            snapshot_cache.map(Arc::as_ref),
+            prior_git,
+        );
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
             watching.and_then(|watching| {
-                let exclude = match crate::vault::ExcludeMatcher::new(definition.exclude_patterns())
-                {
-                    Ok(exclude) => exclude,
-                    Err(error) => {
-                        snapshot.watcher = VaultWatcherStatus::Unavailable;
-                        snapshot.watcher_error = Some(VaultRuntimeError {
-                            code: "vault_watcher_unavailable".to_string(),
-                            message: error,
-                            retryable: true,
-                            detail: None,
-                        });
-                        return None;
-                    }
-                };
-                match spawn_vault_change_watcher(
-                    definition.vault_id(),
-                    vault_path.clone(),
-                    watching.cache_db_path.as_ref().clone(),
-                    exclude,
-                    watching.changes.clone(),
-                ) {
-                    Ok(watcher) => {
-                        snapshot.watcher = VaultWatcherStatus::Running;
-                        Some(watcher)
-                    }
-                    Err(error) => {
-                        snapshot.watcher = VaultWatcherStatus::Unavailable;
-                        snapshot.watcher_error = Some(VaultRuntimeError {
-                            code: "vault_watcher_unavailable".to_string(),
-                            message: error,
-                            retryable: true,
-                            detail: None,
-                        });
-                        None
-                    }
-                }
+                let (watcher, status, error) = start_watcher(&definition, &vault_path, watching);
+                snapshot.watcher = status;
+                snapshot.watcher_error = error;
+                watcher
             })
         } else {
             None
@@ -630,6 +673,8 @@ impl VaultControlBlock {
             cancellation,
             revisions,
             watcher: Arc::new(RwLock::new(watcher)),
+            watching: watching.cloned(),
+            snapshot_cache: snapshot_cache.cloned(),
             write_ledger: prior_writes.unwrap_or_else(|| Arc::new(crate::git::WriteLedger::new())),
         }
     }
@@ -715,10 +760,30 @@ impl VaultControlBlock {
         })
     }
 
+    /// The published status survives a panic raised while its lock was held:
+    /// every writer replaces whole fields and recomputes the capabilities from
+    /// them, so the value behind a poisoned lock is still a coherent status.
+    /// Refusing it would turn one panicked turn into a panic on every later
+    /// read, status publication and readiness check of that Vault, including
+    /// the shared dispatch loop's publication of the panic itself (#326).
+    fn write_snapshot(&self) -> std::sync::RwLockWriteGuard<'_, CollectionVaultSnapshot> {
+        self.snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Run `during` while holding this Vault's status write lock, so a test
+    /// can poison it the way a turn panicking mid-publication would.
+    #[cfg(test)]
+    pub(crate) fn while_holding_status_lock<R>(&self, during: impl FnOnce() -> R) -> R {
+        let _guard = self.write_snapshot();
+        during()
+    }
+
     pub fn snapshot(&self) -> CollectionVaultSnapshot {
         self.snapshot
             .read()
-            .expect("Vault control snapshot poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -864,10 +929,7 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let mut snapshot = self
-            .snapshot
-            .write()
-            .expect("Vault control snapshot poisoned");
+        let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.search = status;
         snapshot.search_error = error;
@@ -894,10 +956,7 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let mut snapshot = self
-            .snapshot
-            .write()
-            .expect("Vault control snapshot poisoned");
+        let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.local_content = status;
         snapshot.activation = if status == LocalContentStatus::Unavailable {
@@ -906,15 +965,21 @@ impl VaultControlBlock {
             VaultActivationStatus::Active
         };
         snapshot.activation_error = error;
-        snapshot.capabilities = collection_capabilities(&self.definition, &snapshot);
-        let changed = *snapshot != previous;
         // A managed Git Vault has no directory to probe when its runtime is
         // established, because its checkout has not landed yet. This seam is
         // where it becomes Active, so it is the second place the filesystem
         // report can first be made, and the transition is what keeps it to
-        // one line rather than one per status publish (#345).
+        // one line rather than one per status publish (#345). It is also the
+        // second place a watcher can start: activation skipped it for want of
+        // a directory, and a watcher left on a checkout that was lost and
+        // re-cloned watches a directory that no longer exists (#324).
         let became_active = snapshot.activation == VaultActivationStatus::Active
             && previous.activation != VaultActivationStatus::Active;
+        if became_active {
+            self.rearm_watcher(&mut snapshot);
+        }
+        snapshot.capabilities = collection_capabilities(&self.definition, &snapshot);
+        let changed = *snapshot != previous;
         drop(snapshot);
         if became_active {
             let _ = report_compare_and_swap_support(self.definition.vault_id(), &self.vault_path);
@@ -926,6 +991,64 @@ impl VaultControlBlock {
         Ok(())
     }
 
+    /// Replace this Vault's watcher with a fresh one over its current
+    /// directory, publishing the result into `snapshot`. A no-op for a
+    /// collection that does not watch, outside a Tokio runtime (the watcher
+    /// task needs one), or once the block has been revoked: the watcher slot
+    /// is taken before admission is re-checked, and `revoke` reads that slot
+    /// only after withdrawing admission, so a retiring block can never be
+    /// left holding a watcher nobody cancels.
+    fn rearm_watcher(&self, snapshot: &mut CollectionVaultSnapshot) {
+        let Some(watching) = self.watching.as_ref() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let mut slot = self.watcher.write().expect("Vault watcher handle poisoned");
+        if !self.is_accepting_operations() {
+            return;
+        }
+        if let Some(previous) = slot.take() {
+            previous.cancel();
+        }
+        let (watcher, status, error) = start_watcher(&self.definition, &self.vault_path, watching);
+        *slot = watcher;
+        snapshot.watcher = status;
+        snapshot.watcher_error = error;
+    }
+
+    /// Label this Vault's published snapshot stale because a foreground write
+    /// has just changed its Markdown, so a collection read between the write
+    /// and the Index turn it asks for does not call the old generation fresh
+    /// (#324). The write path does this itself rather than waiting on a
+    /// watcher, which may not exist or may have lost the event.
+    ///
+    /// Blocking (it writes SQLite): call it from the blocking pool, while
+    /// holding this Vault's foreground mutation guard. A failure is logged
+    /// rather than returned, because the write it follows has already landed.
+    pub(crate) fn mark_snapshot_behind_write(&self) {
+        let Some(cache) = self.snapshot_cache.as_ref() else {
+            return;
+        };
+        let vault_id = self.definition.vault_id();
+        if let Err(error) = cache.mark_vault_snapshot_behind_write(vault_id) {
+            warn!(%vault_id, %error, "could not mark the Vault snapshot stale after a write");
+        }
+    }
+
+    /// Ask for this Vault's commit and Index turns after a foreground write,
+    /// on the same intent channel its watcher reports on, so the write is
+    /// indexed and committed whether or not a watcher saw it (#324). The
+    /// forwarder in `server.rs` applies the commit mode and cooldown, and the
+    /// coordinator coalesces this with the watcher's own report of the same
+    /// change.
+    pub(crate) fn report_write(&self) {
+        if let Some(watching) = self.watching.as_ref() {
+            let _ = watching.changes.send(self.definition.vault_id());
+        }
+    }
+
     /// Publish Git availability without changing authoritative local-content
     /// capability. The per-Vault Git lifecycle packet owns the operations that
     /// call this seam.
@@ -935,10 +1058,7 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let mut snapshot = self
-            .snapshot
-            .write()
-            .expect("Vault control snapshot poisoned");
+        let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.git = status;
         snapshot.git_error = error;
@@ -1139,25 +1259,111 @@ impl VaultCollectionRuntime {
     /// Existing enabled runtimes are retained when their definition and path
     /// are unchanged, so an unrelated Vault update cannot replace their locks
     /// or in-memory status.
+    ///
+    /// The replacement control blocks are built before the collection's write
+    /// lock is taken, not under it. Activating one stats its directory, reads
+    /// its retained snapshot from SQLite and registers a recursive watcher on
+    /// every directory of the Vault, and every HTTP and MCP read waits on that
+    /// lock: holding it across the walk froze all of them for the length of a
+    /// large Vault's watcher registration on every registry mutation (#326).
+    /// The lock is then held only to install the result, and only if no other
+    /// reconciliation installed a revision in between; if one did, this one's
+    /// unadopted blocks are revoked and it starts over from what is live.
     pub fn reconcile(
         &self,
         registry: &VaultRegistryStore,
         snapshot: &VaultRegistrySnapshot,
     ) -> bool {
-        let mut state = self
-            .state
-            .write()
-            .expect("Vault collection runtime poisoned");
-        if snapshot.revision() <= state.registry_revision {
-            return false;
-        }
-        let previous = std::mem::take(&mut state.vaults);
-        let mut next = BTreeMap::new();
         let revision_publisher = CollectionRevisionPublisher {
             state: Arc::downgrade(&self.state),
             revisions: self.revisions.clone(),
         };
+        let (mut state, previous, next) = loop {
+            let (observed_revision, observed) = {
+                let state = self
+                    .state
+                    .read()
+                    .expect("Vault collection runtime poisoned");
+                if snapshot.revision() <= state.registry_revision {
+                    return false;
+                }
+                (state.registry_revision, state.vaults.clone())
+            };
+            let next = self.next_entries(registry, snapshot, &observed, &revision_publisher);
+            let mut state = self
+                .state
+                .write()
+                .expect("Vault collection runtime poisoned");
+            if state.registry_revision == observed_revision {
+                // Only `reconcile` replaces the map, and it always advances
+                // the revision, so an unchanged revision is an unchanged map.
+                let previous = std::mem::take(&mut state.vaults);
+                break (state, previous, next);
+            }
+            drop(state);
+            revoke_unadopted(&observed, &next);
+        };
 
+        for (vault_id, entry) in &previous {
+            let VaultCollectionEntry::Active(previous_runtime) = entry else {
+                continue;
+            };
+            let retained = matches!(
+                next.get(vault_id),
+                Some(VaultCollectionEntry::Active(next_runtime))
+                    if Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
+            );
+            if !retained {
+                previous_runtime.revoke();
+            }
+        }
+
+        let previous_snapshots = collection_snapshots(&previous);
+        let next_snapshots = collection_snapshots(&next);
+        let changed_vault_ids: Vec<VaultId> = {
+            let mut ids = BTreeSet::new();
+            for (vault_id, snapshot) in &next_snapshots {
+                if previous_snapshots.get(vault_id) != Some(snapshot) {
+                    ids.insert(*vault_id);
+                }
+            }
+            for vault_id in previous_snapshots.keys() {
+                if !next_snapshots.contains_key(vault_id) {
+                    ids.insert(*vault_id);
+                }
+            }
+            ids.into_iter().collect()
+        };
+        state.registry_revision = snapshot.revision();
+        let event = if changed_vault_ids.is_empty() {
+            None
+        } else {
+            state.collection_revision = state.collection_revision.saturating_add(1);
+            Some(VaultCollectionRevisionEvent {
+                collection_revision: state.collection_revision,
+                vault_ids: changed_vault_ids,
+                category: VaultChangeCategory::Definition,
+            })
+        };
+        state.vaults = next;
+        drop(state);
+        if let Some(event) = event {
+            self.revisions.send_replace(event);
+        }
+        true
+    }
+
+    /// The collection `snapshot` describes, built from `previous`: retained
+    /// control blocks where a definition and path are unchanged, freshly
+    /// activated ones everywhere else. Called without the collection lock.
+    fn next_entries(
+        &self,
+        registry: &VaultRegistryStore,
+        snapshot: &VaultRegistrySnapshot,
+        previous: &BTreeMap<VaultId, VaultCollectionEntry>,
+        revision_publisher: &CollectionRevisionPublisher,
+    ) -> BTreeMap<VaultId, VaultCollectionEntry> {
+        let mut next = BTreeMap::new();
         for definition in snapshot.definitions() {
             let vault_id = definition.vault_id();
             let vault_path = registry.vault_path(&definition);
@@ -1214,11 +1420,13 @@ impl VaultCollectionRuntime {
                         } else {
                             CarriedOverState::default()
                         };
+                        #[cfg(test)]
+                        observe_activation();
                         VaultCollectionEntry::Active(VaultControlBlock::activate(
                             definition,
                             vault_path,
                             self.watching.as_ref(),
-                            self.snapshot_cache.as_deref(),
+                            self.snapshot_cache.as_ref(),
                             revision_publisher.clone(),
                             carried_over,
                         ))
@@ -1227,54 +1435,7 @@ impl VaultCollectionRuntime {
             };
             next.insert(vault_id, entry);
         }
-
-        for (vault_id, entry) in &previous {
-            let VaultCollectionEntry::Active(previous_runtime) = entry else {
-                continue;
-            };
-            let retained = matches!(
-                next.get(vault_id),
-                Some(VaultCollectionEntry::Active(next_runtime))
-                    if Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
-            );
-            if !retained {
-                previous_runtime.revoke();
-            }
-        }
-
-        let previous_snapshots = collection_snapshots(&previous);
-        let next_snapshots = collection_snapshots(&next);
-        let changed_vault_ids: Vec<VaultId> = {
-            let mut ids = BTreeSet::new();
-            for (vault_id, snapshot) in &next_snapshots {
-                if previous_snapshots.get(vault_id) != Some(snapshot) {
-                    ids.insert(*vault_id);
-                }
-            }
-            for vault_id in previous_snapshots.keys() {
-                if !next_snapshots.contains_key(vault_id) {
-                    ids.insert(*vault_id);
-                }
-            }
-            ids.into_iter().collect()
-        };
-        state.registry_revision = snapshot.revision();
-        let event = if changed_vault_ids.is_empty() {
-            None
-        } else {
-            state.collection_revision = state.collection_revision.saturating_add(1);
-            Some(VaultCollectionRevisionEvent {
-                collection_revision: state.collection_revision,
-                vault_ids: changed_vault_ids,
-                category: VaultChangeCategory::Definition,
-            })
-        };
-        state.vaults = next;
-        drop(state);
-        if let Some(event) = event {
-            self.revisions.send_replace(event);
-        }
-        true
+        next
     }
 
     /// Rebuild disposable background work from the authoritative collection and
@@ -1720,6 +1881,45 @@ impl Default for VaultCollectionRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Revoke every control block `next` activated rather than carried over from
+/// `previous`, for a reconciliation that lost the race to install it: each
+/// may already be watching its directory, and nothing else would stop it.
+fn revoke_unadopted(
+    previous: &BTreeMap<VaultId, VaultCollectionEntry>,
+    next: &BTreeMap<VaultId, VaultCollectionEntry>,
+) {
+    for (vault_id, entry) in next {
+        let VaultCollectionEntry::Active(runtime) = entry else {
+            continue;
+        };
+        let carried_over = matches!(
+            previous.get(vault_id),
+            Some(VaultCollectionEntry::Active(previous_runtime))
+                if Arc::ptr_eq(&previous_runtime.snapshot, &runtime.snapshot)
+        );
+        if !carried_over {
+            runtime.revoke();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Called on the reconciling thread just before each control block is
+    /// activated, so a test can observe what that thread holds at the time.
+    pub(crate) static ACTIVATION_OBSERVER: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_activation() {
+    ACTIVATION_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow().as_ref() {
+            observer();
+        }
+    });
 }
 
 fn collection_snapshots(

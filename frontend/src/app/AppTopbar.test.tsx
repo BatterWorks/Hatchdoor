@@ -8,7 +8,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppTopbar } from "./AppTopbar";
-import { THREE_VAULTS } from "../test/fixtures/vaults";
+import {
+  conflictVault,
+  healthyVault,
+  staleVault,
+  syncFailedVault,
+  THREE_VAULTS,
+} from "../test/fixtures/vaults";
 import type { ActiveNoteMeta } from "../types";
 
 function renderTopbar(
@@ -423,5 +429,38 @@ describe("AppTopbar mobile scope sheet (#145)", () => {
 
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(last).toHaveFocus();
+  });
+});
+
+describe("AppTopbar single-Vault condition row (#334)", () => {
+  afterEach(cleanup);
+
+  it.each([
+    ["conflict", conflictVault("Solo")],
+    ["sync failed", syncFailedVault("Solo")],
+    ["stale", staleVault("Solo")],
+  ])(
+    "shows %s on mobile at one enabled Vault, with nothing to press",
+    (word, vault) => {
+      renderTopbar({ vaults: [vault], scope: "all", isMobile: true });
+
+      const row = document.querySelector(".topbar-mobile-meta");
+      expect(row).not.toBeNull();
+      expect(within(row as HTMLElement).getByText("Solo")).toBeInTheDocument();
+      expect(within(row as HTMLElement).getByText(word)).toBeInTheDocument();
+      expect(within(row as HTMLElement).queryByRole("button")).toBeNull();
+    },
+  );
+
+  it("stays absent for a healthy single Vault", () => {
+    renderTopbar({ vaults: [healthyVault("Solo")], isMobile: true });
+
+    expect(document.querySelector(".topbar-mobile-meta")).toBeNull();
+  });
+
+  it("stays absent on desktop, where the explorer head reports it", () => {
+    renderTopbar({ vaults: [conflictVault("Solo")], isMobile: false });
+
+    expect(document.querySelector(".topbar-mobile-meta")).toBeNull();
   });
 });

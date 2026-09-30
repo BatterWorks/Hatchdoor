@@ -14,7 +14,7 @@ use std::borrow::Cow;
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -279,24 +279,45 @@ impl CompiledQuery {
         })
     }
 
-    /// The rows one Vault's published snapshot contributes. Unsorted and
-    /// unlimited: ordering and the limit are decided once across every
-    /// participating Vault, so an `all` query cannot depend on which Vault a
-    /// Note happens to live in.
+    /// The rows one Vault's published snapshot contributes, sorted, and at
+    /// most `limit + 1` of them: the first `limit` in [`sort_rows`] order,
+    /// plus one more when more qualified, so the caller can still say the
+    /// answer was truncated. Ordering and the limit are decided once more
+    /// across every participating Vault, so an `all` query cannot depend on
+    /// which Vault a Note happens to live in. Keeping only that many while
+    /// scanning holds a broad query's working set to the size of its answer
+    /// rather than to the size of the collection.
     pub(crate) fn rows_for(
         &self,
         vault_id: VaultId,
         notes: &[VaultSnapshotNote],
     ) -> Vec<NoteQueryRow> {
-        notes
-            .iter()
-            .filter(|note| self.selects(note))
-            .map(|note| NoteQueryRow {
-                vault_id,
-                title: note.title.clone(),
-                slug: note.slug.clone(),
-                relative_path: note.relative_path.clone(),
-                properties: self.project(note),
+        let keep = self.limit.saturating_add(1);
+        // A max-heap on the sort key: once it holds `keep` Notes, each new
+        // match either displaces the current last one or is dropped. Within
+        // one Vault the key is the path then the slug, which is what
+        // `sort_rows` orders one Vault's rows by.
+        let mut kept: BinaryHeap<(&str, &str, usize)> = BinaryHeap::with_capacity(keep + 1);
+        for (position, note) in notes.iter().enumerate() {
+            if !self.selects(note) {
+                continue;
+            }
+            kept.push((note.relative_path.as_str(), note.slug.as_str(), position));
+            if kept.len() > keep {
+                kept.pop();
+            }
+        }
+        kept.into_sorted_vec()
+            .into_iter()
+            .map(|(_, _, position)| {
+                let note = &notes[position];
+                NoteQueryRow {
+                    vault_id,
+                    title: note.title.clone(),
+                    slug: note.slug.clone(),
+                    relative_path: note.relative_path.clone(),
+                    properties: self.project(note),
+                }
             })
             .collect()
     }
@@ -923,6 +944,58 @@ mod tests {
         assert_eq!(compiled(Some(0)), 1);
         assert_eq!(compiled(Some(10_000)), 200);
         assert_eq!(compiled(Some(7)), 7);
+    }
+
+    #[test]
+    fn one_vault_contributes_at_most_one_row_past_the_limit_in_answer_order() {
+        let compiled = CompiledQuery::compile(&NoteQuery {
+            limit: Some(2),
+            ..query(vec![tag("topic")])
+        })
+        .expect("compile");
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let note = |path: &str, tags: &[&str]| VaultSnapshotNote {
+            title: path.to_string(),
+            slug: path.to_lowercase(),
+            relative_path: path.to_string(),
+            size_bytes: 0,
+            mtime_ns: 0,
+            layer: None,
+            metadata: crate::vault::NoteMetadata {
+                tags: tags.iter().map(|tag| tag.to_string()).collect(),
+                aliases: Vec::new(),
+                properties: json!({}),
+            },
+        };
+        // Deliberately out of order, with a non-match among them.
+        let notes = [
+            note("e", &["topic"]),
+            note("b", &["topic"]),
+            note("skip", &["other"]),
+            note("d", &["topic"]),
+            note("a", &["topic"]),
+            note("c", &["topic"]),
+        ];
+
+        let rows = compiled.rows_for(vault_id, &notes);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "the limit's rows in answer order, plus one to show there were more"
+        );
+
+        let few = [note("z", &["topic"]), note("y", &["topic"])];
+        assert_eq!(
+            compiled
+                .rows_for(vault_id, &few)
+                .iter()
+                .map(|row| row.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["y", "z"],
+            "a Vault with no more matches than the limit contributes all of them"
+        );
     }
 
     #[test]

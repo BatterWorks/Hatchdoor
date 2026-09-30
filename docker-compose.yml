@@ -24,6 +24,11 @@ services:
       # image upgrades. Bind-mount this directory to avoid re-downloading.
       - ${HOST_MODELS_PATH:-./models}:/models
     restart: unless-stopped
+    # Shutdown waits for an in-flight Git turn to reach a safe boundary. A
+    # remote that stalls mid-transfer is cut off after 15 s to connect plus
+    # 120 s of silence, so give the process longer than that before Docker's
+    # SIGKILL (the default grace is only 10 s).
+    stop_grace_period: 3m
     healthcheck:
       # Distroless runtime has no shell/curl, so the binary probes its own
       # /health endpoint (which also pings SQLite) and exits non-zero on failure.

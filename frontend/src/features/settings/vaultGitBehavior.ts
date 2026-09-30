@@ -329,6 +329,23 @@ const GIT_FAILURE_COPY: Record<
     sentence: () =>
       "Too many pushes landed on this Vault's remote at once and Hatchdoor gave up retrying. Nothing was lost. Press Try again.",
   },
+  // Issue #323 adds two failures to the nine above. A refused push's server
+  // message carries the remote's own reason (a protected branch, a hook),
+  // which the Git console already prints beneath this sentence.
+  managed_git_push_rejected: {
+    label: "push refused",
+    tier: "error",
+    files: false,
+    sentence: () =>
+      "This Vault's remote refused Hatchdoor's push, so nothing reached it. Nothing local was lost. Check the remote's reason below, change its rules or the branch above, then press Try again.",
+  },
+  managed_git_operation_in_progress: {
+    label: "unfinished merge",
+    tier: "error",
+    files: true,
+    sentence: () =>
+      "This Vault's Git checkout is part-way through a merge or similar operation, so Hatchdoor committed and pushed nothing. Finish or abort it with Git in the checkout, then press Try again.",
+  },
 };
 
 export function describeGitFailure(

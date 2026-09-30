@@ -76,7 +76,10 @@ use super::super::limits::{BATCH_MAX_READ_ITEMS, BATCH_MAX_WRITE_ITEMS};
 use super::super::protocol::{JsonRpcFailure, OUTCOME_FIELD, tool_success};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
 use super::write::WRITE_OPS;
-use super::{READ_OPS, WRITE_DISABLED_MESSAGE, dispatch_read_tool, write, write_tool_annotations};
+use super::{
+    READ_OPS, WRITE_DISABLED_CODE, WRITE_DISABLED_MESSAGE, dispatch_read_tool,
+    environment_cleanup_refusal, write, write_tool_annotations,
+};
 
 /// The write ops that carry both `slug` and `expected_content_hash` — the
 /// only ones eligible for within-batch hash chaining. `create_note` and the
@@ -129,6 +132,7 @@ struct UnlockedVault {
     code: i64,
     message: String,
     tool_level: bool,
+    domain_error: Option<Value>,
 }
 
 impl UnlockedVault {
@@ -137,6 +141,7 @@ impl UnlockedVault {
             code: self.code,
             message: self.message.clone(),
             tool_level: self.tool_level,
+            domain_error: self.domain_error.clone(),
         }
     }
 }
@@ -371,6 +376,7 @@ async fn lock_touched_vaults(
                 code: failure.code,
                 message: failure.message,
                 tool_level: failure.tool_level,
+                domain_error: failure.domain_error,
             }),
         }
     }
@@ -424,8 +430,20 @@ async fn dispatch_one(
     match op {
         _ if READ_OPS.contains(&op) => dispatch_read_tool(state, config, op, arguments).await,
         _ if WRITE_OPS.contains(&op) => {
+            // Both refusals carry a stable string code (#327), like every
+            // other item error: an item is data, not a JSON-RPC error.
+            if let Some(refusal) = environment_cleanup_refusal(&state) {
+                return Err(structured_item_failure(&refusal));
+            }
             if !config.write_enabled {
-                return Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE));
+                return Err(structured_item_failure(
+                    &crate::vault_error::VaultOperationError::new(
+                        WRITE_DISABLED_CODE,
+                        WRITE_DISABLED_MESSAGE,
+                        None,
+                        false,
+                    ),
+                ));
             }
             let vault_id = write::parse_vault_id(&arguments)?;
             let Some(locked) = locks
@@ -526,7 +544,13 @@ fn record_chain(chain: &mut HashChain, op: &str, result: &Value) {
 /// `JsonRpcFailure` for [`failure_to_error_value`] to shape.
 fn item_error_value(value: &Value) -> Value {
     let Some(mut error) = value.get("structuredContent").cloned() else {
-        return json!({ "message": value["content"][0]["text"] });
+        // No read tool renders an unstructured error today; should one ever,
+        // its item still carries a string code (#327).
+        return json!({
+            "code": plain_failure_code(0),
+            "message": value["content"][0]["text"],
+            "retryable": false,
+        });
     };
     if let Some(object) = error.as_object_mut() {
         object.remove(OUTCOME_FIELD);
@@ -534,22 +558,54 @@ fn item_error_value(value: &Value) -> Value {
     error
 }
 
-/// Renders a per-item dispatch failure the same way the top-level dispatcher
-/// renders a tool-level one (`mod.rs`'s own tail): a JSON-object message
-/// decodes to the structured domain error it already is, and a plain-text
-/// message (an invalid-params rejection, say) falls back to a `{code,
-/// message}` pair carrying the JSON-RPC error code.
+/// A per-item refusal shaped as the structured domain error it is, so
+/// [`failure_to_error_value`] hands the item that object verbatim.
+fn structured_item_failure(error: &crate::vault_error::VaultOperationError) -> JsonRpcFailure {
+    JsonRpcFailure::not_found(
+        serde_json::to_string(error).unwrap_or_else(|_| error.message.clone()),
+    )
+}
+
+/// Renders a per-item dispatch failure as the bare `{code, message,
+/// vault_id?, retryable}` object every item error shares, and `code` is
+/// always a stable string (#327): the server instructions tell agents to
+/// branch on it, so it must never be a JSON-RPC number.
+///
+/// A failure carrying its structured domain error (an unwritable target path)
+/// reports that; a JSON-object message decodes to the structured error it
+/// already is, the same way the top-level dispatcher's tail does; and a
+/// plain-text message (an argument-parse rejection, a missing `vault_id`)
+/// falls back to a string code named for its JSON-RPC class, with the number
+/// kept alongside as `jsonrpc_code`.
 fn failure_to_error_value(failure: JsonRpcFailure) -> Value {
+    if let Some(domain_error) = failure.domain_error {
+        return domain_error;
+    }
     match serde_json::from_str::<Value>(&failure.message) {
-        Ok(structured) => structured,
-        Err(_) => json!({ "code": failure.code, "message": failure.message }),
+        Ok(structured) if structured.get("code").is_some_and(Value::is_string) => structured,
+        _ => json!({
+            "code": plain_failure_code(failure.code),
+            "message": failure.message,
+            "retryable": false,
+            "jsonrpc_code": failure.code,
+        }),
+    }
+}
+
+/// The stable string code for a plain-text failure, by its JSON-RPC class.
+fn plain_failure_code(jsonrpc_code: i64) -> &'static str {
+    match jsonrpc_code {
+        -32602 => "invalid_arguments",
+        -32601 => "unknown_operation",
+        JsonRpcFailure::INTERNAL_ERROR_CODE => "internal_error",
+        _ => "operation_failed",
     }
 }
 
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag is not allowed inside a batch; call it on its own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag is not allowed inside a batch; call it on its own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Each search_notes item counts against the per-minute tool-call quota as a standalone search would. Every failed item's error carries a string code to branch on. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -734,8 +790,19 @@ mod tests {
         assert_eq!(structured["code"], "note_not_found");
 
         let plain = failure_to_error_value(JsonRpcFailure::invalid_params("bad input"));
-        assert_eq!(plain["code"], -32602);
+        assert_eq!(plain["code"], "invalid_arguments");
         assert_eq!(plain["message"], "bad input");
+        assert_eq!(plain["retryable"], false);
+        assert_eq!(plain["jsonrpc_code"], -32602);
+
+        let internal = failure_to_error_value(JsonRpcFailure::internal("boom"));
+        assert_eq!(internal["code"], "internal_error");
+
+        let carried = failure_to_error_value(
+            JsonRpcFailure::invalid_params("noise")
+                .with_domain_error(json!({"code": "noise_excluded_write", "message": "noise"})),
+        );
+        assert_eq!(carried["code"], "noise_excluded_write");
     }
 
     /// Both halves of the allow-list produce the same bare error object for an
@@ -753,7 +820,10 @@ mod tests {
         );
 
         let plain_text = item_error_value(&crate::mcp::protocol::tool_error("no payload".into()));
-        assert_eq!(plain_text, json!({"message": "no payload"}));
+        assert_eq!(
+            plain_text,
+            json!({"code": "operation_failed", "message": "no payload", "retryable": false})
+        );
     }
 
     #[test]

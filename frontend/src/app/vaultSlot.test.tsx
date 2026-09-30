@@ -45,6 +45,17 @@ describe("deriveVaultSlot", () => {
     });
   });
 
+  it("reports an unknown count as unknown, never as 0 (#333)", () => {
+    expect(deriveVaultSlot(healthyVault("Alpha"), undefined)).toEqual({
+      kind: "count",
+      count: null,
+    });
+    expect(deriveVaultSlot(browsableVault("Alpha"), undefined)).toMatchObject({
+      kind: "count-pending-search",
+      count: null,
+    });
+  });
+
   it("reports a failed embedding pass instead of claiming search is still building", () => {
     const vault = browsableVault("Alpha");
     expect(
@@ -214,6 +225,24 @@ describe("VaultSlot", () => {
     expect(count).toHaveClass("side-count");
   });
 
+  it("renders an unknown count as a labelled dash, never 0 (#333)", () => {
+    render(<VaultSlot vault={healthyVault("Alpha")} noteCount={undefined} />);
+
+    const slot = screen.getByLabelText("Note count not known");
+    expect(slot).toHaveTextContent("–");
+    expect(slot).toHaveClass("side-count");
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
+
+  it("renders a browsable Vault's unknown count as a dash, not 0 (#333)", () => {
+    render(<VaultSlot vault={browsableVault("Alpha")} noteCount={undefined} />);
+
+    expect(
+      screen.getByRole("status", { name: /^Note count not known\./ }),
+    ).toHaveTextContent("–");
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
+
   it("renders a shimmering placeholder while indexing, with no word", () => {
     render(<VaultSlot vault={indexingVault("Alpha")} noteCount={undefined} />);
 
@@ -355,6 +384,10 @@ describe("describeScopeSlot", () => {
   it("names a condition word when narrowed to a Vault in trouble", () => {
     const stale = staleVault("Alpha");
     expect(describeScopeSlot(stale.vault_id, [stale], {})).toBe("stale");
+  });
+
+  it("announces nothing, not 0 notes, while the narrowed Vault's count is unknown (#333)", () => {
+    expect(describeScopeSlot(alpha.vault_id, [alpha], {})).toBeNull();
   });
 
   it("is unknown while the narrowed Vault is still indexing", () => {

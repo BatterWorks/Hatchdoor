@@ -355,6 +355,55 @@ fn column_order_follows_the_definition_and_defaults_to_the_file_name() {
 }
 
 #[test]
+fn an_aliases_column_shows_the_lifted_aliases_however_it_is_spelled() {
+    let mut aliased = note("people/Ada.md", "Ada", &["type/person"], json!({}));
+    aliased.metadata.aliases = vec!["Countess".to_string(), "Ada L.".to_string()];
+    let notes = vec![aliased];
+    for spelling in [
+        "aliases",
+        "note.aliases",
+        "note[\"aliases\"]",
+        "note['aliases']",
+    ] {
+        let source = format!(
+            "views:\n  - type: table\n    order: [file.name, {}]",
+            serde_json::to_string(spelling).expect("quote the column id")
+        );
+        let shown = table(evaluate_one(&source, &notes, "2026-09-18T12:00:00"));
+        assert_eq!(
+            shown.columns[1],
+            SavedQueryColumn {
+                id: spelling.to_string(),
+                label: "aliases".to_string(),
+            },
+            "{spelling}"
+        );
+        assert_eq!(
+            shown.rows[0].cells[1],
+            json!(["Countess", "Ada L."]),
+            "{spelling} must show the aliases the Note carries, not an empty cell"
+        );
+    }
+}
+
+#[test]
+fn a_tags_property_column_is_refused_rather_than_drawn_empty() {
+    let notes = subscriptions();
+    for spelling in ["tags", "note.tags", "note[\"tags\"]", "note['tags']"] {
+        let source = format!(
+            "views:\n  - type: table\n    order: [file.name, {}]",
+            serde_json::to_string(spelling).expect("quote the column id")
+        );
+        let refused = refusal(evaluate_one(&source, &notes, "2026-09-18T12:00:00"));
+        assert_eq!(refused.construct, spelling);
+        assert!(
+            refused.message.contains("file.tags"),
+            "the refusal points at the column that does answer: {refused:?}"
+        );
+    }
+}
+
+#[test]
 fn the_definitions_row_limit_is_respected_and_reported() {
     let table = table(evaluate_one(
         "filters: 'file.hasTag(\"type/entity/subscription\")'\nviews:\n  - type: table\n    limit: 2",

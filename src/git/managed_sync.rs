@@ -69,6 +69,22 @@ pub enum ManagedSyncError {
         files: Vec<String>,
     },
     PushRace,
+    /// The remote accepted the push connection but refused to update the
+    /// branch: a protected branch, a pre-receive hook, a quota. Carries the
+    /// remote's own one-line reason. Nothing landed on the remote, so a turn
+    /// that ends here must never read as synchronized (#323).
+    PushRejected {
+        reason: String,
+    },
+    /// The checkout is part-way through a merge, rebase, cherry-pick or
+    /// revert, or its index still holds unresolved conflict entries.
+    /// Committing that state would record whatever conflict markers are on
+    /// disk and drop the operation's other parent, so every turn refuses it
+    /// and leaves the checkout exactly as found for a human to finish or
+    /// abort (#323). `files` lists the conflicted paths, when there are any.
+    OperationInProgress {
+        files: Vec<String>,
+    },
     /// The remote rejected the supplied (or absent) credentials. Distinct from
     /// `Remote` so a caller can wait for a credential change or manual retry
     /// rather than backing off and retrying blindly.
@@ -100,6 +116,19 @@ impl std::fmt::Display for ManagedSyncError {
             Self::PushRace => {
                 formatter.write_str("managed checkout push raced with a remote update")
             }
+            Self::PushRejected { reason } => {
+                write!(
+                    formatter,
+                    "managed checkout push was rejected by the remote: {reason}"
+                )
+            }
+            Self::OperationInProgress { files } if files.is_empty() => formatter
+                .write_str("managed checkout has an unfinished merge or other Git operation"),
+            Self::OperationInProgress { files } => write!(
+                formatter,
+                "managed checkout has an unfinished merge with conflicts in: {}",
+                files.join(", ")
+            ),
             Self::Authentication => formatter.write_str("managed checkout authentication failed"),
             Self::Remote => formatter.write_str("managed checkout remote operation failed"),
         }
@@ -297,7 +326,36 @@ fn open_commit_repository(config: &ManagedSyncConfig) -> Result<Repository, Mana
         return Err(ManagedSyncError::Validation);
     }
     drop(head);
+    reject_unfinished_operation(&repository)?;
     Ok(repository)
+}
+
+/// Refuse a checkout that is mid-merge (or mid-rebase, cherry-pick, revert)
+/// or whose index still carries conflict entries. Such a checkout reaches a
+/// turn only when something outside this module left it that way: the
+/// process died between `merge` and its abort, or an operator is resolving a
+/// merge in their own `ExistingGit` checkout. Either way the working tree may
+/// hold conflict markers, and committing it as ordinary drift would publish
+/// them and silently drop the merge's second parent. This boundary cannot
+/// tell a Hatchdoor-interrupted merge from an operator's deliberate one, so
+/// it repairs neither and reports both (#323).
+fn reject_unfinished_operation(repository: &Repository) -> Result<(), ManagedSyncError> {
+    let index = repository
+        .index()
+        .map_err(|_| ManagedSyncError::Validation)?;
+    if repository.state() == git2::RepositoryState::Clean && !index.has_conflicts() {
+        return Ok(());
+    }
+    Err(unfinished_operation_error(repository))
+}
+
+fn unfinished_operation_error(repository: &Repository) -> ManagedSyncError {
+    ManagedSyncError::OperationInProgress {
+        files: repository
+            .index()
+            .map(|mut index| conflict_paths(&mut index))
+            .unwrap_or_default(),
+    }
 }
 
 fn open_validated_repository(config: &ManagedSyncConfig) -> Result<Repository, ManagedSyncError> {
@@ -586,6 +644,7 @@ fn fetch(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Mana
     let mut remote = repository
         .find_remote(&remote_name)
         .map_err(|_| ManagedSyncError::Validation)?;
+    super::bound_network_waits();
     let mut options = FetchOptions::new();
     if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
         options.remote_callbacks(callbacks);
@@ -730,39 +789,92 @@ fn conflict_paths(index: &mut git2::Index) -> Vec<String> {
     files
 }
 
+/// Undo a conflicted merge and put the checkout back on `local_oid` with no
+/// merge state, no conflict entries in the index, and no conflict markers on
+/// disk. Runs to completion on every conflicted merge, whatever else the
+/// merge touched: an early return here strands the repository mid-merge with
+/// markers in the Vault's Markdown (#323).
+///
+/// Only the paths the merge itself wrote are restored: the ones whose index
+/// entry now differs from `local_oid` (the remote's cleanly merged changes,
+/// inside the Vault subtree or outside it) and the conflicted ones. A
+/// whole-tree hard reset would also revert a note an external editor saved
+/// during the turn, which `git_merge`'s safe checkout deliberately left
+/// alone, and that edit exists nowhere else. Such a note keeps its content
+/// and is committed by the next turn as ordinary drift.
 fn abort_merge(
     repository: &Repository,
     config: &ManagedSyncConfig,
     local_oid: git2::Oid,
 ) -> Result<(), ManagedSyncError> {
-    let vault_relative = vault_relative_path(repository, config)?;
-    let outside = non_conflict_changed_paths(repository)?
-        .into_iter()
-        .filter(|path| !path.starts_with(&vault_relative))
-        .collect::<Vec<_>>();
-    if !outside.is_empty() {
-        return Err(dirty_worktree_error(outside));
-    }
     let local = repository
         .find_commit(local_oid)
         .map_err(|_| ManagedSyncError::Validation)?;
+    // With no merge-written path there is nothing on disk to restore, and an
+    // empty path list would mean "every path", so the checkout is skipped. A
+    // status read that fails counts as a failed restore.
+    let restored = match merge_written_paths(repository) {
+        Ok(merged_paths) if merged_paths.is_empty() => true,
+        Ok(merged_paths) => {
+            let mut checkout = git2::build::CheckoutBuilder::new();
+            // Literal paths, not pathspecs: a note named `[draft].md` or
+            // `*.md` must match itself and nothing else. Set here rather than
+            // passed to `reset`, which replaces the strategy flags with a
+            // bare FORCE.
+            checkout.force().disable_pathspec_match(true);
+            for path in &merged_paths {
+                checkout.path(path);
+            }
+            // Checked out while the index still lists what the merge added,
+            // so a file the remote introduced is removed as tracked content
+            // rather than left behind as untracked.
+            repository
+                .checkout_tree(local.as_object(), Some(&mut checkout))
+                .is_ok()
+        }
+        Err(_) => false,
+    };
+    // A mixed reset reads `local`'s tree into the whole index, which drops
+    // every conflict entry, and clears MERGE_HEAD and the other merge state
+    // files. When the targeted restore failed, a full hard reset is the
+    // fallback: losing an in-flight external edit is recoverable from the
+    // editor, conflict markers left in a clean-looking checkout are not,
+    // because the next turn would commit them. If even that fails, the merge
+    // state stays and `reject_unfinished_operation` stops every later turn.
+    let reset_type = if restored {
+        ResetType::Mixed
+    } else {
+        ResetType::Hard
+    };
     repository
-        .reset(local.as_object(), ResetType::Hard, None)
-        .map_err(|_| ManagedSyncError::Validation)?;
+        .reset(local.as_object(), reset_type, None)
+        .map_err(|_| unfinished_operation_error(repository))?;
     repository
         .cleanup_state()
-        .map_err(|_| ManagedSyncError::Validation)?;
+        .map_err(|_| unfinished_operation_error(repository))?;
     open_validated_repository(config).map(|_| ())
 }
 
-fn non_conflict_changed_paths(repository: &Repository) -> Result<Vec<PathBuf>, ManagedSyncError> {
+/// Every path a just-failed merge wrote: its index entry differs from HEAD
+/// (still the pre-merge local commit), or it is conflicted. A path whose only
+/// difference is in the working tree was not written by the merge.
+fn merge_written_paths(repository: &Repository) -> Result<Vec<PathBuf>, ManagedSyncError> {
+    let merge_written = git2::Status::INDEX_NEW
+        | git2::Status::INDEX_MODIFIED
+        | git2::Status::INDEX_DELETED
+        | git2::Status::INDEX_RENAMED
+        | git2::Status::INDEX_TYPECHANGE
+        | git2::Status::CONFLICTED;
     let mut options = git2::StatusOptions::new();
-    options.include_untracked(true).recurse_untracked_dirs(true);
+    options
+        .include_untracked(false)
+        .renames_head_to_index(false)
+        .renames_index_to_workdir(false);
     repository
         .statuses(Some(&mut options))
         .map_err(|_| ManagedSyncError::Validation)?
         .iter()
-        .filter(|entry| !entry.status().contains(git2::Status::CONFLICTED))
+        .filter(|entry| entry.status().intersects(merge_written))
         .map(|entry| {
             entry
                 .path()
@@ -777,27 +889,71 @@ fn push(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Manag
     let mut remote = repository
         .find_remote(&remote_name)
         .map_err(|_| ManagedSyncError::Validation)?;
+    super::bound_network_waits();
+    // libgit2 reports a ref the remote refused to update only through this
+    // callback: without one, `git_remote_push` discards the per-ref status
+    // and returns success for a push that landed nothing (#323).
+    let rejection = std::cell::RefCell::new(None::<String>);
+    let mut callbacks = managed_remote_callbacks(config.credentials.as_ref()).unwrap_or_default();
+    callbacks.push_update_reference(|_refname, status| {
+        if let Some(reason) = status {
+            rejection
+                .borrow_mut()
+                .get_or_insert_with(|| push_rejection_reason(reason));
+        }
+        Ok(())
+    });
     let mut options = PushOptions::new();
-    if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
-        options.remote_callbacks(callbacks);
+    options.remote_callbacks(callbacks);
+    let pushed = remote.push(
+        &[&format!("refs/heads/{0}:refs/heads/{0}", config.branch)],
+        Some(&mut options),
+    );
+    drop(options);
+    pushed.map_err(|error| {
+        if error.code() == git2::ErrorCode::NotFastForward {
+            ManagedSyncError::PushRace
+        } else {
+            classify_remote_error(error)
+        }
+    })?;
+    match rejection.into_inner() {
+        Some(reason) => Err(ManagedSyncError::PushRejected { reason }),
+        None => Ok(()),
     }
-    remote
-        .push(
-            &[&format!("refs/heads/{0}:refs/heads/{0}", config.branch)],
-            Some(&mut options),
-        )
-        .map_err(|error| {
-            if error.code() == git2::ErrorCode::NotFastForward {
-                ManagedSyncError::PushRace
-            } else {
-                classify_remote_error(error)
-            }
-        })
 }
 
-fn managed_remote_callbacks(
+/// The remote's rejection text, trimmed to one short line. It reaches every
+/// client through the Vault's status, so control characters (a hook can
+/// print anything) are dropped and the length is capped.
+fn push_rejection_reason(reason: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let cleaned = reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return "no reason given".to_string();
+    }
+    if cleaned.chars().count() > MAX_CHARS {
+        let mut truncated = cleaned.chars().take(MAX_CHARS).collect::<String>();
+        truncated.push('…');
+        truncated
+    } else {
+        cleaned
+    }
+}
+
+fn managed_remote_callbacks<'a>(
     credentials: Option<&ManagedHttpsCredentials>,
-) -> Option<RemoteCallbacks<'static>> {
+) -> Option<RemoteCallbacks<'a>> {
     let credentials = credentials?.clone();
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(move |_url, _username, _allowed| {
@@ -930,6 +1086,42 @@ mod tests {
         assert_eq!(
             classify_remote_error(network_error),
             ManagedSyncError::Remote
+        );
+    }
+
+    fn run_against_stalled_remote(
+        mode: ManagedSyncMode,
+    ) -> Result<ManagedSyncOutcome, ManagedSyncError> {
+        let (root, mut config) = fixture(mode);
+        let stalled = crate::git::stalled_https_remote();
+        Repository::open(&config.repository_path)
+            .expect("checkout")
+            .remote_set_url("origin", &stalled)
+            .expect("point origin at the stalled remote");
+        config.repository_url = stalled;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _root = root;
+            let _ = sender.send(synchronize_managed_checkout(&config, &WriteLedger::new()));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("sync against a stalled remote never returned")
+    }
+
+    #[test]
+    fn a_stalled_remote_fails_a_pull_only_turn_as_a_retryable_remote_error() {
+        assert_eq!(
+            run_against_stalled_remote(ManagedSyncMode::PullOnly),
+            Err(ManagedSyncError::Remote)
+        );
+    }
+
+    #[test]
+    fn a_stalled_remote_fails_a_two_way_turn_as_a_retryable_remote_error() {
+        assert_eq!(
+            run_against_stalled_remote(ManagedSyncMode::TwoWay),
+            Err(ManagedSyncError::Remote)
         );
     }
 
@@ -1450,5 +1642,278 @@ mod tests {
         let checkout = Repository::open(&config.repository_path).expect("checkout");
         assert_eq!(checkout.state(), git2::RepositoryState::Clean);
         assert_eq!(file_at_head(&checkout, "outside.md"), "local\n");
+    }
+
+    fn assert_no_conflict_markers(root: &Path) {
+        for entry in walkdir_files(root) {
+            let contents = std::fs::read(&entry).expect("read checkout file");
+            let text = String::from_utf8_lossy(&contents);
+            assert!(
+                !text.contains("<<<<<<<") && !text.contains(">>>>>>>"),
+                "conflict markers left on disk in {}",
+                entry.display()
+            );
+        }
+    }
+
+    fn walkdir_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read directory") {
+                let path = entry.expect("directory entry").path();
+                if path.file_name().is_some_and(|name| name == ".git") {
+                    continue;
+                }
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    fn assert_checkout_is_consistent(repository: &Repository) {
+        assert_eq!(repository.state(), git2::RepositoryState::Clean);
+        assert!(
+            !repository.path().join("MERGE_HEAD").exists(),
+            "MERGE_HEAD must not survive an aborted merge"
+        );
+        assert!(
+            !repository.index().expect("index").has_conflicts(),
+            "the index must hold no conflict entries"
+        );
+        assert_no_conflict_markers(repository.workdir().expect("workdir"));
+    }
+
+    /// #323: a conflicted merge whose remote side also changed a path outside
+    /// the Vault subtree used to return before resetting, stranding
+    /// MERGE_HEAD, the conflicted index, and conflict markers in the note.
+    #[test]
+    fn a_vault_conflict_alongside_an_outside_change_is_fully_aborted() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let actor = root.path().join("actor-mixed");
+        let repository = Repository::clone(
+            root.path()
+                .join("remote.git")
+                .to_str()
+                .expect("remote path"),
+            &actor,
+        )
+        .expect("actor checkout");
+        commit(
+            &repository,
+            "outside.md",
+            "remote outside\n",
+            "remote outside",
+        );
+        commit(
+            &repository,
+            "vault/Home.md",
+            "remote change\n",
+            "remote note",
+        );
+        commit(
+            &repository,
+            "vault/New.md",
+            "remote new\n",
+            "remote new note",
+        );
+        repository
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("actor push");
+        std::fs::write(config.vault_path.join("Home.md"), "local change\n").expect("local edit");
+
+        let error =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect_err("merge conflict");
+
+        assert_eq!(
+            error,
+            ManagedSyncError::Conflict {
+                files: vec!["vault/Home.md".to_string()]
+            }
+        );
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_checkout_is_consistent(&checkout);
+        assert_eq!(
+            std::fs::read_to_string(config.vault_path.join("Home.md")).expect("note"),
+            "local change\n"
+        );
+        assert!(
+            !config.repository_path.join("outside.md").exists(),
+            "the remote's outside file must not be left behind"
+        );
+        assert!(
+            !config.vault_path.join("New.md").exists(),
+            "the remote's new note must not be left behind"
+        );
+        assert!(
+            changed_paths(&checkout).expect("status").is_empty(),
+            "the checkout is back on its local commit with nothing pending"
+        );
+        // And the next turn is not wedged: it reports the same conflict.
+        assert!(matches!(
+            synchronize_managed_checkout(&config, &WriteLedger::new()),
+            Err(ManagedSyncError::Conflict { .. })
+        ));
+    }
+
+    /// #323: the abort used to hard-reset the whole working tree, reverting a
+    /// note an external editor saved while the turn was running.
+    #[test]
+    fn aborting_a_conflicted_merge_keeps_an_external_edit_the_merge_did_not_touch() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        commit(&checkout, "vault/Other.md", "# Other\n", "add other note");
+        commit(&checkout, "vault/Home.md", "local change\n", "local note");
+        remote_commit(
+            root.path(),
+            "vault/Home.md",
+            "remote change\n",
+            "remote conflict",
+        );
+        fetch(&checkout, &config).expect("fetch");
+        let relation = graph(&checkout, &config).expect("graph");
+        // Saved by an editor between the turn's own commit and the merge.
+        std::fs::write(
+            config.vault_path.join("Other.md"),
+            "# Other\n\nsaved in the editor mid-turn\n",
+        )
+        .expect("external edit");
+
+        let error =
+            merge_remote(&checkout, &config, relation.remote_oid).expect_err("merge conflict");
+
+        assert!(matches!(error, ManagedSyncError::Conflict { .. }));
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_checkout_is_consistent(&checkout);
+        assert_eq!(
+            std::fs::read_to_string(config.vault_path.join("Other.md")).expect("edited note"),
+            "# Other\n\nsaved in the editor mid-turn\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config.vault_path.join("Home.md")).expect("note"),
+            "local change\n"
+        );
+    }
+
+    /// Leave `config`'s checkout mid-merge with a conflict in `vault/Home.md`,
+    /// the way a process killed between `merge` and its abort would.
+    fn strand_a_conflicted_merge(root: &Path, config: &ManagedSyncConfig) -> git2::Oid {
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        commit(&checkout, "vault/Home.md", "local change\n", "local note");
+        remote_commit(root, "vault/Home.md", "remote change\n", "remote conflict");
+        fetch(&checkout, config).expect("fetch");
+        let relation = graph(&checkout, config).expect("graph");
+        let remote = checkout
+            .find_annotated_commit(relation.remote_oid)
+            .expect("remote commit");
+        checkout.merge(&[&remote], None, None).expect("merge");
+        assert_eq!(checkout.state(), git2::RepositoryState::Merge);
+        assert!(
+            std::fs::read_to_string(config.vault_path.join("Home.md"))
+                .expect("note")
+                .contains("<<<<<<<"),
+            "fixture must leave markers on disk"
+        );
+        checkout
+            .head()
+            .expect("head")
+            .target()
+            .expect("head commit")
+    }
+
+    /// #323: a checkout left mid-merge used to pass validation, so the next
+    /// commit turn committed the conflict markers as ordinary drift (dropping
+    /// the merge's second parent) and the sync after it pushed them.
+    #[test]
+    fn a_checkout_left_mid_merge_is_refused_rather_than_committed_or_pushed() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let before = strand_a_conflicted_merge(root.path(), &config);
+        let remote_before = Repository::open_bare(root.path().join("remote.git"))
+            .expect("remote")
+            .head()
+            .expect("remote head")
+            .target();
+
+        let expected = ManagedSyncError::OperationInProgress {
+            files: vec!["vault/Home.md".to_string()],
+        };
+        assert_eq!(
+            commit_managed_checkout(&config, &WriteLedger::new()),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            synchronize_managed_checkout(&config, &WriteLedger::new()),
+            Err(expected)
+        );
+
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(checkout.head().expect("head").target(), Some(before));
+        assert_eq!(
+            checkout.state(),
+            git2::RepositoryState::Merge,
+            "the operator's evidence is left exactly as found"
+        );
+        let remote = Repository::open_bare(root.path().join("remote.git")).expect("remote");
+        assert_eq!(remote.head().expect("remote head").target(), remote_before);
+        assert!(!file_at_head(&remote, "vault/Home.md").contains("<<<<<<<"));
+    }
+
+    #[test]
+    fn a_pull_only_checkout_left_mid_merge_is_refused() {
+        let (root, mut config) = fixture(ManagedSyncMode::TwoWay);
+        strand_a_conflicted_merge(root.path(), &config);
+        config.mode = ManagedSyncMode::PullOnly;
+
+        assert!(matches!(
+            synchronize_managed_checkout(&config, &WriteLedger::new()),
+            Err(ManagedSyncError::OperationInProgress { .. })
+        ));
+    }
+
+    /// #323: libgit2 discards a server-side per-ref rejection unless a
+    /// `push_update_reference` callback is installed, so a protected branch
+    /// or a refusing hook read as a successful sync forever. The local
+    /// transport reports a ref it cannot lock the same way a remote
+    /// receive-pack reports a hook's refusal.
+    #[test]
+    fn a_push_the_remote_refuses_to_apply_fails_the_turn() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        std::fs::write(config.vault_path.join("Home.md"), "never lands\n").expect("local edit");
+        let remote_git = root.path().join("remote.git");
+        let remote_before = Repository::open_bare(&remote_git)
+            .expect("remote")
+            .head()
+            .expect("remote head")
+            .target();
+        std::fs::write(remote_git.join("refs/heads/master.lock"), "held\n")
+            .expect("hold the remote branch lock");
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("a refused push is not a sync");
+
+        let ManagedSyncError::PushRejected { reason } = &error else {
+            panic!("expected a push rejection, got {error:?}");
+        };
+        assert!(!reason.is_empty());
+        let remote = Repository::open_bare(&remote_git).expect("remote");
+        assert_eq!(remote.head().expect("remote head").target(), remote_before);
+    }
+
+    #[test]
+    fn a_push_rejection_reason_is_one_short_printable_line() {
+        assert_eq!(
+            push_rejection_reason("pre-receive hook\ndeclined\u{1b}[31m"),
+            "pre-receive hook declined [31m"
+        );
+        assert_eq!(push_rejection_reason(" \n "), "no reason given");
+        let long = push_rejection_reason(&"x".repeat(500));
+        assert_eq!(long.chars().count(), 201);
+        assert!(long.ends_with('…'));
     }
 }

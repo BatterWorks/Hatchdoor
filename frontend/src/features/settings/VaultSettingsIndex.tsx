@@ -1,11 +1,12 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../../api/api";
-import { VaultSlot } from "../../app/vaultSlot";
+import { UnknownCount, VaultSlot } from "../../app/vaultSlot";
 import type { VaultSlotState } from "../../app/vaultSlotLogic";
 import { StateBlock } from "../../components/ui";
 import type { VaultId, VaultSource, VaultSummary } from "../../types";
 import { useVaultCollection, useVaultProjection } from "../../vaults";
+import { SettingsModal } from "./SettingsModal";
 import { VaultCreationDialog } from "./VaultCreation";
 import {
   behaviorOf,
@@ -15,6 +16,7 @@ import {
   clearRecoveryPending,
   DEFAULT_POLL_MINUTES,
   describeGitFailure,
+  fetchRegistryRevision,
   type GitBehavior,
   isRecoveryPending,
   isRemoteBacked,
@@ -37,7 +39,18 @@ function conditionSentence(slot: VaultSlotState): string {
     : "This Vault is ready to use.";
 }
 
-function lastChanged(mtimeNs: number | undefined): string {
+/** What the detail header knows about a Vault's last change: still being
+ * read, refused (an unavailable or still-indexing Vault answers `/recent`
+ * with an error), or read, possibly with nothing in it yet. */
+type LastChange =
+  | { state: "loading" }
+  | { state: "unavailable" }
+  | { state: "loaded"; mtimeNs: number | undefined };
+
+function lastChanged(change: LastChange): string {
+  if (change.state === "loading") return "checking last change";
+  if (change.state === "unavailable") return "last change unavailable";
+  const mtimeNs = change.mtimeNs;
   if (!mtimeNs) return "no indexed changes yet";
   const date = new Date(mtimeNs / 1_000_000);
   return Number.isNaN(date.valueOf())
@@ -73,6 +86,8 @@ export function VaultSettingsIndex({
     noteCounts: counts,
     demoMode,
     recovery: registryRecovery,
+    readState,
+    error: discoveryError,
     refresh: loadVaults,
   } = useVaultCollection();
 
@@ -91,6 +106,23 @@ export function VaultSettingsIndex({
           tone="error"
           title="Vault Registry Unavailable"
           description={`${registryRecovery.message} Nothing was changed, and your Markdown is untouched.`}
+          actionLabel="Try again"
+          onAction={() => void loadVaults()}
+        />
+      </section>
+    );
+  }
+
+  // A failed discovery knows nothing about the registry: an empty group with
+  // its Add a Vault action would read as "you have no Vaults" (#333).
+  if (readState === "error") {
+    return (
+      <section className="settings-vault-index" aria-label="Vaults">
+        <p className="settings-index-group">Vaults</p>
+        <StateBlock
+          tone="error"
+          title="Vaults Unavailable"
+          description={`${discoveryError ?? "Could not load your Vaults."} Nothing was changed, and your Markdown is untouched.`}
           actionLabel="Try again"
           onAction={() => void loadVaults()}
         />
@@ -192,6 +224,26 @@ function draftsFromSource(source: VaultSource | undefined) {
 const IDENTITY_CHANGE_CONSEQUENCE =
   "This runs as one step: the Vault pauses, the change saves, and the Vault starts back up. It stays out of the sidebar and All Vaults for that moment.";
 
+/** The server's own `registry_revision_conflict` message is an internal
+ * diagnostic (`expected registry revision N, current revision is M`), so this
+ * page says what it means instead (#338). A Save carries every field of this
+ * form, so after a conflict it is not silently re-sent over whatever changed:
+ * the page adopts the fresh revision and asks for the Save again. A pause,
+ * resume or disconnect carries no form fields, reads the revision fresh, and
+ * so only conflicts when something moved in the instant between. */
+const SAVE_CONFLICT_MESSAGE =
+  "This Vault's settings changed elsewhere since this page opened. Your edits are still here: press Save Vault again to save them over that change.";
+const ACTION_CONFLICT_MESSAGE =
+  "This Vault changed elsewhere just now. Try again.";
+const UNREACHABLE_MESSAGE =
+  "Could not reach the server. Check the connection and try again.";
+
+function failureText(payload: Record<string, unknown>, fallback: string) {
+  if (payload.code === "registry_revision_conflict")
+    return ACTION_CONFLICT_MESSAGE;
+  return typeof payload.message === "string" ? payload.message : fallback;
+}
+
 const LOCAL_HISTORY_CONSEQUENCE =
   "Local history creates a hidden .git folder inside this Vault's notes folder to hold its history. That folder grows permanently: every image and PDF attached stays in it, even after you delete the file from the Vault.";
 
@@ -216,9 +268,10 @@ export function VaultSettingsDetail({
   const [vault, setVault] = useState<VaultSummary | null>(null);
   // The mutation-sequencing token, not a projection of the collection: a
   // pause/edit/un-pause round trip carries the revision each step returned,
-  // so it is seeded from the client and then advanced by the responses.
+  // so it is seeded from the client and then advanced by the responses. It is
+  // the base a Save is checked against; a conflict re-reads it (#338).
   const [revision, setRevision] = useState<number | null>(null);
-  const [changed, setChanged] = useState<number>();
+  const [changed, setChanged] = useState<LastChange>({ state: "loading" });
   const [name, setName] = useState("");
   const [exclude, setExclude] = useState("");
   const [archive, setArchive] = useState("");
@@ -234,7 +287,14 @@ export function VaultSettingsDetail({
   const [plaqueEditing, setPlaqueEditing] = useState(false);
   const [signIn, setSignIn] = useState<"none" | "token">("none");
   const [credToken, setCredToken] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
+  // A failure is announced assertively and drawn as one; progress and
+  // success stay polite (#338).
+  const [notice, setNotice] = useState<{ text: string; alert: boolean } | null>(
+    null,
+  );
+  const setMessage = (text: string | null) =>
+    setNotice(text === null ? null : { text, alert: false });
+  const setFailure = (text: string) => setNotice({ text, alert: true });
   const [confirmation, setConfirmation] = useState<{
     newSource: VaultSource;
     localHistory: boolean;
@@ -300,18 +360,28 @@ export function VaultSettingsDetail({
     setVault(summary);
   }, [busy, summary]);
 
+  // Reset on every Vault switch, and a refusal recorded as one: otherwise the
+  // previous Vault's date would stay printed under this Vault's name (#338).
   useEffect(() => {
     let cancelled = false;
+    setChanged({ state: "loading" });
     void (async () => {
       const response = await apiFetch(
         `/api/v1/vaults/${vaultId}/recent?limit=1`,
       );
-      if (!response.ok || cancelled) return;
+      if (cancelled) return;
+      if (!response.ok) {
+        setChanged({ state: "unavailable" });
+        return;
+      }
       const recent = (await response.json()) as {
         data?: Array<{ mtime_ns: number }>;
       };
-      if (!cancelled) setChanged(recent.data?.[0]?.mtime_ns);
-    })().catch(() => setMessage("This Vault could not be loaded."));
+      if (!cancelled)
+        setChanged({ state: "loaded", mtimeNs: recent.data?.[0]?.mtime_ns });
+    })().catch(() => {
+      if (!cancelled) setChanged({ state: "unavailable" });
+    });
     return () => {
       cancelled = true;
     };
@@ -352,10 +422,38 @@ export function VaultSettingsDetail({
   const showPlaqueFields = draftBehavior !== null && draftBehavior !== "no_git";
   const plaqueFieldsEditable = vault.source?.type === "local" || plaqueEditing;
 
+  // The saved sign-in state, which the controls fall back to whenever the
+  // drafted behaviour stops showing them.
+  const savedSignIn = vault.credential_configured ? "token" : "none";
+
+  /** A behaviour switch clears whatever it takes off the screen, as the
+   * creation flow's `selectBehavior` does (#338): a token typed for a remote
+   * behaviour must not ride along, unseen, on a save the server refuses for
+   * it. Fields that leave go back to their saved values rather than empty,
+   * since this edits an existing Vault. */
+  const selectBehavior = (next: GitBehavior) => {
+    setDraftBehavior(next);
+    if (!isRemoteBacked(next)) {
+      const saved = draftsFromSource(vault.source);
+      setSignIn(savedSignIn);
+      setCredToken("");
+      setPollMinutesDraft(saved.pollMinutes);
+      if (next === "no_git") {
+        setRepoUrlDraft(saved.repoUrl);
+        setBranchDraft(saved.branch);
+        setSubdirDraft(saved.subdirectory);
+        setPlaqueEditing(false);
+      }
+    }
+  };
+
   const credentialsPatch = ():
     | { action: "keep" }
     | { action: "remove" }
     | { action: "replace"; token: string } => {
+    // Sign-in is not on screen for a behaviour without a remote, and the
+    // registry drops a credential on such a source anyway.
+    if (!remoteBackedDraft) return { action: "remove" };
     if (signIn === "none") return { action: "remove" };
     if (credToken.trim()) return { action: "replace", token: credToken.trim() };
     return { action: "keep" };
@@ -380,16 +478,34 @@ export function VaultSettingsDetail({
     commit_identity: identity,
   });
 
-  const mutate = async (path: string, init: RequestInit) => {
+  /** A registry-revision conflict means the base this page holds is behind;
+   * adopt the current one so the next attempt can succeed rather than
+   * re-sending the same stale number forever (#338). */
+  const refreshRevision = async () => {
+    const fresh = await fetchRegistryRevision();
+    if (fresh !== null) setRevision(fresh);
+  };
+
+  const mutate = async (
+    path: string,
+    init: RequestInit,
+    conflictMessage = ACTION_CONFLICT_MESSAGE,
+  ) => {
     setMessage(null);
     const { ok, payload: raw } = await requestJson(path, init);
     const payload = raw as {
       vault?: VaultSummary;
       registry_revision?: number;
       message?: string;
+      code?: string;
     };
     if (!ok) {
-      setMessage(payload.message ?? "This Vault could not be changed.");
+      if (payload.code === "registry_revision_conflict") {
+        await refreshRevision();
+        setFailure(conflictMessage);
+      } else {
+        setFailure(failureText(raw, "This Vault could not be changed."));
+      }
       return false;
     }
     if (payload.vault) applyVault(payload.vault);
@@ -401,11 +517,33 @@ export function VaultSettingsDetail({
 
   const plainSave = async (source: VaultSource | undefined) => {
     if (revision === null) return;
-    await mutate(`/api/v1/vaults/${vaultId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(editVaultBody(source, revision, false)),
-    });
+    await mutate(
+      `/api/v1/vaults/${vaultId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editVaultBody(source, revision, false)),
+      },
+      SAVE_CONFLICT_MESSAGE,
+    );
+  };
+
+  /** Pause, resume and disconnect say what to do, not what the fields should
+   * be, so they read the revision at the moment of the click, as creation
+   * and recovery already do, instead of trusting the one this page opened
+   * with (#338). */
+  const runAction = async (
+    path: (expectedRevision: number) => string,
+    init: RequestInit,
+  ) => {
+    setMessage(null);
+    const fresh = await fetchRegistryRevision();
+    if (fresh === null) {
+      setFailure(UNREACHABLE_MESSAGE);
+      return false;
+    }
+    setRevision(fresh);
+    return mutate(path(fresh), init);
   };
 
   /** Issue #121's round trip: accepting an identity change runs pause, edit
@@ -430,11 +568,16 @@ export function VaultSettingsDetail({
       message?: string;
     };
     if (!disableResult.ok || disablePayload.registry_revision === undefined) {
-      setMessage(
-        disablePayload.message
-          ? `Nothing changed. ${disablePayload.message}`
-          : "Nothing changed — this Vault could not be paused for the edit.",
-      );
+      if (disableResult.payload.code === "registry_revision_conflict") {
+        await refreshRevision();
+        setFailure(SAVE_CONFLICT_MESSAGE);
+      } else {
+        setFailure(
+          disablePayload.message
+            ? `Nothing changed. ${disablePayload.message}`
+            : "Nothing changed — this Vault could not be paused for the edit.",
+        );
+      }
       setBusy(false);
       return;
     }
@@ -460,15 +603,15 @@ export function VaultSettingsDetail({
           setVault((current) =>
             current ? { ...current, enabled: true } : current,
           );
-        setMessage(
+        setFailure(
           editPayload.message
-            ? `Nothing changed. ${editPayload.message}`
+            ? `Nothing changed. ${failureText(editResult.payload, editPayload.message)}`
             : "Nothing changed.",
         );
       } else {
         markRecoveryPending(vaultId);
         setRecoveryPending(true);
-        setMessage(
+        setFailure(
           "This Vault is paused and could not be restored automatically. Use the button below to bring it back.",
         );
       }
@@ -492,7 +635,7 @@ export function VaultSettingsDetail({
     };
     if (!enableResult.ok) {
       setRecoveryPending(true);
-      setMessage(
+      setFailure(
         "This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.",
       );
       setBusy(false);
@@ -518,7 +661,7 @@ export function VaultSettingsDetail({
       return;
     }
     if (missingRequiredRepositoryUrl(draftSource)) {
-      setMessage(REPOSITORY_URL_REQUIRED_MESSAGE);
+      setFailure(REPOSITORY_URL_REQUIRED_MESSAGE);
       return;
     }
     if (identityChanged) {
@@ -542,7 +685,7 @@ export function VaultSettingsDetail({
       if (result.vault) applyVault(result.vault);
       setMessage("This Vault is back.");
     } else {
-      setMessage(result.message);
+      setFailure(result.message);
     }
     setBusy(false);
   };
@@ -556,9 +699,8 @@ export function VaultSettingsDetail({
       { method: "POST" },
     );
     if (!ok)
-      setMessage(
-        (payload as { message?: string }).message ??
-          "Could not start a Git turn for this Vault.",
+      setFailure(
+        failureText(payload, "Could not start a Git turn for this Vault."),
       );
     // No re-read here: the refresh publishes the new record and the effect
     // above adopts it, same as any other writer's change.
@@ -591,7 +733,8 @@ export function VaultSettingsDetail({
         <div>
           <h2 className="settings-sec-title">{vault.name}</h2>
           <p className="settings-sec-blurb">
-            {sourceLabel(vault.source)} · {count ?? 0} notes ·{" "}
+            {sourceLabel(vault.source)} ·{" "}
+            {count === undefined ? <UnknownCount inline /> : count} notes ·{" "}
             {lastChanged(changed)}
           </p>
         </div>
@@ -668,9 +811,16 @@ export function VaultSettingsDetail({
           ? "This Vault is paused. It is kept here so you can turn it back on."
           : conditionSentence(vaultProjection.slotFor(vault))}
       </p>
-      {message ? (
-        <div className="settings-notice" role="status">
-          {message}
+      {notice ? (
+        <div
+          className={
+            notice.alert
+              ? "settings-notice settings-notice-err"
+              : "settings-notice"
+          }
+          role={notice.alert ? "alert" : "status"}
+        >
+          {notice.text}
         </div>
       ) : null}
       <div className="settings-rows">
@@ -851,7 +1001,7 @@ export function VaultSettingsDetail({
                   key={item.id}
                   type="button"
                   aria-pressed={draftBehavior === item.id}
-                  onClick={() => setDraftBehavior(item.id)}
+                  onClick={() => selectBehavior(item.id)}
                 >
                   {item.label}
                 </button>
@@ -969,10 +1119,11 @@ export function VaultSettingsDetail({
       <div className="settings-vault-actions">
         <button
           className="settings-btn"
-          disabled={revision === null || busy}
+          disabled={busy}
           onClick={() =>
-            void mutate(
-              `/api/v1/vaults/${vaultId}/${paused ? "enable" : "disable"}?expected_registry_revision=${revision}`,
+            void runAction(
+              (expected) =>
+                `/api/v1/vaults/${vaultId}/${paused ? "enable" : "disable"}?expected_registry_revision=${expected}`,
               { method: "POST" },
             )
           }
@@ -992,11 +1143,12 @@ export function VaultSettingsDetail({
         </button>
         <button
           className="settings-btn settings-btn-danger"
-          disabled={revision === null || busy}
+          disabled={busy}
           onClick={async () => {
             if (
-              await mutate(
-                `/api/v1/vaults/${vaultId}?expected_registry_revision=${revision}`,
+              await runAction(
+                (expected) =>
+                  `/api/v1/vaults/${vaultId}?expected_registry_revision=${expected}`,
                 { method: "DELETE" },
               )
             )
@@ -1015,42 +1167,38 @@ export function VaultSettingsDetail({
         folder, its history, or anything on the server.
       </p>
       {confirmation ? (
-        <div className="settings-modal-back">
-          <div
-            className="settings-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Before this is saved"
-          >
-            <h3>Before this is saved</h3>
-            <p>{IDENTITY_CHANGE_CONSEQUENCE}</p>
-            {confirmation.localHistory ? (
-              <p>{LOCAL_HISTORY_CONSEQUENCE}</p>
-            ) : null}
-            {vault.credential_configured ? (
-              <p>
-                Its stored access token will be cleared — sign in again
-                afterward if this Vault still needs one.
-              </p>
-            ) : null}
-            <div className="settings-modal-actions">
-              <button
-                type="button"
-                className="settings-btn"
-                onClick={() => setConfirmation(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="settings-btn settings-btn-hot"
-                onClick={() => void runIdentityChange(confirmation.newSource)}
-              >
-                Go ahead
-              </button>
-            </div>
+        <SettingsModal
+          label="Before this is saved"
+          onClose={() => setConfirmation(null)}
+        >
+          <h3>Before this is saved</h3>
+          <p>{IDENTITY_CHANGE_CONSEQUENCE}</p>
+          {confirmation.localHistory ? (
+            <p>{LOCAL_HISTORY_CONSEQUENCE}</p>
+          ) : null}
+          {vault.credential_configured ? (
+            <p>
+              Its stored access token will be cleared — sign in again afterward
+              if this Vault still needs one.
+            </p>
+          ) : null}
+          <div className="settings-modal-actions">
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => setConfirmation(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="settings-btn settings-btn-hot"
+              onClick={() => void runIdentityChange(confirmation.newSource)}
+            >
+              Go ahead
+            </button>
           </div>
-        </div>
+        </SettingsModal>
       ) : null}
     </div>
   );

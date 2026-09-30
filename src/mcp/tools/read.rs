@@ -609,9 +609,18 @@ pub(super) async fn get_attachment_tool(
                 false,
             )));
         }
+        // A structured tool error like every other outcome of this tool
+        // (#327), so an agent can branch on the code and retry with
+        // `encoding: "url"` rather than meet a bare JSON-RPC error its
+        // harness may surface as a transport failure.
         Ok(Err(AttachmentFailure::TooLargeForBase64(size_bytes))) => {
-            return Err(JsonRpcFailure::invalid_params(format!(
-                "attachment exceeds max size for base64 encoding: {size_bytes} > {max_base64_bytes}; call get_attachment again with encoding \"url\" instead"
+            return Ok(structured_error(VaultOperationError::new(
+                "attachment_too_large_for_base64",
+                format!(
+                    "attachment exceeds max size for base64 encoding: {size_bytes} > {max_base64_bytes}; call get_attachment again with encoding \"url\" instead"
+                ),
+                Some(vault_id),
+                false,
             )));
         }
         Err(error) => return read_failure(error),

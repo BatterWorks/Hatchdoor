@@ -88,13 +88,19 @@ impl StartupTracker {
         self.0.set_indexing(progress);
     }
 
-    pub fn set_ready(&self) {
-        self.0.set_ready();
+    /// Report an Index turn's progress, unless the collection has already
+    /// settled `Ready`. Once it has, a later Index turn is routine upkeep of
+    /// one Vault, which that Vault reports itself; moving this tracker back to
+    /// `Indexing` for it took the whole instance out of readiness (`/ready`
+    /// answered 503) for the length of every watcher-triggered embedding pass
+    /// (#326). Only model setup, which starts the collection over, leaves
+    /// `Ready` again.
+    pub fn report_indexing_progress(&self, progress: IndexingProgressSnapshot) {
+        self.0.set_indexing_unless_ready(progress);
     }
 
-    pub fn set_failed(&self) {
-        self.0
-            .set_unavailable("vault_index_failed", "Indexing could not be completed.");
+    pub fn set_ready(&self) {
+        self.0.set_ready();
     }
 
     pub fn set_model_setup_failed(&self) {
@@ -104,10 +110,10 @@ impl StartupTracker {
         );
     }
 
-    /// Whether every active Vault's Index turn has settled `Ready`, which is
-    /// the condition `VaultWorkExecutor::publish_outcome` latches here through
-    /// `collection_indexes_ready`. It falls back to false for the duration of
-    /// each subsequent rebuild.
+    /// Whether every active Vault's Index turn has settled, which is the
+    /// condition `VaultWorkExecutor::publish_outcome` latches here through
+    /// `collection_indexes_settled`. Once latched it stays true through later
+    /// rebuilds and single-Vault failures; only model setup resets it.
     ///
     /// Named for what it measures rather than for `Ready`, because the shorter
     /// `is_ready` invited a question it cannot answer: three callers read it as
@@ -322,13 +328,33 @@ mod tests {
         assert!(!tracker.model_setup_pending());
     }
 
+    /// A settled collection stays ready through a later Index turn's
+    /// progress reports: that turn is one Vault's upkeep, not startup (#326).
+    #[test]
+    fn indexing_progress_after_readiness_does_not_leave_ready() {
+        let tracker = StartupTracker::scanning();
+        tracker.report_indexing_progress(IndexingProgressSnapshot::default());
+        assert_eq!(
+            tracker.status().state,
+            "indexing",
+            "first-run progress is still reported"
+        );
+
+        tracker.set_ready();
+        tracker.report_indexing_progress(IndexingProgressSnapshot::default());
+        assert!(tracker.collection_indexes_ready());
+        assert_eq!(tracker.status().state, "ready");
+    }
+
     /// `Unavailable` is not one condition: a failed index and a registry
     /// awaiting operator recovery both land here, and neither is answered by
     /// accepting a model licence. Only the error code tells them apart.
     #[test]
     fn unavailable_for_a_non_setup_reason_is_not_pending_setup() {
         let tracker = StartupTracker::ready();
-        tracker.set_failed();
+        tracker
+            .runtime()
+            .set_unavailable("vault_index_failed", "Indexing could not be completed.");
         assert!(!tracker.model_setup_pending());
 
         tracker.runtime().set_unavailable(

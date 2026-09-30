@@ -44,6 +44,7 @@ services:
       - ${HOST_STATE_PATH:-./data/state}:/data/state
       - ${HOST_MODELS_PATH:-./models}:/models
     restart: unless-stopped
+    stop_grace_period: 3m
     healthcheck:
       test: ["CMD", "/app/hatchdoor", "--healthcheck"]
       interval: 30s

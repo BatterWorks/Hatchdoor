@@ -5,6 +5,7 @@ import {
   describeMissingVaults,
   describeNotSearchableVaults,
   describeVaultsNotDrawn,
+  joinWithAnd,
   missingVaultNames,
   notSearchableVaultNames,
 } from "./vaultParticipants";
@@ -99,5 +100,16 @@ describe("describeVaultsNotDrawn", () => {
     expect(
       describeVaultsNotDrawn(["Field Station", "Archive", "Journal"]),
     ).toBe("Field Station, Archive, and Journal could not be drawn.");
+  });
+});
+
+describe("joinWithAnd", () => {
+  it("lists one, two, and three or more Vault names", () => {
+    expect(joinWithAnd([])).toBe("");
+    expect(joinWithAnd(["Work"])).toBe("Work");
+    expect(joinWithAnd(["Work", "Archive"])).toBe("Work and Archive");
+    expect(joinWithAnd(["Work", "Archive", "Journal"])).toBe(
+      "Work, Archive, and Journal",
+    );
   });
 });

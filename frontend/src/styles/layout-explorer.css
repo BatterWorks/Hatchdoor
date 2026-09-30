@@ -341,7 +341,8 @@
 
 /* Tells the truth about a partial read (#141): never a banner, just this
    trailing line below the last row, in warn ink. */
-.explorer-changes-partial {
+.explorer-changes-partial,
+.explorer-tree-partial {
   margin: 0.35rem 0 0 0.45rem;
   font-family: var(--font-sans);
   font-size: 0.76rem;
@@ -363,6 +364,17 @@
 
 button.side-head {
   cursor: pointer;
+}
+
+/* The single-Vault Notes head while it reports a condition (#334): the one
+   desktop place that Vault's health shows, so it sticks to whichever edge of
+   the scrolling nav it would otherwise leave through. */
+.explorer-nav > .side-head.is-pinned {
+  position: sticky;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  background: var(--bg);
 }
 
 button.side-head:focus-visible {

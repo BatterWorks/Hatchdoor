@@ -16,7 +16,10 @@
 //! can rewrite twice a day.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -58,14 +61,25 @@ pub struct GitTurnRecord {
 }
 
 /// Reader/writer for the durable per-Vault runtime state file.
+///
+/// Clones share one write lock. Every change is a read-modify-write of the
+/// whole file, and two run on different tasks: a Git turn recording its
+/// outcome and a disconnect forgetting another Vault. Unserialized, one could
+/// write back what it read before the other's change and silently undo it,
+/// resurrecting a disconnected Vault's countdown for whatever reconnects
+/// under its ID (#326).
 #[derive(Clone)]
 pub struct VaultRuntimeStateStore {
     path: PathBuf,
+    writes: Arc<Mutex<()>>,
 }
 
 impl VaultRuntimeStateStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            writes: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Resolve the state file beside the Vault registry, so both live in the
@@ -90,6 +104,7 @@ impl VaultRuntimeStateStore {
 
     /// Record one completed Git turn.
     pub fn record_git_turn(&self, vault_id: VaultId, record: GitTurnRecord) -> Result<(), String> {
+        let _write = self.lock_writes();
         let mut stored = match self.load() {
             LoadedState::Usable(stored) => stored,
             // A newer Hatchdoor wrote this. Its shape is not ours to guess at,
@@ -122,6 +137,7 @@ impl VaultRuntimeStateStore {
     ///
     /// A no-op when nothing is stored, so callers can prune unconditionally.
     pub fn forget(&self, vault_id: VaultId) -> Result<(), String> {
+        let _write = self.lock_writes();
         let LoadedState::Usable(mut stored) = self.load() else {
             return Ok(());
         };
@@ -129,6 +145,15 @@ impl VaultRuntimeStateStore {
             return Ok(());
         }
         self.persist(&stored)
+    }
+
+    /// Held across a whole read-modify-write. A panic while holding it cannot
+    /// leave the file half-written (see [`Self::persist`]), so a poisoned lock
+    /// is still safe to take.
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn load(&self) -> LoadedState {
@@ -157,8 +182,35 @@ impl VaultRuntimeStateStore {
         })?;
         let encoded = serde_json::to_vec_pretty(stored)
             .map_err(|error| format!("could not encode Vault runtime state: {error}"))?;
-        std::fs::write(&self.path, encoded)
-            .map_err(|error| format!("could not write Vault runtime state: {error}"))
+        // Written beside the file and renamed over it, so a reader, or the
+        // next start after a crash mid-write, sees the old file or the new
+        // one and never a truncated one.
+        static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let file_name = self.path.file_name().map_or_else(
+            || RUNTIME_STATE_FILE_NAME.into(),
+            |name| name.to_os_string(),
+        );
+        let mut temporary_name = std::ffi::OsString::from(".");
+        temporary_name.push(file_name);
+        temporary_name.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary = parent.join(temporary_name);
+        let result = (|| {
+            let mut file = std::fs::File::create(&temporary)
+                .map_err(|error| format!("could not write Vault runtime state: {error}"))?;
+            file.write_all(&encoded)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| format!("could not write Vault runtime state: {error}"))?;
+            std::fs::rename(&temporary, &self.path)
+                .map_err(|error| format!("could not replace Vault runtime state: {error}"))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 }
 

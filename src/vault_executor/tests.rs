@@ -1087,6 +1087,80 @@ async fn an_index_turn_with_no_concurrent_mutation_publishes_fresh() {
     );
 }
 
+/// Issue #329: a snapshot attempt that starts while an Index turn is still
+/// building supersedes that turn, and the turn's publication then writes
+/// nothing. The turn used to count that as a publication and mark its Vault
+/// `Ready` on the strength of rows it never wrote. It now fails retryably,
+/// leaves the row exactly as the newer attempt left it, and does not mark it
+/// stale over that attempt's verdict.
+#[tokio::test]
+async fn a_superseded_index_turn_fails_retryably_and_leaves_the_row_to_the_newer_attempt() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let (entered, release, turn) = fixture.hold_open_mid_embedding();
+    meet_barrier(&entered).await;
+
+    // `mark_vault_snapshot_stale` begins its own snapshot attempt, which is
+    // exactly the concurrent caller the attempt guard exists for. The newer
+    // attempt then decides the row's freshness; setting it `fresh` here makes
+    // any stale mark the superseded turn wrongly applied afterwards visible.
+    fixture
+        .cache
+        .mark_vault_snapshot_stale(fixture.vault_id)
+        .expect("a newer attempt supersedes the running turn");
+    fixture
+        .cache
+        .connection()
+        .expect("open the shared cache")
+        .execute(
+            "UPDATE vault_snapshots SET freshness = 'fresh' WHERE vault_id = ?1",
+            [fixture.vault_id.to_string()],
+        )
+        .expect("the newer attempt settles the row fresh");
+
+    meet_barrier(&release).await;
+    let outcome = turn
+        .await
+        .expect("Index turn task")
+        .expect("Index turn ran");
+    let error = outcome
+        .result
+        .expect_err("a superseded turn published nothing and must not report success");
+    assert_eq!(error.code(), "vault_index_failed");
+    assert!(error.retryable(), "a superseded turn is worth retrying");
+
+    assert_eq!(
+        fixture.snapshot_status(),
+        Some(VaultSnapshotStatus {
+            participating: true,
+            freshness: VaultSnapshotFreshness::Fresh,
+            searchable: true,
+        }),
+        "the superseded turn must not stale the row the newer attempt owns"
+    );
+    assert_eq!(
+        fixture
+            .cache
+            .snapshot_note_content(fixture.vault_id, "home")
+            .expect("read the retained snapshot")
+            .as_deref(),
+        Some("# Home\n\nmelatonin original"),
+        "the superseded turn's candidate was never published"
+    );
+    let runtime = fixture.control().snapshot();
+    assert_ne!(
+        runtime.search,
+        VaultSearchStatus::Ready,
+        "a turn that published nothing must not report its Vault current"
+    );
+    assert_eq!(
+        runtime
+            .search_error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("vault_index_failed")
+    );
+}
+
 /// A managed-Git Vault's control block, activated through the real
 /// registry and collection runtime exactly like production. Uses a
 /// syntactically valid but unreachable `https://` URL — like
@@ -1182,6 +1256,105 @@ async fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_bro
         .await
         .expect("successful acquisition queues Index work");
     index_turn.result.expect("Index turn can proceed");
+}
+
+/// #323: a successful commit turn used to republish `Ready`, erasing a
+/// sync conflict and its file list within one save of it appearing. A
+/// conflict survives commit turns; a sync that succeeds clears it.
+#[test]
+fn a_sync_conflict_survives_successful_commit_turns_until_a_sync_resolves_it() {
+    let directory = tempdir().expect("temporary state directory");
+    let (_collection, _registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    managed_git.activate(
+        vault_id,
+        std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+    );
+    let cooldown = crate::git::CommitCooldown::new();
+    publish_managed_git_turn_outcome(
+        &control_block,
+        &coordinator,
+        &managed_git,
+        vault_id,
+        &Err(VaultWorkError::new(
+            "managed_git_conflict",
+            "managed checkout merge conflict: vault/Home.md",
+            false,
+        )
+        .with_detail(crate::vault_work::VaultWorkErrorDetail::AffectedPaths(
+            vec!["vault/Home.md".to_string()],
+        ))),
+    );
+    let published = control_block.snapshot();
+
+    for _ in 0..2 {
+        finish_commit_turn(
+            &control_block,
+            &cooldown,
+            vault_id,
+            Ok(crate::git::ManagedGitOutcome::Synchronized),
+        )
+        .expect("commit turn succeeded");
+    }
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Unavailable);
+    assert_eq!(after.git_error, published.git_error);
+    assert!(
+        after
+            .git_error
+            .as_ref()
+            .is_some_and(|error| error.detail.is_some()),
+        "the conflicted file list must survive too"
+    );
+
+    publish_managed_git_turn_outcome(
+        &control_block,
+        &coordinator,
+        &managed_git,
+        vault_id,
+        &Ok(crate::git::ManagedGitOutcome::Synchronized),
+    );
+    let resolved = control_block.snapshot();
+    assert_eq!(resolved.git, VaultGitStatus::Ready);
+    assert!(resolved.git_error.is_none());
+}
+
+/// The other half of #323's rule: a failure a commit turn can itself
+/// produce is cleared by the next commit turn that succeeds.
+#[test]
+fn a_successful_commit_turn_clears_a_failure_a_commit_could_have_caused() {
+    let directory = tempdir().expect("temporary state directory");
+    let (_collection, _registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
+    let cooldown = crate::git::CommitCooldown::new();
+    let _ = finish_commit_turn(
+        &control_block,
+        &cooldown,
+        vault_id,
+        Err(VaultWorkError::new(
+            "managed_git_dirty_working_copy",
+            "managed checkout has unsupported local work: outside.txt",
+            false,
+        )),
+    );
+    assert_eq!(control_block.snapshot().git, VaultGitStatus::Unavailable);
+
+    finish_commit_turn(
+        &control_block,
+        &cooldown,
+        vault_id,
+        Ok(crate::git::ManagedGitOutcome::Synchronized),
+    )
+    .expect("commit turn succeeded");
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Ready);
+    assert!(after.git_error.is_none());
 }
 
 #[test]
@@ -1963,13 +2136,68 @@ fn startup_readiness_follows_collection_index_completion() {
     let vaults = VaultCollectionRuntime::new();
     vaults.reconcile(&registry, &snapshot);
 
-    assert!(!collection_indexes_ready(&vaults));
-    vaults
-        .runtime(vault_id)
-        .expect("active Vault")
+    assert!(!collection_indexes_settled(&vaults));
+    let runtime = vaults.runtime(vault_id).expect("active Vault");
+    runtime
+        .set_search_status(VaultSearchStatus::Indexing, None)
+        .expect("publish indexing search status");
+    assert!(
+        !collection_indexes_settled(&vaults),
+        "a turn still running has not settled"
+    );
+    runtime
         .set_search_status(VaultSearchStatus::Ready, None)
         .expect("publish ready search status");
-    assert!(collection_indexes_ready(&vaults));
+    assert!(collection_indexes_settled(&vaults));
+    runtime
+        .set_search_status(
+            VaultSearchStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: "vault_index_failed".to_string(),
+                message: "scan failed".to_string(),
+                retryable: true,
+                detail: None,
+            }),
+        )
+        .expect("publish failed search status");
+    assert!(
+        collection_indexes_settled(&vaults),
+        "a Vault whose turn failed has settled; the failure is its own status (#326)"
+    );
+}
+
+/// A Vault with no directory has nothing to index, so it must not hold the
+/// rest of the collection out of readiness (#326).
+#[test]
+fn a_vault_without_a_directory_does_not_hold_the_collection_unsettled() {
+    let directory = tempdir().expect("temporary state directory");
+    let present = directory.path().join("present");
+    std::fs::create_dir_all(&present).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let with_present = add_local_vault(&registry, &empty, "Present", present);
+    let missing_path = directory.path().join("missing");
+    std::fs::create_dir_all(&missing_path).expect("create Vault directory");
+    let committed = add_local_vault(&registry, &with_present, "Missing", missing_path.clone());
+    // Registered while it existed, gone by the time the runtime activates:
+    // the dev fixture's missing-path Vault, and a moved or unmounted one.
+    std::fs::remove_dir_all(&missing_path).expect("remove Vault directory");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &committed);
+    let missing = vaults
+        .runtime(vault_id_named(&committed, "Missing"))
+        .expect("a Vault without a directory is still an active runtime");
+    assert_ne!(missing.snapshot().activation, VaultActivationStatus::Active);
+
+    vaults
+        .runtime(vault_id_named(&committed, "Present"))
+        .expect("present Vault")
+        .set_search_status(VaultSearchStatus::Ready, None)
+        .expect("publish ready search status");
+    assert!(collection_indexes_settled(&vaults));
 }
 
 /// The executor binds the settings snapshot at the *start of each turn*, not
@@ -2028,6 +2256,7 @@ async fn each_index_turn_binds_the_settings_snapshot_at_its_own_start() {
         runtime_config: runtime_config.clone(),
         startup: StartupTracker::scanning(),
         model_setup_started: Arc::new(AtomicBool::new(false)),
+        index_retries: IndexRetries::default(),
     };
 
     let outcome = worker
@@ -2139,6 +2368,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         runtime_config: RuntimeConfig::for_tests(),
         startup: StartupTracker::scanning(),
         model_setup_started: model_setup_started.clone(),
+        index_retries: IndexRetries::default(),
     };
 
     let drive = async |worker: &mut crate::vault_work::VaultWorkWorker| {
@@ -2204,8 +2434,8 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         "an embedder_not_ready deferral is not an indexing failure"
     );
 
-    // Any other Index failure is, and it clears the model-setup flag too.
-    model_setup_started.store(true, Ordering::Release);
+    // Nor is a real Index failure of one Vault: it is that Vault's own
+    // status, and the other Vault is still serving (#326).
     executor.publish_outcome(&VaultWorkOutcome {
         request: first_turn.request,
         result: Err(VaultWorkError::new(
@@ -2215,10 +2445,9 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         )),
     });
     assert!(
-        !executor.startup.collection_indexes_ready(),
-        "a real Index failure fails startup"
+        executor.startup.collection_indexes_ready(),
+        "one Vault's Index failure does not take the instance out of readiness"
     );
-    assert!(!model_setup_started.load(Ordering::Acquire));
 
     // A Git turn's outcome never moves startup readiness. Take a real Git
     // request from the coordinator rather than fabricating one — a `Local`
@@ -2635,4 +2864,372 @@ async fn a_commit_turn_leaves_the_remote_sync_schedule_where_it_was() {
         Some(std::time::Duration::from_secs(3600)),
         "nor does it change the interval"
     );
+}
+
+/// #323: a Git turn that cannot read the registry publishes this failure as
+/// the Vault's `git_error`, which every client sees. The registry error's own
+/// text names the registry file's absolute host path.
+#[test]
+fn an_unreadable_registry_is_reported_without_the_host_path() {
+    let directory = tempdir().expect("temporary directory");
+    let registry_path = directory.path().join("state/vaults.json");
+    std::fs::create_dir_all(&registry_path).expect("a directory where the file should be");
+    let registry = VaultRegistryStore::new(registry_path);
+    let vault_id = VaultId::generate().expect("vault id");
+
+    let error = git_credentials(&registry, vault_id).expect_err("registry cannot be read");
+
+    assert_eq!(error.code(), "managed_git_registry_unavailable");
+    assert!(error.retryable());
+    assert!(
+        !error.message().contains('/'),
+        "client-visible message leaks a host path: {}",
+        error.message()
+    );
+}
+
+/// Two Local Vaults reconstructed into a collection, with an executor over
+/// them that starts where a fresh process does: model installed, tracker
+/// scanning, nothing indexed yet.
+async fn two_vault_executor(
+    directory: &Path,
+) -> (
+    VaultWorkExecutor,
+    crate::vault_work::VaultWorkWorker,
+    VaultId,
+    VaultId,
+    PathBuf,
+) {
+    let first_path = directory.join("first");
+    let second_path = directory.join("second");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    std::fs::create_dir_all(&second_path).expect("second Vault directory");
+    std::fs::write(first_path.join("One.md"), "# One\n\nfirst note").expect("write first note");
+    std::fs::write(second_path.join("Two.md"), "# Two\n\nsecond note").expect("write second note");
+    let registry = VaultRegistryStore::new(directory.join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let with_first = add_local_vault(&registry, &empty, "First", first_path);
+    let committed = add_local_vault(&registry, &with_first, "Second", second_path.clone());
+    let first = vault_id_named(&committed, "First");
+    let second = vault_id_named(&committed, "Second");
+    let vaults = VaultCollectionRuntime::new();
+    let (work, worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(work.clone()));
+    vaults
+        .reconcile_and_reconstruct(&registry, &committed, &work, &managed_git)
+        .await;
+    let executor = VaultWorkExecutor {
+        vaults,
+        registry,
+        work,
+        managed_git,
+        commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
+        cache: Arc::new(SqliteCache::in_memory(384).expect("open shared cache")),
+        embedder: Arc::new(StubEmbedder::new(384)),
+        runtime_config: RuntimeConfig::for_tests(),
+        startup: StartupTracker::scanning(),
+        model_setup_started: Arc::new(AtomicBool::new(true)),
+        index_retries: IndexRetries::default(),
+    };
+    (executor, worker, first, second, second_path)
+}
+
+/// The audit's first finding: one Vault's failed Index turn latched the
+/// instance-wide tracker `Unavailable`, so `/ready` answered 503 although the
+/// other Vault was indexed and serving (#326).
+#[tokio::test]
+async fn one_vaults_failed_index_turn_leaves_the_collection_ready() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, first, second, second_path) =
+        two_vault_executor(directory.path()).await;
+    // The second Vault's directory goes away after activation, so its scan
+    // fails for real.
+    std::fs::remove_dir_all(&second_path).expect("remove second Vault directory");
+
+    for _ in 0..2 {
+        let outcome = worker
+            .run_next(|request| executor.run(request))
+            .await
+            .expect("reconstructed Index turn");
+        executor.publish_outcome(&outcome);
+        match outcome.request.vault_id() {
+            vault_id if vault_id == first => outcome.result.expect("the healthy Vault indexes"),
+            vault_id => {
+                assert_eq!(vault_id, second);
+                assert_eq!(
+                    outcome.result.expect_err("the broken Vault fails").code(),
+                    "vault_index_failed"
+                );
+            }
+        }
+    }
+
+    assert!(
+        executor.startup.collection_indexes_ready(),
+        "the healthy Vault is serving, so the instance is ready"
+    );
+    assert_eq!(executor.startup.status().state, "ready");
+    assert!(!executor.model_setup_started.load(Ordering::Acquire));
+    let failed = executor
+        .vaults
+        .runtime(second)
+        .expect("second Vault")
+        .snapshot();
+    assert_eq!(failed.search, VaultSearchStatus::Unavailable);
+    assert_eq!(
+        failed
+            .search_error
+            .expect("the failure is on the Vault")
+            .code,
+        "vault_index_failed",
+        "the failure stays visible on the Vault that had it"
+    );
+    assert_eq!(
+        executor
+            .vaults
+            .runtime(first)
+            .expect("first Vault")
+            .snapshot()
+            .search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// A routine reindex after the collection settled is one Vault's upkeep and
+/// reports its own `Indexing`; it must not move the instance tracker, which
+/// `/ready` reads, back out of `Ready` (#326).
+#[tokio::test]
+async fn a_routine_reindex_does_not_leave_startup_readiness() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, first, _second, _) = two_vault_executor(directory.path()).await;
+    for _ in 0..2 {
+        let outcome = worker
+            .run_next(|request| executor.run(request))
+            .await
+            .expect("reconstructed Index turn");
+        executor.publish_outcome(&outcome);
+        outcome.result.expect("Index turn succeeds");
+    }
+    assert!(executor.startup.collection_indexes_ready());
+
+    std::fs::write(
+        directory.path().join("first/Three.md"),
+        "# Three\n\na change the watcher would report",
+    )
+    .expect("write a new note");
+    assert_eq!(
+        executor.work.request(first, VaultWorkKind::Index),
+        ScheduleResult::Queued
+    );
+    let startup = executor.startup.clone();
+    let observed_ready_throughout = Arc::new(AtomicBool::new(true));
+    let observer = observed_ready_throughout.clone();
+    let executor_ref = &executor;
+    let outcome = worker
+        .run_next(|request| async move {
+            let executor = executor_ref;
+            // Progress is reported from inside the turn; readiness must hold
+            // at every point of it, not only once it has finished.
+            let result = executor.run(request).await;
+            if !startup.collection_indexes_ready() {
+                observer.store(false, Ordering::Release);
+            }
+            result
+        })
+        .await
+        .expect("routine Index turn");
+    outcome.result.expect("routine reindex succeeds");
+    assert!(observed_ready_throughout.load(Ordering::Acquire));
+    assert_eq!(executor.startup.status().state, "ready");
+}
+
+/// A retryable Index failure asks for another turn after a backoff that
+/// doubles, and stops after a bounded number of attempts. Before #326 a
+/// failed turn was never retried on its own.
+#[tokio::test(start_paused = true)]
+async fn a_retryable_index_failure_is_retried_with_a_bounded_backoff() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, first, second, _) = two_vault_executor(directory.path()).await;
+    // Clear the reconstructed turns so only a retry can queue work.
+    for _ in 0..2 {
+        worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("reconstructed turn");
+    }
+    let failure = VaultWorkOutcome {
+        request: VaultWorkRequest::for_tests(first, VaultWorkKind::Index),
+        result: Err(VaultWorkError::new(
+            "vault_index_failed",
+            "scan failed",
+            true,
+        )),
+    };
+
+    let mut delay = INDEX_RETRY_BASE_DELAY;
+    for attempt in 0..INDEX_RETRY_LIMIT {
+        executor.publish_outcome(&failure);
+        tokio::time::sleep(delay - Duration::from_secs(1)).await;
+        assert!(
+            !executor.work.has_work(first, VaultWorkKind::Index),
+            "attempt {attempt} waits out its backoff"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            executor.work.has_work(first, VaultWorkKind::Index),
+            "attempt {attempt} is requested once its backoff elapses"
+        );
+        worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("retried turn");
+        delay *= 2;
+    }
+
+    executor.publish_outcome(&failure);
+    tokio::time::sleep(delay * 2).await;
+    assert!(
+        !executor.work.has_work(first, VaultWorkKind::Index),
+        "retries stop once the limit is spent"
+    );
+
+    // A success resets the count, and a non-retryable failure asks for
+    // nothing.
+    executor.publish_outcome(&VaultWorkOutcome {
+        request: failure.request,
+        result: Ok(()),
+    });
+    executor.publish_outcome(&failure);
+    tokio::time::sleep(INDEX_RETRY_BASE_DELAY + Duration::from_secs(1)).await;
+    assert!(executor.work.has_work(first, VaultWorkKind::Index));
+    worker
+        .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+        .await
+        .expect("retried turn");
+    executor.publish_outcome(&VaultWorkOutcome {
+        request: VaultWorkRequest::for_tests(second, VaultWorkKind::Index),
+        result: Err(VaultWorkError::new("vault_index_failed", "for good", false)),
+    });
+    tokio::time::sleep(INDEX_RETRY_BASE_DELAY * 4).await;
+    assert!(!executor.work.has_work(second, VaultWorkKind::Index));
+}
+
+/// A panic in a turn's async shell is caught by the worker (#326). The turn
+/// never reached its own failure publication, so the executor publishes it:
+/// otherwise the Vault would read `Indexing` forever. And the Vault can still
+/// be disabled afterwards without the request hanging.
+#[tokio::test]
+async fn a_panicking_index_turn_is_published_and_its_vault_can_still_be_disabled() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, _first, _second, _) = two_vault_executor(directory.path()).await;
+
+    let outcome = worker
+        .run_next(|request| {
+            let vaults = executor.vaults.clone();
+            async move {
+                vaults
+                    .runtime(request.vault_id())
+                    .expect("active Vault")
+                    .set_search_status(VaultSearchStatus::Indexing, None)
+                    .expect("publish indexing");
+                panic!("injected panic in the turn's async shell");
+            }
+        })
+        .await
+        .expect("the panicking turn still completes");
+    executor.publish_outcome(&outcome);
+    let panicked = outcome.request.vault_id();
+    let snapshot = executor
+        .vaults
+        .runtime(panicked)
+        .expect("panicked Vault")
+        .snapshot();
+    assert_eq!(snapshot.search, VaultSearchStatus::Unavailable);
+    assert_eq!(
+        snapshot
+            .search_error
+            .expect("the panic is on the Vault")
+            .code,
+        crate::vault_work::TURN_PANICKED
+    );
+
+    // The other Vault's turn still runs.
+    let next = worker
+        .run_next(|request| executor.run(request))
+        .await
+        .expect("the other Vault's turn");
+    assert_ne!(next.request.vault_id(), panicked);
+    next.result.expect("the other Vault indexes");
+
+    let current = match executor.registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let disabled = executor
+        .registry
+        .disable(current.revision(), panicked)
+        .expect("disable the panicked Vault");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        executor.vaults.reconcile_and_reconstruct(
+            &executor.registry,
+            &disabled,
+            &executor.work,
+            &executor.managed_git,
+        ),
+    )
+    .await
+    .expect("disabling the Vault whose turn panicked does not hang");
+    assert!(executor.vaults.runtime(panicked).is_none());
+}
+
+#[tokio::test]
+async fn a_turn_that_panics_holding_its_vaults_status_lock_does_not_stop_the_dispatch_loop() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, _first, _second, _) = two_vault_executor(directory.path()).await;
+
+    let outcome = worker
+        .run_next(|request| {
+            let vaults = executor.vaults.clone();
+            async move {
+                vaults
+                    .runtime(request.vault_id())
+                    .expect("active Vault")
+                    .while_holding_status_lock(|| {
+                        panic!("injected panic while holding the Vault's status lock")
+                    })
+            }
+        })
+        .await
+        .expect("the panicking turn still completes");
+    // The dispatch loop calls this right after the turn; with the status lock
+    // poisoned it used to panic out of the loop and end every Vault's work.
+    executor.publish_outcome(&outcome);
+    let panicked = outcome.request.vault_id();
+    let snapshot = executor
+        .vaults
+        .runtime(panicked)
+        .expect("panicked Vault")
+        .snapshot();
+    assert_eq!(snapshot.search, VaultSearchStatus::Unavailable);
+    assert_eq!(
+        snapshot
+            .search_error
+            .expect("the panic is on the Vault")
+            .code,
+        crate::vault_work::TURN_PANICKED
+    );
+
+    // The loop goes on: the other Vault indexes and the collection settles.
+    let next = worker
+        .run_next(|request| executor.run(request))
+        .await
+        .expect("the other Vault's turn");
+    assert_ne!(next.request.vault_id(), panicked);
+    next.result.as_ref().expect("the other Vault indexes");
+    executor.publish_outcome(&next);
+    assert!(executor.startup.collection_indexes_ready());
 }

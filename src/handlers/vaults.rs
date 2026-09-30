@@ -164,6 +164,7 @@ fn management_error_response(error: VaultOperationError) -> Response {
         // Retry-after-operator-action, or retry-after-the-runtime-settles.
         "vault_registry_recovery_required"
         | "legacy_environment_cleanup_required"
+        | "legacy_migration_required"
         | "vault_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         // `internal_error` and `registry_revision_exhausted`.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -445,6 +446,7 @@ mod tests {
                 "legacy_environment_cleanup_required",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
+            ("legacy_migration_required", StatusCode::SERVICE_UNAVAILABLE),
             ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
             (
                 "registry_revision_exhausted",

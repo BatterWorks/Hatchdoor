@@ -4,7 +4,7 @@
  *
  * The service worker is registered in `autoUpdate` mode, so a fresh nightly
  * build installs, activates and reloads the page on its own, with no prompt,
- * triggered by a one-hour interval, tab focus, or the tab becoming visible.
+ * triggered by a one-hour interval or the tab becoming visible.
  * That reload is invisible to React: it happens between keystrokes and takes
  * whatever has not reached the vault with it. The local draft now survives it,
  * but a reload the user did not ask for is still an interruption worth not

@@ -46,9 +46,8 @@ impl MutationJournal {
         source: &Path,
         destination: &Path,
     ) -> Result<(), WriteError> {
-        let result = move_file_no_follow(source, destination);
-        self.retain_completed_move(phase, source, destination, &result);
-        result
+        let result = try_move_file_no_follow(source, destination);
+        self.retain_completed_move(phase, source, destination, result)
     }
 
     pub(super) fn move_note(
@@ -57,32 +56,49 @@ impl MutationJournal {
         destination: &Path,
         expected_content_hash: &str,
     ) -> Result<(), WriteError> {
-        let result = move_file_if_unchanged(source, destination, expected_content_hash);
-        self.retain_completed_move(MutationPhase::Note, source, destination, &result);
-        result
+        self.move_note_with_after_exchange(source, destination, expected_content_hash, || {})
     }
 
+    fn move_note_with_after_exchange(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        expected_content_hash: &str,
+        after_exchange: impl FnOnce(),
+    ) -> Result<(), WriteError> {
+        let result =
+            try_move_file_if_unchanged(source, destination, expected_content_hash, after_exchange);
+        self.retain_completed_move(MutationPhase::Note, source, destination, result)
+    }
+
+    /// Record a move the rollback must undo: one that succeeded, and one the
+    /// primitive itself reports as landed although a step after its commit
+    /// failed. The primitive says so from where the failure happened rather
+    /// than this inferring it from what the paths look like afterwards: an
+    /// occupied destination and a vanished source are also what a move
+    /// refused at its gate looks like when something outside Hatchdoor
+    /// deleted the source meanwhile, and undoing that "move" would carry an
+    /// unrelated file off the destination.
     fn retain_completed_move(
         &mut self,
         phase: MutationPhase,
         source: &Path,
         destination: &Path,
-        result: &Result<(), WriteError>,
-    ) {
-        // The R01 move primitive normally returns Ok only after removing its
-        // source gate. If that final cleanup itself fails, the file has already
-        // reached the destination. Retain that completed commit as well so an
-        // outer transaction never mistakes it for a mutation-free error.
-        let committed_despite_error = result.is_err()
-            && is_regular_file_no_follow(destination)
-            && !is_regular_file_no_follow(source);
-        if result.is_ok() || committed_despite_error {
+        result: Result<(), MoveError>,
+    ) -> Result<(), WriteError> {
+        let landed = match &result {
+            Ok(()) => true,
+            Err(MoveError::Landed(_)) => true,
+            Err(MoveError::NotMoved(_)) => false,
+        };
+        if landed {
             self.completed.push(Compensation::MoveBack {
                 phase,
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
             });
         }
+        result.map_err(MoveError::into_write_error)
     }
 
     pub(super) fn apply_rewrites(
@@ -246,10 +262,6 @@ impl MutationJournal {
     }
 }
 
-fn is_regular_file_no_follow(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
-}
-
 fn bounded_vault_path(vault_root: &Path, path: &Path) -> String {
     path.strip_prefix(vault_root)
         .ok()
@@ -317,8 +329,23 @@ pub(super) fn atomic_write_if_unchanged(
     atomic_write_bytes_if_unchanged(path, content.as_bytes(), expected_content_hash)
 }
 
+/// Write a new file at a name that must still be free when the write
+/// commits. A file that appeared there after the caller checked, from
+/// anything outside Hatchdoor, is refused with [`WriteError::Conflict`] and
+/// left untouched rather than replaced.
+pub(super) fn atomic_create(path: &Path, content: &str) -> Result<(), WriteError> {
+    atomic_write_inner(
+        path,
+        content.as_bytes(),
+        Commit::CreateNew,
+        None,
+        || {},
+        || {},
+    )
+}
+
 pub(super) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
-    atomic_write_inner(path, bytes, None, None, || {}, || {})
+    atomic_write_inner(path, bytes, Commit::Replace, None, || {}, || {})
 }
 
 fn atomic_write_bytes_if_unchanged(
@@ -326,7 +353,14 @@ fn atomic_write_bytes_if_unchanged(
     bytes: &[u8],
     expected_content_hash: &str,
 ) -> Result<(), WriteError> {
-    atomic_write_inner(path, bytes, Some(expected_content_hash), None, || {}, || {})
+    atomic_write_inner(
+        path,
+        bytes,
+        Commit::IfUnchanged(expected_content_hash),
+        None,
+        || {},
+        || {},
+    )
 }
 
 /// A conditional write that leaves the note carrying `modified` rather than
@@ -341,7 +375,7 @@ fn atomic_write_if_unchanged_keeping_modified(
     atomic_write_inner(
         path,
         content.as_bytes(),
-        Some(expected_content_hash),
+        Commit::IfUnchanged(expected_content_hash),
         modified,
         || {},
         || {},
@@ -381,6 +415,22 @@ fn keep_modified_time(file: &fs::File, path: &Path, modified: SystemTime) {
 }
 
 #[cfg(test)]
+fn atomic_create_with_before_commit(
+    path: &Path,
+    content: &str,
+    before_commit: impl FnOnce(),
+) -> Result<(), WriteError> {
+    atomic_write_inner(
+        path,
+        content.as_bytes(),
+        Commit::CreateNew,
+        None,
+        before_commit,
+        || {},
+    )
+}
+
+#[cfg(test)]
 fn atomic_write_if_unchanged_with_before_exchange(
     path: &Path,
     content: &str,
@@ -390,7 +440,7 @@ fn atomic_write_if_unchanged_with_before_exchange(
     atomic_write_inner(
         path,
         content.as_bytes(),
-        Some(expected_content_hash),
+        Commit::IfUnchanged(expected_content_hash),
         None,
         before_exchange,
         || {},
@@ -410,17 +460,29 @@ fn atomic_write_if_unchanged_with_after_exchange(
     atomic_write_inner(
         path,
         content.as_bytes(),
-        Some(expected_content_hash),
+        Commit::IfUnchanged(expected_content_hash),
         None,
         || {},
         after_exchange,
     )
 }
 
+/// How a prepared write takes the destination name.
+enum Commit<'a> {
+    /// Whatever is there is replaced.
+    Replace,
+    /// Only the content with this hash is replaced; anything else is a
+    /// conflict and is put back.
+    IfUnchanged(&'a str),
+    /// Only a free name is taken. Anything that appeared at it since the
+    /// caller looked is a conflict and is left alone.
+    CreateNew,
+}
+
 fn atomic_write_inner(
     path: &Path,
     bytes: &[u8],
-    expected_content_hash: Option<&str>,
+    commit: Commit<'_>,
     preserved_modified: Option<SystemTime>,
     before_commit: impl FnOnce(),
     after_exchange: impl FnOnce(),
@@ -450,87 +512,124 @@ fn atomic_write_inner(
     drop(file);
     before_commit();
 
-    if let Some(expected) = expected_content_hash {
-        // Exchange is the commit point: the displaced destination is held at
-        // our private name, where we verify its identity. A concurrent atomic
-        // save therefore becomes detectable and is swapped back, rather than
-        // being silently overwritten in a check-then-rename gap.
-        if let Err(error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
-            if !exchange_unavailable(commit_directory(path), &error) {
-                return Err(WriteError::from(error));
+    match commit {
+        Commit::IfUnchanged(expected) => {
+            // Exchange is the commit point: the displaced destination is held at
+            // our private name, where we verify its identity. A concurrent atomic
+            // save therefore becomes detectable and is swapped back, rather than
+            // being silently overwritten in a check-then-rename gap.
+            if let Err(error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
+                if !exchange_unavailable(commit_directory(path), &error) {
+                    return Err(WriteError::from(error));
+                }
+                // The hook stands in for an external process touching the Vault
+                // directory at the commit point. On this path that point is the
+                // instant before the rename rather than just after an exchange,
+                // so it is handed over to fire there.
+                let committed = commit_checked_without_exchange(
+                    &parent,
+                    &tmp_name,
+                    &filename,
+                    path,
+                    expected,
+                    after_exchange,
+                );
+                if committed.is_ok() {
+                    let _ = parent.sync_all();
+                }
+                return committed;
             }
-            // The hook stands in for an external process touching the Vault
-            // directory at the commit point. On this path that point is the
-            // instant before the rename rather than just after an exchange,
-            // so it is handed over to fire there.
-            let committed = commit_checked_without_exchange(
-                &parent,
-                &tmp_name,
-                &filename,
-                path,
-                expected,
-                after_exchange,
-            );
-            if committed.is_ok() {
-                let _ = parent.sync_all();
-            }
-            return committed;
-        }
-        after_exchange();
-        // The exchange is the commit point. From here the destination already
-        // holds the new bytes, so every failure below turns on whether the
-        // undo put them back: reporting one as a plain failure told a caller
-        // its write had not landed while the new content sat committed.
-        //
-        // A recovery message reaches an API client unsanitized, so it names
-        // the note and the sidecar without their directories.
-        let note = bounded_write_name(path);
-        let sidecar = tmp_name.to_string_lossy().into_owned();
-        let prior = match read_file_at_no_follow(&parent, &tmp_name) {
-            Ok(prior) => prior,
-            Err(read_error) => {
-                return Err(
-                    match rename_exchange(&parent, &tmp_name, &parent, &filename) {
-                        Ok(()) => {
-                            let _ = unlink_at(&parent, &tmp_name);
-                            WriteError::Io(format!(
-                                "failed to inspect replaced note '{}': {read_error}",
-                                path.display()
-                            ))
-                        }
-                        Err(undo_error) => WriteError::recovery_required(format!(
-                            "note '{note}' was replaced, its prior content could not be read \
+            after_exchange();
+            // The exchange is the commit point. From here the destination already
+            // holds the new bytes, so every failure below turns on whether the
+            // undo put them back: reporting one as a plain failure told a caller
+            // its write had not landed while the new content sat committed.
+            //
+            // A recovery message reaches an API client unsanitized, so it names
+            // the note and the sidecar without their directories.
+            let note = bounded_write_name(path);
+            let sidecar = tmp_name.to_string_lossy().into_owned();
+            let prior = match read_file_at_no_follow(&parent, &tmp_name) {
+                Ok(prior) => prior,
+                Err(read_error) => {
+                    return Err(
+                        match rename_exchange(&parent, &tmp_name, &parent, &filename) {
+                            Ok(()) => {
+                                let _ = unlink_at(&parent, &tmp_name);
+                                WriteError::Io(format!(
+                                    "failed to inspect replaced note '{}': {read_error}",
+                                    path.display()
+                                ))
+                            }
+                            Err(undo_error) => WriteError::recovery_required(format!(
+                                "note '{note}' was replaced, its prior content could not be read \
                              back ({read_error}), and the replacement could not be undone \
                              ({undo_error}). The new content is committed and was never \
                              checked against the expected hash; the prior content is in \
                              '{sidecar}' beside it if that file still exists."
-                        )),
-                    },
-                );
-            }
-        };
-        if content_hash(&prior) != expected.trim() {
-            if let Err(undo_error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
-                return Err(WriteError::recovery_required(format!(
-                    "note '{note}' changed since it was read, and the replacement could not be \
+                            )),
+                        },
+                    );
+                }
+            };
+            if content_hash(&prior) != expected.trim() {
+                if let Err(undo_error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
+                    return Err(WriteError::recovery_required(format!(
+                        "note '{note}' changed since it was read, and the replacement could not be \
                      undone ({undo_error}). The new content is committed over that change, \
                      whose content is in '{sidecar}' beside it if that file still exists."
+                    )));
+                }
+                let _ = unlink_at(&parent, &tmp_name);
+                return Err(WriteError::Conflict(format!(
+                    "note changed since it was read: expected {}, found {}",
+                    expected.trim(),
+                    content_hash(&prior)
                 )));
             }
+            // Committed and verified. A sidecar that will not unlink is
+            // dot-prefixed litter the Vault already excludes as noise, and
+            // failing here would report a correct write as a failure.
             let _ = unlink_at(&parent, &tmp_name);
-            return Err(WriteError::Conflict(format!(
-                "note changed since it was read: expected {}, found {}",
-                expected.trim(),
-                content_hash(&prior)
-            )));
         }
-        // Committed and verified. A sidecar that will not unlink is
-        // dot-prefixed litter the Vault already excludes as noise, and
-        // failing here would report a correct write as a failure.
-        let _ = unlink_at(&parent, &tmp_name);
-    } else {
-        ensure_safe_destination_at(&parent, &filename, path)?;
-        rename_at(&parent, &tmp_name, &parent, &filename)?;
+        Commit::Replace => {
+            ensure_safe_destination_at(&parent, &filename, path)?;
+            rename_at(&parent, &tmp_name, &parent, &filename)?;
+        }
+        Commit::CreateNew => {
+            if let Err(error) = rename_flagged_at(
+                &parent,
+                &tmp_name,
+                &parent,
+                &filename,
+                RenameFlag::NoReplace,
+            ) {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    let _ = unlink_at(&parent, &tmp_name);
+                    return Err(WriteError::Conflict(format!(
+                        "'{}' already exists",
+                        bounded_write_name(path)
+                    )));
+                }
+                if !crate::rename_flags::flag_unavailable(
+                    commit_directory(path),
+                    RenameFlag::NoReplace,
+                    &error,
+                ) {
+                    let _ = unlink_at(&parent, &tmp_name);
+                    return Err(WriteError::Io(format!(
+                        "failed to create '{}': {error}",
+                        path.display()
+                    )));
+                }
+                // A filesystem that cannot refuse an occupied name keeps the
+                // plain rename, and with it the caller's own existence check
+                // as the only guard: the same race every write on such a
+                // filesystem accepts (ADR-26).
+                ensure_safe_destination_at(&parent, &filename, path)?;
+                rename_at(&parent, &tmp_name, &parent, &filename)?;
+            }
+        }
     }
 
     // fsync the parent directory so the rename itself (a directory metadata
@@ -668,12 +767,28 @@ fn create_unique_temporary_file(
     ))
 }
 
-pub(super) fn move_file_if_unchanged(
-    source: &Path,
-    destination: &Path,
-    expected_content_hash: &str,
-) -> Result<(), WriteError> {
-    move_file_if_unchanged_inner(source, destination, expected_content_hash, || {})
+/// Why a move primitive failed, split by whether the file had already
+/// reached its destination when it did.
+enum MoveError {
+    /// Nothing moved, or the move was undone: the source is where it was.
+    NotMoved(WriteError),
+    /// The move committed and stays committed; a step after the commit
+    /// failed. The caller's rollback owns moving it back.
+    Landed(WriteError),
+}
+
+impl MoveError {
+    fn into_write_error(self) -> WriteError {
+        match self {
+            Self::NotMoved(error) | Self::Landed(error) => error,
+        }
+    }
+}
+
+impl From<WriteError> for MoveError {
+    fn from(error: WriteError) -> Self {
+        Self::NotMoved(error)
+    }
 }
 
 #[cfg(test)]
@@ -683,15 +798,16 @@ fn move_file_if_unchanged_with_after_exchange(
     expected_content_hash: &str,
     after_exchange: impl FnOnce(),
 ) -> Result<(), WriteError> {
-    move_file_if_unchanged_inner(source, destination, expected_content_hash, after_exchange)
+    try_move_file_if_unchanged(source, destination, expected_content_hash, after_exchange)
+        .map_err(MoveError::into_write_error)
 }
 
-fn move_file_if_unchanged_inner(
+fn try_move_file_if_unchanged(
     source: &Path,
     destination: &Path,
     expected_content_hash: &str,
     after_exchange: impl FnOnce(),
-) -> Result<(), WriteError> {
+) -> Result<(), MoveError> {
     let (source_parent, source_name) = open_parent_dir_no_follow(source)?;
     let (destination_parent, destination_name) = open_parent_dir_no_follow(destination)?;
     create_move_gate(&destination_parent, &destination_name).map_err(|error| {
@@ -722,14 +838,15 @@ fn move_file_if_unchanged_inner(
                 source,
                 Some(expected_content_hash),
                 after_exchange,
-            );
+            )
+            .map_err(MoveError::NotMoved);
         }
         let _ = remove_move_gate(&destination_parent, &destination_name);
-        return Err(WriteError::Io(format!(
+        return Err(MoveError::NotMoved(WriteError::Io(format!(
             "failed to atomically move '{}' to '{}': {error}",
             source.display(),
             destination.display()
-        )));
+        ))));
     }
     after_exchange();
     let moved = read_regular_file_at(&destination_parent, &destination_name);
@@ -744,23 +861,23 @@ fn move_file_if_unchanged_inner(
             &destination_name,
             source,
         )?;
-        return match moved {
-            Ok(prior) => Err(WriteError::Conflict(format!(
+        return Err(MoveError::NotMoved(match moved {
+            Ok(prior) => WriteError::Conflict(format!(
                 "note changed since it was read: expected {}, found {}",
                 expected_content_hash.trim(),
                 content_hash(&prior)
-            ))),
-            Err(error) => Err(WriteError::Conflict(format!(
+            )),
+            Err(error) => WriteError::Conflict(format!(
                 "refusing to move unsafe source '{}': {error}",
                 source.display()
-            ))),
-        };
+            )),
+        }));
     }
     remove_move_gate(&source_parent, &source_name).map_err(|error| {
-        WriteError::Io(format!(
+        MoveError::Landed(WriteError::Io(format!(
             "failed to finalize move from '{}': {error}",
             source.display()
-        ))
+        )))
     })?;
     let _ = source_parent.sync_all();
     let _ = destination_parent.sync_all();
@@ -768,6 +885,10 @@ fn move_file_if_unchanged_inner(
 }
 
 pub(super) fn move_file_no_follow(source: &Path, destination: &Path) -> Result<(), WriteError> {
+    try_move_file_no_follow(source, destination).map_err(MoveError::into_write_error)
+}
+
+fn try_move_file_no_follow(source: &Path, destination: &Path) -> Result<(), MoveError> {
     let (source_parent, source_name) = open_parent_dir_no_follow(source)?;
     let (destination_parent, destination_name) = open_parent_dir_no_follow(destination)?;
     create_move_gate(&destination_parent, &destination_name).map_err(|error| {
@@ -798,14 +919,15 @@ pub(super) fn move_file_no_follow(source: &Path, destination: &Path) -> Result<(
                 source,
                 None,
                 || {},
-            );
+            )
+            .map_err(MoveError::NotMoved);
         }
         let _ = remove_move_gate(&destination_parent, &destination_name);
-        return Err(WriteError::Io(format!(
+        return Err(MoveError::NotMoved(WriteError::Io(format!(
             "failed to atomically move '{}' to '{}': {error}",
             source.display(),
             destination.display()
-        )));
+        ))));
     }
     if let Err(error) = assert_regular_file_at(&destination_parent, &destination_name) {
         restore_move_from_gate(
@@ -815,16 +937,16 @@ pub(super) fn move_file_no_follow(source: &Path, destination: &Path) -> Result<(
             &destination_name,
             source,
         )?;
-        return Err(WriteError::Conflict(format!(
+        return Err(MoveError::NotMoved(WriteError::Conflict(format!(
             "refusing to move unsafe source '{}': {error}",
             source.display()
-        )));
+        ))));
     }
     remove_move_gate(&source_parent, &source_name).map_err(|error| {
-        WriteError::Io(format!(
+        MoveError::Landed(WriteError::Io(format!(
             "failed to finalize move from '{}': {error}",
             source.display()
-        ))
+        )))
     })?;
     let _ = source_parent.sync_all();
     let _ = destination_parent.sync_all();
@@ -912,13 +1034,16 @@ fn remove_move_gate(parent: &fs::File, name: &CString) -> Result<(), std::io::Er
     }
 }
 
+/// Undo an exchange that must not stand. When the undo itself fails, the
+/// file is still at the destination, so that failure is [`MoveError::Landed`];
+/// once it is back at its source, a gate that will not clear is not.
 fn restore_move_from_gate(
     source_parent: &fs::File,
     source_name: &CString,
     destination_parent: &fs::File,
     destination_name: &CString,
     source: &Path,
-) -> Result<(), WriteError> {
+) -> Result<(), MoveError> {
     rename_exchange(
         source_parent,
         source_name,
@@ -926,16 +1051,16 @@ fn restore_move_from_gate(
         destination_name,
     )
     .map_err(|error| {
-        WriteError::Io(format!(
+        MoveError::Landed(WriteError::Io(format!(
             "failed to restore unsafe move from '{}': {error}",
             source.display()
-        ))
+        )))
     })?;
     remove_move_gate(destination_parent, destination_name).map_err(|error| {
-        WriteError::Io(format!(
+        MoveError::NotMoved(WriteError::Io(format!(
             "failed to remove move gate for '{}': {error}",
             source.display()
-        ))
+        )))
     })
 }
 
@@ -1174,6 +1299,45 @@ mod tests {
         assert!(!note.with_extension("md.hatchdoor-tmp").exists());
     }
 
+    #[test]
+    fn a_create_refuses_a_file_that_appeared_after_the_existence_check() {
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("New.md");
+
+        let result = atomic_create_with_before_commit(&note, "hatchdoor", || {
+            fs::write(&note, "created outside Hatchdoor").expect("external create");
+        });
+
+        assert!(matches!(result, Err(WriteError::Conflict(_))), "{result:?}");
+        assert_eq!(
+            fs::read_to_string(&note).unwrap(),
+            "created outside Hatchdoor",
+            "a create must never replace a file it did not write"
+        );
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("New.md")],
+            "no temp file left"
+        );
+    }
+
+    #[test]
+    fn a_create_on_a_free_name_writes_it_with_or_without_rename_flags() {
+        for forced in [false, true] {
+            let dir = tempdir().expect("tempdir");
+            if forced {
+                crate::rename_flags::force_unsupported_for_tests(dir.path());
+            }
+            let note = dir.path().join("New.md");
+            atomic_create(&note, "hatchdoor").expect("create on a free name");
+            assert_eq!(fs::read_to_string(&note).unwrap(), "hatchdoor");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn atomic_write_avoids_a_planted_temporary_sidecar_without_touching_its_target() {
@@ -1393,7 +1557,7 @@ mod tests {
         atomic_write_inner(
             &note,
             b"safe\n",
-            None,
+            Commit::Replace,
             None,
             || {
                 fs::rename(&notes, &original_parent).expect("swap away opened parent");
@@ -1618,6 +1782,58 @@ mod tests {
             "a.png should not remain at the destination"
         );
         assert!(src_b.exists(), "b.png should still be at its source");
+    }
+
+    #[test]
+    fn a_move_refused_at_its_gate_is_not_rolled_back_even_when_its_source_vanished() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        // The source was validated, then deleted by something outside
+        // Hatchdoor; the destination name already holds the user's own file.
+        let source = root.join("gone.png");
+        let destination = root.join("taken.png");
+        fs::write(&destination, "the user's own file").unwrap();
+
+        let mut journal = MutationJournal::new(root);
+        let cause = journal
+            .move_file(MutationPhase::Asset, &source, &destination)
+            .expect_err("an occupied destination refuses the move");
+        assert!(matches!(cause, WriteError::Conflict(_)), "{cause:?}");
+        let error = journal.rollback(cause);
+
+        assert!(matches!(error, WriteError::Conflict(_)), "{error:?}");
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "the user's own file",
+            "the rollback must not carry a file the move never touched"
+        );
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn a_move_that_landed_before_its_cleanup_failed_is_kept_for_rollback() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let source = root.join("Source.md");
+        let destination = root.join("Moved.md");
+        fs::write(&source, "original").unwrap();
+        let expected = content_hash("original");
+
+        let mut journal = MutationJournal::new(root);
+        // Something lands inside the directory gate standing at the source
+        // name, so the gate will not clear once the move has committed.
+        let result =
+            journal.move_note_with_after_exchange(&source, &destination, &expected, || {
+                fs::write(source.join("stray"), "x").expect("write into the gate");
+            });
+
+        assert!(matches!(result, Err(WriteError::Io(_))), "{result:?}");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+        assert_eq!(
+            journal.completed.len(),
+            1,
+            "a committed move whose cleanup failed must still be undone by the rollback"
+        );
     }
 
     #[test]

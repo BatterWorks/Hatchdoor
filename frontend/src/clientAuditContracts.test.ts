@@ -36,11 +36,44 @@ describe("client audit launch contracts", () => {
     );
   });
 
+  // WebKit throws from the `localStorage` accessor itself when site data is
+  // blocked (#339). The pre-paint theme script runs before React, outside any
+  // boundary, so it has to guard its own read and still pick a theme.
+  it("applies the auto theme pre-paint when reading storage throws", () => {
+    const script = /<script>([\s\S]*?)<\/script>/.exec(indexHtml)?.[1];
+    expect(script).toBeTruthy();
+    const blockedStorage = {
+      getItem() {
+        throw new DOMException("The operation is insecure.", "SecurityError");
+      },
+    };
+    const root = { dataset: {} as Record<string, string> };
+    const run = new Function("localStorage", "document", script!);
+    expect(() => run(blockedStorage, { documentElement: root })).not.toThrow();
+    expect(root.dataset.theme).toBe("auto");
+  });
+
   it("checks for service-worker updates during long-lived PWA sessions", () => {
     expect(mainSource).toContain("onRegisteredSW");
     expect(mainSource).toContain("registration.update()");
     expect(mainSource).toContain("visibilitychange");
-    expect(mainSource).toContain("focus");
+  });
+
+  // `update()` rejects whenever the worker script cannot be fetched, which is
+  // every tick while offline (#332). Coming back to the tab fires both `focus`
+  // and `visibilitychange`, so listening to both doubled every check.
+  it("swallows an offline update check and checks once per return to the tab", () => {
+    expect(mainSource).toMatch(/registration\s*\.update\(\)\s*\.catch\(/);
+    expect(mainSource).not.toMatch(/void\s+registration\.update\(\)/);
+    expect(mainSource).not.toMatch(/addEventListener\(\s*"focus"/);
+  });
+
+  // Android Chrome paints the installed app's splash and task-switcher card
+  // from the manifest, which has no media-query form (#332). A dark splash
+  // under a light UI is the milder flash of the two.
+  it("gives the installed PWA a dark splash rather than a light one", () => {
+    expect(viteConfig).toMatch(/background_color:\s*"#0c0c0a"/);
+    expect(viteConfig).toMatch(/theme_color:\s*"#0c0c0a"/);
   });
 
   // `autoUpdate` activates a new worker the moment it installs and reloads the

@@ -131,11 +131,21 @@ pub(crate) struct WebOrLiveMcpToken {
 /// enabled. This keeps runtime disablement as an immediate revocation of that
 /// credential's attachment-write capability. A matching web bearer token is
 /// independent of MCP write mode.
+///
+/// A deployment with no web token configured serves the route openly, exactly
+/// as the rest of the web API and the asset *read* route do (#327). The MCP
+/// credential can only ever add access to a gated route, never start demanding
+/// one: the browser's paste-to-upload flow has no MCP token to send, so letting
+/// a live MCP token turn this gate on would break it the moment an operator set
+/// MCP up.
 pub(crate) async fn require_web_or_live_mcp_token(
     State(tokens): State<WebOrLiveMcpToken>,
     request: Request,
     next: Next,
 ) -> Response {
+    if tokens.web.is_none() {
+        return next.run(request).await;
+    }
     let presented = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -148,7 +158,6 @@ pub(crate) async fn require_web_or_live_mcp_token(
         // into an unauthenticated attachment route.
         Err(_) => return unauthorized(),
     };
-    let configured = tokens.web.is_some() || mcp.bearer_token.is_some();
     let matches_web = presented.is_some_and(|presented| {
         tokens
             .web
@@ -163,7 +172,7 @@ pub(crate) async fn require_web_or_live_mcp_token(
                 .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
     });
 
-    if !configured || matches_web || (matches_mcp && mcp.write_enabled) {
+    if matches_web || (matches_mcp && mcp.write_enabled) {
         next.run(request).await
     } else if matches_mcp {
         forbidden()

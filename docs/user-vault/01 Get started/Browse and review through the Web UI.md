@@ -20,6 +20,10 @@ anything in yet and you land on the empty start page instead, with that
 Vault's notes in the explorer. Choosing **All Vaults**, or switching while you
 are in Settings, Statistics or the graph, leaves the page you are on alone.
 
+If the Vault you narrowed to is paused, becomes unavailable or is
+disconnected, from Settings, another tab or an agent, the selector goes back
+to **All Vaults** by itself and a notice at the top says why.
+
 To find notes yourself, select **Search** in the top bar (or press `/` outside
 a text field). Semantic search is the default: use it for ideas and meaning.
 Turn on **Keyword mode** when exact wording matters, such as a hostname, tag,

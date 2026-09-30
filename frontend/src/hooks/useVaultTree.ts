@@ -37,6 +37,21 @@ function mergeVaultTrees(vaultTrees: VaultTree[]): ExplorerFolder | null {
   };
 }
 
+type ScopeRead = { scope: VaultScope; controller: AbortController };
+
+/** The signal a read for `scope` must carry, or `null` when `scope` has
+ * already been superseded and the read should not start at all. */
+function scopeReadSignal(
+  ref: { current: ScopeRead | null },
+  scope: VaultScope,
+): AbortSignal | null {
+  if (ref.current === null) {
+    // Before the scope effect has run there is nothing to supersede yet.
+    ref.current = { scope, controller: new AbortController() };
+  }
+  return ref.current.scope === scope ? ref.current.controller.signal : null;
+}
+
 /**
  * Owns the vault explorer tree and its live-refresh machinery for the given
  * scope: initial load, and reload whenever the collection client's revision
@@ -52,11 +67,15 @@ export function useVaultTree(scope: VaultScope) {
   const [loadingTree, setLoadingTree] = useState(true);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [treePartial, setTreePartial] = useState(false);
+  const [treeMissingVaults, setTreeMissingVaults] = useState<string[]>([]);
   const [modifiedNotes, setModifiedNotes] = useState<ModifiedNote[]>([]);
   const [modifiedNotesPartial, setModifiedNotesPartial] = useState(false);
   const [modifiedNotesMissingVaults, setModifiedNotesMissingVaults] = useState<
     string[]
   >([]);
+  const [modifiedNotesError, setModifiedNotesError] = useState<string | null>(
+    null,
+  );
   const { revision: vaultRevision } = useVaultCollection();
   // The collection revision the loaded tree reflects, taken from the
   // projection envelope rather than assumed. `loadInFlightRef` holds the load
@@ -66,12 +85,33 @@ export function useVaultTree(scope: VaultScope) {
   // and the recent list are each fetched a second time on every page load.
   const loadedRevisionRef = useRef<number | null>(null);
   const loadInFlightRef = useRef<Promise<void> | null>(null);
+  // Every read made for the current scope carries this controller's signal,
+  // whoever started it (the scope effect, a revision bump, a Retry), and a
+  // scope change aborts it. A wide `all` read is the slow one, so without
+  // this it routinely answered after the narrowed read that replaced it and
+  // put every Vault's folders under the narrowed Vault's header (#334). The
+  // scope is kept beside it so a read started from a closure over the old
+  // scope (the recent read queued behind a superseded tree read) never
+  // borrows the new scope's signal.
+  const scopeReadRef = useRef<ScopeRead | null>(null);
+  // Within one scope, two reads can still overlap (a revision bump while a
+  // Retry is open). Only the newest one started may write.
+  const treeRequestRef = useRef(0);
+  const recentRequestRef = useRef(0);
 
   const loadTree = useCallback(async () => {
+    const signal = scopeReadSignal(scopeReadRef, scope);
+    if (signal === null) {
+      return;
+    }
+    const request = ++treeRequestRef.current;
+    const isCurrent = () =>
+      !signal.aborted && request === treeRequestRef.current;
     setTreeError(null);
     try {
       const res = await apiFetch(
         `/api/v1/vaults/${encodeURIComponent(scope)}/tree`,
+        { signal },
       );
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, "Failed loading tree"));
@@ -79,6 +119,9 @@ export function useVaultTree(scope: VaultScope) {
       const projection = (await res.json()) as VaultReadProjection<
         WireVaultTree[]
       >;
+      if (!isCurrent()) {
+        return;
+      }
       // Notes arrive without a vault ID; the tree they hang from carries it
       // (#192). Stamping them here is the last point at which the grouping is
       // still intact — everything below merges or flattens the trees.
@@ -90,7 +133,11 @@ export function useVaultTree(scope: VaultScope) {
       );
       setVaultTrees(trees);
       setTreePartial(projection.partial);
+      setTreeMissingVaults(missingVaultNames(projection.participants));
     } catch (err) {
+      if (!isCurrent()) {
+        return;
+      }
       setTreeError(
         err instanceof Error ? err.message : "Unknown tree loading error",
       );
@@ -98,10 +145,18 @@ export function useVaultTree(scope: VaultScope) {
   }, [scope]);
 
   const loadModifiedNotes = useCallback(async () => {
+    const signal = scopeReadSignal(scopeReadRef, scope);
+    if (signal === null) {
+      return;
+    }
+    const request = ++recentRequestRef.current;
+    const isCurrent = () =>
+      !signal.aborted && request === recentRequestRef.current;
     try {
       const params = new URLSearchParams({ limit: "5" });
       const res = await apiFetch(
         `/api/v1/vaults/${encodeURIComponent(scope)}/recent?${params.toString()}`,
+        { signal },
       );
       if (!res.ok) {
         throw new Error(
@@ -111,13 +166,25 @@ export function useVaultTree(scope: VaultScope) {
       const projection = (await res.json()) as VaultReadProjection<
         ModifiedNote[]
       >;
+      if (!isCurrent()) {
+        return;
+      }
       setModifiedNotes(projection.data.slice(0, 5));
       setModifiedNotesPartial(projection.partial);
       setModifiedNotesMissingVaults(missingVaultNames(projection.participants));
-    } catch {
+      setModifiedNotesError(null);
+    } catch (err) {
+      if (!isCurrent()) {
+        return;
+      }
+      // A read that never happened is not a quiet collection: keep it apart
+      // from the empty answer so the panel can say it failed.
       setModifiedNotes([]);
       setModifiedNotesPartial(false);
       setModifiedNotesMissingVaults([]);
+      setModifiedNotesError(
+        err instanceof Error ? err.message : "Failed loading modified notes",
+      );
     }
   }, [scope]);
 
@@ -137,13 +204,18 @@ export function useVaultTree(scope: VaultScope) {
   }, [loadModifiedNotes, loadTree]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    scopeReadRef.current = { scope, controller };
     loadedRevisionRef.current = null;
     void (async () => {
       setLoadingTree(true);
       await loadTreeAndRecent();
-      setLoadingTree(false);
+      if (!controller.signal.aborted) {
+        setLoadingTree(false);
+      }
     })();
-  }, [loadTreeAndRecent]);
+    return () => controller.abort();
+  }, [loadTreeAndRecent, scope]);
 
   useEffect(() => {
     if (vaultRevision === null) {
@@ -179,9 +251,11 @@ export function useVaultTree(scope: VaultScope) {
     loadingTree,
     treeError,
     treePartial,
+    treeMissingVaults,
     modifiedNotes,
     modifiedNotesPartial,
     modifiedNotesMissingVaults,
+    modifiedNotesError,
     vaultRevision,
     folderPathsByVault,
     noteCandidates,

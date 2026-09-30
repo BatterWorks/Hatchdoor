@@ -14,17 +14,19 @@
 //! Per ADR-13 and ADR-18 this is a plain module with a small public surface —
 //! no trait, no framework, and no second execution lane.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
 use crate::app_state::AppState;
 use crate::cache::SqliteCache;
-use crate::cache::vault_snapshots::{MutationGuardHandoff, VaultSnapshotFreshness};
+use crate::cache::vault_snapshots::{
+    MutationGuardHandoff, SnapshotPublication, VaultSnapshotFreshness,
+};
 use crate::embed::Embedder;
 use crate::git::{
     CommitCooldown, ManagedCheckoutLease, ManagedGitOutcome, ManagedGitScheduler,
@@ -37,11 +39,13 @@ use crate::vault_registry::{
     VaultGitMode, VaultId, VaultRegistryStore, VaultSource as RegistryVaultSource,
 };
 use crate::vault_runtime::{
-    LocalContentStatus, VaultCollectionRuntime, VaultControlBlock, VaultGitStatus,
-    VaultRuntimeError, VaultRuntimeErrorDetail, VaultSearchStatus, stat_local_content,
+    CollectionVaultSnapshot, LocalContentStatus, VaultActivationStatus, VaultCollectionRuntime,
+    VaultControlBlock, VaultGitStatus, VaultRuntimeError, VaultRuntimeErrorDetail,
+    VaultSearchStatus, stat_local_content,
 };
 use crate::vault_work::{
-    VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkOutcome, VaultWorkRequest,
+    TURN_PANICKED, VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkOutcome,
+    VaultWorkRequest,
 };
 
 #[cfg(test)]
@@ -119,6 +123,48 @@ pub(crate) struct VaultWorkExecutor {
     runtime_config: RuntimeConfig,
     startup: StartupTracker,
     model_setup_started: Arc<AtomicBool>,
+    index_retries: IndexRetries,
+}
+
+/// How long the first automatic retry of a failed Index turn waits. Each
+/// further consecutive failure of the same Vault doubles it.
+const INDEX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
+
+/// How many automatic retries one Vault's run of consecutive Index failures
+/// gets before it waits for something else (a change, a refresh, a restart)
+/// to ask for another turn. Bounded so a Vault that cannot index at all does
+/// not keep the one shared worker busy forever.
+const INDEX_RETRY_LIMIT: u32 = 5;
+
+/// Each Vault's count of consecutive retryable Index failures, so the retry a
+/// failure schedules backs off and stops. A successful Index turn clears it.
+/// In memory only: a restart queues a fresh Index turn for every Vault anyway.
+#[derive(Clone, Default)]
+struct IndexRetries(Arc<Mutex<BTreeMap<VaultId, u32>>>);
+
+impl IndexRetries {
+    /// Count one more failure for `vault_id` and return how long to wait
+    /// before retrying it, or `None` once its retries are spent.
+    fn next_delay(&self, vault_id: VaultId) -> Option<Duration> {
+        let mut failures = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let attempt = failures.entry(vault_id).or_insert(0);
+        if *attempt >= INDEX_RETRY_LIMIT {
+            return None;
+        }
+        let delay = INDEX_RETRY_BASE_DELAY.saturating_mul(1 << *attempt);
+        *attempt += 1;
+        Some(delay)
+    }
+
+    fn clear(&self, vault_id: VaultId) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&vault_id);
+    }
 }
 
 impl VaultWorkExecutor {
@@ -137,6 +183,7 @@ impl VaultWorkExecutor {
             runtime_config: state.runtime_config.clone(),
             startup: state.startup.clone(),
             model_setup_started: state.model_setup_started.clone(),
+            index_retries: IndexRetries::default(),
         }
     }
 
@@ -188,7 +235,7 @@ impl VaultWorkExecutor {
                     self.embedder.clone(),
                     embed_layers,
                     Some(Arc::new(move |progress| {
-                        progress_startup.set_indexing(progress);
+                        progress_startup.report_indexing_progress(progress);
                     })),
                     request,
                 )
@@ -203,37 +250,40 @@ impl VaultWorkExecutor {
     }
 
     /// Apply one completed turn's instance-wide consequences: the startup
-    /// readiness rule, and the operator-facing log line.
+    /// readiness rule, an Index failure's retry, and the operator-facing log
+    /// line.
     ///
     /// Per-Vault status is already published by the turn itself; this is only
-    /// what the *collection* concludes from a turn having finished.
+    /// what the *collection* concludes from a turn having finished. One
+    /// Vault's failure is never the instance's: it stays on that Vault's own
+    /// status, where every collection read already reports it (#326).
+    ///
+    /// It runs on the dispatch loop every Vault shares, so it contains its
+    /// own panics instead of ending that loop.
     pub(crate) fn publish_outcome(&self, outcome: &VaultWorkOutcome) {
-        if outcome.request.kind() == VaultWorkKind::Index {
-            match &outcome.result {
-                Ok(()) if collection_indexes_ready(&self.vaults) => {
-                    self.startup.set_ready();
-                    self.model_setup_started.store(false, Ordering::Release);
-                    info!("Vault collection indexing complete");
-                }
-                Err(error) if error.code() != "embedder_not_ready" => {
-                    self.startup.set_failed();
-                    self.model_setup_started.store(false, Ordering::Release);
-                }
-                _ => {}
-            }
-        }
+        let vault_id = outcome.request.vault_id();
+        // Logged before anything touches the Vault's state, so a failure
+        // below cannot swallow the line that explains it.
         if let Err(error) = &outcome.result {
             // Repair remains expected until its dedicated packet;
             // Index and Git failures are actionable per-Vault status.
             if error.code() == "vault_work_kind_not_yet_implemented" {
                 debug!(
-                    vault_id = %outcome.request.vault_id(),
+                    vault_id = %vault_id,
                     kind = ?outcome.request.kind(),
                     "Vault background work kind not yet implemented"
                 );
+            } else if error.code() == TURN_PANICKED {
+                error!(
+                    vault_id = %vault_id,
+                    kind = ?outcome.request.kind(),
+                    message = error.message(),
+                    "Vault background work turn panicked; the turn was abandoned and \
+                     background work continues"
+                );
             } else {
                 warn!(
-                    vault_id = %outcome.request.vault_id(),
+                    vault_id = %vault_id,
                     kind = ?outcome.request.kind(),
                     code = error.code(),
                     message = error.message(),
@@ -241,20 +291,97 @@ impl VaultWorkExecutor {
                 );
             }
         }
+        // This runs on the dispatch loop every Vault shares, outside the
+        // turn's own panic boundary. A panic here, e.g. while publishing the
+        // status of a Vault whose turn just panicked, would end that loop
+        // and stop every Vault's background work, so it is contained too.
+        let consequences = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.apply_collection_consequences(outcome);
+        }));
+        if let Err(panic) = consequences {
+            error!(
+                vault_id = %vault_id,
+                kind = ?outcome.request.kind(),
+                message = crate::vault_work::panic_message(panic.as_ref()),
+                "publishing a Vault background work outcome panicked; background work continues"
+            );
+        }
+    }
+
+    fn apply_collection_consequences(&self, outcome: &VaultWorkOutcome) {
+        let vault_id = outcome.request.vault_id();
+        if outcome.request.kind() != VaultWorkKind::Index {
+            return;
+        }
+        match &outcome.result {
+            Ok(()) => self.index_retries.clear(vault_id),
+            Err(error) if error.code() == TURN_PANICKED => {
+                // The turn never reached its own failure publication, so
+                // it would otherwise read `Indexing` forever.
+                if let Some(control_block) = self.vaults.runtime(vault_id) {
+                    publish_index_failure(&control_block, &self.cache, error, true);
+                }
+            }
+            // Deferred until the embedder is installed, which re-requests
+            // every active Vault itself.
+            Err(error) if error.code() == "embedder_not_ready" => {}
+            Err(error) if error.retryable() => self.schedule_index_retry(vault_id),
+            Err(_) => {}
+        }
+        if !self.startup.collection_indexes_ready() && collection_indexes_settled(&self.vaults) {
+            self.startup.set_ready();
+            self.model_setup_started.store(false, Ordering::Release);
+            info!("Vault collection indexing complete");
+        }
+    }
+
+    /// Ask for another Index turn of `vault_id` after a backoff, unless this
+    /// run of failures has used up its retries. Nothing else would: a failed
+    /// turn otherwise waits for an unrelated change or a manual refresh.
+    fn schedule_index_retry(&self, vault_id: VaultId) {
+        let Some(delay) = self.index_retries.next_delay(vault_id) else {
+            warn!(
+                %vault_id,
+                "Vault indexing keeps failing; automatic retries stopped until the next change \
+                 or refresh"
+            );
+            return;
+        };
+        info!(%vault_id, delay_seconds = delay.as_secs(), "retrying Vault indexing after a backoff");
+        let work = self.work.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            // Automatic, so it must not add a rerun to an Index turn some
+            // other change has already queued or started. A drained or
+            // shut-down Vault rejects it.
+            work.request_if_idle(vault_id, VaultWorkKind::Index);
+        });
     }
 }
 
-/// Startup is Ready once every active Vault's Index turn has settled Ready.
-/// An empty collection is never Ready: there is nothing that could have
-/// finished indexing.
-fn collection_indexes_ready(vaults: &VaultCollectionRuntime) -> bool {
+/// Startup is Ready once every active Vault's Index turn has *settled*:
+/// searchable (`Ready` or `Stale`), or finished with a failure that Vault now
+/// reports as its own, or with no local Markdown to index at all. A Vault
+/// that failed is settled, not pending: waiting for it to succeed let one
+/// broken Vault, or one without a directory, hold the whole instance out of
+/// readiness (#326). An empty collection is never Ready: there is nothing
+/// that could have finished indexing.
+fn collection_indexes_settled(vaults: &VaultCollectionRuntime) -> bool {
     let active = vaults.active_vault_ids();
     !active.is_empty()
         && active.into_iter().all(|vault_id| {
             vaults
                 .runtime(vault_id)
-                .is_some_and(|runtime| runtime.snapshot().search == VaultSearchStatus::Ready)
+                .is_some_and(|runtime| index_settled(&runtime.snapshot()))
         })
+}
+
+fn index_settled(snapshot: &CollectionVaultSnapshot) -> bool {
+    matches!(
+        snapshot.search,
+        VaultSearchStatus::Ready | VaultSearchStatus::Stale
+    ) || snapshot.search_error.is_some()
+        || snapshot.activation != VaultActivationStatus::Active
 }
 
 /// The instance-wide default commit identity for a Git turn, read from the
@@ -441,6 +568,22 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                         false,
                     )
                 })
+                .and_then(|publication| match publication {
+                    SnapshotPublication::Published => Ok(()),
+                    // A newer snapshot attempt owns this Vault's row now, so
+                    // this turn wrote nothing and must not report the Vault
+                    // current. That attempt decides the row's freshness,
+                    // which is why no stale mark follows.
+                    SnapshotPublication::Superseded => Err((
+                        VaultWorkError::new(
+                            "vault_index_failed",
+                            "a newer snapshot attempt superseded this Index turn before it \
+                             published, so nothing was published",
+                            true,
+                        ),
+                        false,
+                    )),
+                })
         })
         .await
         {
@@ -471,43 +614,53 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
             };
             let _ = control_block.set_search_status(status, None);
         }
-        Err(error) => {
-            let stale_mark_error = stale_mark_required
-                .then(|| cache.mark_vault_snapshot_stale(vault_id))
-                .transpose()
-                .err();
-            // A structure pass that succeeded before the embedding pass failed
-            // leaves a participating generation with no vectors. Reporting it
-            // `Stale` would grant the search capability to a Vault that can
-            // only ever answer with nothing, so the vectorless axis wins here
-            // exactly as it does in `retained_snapshot_search_status`. The
-            // failure is not lost: it rides along as this status's error.
-            let status = match cache.snapshot_status(vault_id) {
-                Ok(Some(snapshot)) if snapshot.participating && snapshot.searchable => {
-                    VaultSearchStatus::Stale
-                }
-                Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
-                Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
-            };
-            let message = match stale_mark_error {
-                Some(mark_error) => format!(
-                    "{} (also could not mark the retained snapshot stale: {mark_error})",
-                    error.message()
-                ),
-                None => error.message().to_string(),
-            };
-            let _ = control_block.set_search_status(
-                status,
-                Some(VaultRuntimeError {
-                    code: error.code().to_string(),
-                    message,
-                    retryable: error.retryable(),
-                    detail: None,
-                }),
-            );
-        }
+        Err(error) => publish_index_failure(&control_block, &cache, error, stale_mark_required),
     }
     result
+}
+
+/// Publish a failed Index turn's search status on its Vault: whatever the
+/// Vault's retained generation still supports, with the failure attached.
+fn publish_index_failure(
+    control_block: &VaultControlBlock,
+    cache: &SqliteCache,
+    error: &VaultWorkError,
+    stale_mark_required: bool,
+) {
+    let vault_id = control_block.definition().vault_id();
+    let stale_mark_error = stale_mark_required
+        .then(|| cache.mark_vault_snapshot_stale(vault_id))
+        .transpose()
+        .err();
+    // A structure pass that succeeded before the embedding pass failed
+    // leaves a participating generation with no vectors. Reporting it
+    // `Stale` would grant the search capability to a Vault that can
+    // only ever answer with nothing, so the vectorless axis wins here
+    // exactly as it does in `retained_snapshot_search_status`. The
+    // failure is not lost: it rides along as this status's error.
+    let status = match cache.snapshot_status(vault_id) {
+        Ok(Some(snapshot)) if snapshot.participating && snapshot.searchable => {
+            VaultSearchStatus::Stale
+        }
+        Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
+        Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
+    };
+    let message = match stale_mark_error {
+        Some(mark_error) => format!(
+            "{} (also could not mark the retained snapshot stale: {mark_error})",
+            error.message()
+        ),
+        None => error.message().to_string(),
+    };
+    let _ = control_block.set_search_status(
+        status,
+        Some(VaultRuntimeError {
+            code: error.code().to_string(),
+            message,
+            retryable: error.retryable(),
+            detail: None,
+        }),
+    );
 }
 
 fn vault_index_error(error: VaultRuntimeError) -> VaultWorkError {
@@ -953,11 +1106,20 @@ fn finish_commit_turn(
         Ok(outcome) => {
             info!(%vault_id, ?outcome, "Vault Git commit turn completed");
             commit_cooldown.clear(vault_id);
-            // The same status a successful sync publishes. A remote failure
-            // this clears is republished by that Vault's next scheduled sync
-            // turn: the commit half being healthy is the honest report of
-            // what this turn actually proved.
-            let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
+            // A commit proves the local half of Git healthy and nothing
+            // about the remote. A standing remote-only failure (a conflict
+            // with the remote, a refused push) stays published: syncs run
+            // on the poll interval, a day by default, and a commit fires on
+            // every save, so clearing it here would hide the one failure
+            // that needs a human almost as soon as it appeared (#323).
+            // Anything else is a failure this turn just disproved.
+            let remote_failure_stands = control_block
+                .snapshot()
+                .git_error
+                .is_some_and(|error| crate::git::managed_task::is_remote_only_failure(&error.code));
+            if !remote_failure_stands {
+                let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
+            }
         }
         Err(error) => {
             commit_cooldown.arm(vault_id);
@@ -1096,12 +1258,22 @@ where
 
 /// Read a Vault's stored HTTPS credentials, mapping an unreachable registry
 /// into the retryable failure a Git turn reports for it.
+///
+/// The client-visible message is fixed: `VaultRegistryError`'s text embeds
+/// the registry file's absolute host path, and this failure becomes the
+/// Vault's published `git_error` (#323). The full error goes to the
+/// operator's log instead.
 fn git_credentials(
     registry: &VaultRegistryStore,
     vault_id: VaultId,
 ) -> Result<Option<crate::vault_registry::HttpsCredentials>, VaultWorkError> {
     registry.https_credentials(vault_id).map_err(|error| {
-        VaultWorkError::new("managed_git_registry_unavailable", error.to_string(), true)
+        tracing::warn!(%vault_id, %error, "Vault registry unavailable for a Git turn");
+        VaultWorkError::new(
+            "managed_git_registry_unavailable",
+            "Hatchdoor could not read this Vault's stored Git settings",
+            true,
+        )
     })
 }
 

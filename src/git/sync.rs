@@ -205,25 +205,51 @@ pub fn run_local_history_git_turn(
 /// automatic retry, everything else needs a human or the enclosing
 /// checkout's state to change first.
 ///
-/// Only `Validation` and `Other` are actually reachable from this function's
-/// callee pair. #185 deleted the fetch/integrate/push half of this module,
+/// Only `Validation`, `ManualRecovery` and `Other` are actually reachable
+/// from this function's callee pair. `ManualRecovery` comes from
+/// `commit_local` refusing a checkout left mid-merge or with a conflicted
+/// index (#323). #185 deleted the fetch/integrate/push half of this module,
 /// and with it the merge-marker recovery `commit_local` used to run, so
-/// `Conflict`, `DirtyWorkingTree`, `Remote`, and `ManualRecovery` have no
-/// producer left on this path. All four keep an arm rather than being
-/// dropped: `GitError` is the shared error of a module `init_local_repo` and
+/// `Conflict`, `DirtyWorkingTree`, and `Remote` have no producer left on
+/// this path. All three keep an arm rather than being dropped: `GitError` is the shared error of a module `init_local_repo` and
 /// `validate_repo` also raise, and its variants are not this function's to
 /// narrow.
+///
+/// The client-facing message is fixed per code, never `error.to_string()`:
+/// `GitError`'s strings carry absolute host paths (the Vault path, the
+/// repository root, libgit2's own "could not find repository at '…'"), and
+/// this message reaches every client through the Vault's status (#323). The
+/// full error goes to the operator's log instead.
 fn classify_local_history_error(error: GitError) -> VaultWorkError {
-    let code = match &error {
-        GitError::Validation(_) => "existing_git_local_history_validation_failed",
-        GitError::Conflict { .. } => "existing_git_local_history_conflict",
-        GitError::DirtyWorkingTree { .. } => "existing_git_local_history_dirty_working_tree",
-        GitError::ManualRecovery { .. } => "existing_git_local_history_manual_recovery_required",
-        GitError::Remote(_) => "existing_git_local_history_remote_unexpected",
-        GitError::Other(_) => "existing_git_local_history_git_error",
+    let (code, message) = match &error {
+        GitError::Validation(_) => (
+            "existing_git_local_history_validation_failed",
+            "this Vault's Git checkout failed validation",
+        ),
+        GitError::Conflict { .. } => (
+            "existing_git_local_history_conflict",
+            "this Vault's Git checkout has a merge conflict",
+        ),
+        GitError::DirtyWorkingTree { .. } => (
+            "existing_git_local_history_dirty_working_tree",
+            "this Vault's Git checkout has uncommitted edits Hatchdoor will not overwrite",
+        ),
+        GitError::ManualRecovery { .. } => (
+            "existing_git_local_history_manual_recovery_required",
+            "this Vault's Git checkout is part-way through an operation that needs manual recovery",
+        ),
+        GitError::Remote(_) => (
+            "existing_git_local_history_remote_unexpected",
+            "a Local history turn unexpectedly reached a Git remote",
+        ),
+        GitError::Other(_) => (
+            "existing_git_local_history_git_error",
+            "Git could not record this Vault's local history",
+        ),
     };
+    tracing::warn!(code, %error, "Local history Git turn failed");
     let retryable = matches!(error, GitError::Remote(_) | GitError::Other(_));
-    VaultWorkError::new(code, error.to_string(), retryable)
+    VaultWorkError::new(code, message, retryable)
 }
 
 /// Initialise a vault for explicitly-confirmed local versioning. The ignore
@@ -421,6 +447,7 @@ fn commit_working_tree(
     config: &GitConfig,
     message: &str,
 ) -> Result<bool, GitError> {
+    reject_unfinished_operation(repo)?;
     let mut index = repo.index()?;
     let head_commit = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
     let vault_relative = vault_relative_path(repo, config)?;
@@ -454,6 +481,41 @@ fn commit_working_tree(
         worktree_index.write()?;
     }
     Ok(true)
+}
+
+/// Refuse to commit a checkout that is part-way through a merge, rebase,
+/// cherry-pick or revert, or whose index holds conflict entries (#323).
+/// `commit_working_tree` seeds a fresh index from HEAD, which silently drops
+/// conflict entries, and would then stage every in-Vault file still carrying
+/// conflict markers as an ordinary single-parent commit. Hatchdoor cannot
+/// tell an operator's hand resolution from an abandoned one, so it leaves the
+/// state untouched and reports it rather than repairing it.
+fn reject_unfinished_operation(repo: &Repository) -> Result<(), GitError> {
+    let state = repo.state();
+    let index = repo.index()?;
+    if state == git2::RepositoryState::Clean && !index.has_conflicts() {
+        return Ok(());
+    }
+    let mut files = index
+        .conflicts()
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|conflict| conflict.our.or(conflict.their))
+        .filter_map(|entry| std::str::from_utf8(&entry.path).ok().map(str::to_owned))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    let reason = if files.is_empty() {
+        "an unfinished Git operation must be completed or aborted first".to_string()
+    } else {
+        format!("unresolved conflicts in: {}", files.join(", "))
+    };
+    Err(GitError::ManualRecovery {
+        state: format!("{state:?}"),
+        reason,
+    })
 }
 
 /// Return the Vault location relative to the discovered checkout. This is a
@@ -539,6 +601,100 @@ mod tests {
     use git2::Repository;
     use std::fs;
     use tempfile::TempDir;
+
+    /// #323: a Local history failure's message reaches every client through
+    /// the Vault's status, and used to carry `GitError`'s text, which embeds
+    /// the Vault's absolute host path.
+    #[test]
+    fn a_local_history_failure_is_reported_without_the_host_path() {
+        let root = tempfile::tempdir().expect("not a repository");
+        let vault_path = root.path().join("vault");
+        fs::create_dir(&vault_path).expect("vault directory");
+
+        let error = run_local_history_git_turn(
+            vault_path,
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("no enclosing repository");
+
+        assert_eq!(error.code(), "existing_git_local_history_validation_failed");
+        assert!(
+            !error.message().contains('/'),
+            "client-visible message leaks a host path: {}",
+            error.message()
+        );
+    }
+
+    /// #323: an operator part-way through resolving a merge by hand must not
+    /// have the conflict markers swept into a Local history commit. Seeding
+    /// the commit index from HEAD drops the conflict entries, so without a
+    /// guard the marked-up note was committed as an ordinary change.
+    #[test]
+    fn a_local_history_turn_refuses_a_checkout_left_mid_merge() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        let vault = root.path().join("notes");
+        fs::create_dir(&vault).expect("vault directory");
+        let sig = git2::Signature::now("Test", "test@example.invalid").expect("signature");
+        let commit_note = |content: &str, parents: &[&git2::Commit<'_>]| {
+            fs::write(vault.join("Home.md"), content).expect("write note");
+            let mut index = repo.index().expect("index");
+            index
+                .add_path(Path::new("notes/Home.md"))
+                .expect("stage note");
+            index.write().expect("write index");
+            let tree = repo
+                .find_tree(index.write_tree().expect("tree"))
+                .expect("find tree");
+            let oid = repo
+                .commit(None, &sig, &sig, content, &tree, parents)
+                .expect("commit");
+            repo.find_commit(oid).expect("find commit")
+        };
+        let base = commit_note("base\n", &[]);
+        let theirs = commit_note("theirs\n", &[&base]);
+        repo.reference("refs/heads/theirs", theirs.id(), true, "theirs")
+            .expect("theirs branch");
+        let ours = commit_note("ours\n", &[&base]);
+        repo.reference("refs/heads/master", ours.id(), true, "ours")
+            .expect("ours branch");
+        repo.set_head("refs/heads/master").expect("head");
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .expect("checkout ours");
+        let annotated = repo
+            .find_annotated_commit(theirs.id())
+            .expect("annotated theirs");
+        repo.merge(&[&annotated], None, None).expect("start merge");
+        assert!(repo.index().expect("index").has_conflicts());
+        let marked = fs::read_to_string(vault.join("Home.md")).expect("marked note");
+        assert!(marked.contains("<<<<<<<"), "merge left markers: {marked}");
+
+        let error = run_local_history_git_turn(
+            vault.clone(),
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("a conflicted merge must not be committed");
+
+        assert_eq!(
+            error.code(),
+            "existing_git_local_history_manual_recovery_required"
+        );
+        assert!(!error.retryable());
+        assert_eq!(
+            repo.head().expect("head").target(),
+            Some(ours.id()),
+            "no commit was made"
+        );
+        assert_eq!(repo.state(), git2::RepositoryState::Merge);
+        assert!(
+            repo.index().expect("index").has_conflicts(),
+            "the operator's merge state is left for them to finish"
+        );
+    }
 
     #[test]
     fn local_history_commits_only_the_contained_vault_subtree() {

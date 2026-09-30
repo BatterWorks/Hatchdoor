@@ -324,4 +324,32 @@ describe("NoteEditor conflict review", () => {
       screen.queryByText("This note changed on disk while you were editing."),
     ).not.toBeInTheDocument();
   });
+
+  it("shows only the changed lines of a long note, with the rest folded (#331)", () => {
+    const disk = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`);
+    const draft = ["new first line", ...disk];
+
+    const { container } = render(
+      <FrontmatterHarness
+        initialContent={draft.join("\n")}
+        onSaveContent={() => {}}
+        conflictReview={{
+          diskContent: disk.join("\n"),
+          draftContent: draft.join("\n"),
+          onUseDisk: vi.fn(),
+          onKeepDraft: vi.fn(),
+        }}
+      />,
+    );
+
+    const rows = container.querySelectorAll(".note-editor-conflict-line");
+    expect(rows).toHaveLength(5);
+    expect(
+      container.querySelectorAll(".note-editor-conflict-line.draft"),
+    ).toHaveLength(1);
+    expect(
+      container.querySelectorAll(".note-editor-conflict-line.disk"),
+    ).toHaveLength(0);
+    expect(screen.getByText("57 unchanged lines")).toBeInTheDocument();
+  });
 });

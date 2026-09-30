@@ -55,7 +55,10 @@ export function describeVaultsNotDrawn(missing: string[]): string {
   return `${joinWithAnd(missing)} could not be drawn.`;
 }
 
-function joinWithAnd(names: string[]): string {
+/** "X" / "X and Y" / "X, Y, and Z": the Vault-name list every sentence here
+ * is built on, exported so a feature can phrase its own sentence around the
+ * same list. */
+export function joinWithAnd(names: string[]): string {
   if (names.length <= 1) {
     return names[0] ?? "";
   }

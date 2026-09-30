@@ -558,3 +558,25 @@ describe("VaultCreationDialog — an own-folder remote behaviour", () => {
     expect(screen.getByLabelText("Repository URL")).toHaveValue("");
   });
 });
+
+describe("VaultCreationDialog — keyboard (#338)", () => {
+  it("starts on the name field, keeps Tab inside, and closes on Escape", () => {
+    const onClose = vi.fn();
+    render(<VaultCreationDialog onClose={onClose} onCreated={() => {}} />);
+
+    const dialog = screen.getByRole("dialog", { name: "Add a Vault" });
+    const name = screen.getByLabelText("Vault name");
+    expect(name).toHaveFocus();
+
+    const create = screen.getByRole("button", { name: "Create Vault" });
+    create.focus();
+    fireEvent.keyDown(create, { key: "Tab" });
+    expect(name).toHaveFocus();
+    fireEvent.keyDown(name, { key: "Tab", shiftKey: true });
+    expect(create).toHaveFocus();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    fireEvent.keyDown(create, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

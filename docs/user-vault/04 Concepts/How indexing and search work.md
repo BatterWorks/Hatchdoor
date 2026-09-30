@@ -14,6 +14,8 @@ The SQLite cache is a rebuildable projection of the Vault's Markdown, never a se
 
 A file watcher notices any create, edit, or delete under the Vault — Markdown, attachments, and `.hatchdoor-layer` markers alike, since a marker change reclassifies notes without touching their content. Changes are debounced: a burst of saves within about half a second coalesces into one reindex pass, with a five-second ceiling so a genuinely busy editing session can't defer freshness forever.
 
+A save made through Hatchdoor itself, from the browser or an agent, doesn't wait for the watcher: the save asks for the reindex directly and marks the Vault's search `stale` until it lands, so it's picked up even where the watcher can't see changes. If the operating system reports that it dropped file events, the next pass rescans the whole Vault rather than trusting the gap.
+
 > [!note]
 > Reindexing is incremental, not a full rebuild. Each note carries a content hash; unchanged notes and unchanged chunks are reused as-is rather than re-embedded. A full rebuild only happens when something invalidates the whole cache at once — switching embedding models, or flipping `HATCHDOOR_EMBED_LAYERS` — because every vector in the cache has to share one embedding space, and a partial rebuild would leave some vectors comparable and others not.
 

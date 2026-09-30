@@ -8,7 +8,7 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 use super::assets::asset_move_plan;
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::{
-    MutationJournal, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
+    MutationJournal, atomic_create, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
 };
 use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
@@ -176,18 +176,26 @@ pub fn create_note(
     catalog: &VaultIndex,
 ) -> Result<WriteOutcome, WriteError> {
     let path = resolve_new_note_path(vault_root, relative_path)?;
+    let normalized = normalize_note_relative_path(relative_path)?;
+    let already_exists = || WriteError::Conflict(format!("Note already exists: {normalized}"));
     if path.exists() && !overwrite {
-        return Err(WriteError::Conflict(format!(
-            "Note already exists: {}",
-            normalize_note_relative_path(relative_path)?
-        )));
+        return Err(already_exists());
     }
 
     create_parent_dir_inside_root(vault_root, &path, "note")?;
 
     let prepared = prepare_note_content(content)?;
-    atomic_write(&path, &prepared.content)?;
-    let normalized = normalize_note_relative_path(relative_path)?;
+    if overwrite {
+        atomic_write(&path, &prepared.content)?;
+    } else {
+        // The check above is only a fast answer: a file created at this path
+        // since then, by anything outside Hatchdoor, is refused at the commit
+        // itself rather than replaced.
+        atomic_create(&path, &prepared.content).map_err(|error| match error {
+            WriteError::Conflict(_) => already_exists(),
+            other => other,
+        })?;
+    }
     let relative_without_ext = strip_md_extension(&normalized).to_string();
     let slug = slug_for_relative_path(catalog, &relative_without_ext, &path, None);
     Ok(WriteOutcome {

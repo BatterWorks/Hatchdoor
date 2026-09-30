@@ -37,7 +37,11 @@
     <title>Hatchdoor</title>
     <script>
       (function () {
-        var v = localStorage.getItem("hatchdoor.theme");
+        // Blocked site data makes the accessor itself throw (#339).
+        var v = null;
+        try {
+          v = localStorage.getItem("hatchdoor.theme");
+        } catch (e) {}
         document.documentElement.dataset.theme =
           v === "light" || v === "dark" ? v : "auto";
       })();

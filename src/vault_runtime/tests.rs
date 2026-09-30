@@ -1026,6 +1026,101 @@ fn an_older_registry_snapshot_cannot_replace_a_newer_live_collection() {
     assert!(live.vaults.contains_key(&second_id));
 }
 
+/// Activating a control block stats its directory, reads SQLite and walks the
+/// whole tree registering watches. None of that may happen under the
+/// collection lock every HTTP and MCP read takes, or a registry mutation
+/// freezes every read for the length of the walk (#326).
+#[test]
+fn reconcile_activates_control_blocks_without_holding_the_collection_lock() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let first_path = directory.path().join("first");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    let one = add_local_vault(&registry, &empty, "First", first_path);
+    let collection = VaultCollectionRuntime::new();
+
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    ACTIVATION_OBSERVER.with(|observer| {
+        let collection = collection.clone();
+        let observed = observed.clone();
+        *observer.borrow_mut() = Some(Box::new(move || {
+            observed
+                .borrow_mut()
+                .push(collection.state.try_write().is_ok());
+        }));
+    });
+    assert!(collection.reconcile(&registry, &one));
+    ACTIVATION_OBSERVER.with(|observer| observer.borrow_mut().take());
+
+    assert_eq!(
+        *observed.borrow(),
+        vec![true],
+        "the collection lock is free while the control block activates"
+    );
+    assert_eq!(collection.active_vault_ids().len(), 1);
+}
+
+/// Building outside the lock opens a window in which another reconciliation
+/// can install its revision. The one that finds the map moved on must not
+/// install blocks built from what it saw before; it starts over from what is
+/// live, and still converges on the newest revision.
+#[test]
+fn reconcile_that_loses_the_install_race_rebuilds_from_the_live_collection() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    std::fs::create_dir_all(&second_path).expect("second Vault directory");
+    let one = add_local_vault(&registry, &empty, "First", first_path);
+    let two = add_local_vault(&registry, &one, "Second", second_path);
+    let first_id = vault_id_named(&two, "First");
+    let collection = VaultCollectionRuntime::new();
+
+    // While the newer reconciliation is activating, an older one installs.
+    let interleaved: std::rc::Rc<std::cell::RefCell<Option<VaultControlBlock>>> =
+        std::rc::Rc::default();
+    let entered = std::rc::Rc::new(std::cell::Cell::new(false));
+    ACTIVATION_OBSERVER.with(|observer| {
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let one = one.clone();
+        let interleaved = interleaved.clone();
+        let entered = entered.clone();
+        *observer.borrow_mut() = Some(Box::new(move || {
+            if !entered.replace(true) {
+                assert!(collection.reconcile(&registry, &one));
+                *interleaved.borrow_mut() = collection.runtime(first_id);
+            }
+        }));
+    });
+    assert!(collection.reconcile(&registry, &two));
+    ACTIVATION_OBSERVER.with(|observer| observer.borrow_mut().take());
+    let interleaved = interleaved
+        .borrow_mut()
+        .take()
+        .expect("the older reconciliation installed the first Vault");
+
+    let live = collection.snapshot();
+    assert_eq!(live.registry_revision, two.revision());
+    assert_eq!(live.vaults.len(), 2);
+    let first = collection.runtime(first_id).expect("first Vault");
+    assert!(
+        Arc::ptr_eq(&first.snapshot, &interleaved.snapshot),
+        "the first Vault keeps the block the interleaved install made, rather than one \
+         built before it and never installed"
+    );
+    assert!(first.is_accepting_operations());
+}
+
 #[tokio::test]
 async fn disabling_a_vault_waits_for_an_active_foreground_mutation_safe_boundary() {
     use crate::vault_work::VaultWorkCoordinator;
@@ -3056,4 +3151,194 @@ fn the_filesystem_report_speaks_only_for_a_directory_that_cannot_compare_and_swa
         report_compare_and_swap_support(vault_id, hostile.path()),
         "a filesystem that rejects the flag is reported"
     );
+}
+
+/// Issue #324: a managed-Git Vault is activated before its checkout exists, so
+/// activation has no directory to watch. The seam where its first Git turn
+/// makes it Active must start the watcher activation could not, or the Vault
+/// is writable with nothing watching it.
+#[tokio::test]
+async fn a_vault_that_becomes_active_after_activation_gets_a_watcher() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Cloned later".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault before its checkout exists");
+    let vault_id = vault_id_named(&committed, "Cloned later");
+    let collection = VaultCollectionRuntime::with_watching(directory.path().join("cache.sqlite3"));
+    let mut changes = collection.subscribe_changes().expect("watched collection");
+    collection.reconcile(&registry, &committed);
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    assert_eq!(runtime.snapshot().watcher, VaultWatcherStatus::Disabled);
+
+    // What the first Git turn does: the clone lands, then the executor
+    // publishes the checkout's local-content status.
+    let vault_path = registry.vault_path(runtime.definition());
+    std::fs::create_dir_all(&vault_path).expect("cloned checkout");
+    runtime
+        .set_local_content_status(LocalContentStatus::ReadWrite, None)
+        .expect("publish the cloned checkout");
+    let snapshot = runtime.snapshot();
+    assert_eq!(snapshot.watcher, VaultWatcherStatus::Running);
+    assert!(snapshot.watcher_error.is_none());
+
+    std::fs::write(vault_path.join("Changed.md"), "# Changed\n").expect("write a note");
+    let changed = tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv())
+        .await
+        .expect("the late watcher must report the change")
+        .expect("watcher change");
+    assert_eq!(changed, vault_id);
+
+    // The late watcher is the block's watcher like any other: retiring the
+    // block stops it.
+    runtime.revoke();
+    assert!(runtime.watcher_cancelled());
+}
+
+/// Issue #324: the write path must not depend on a watcher to get its change
+/// indexed and committed, nor let a collection read call the pre-write
+/// generation fresh in the meantime. With the watcher gone, a write still
+/// marks the published snapshot stale and reports the change on the intent
+/// channel the server forwards as commit and Index requests. Both happen
+/// before the write returns, well inside the watcher's own debounce window.
+#[tokio::test]
+async fn a_write_to_a_vault_without_a_watcher_marks_its_snapshot_stale_and_asks_for_turns() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    let committed = add_local_vault(&registry, &empty, "Unwatched", vault_path.clone());
+    let vault_id = vault_id_named(&committed, "Unwatched");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    cache
+        .replace_vault_snapshot(
+            vault_id,
+            &crate::vault::VaultIndex::build(&vault_path).expect("build Vault index"),
+            &StubEmbedder::new(384),
+        )
+        .expect("publish Vault snapshot");
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    collection.reconcile(&registry, &committed);
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    if let Some(watcher) = runtime
+        .watcher
+        .write()
+        .expect("Vault watcher handle poisoned")
+        .take()
+    {
+        watcher.cancel();
+    }
+    let mut changes = collection.subscribe_changes().expect("watched collection");
+    assert_eq!(
+        cache
+            .snapshot_status(vault_id)
+            .expect("snapshot status")
+            .expect("published snapshot")
+            .freshness,
+        VaultSnapshotFreshness::Fresh
+    );
+
+    crate::vault_mutation::VaultMutationCore::new(
+        &cache,
+        &collection,
+        crate::runtime_config::RuntimeConfig::for_tests().snapshot(),
+    )
+    .create_note(vault_id, "New.md", "# New\n", false)
+    .await
+    .expect("write a note");
+
+    assert_eq!(
+        cache
+            .snapshot_status(vault_id)
+            .expect("snapshot status")
+            .expect("published snapshot")
+            .freshness,
+        VaultSnapshotFreshness::Stale,
+        "a collection read after the write must not call the old generation fresh"
+    );
+    assert_eq!(
+        changes
+            .try_recv()
+            .expect("the write must ask for its own turns"),
+        vault_id
+    );
+}
+
+/// A write refused before it touches the disk changed nothing, so it neither
+/// stales the snapshot nor asks for turns.
+#[tokio::test]
+async fn a_refused_write_neither_stales_the_snapshot_nor_asks_for_turns() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    let committed = add_local_vault(&registry, &empty, "Refusing", vault_path.clone());
+    let vault_id = vault_id_named(&committed, "Refusing");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    cache
+        .replace_vault_snapshot(
+            vault_id,
+            &crate::vault::VaultIndex::build(&vault_path).expect("build Vault index"),
+            &StubEmbedder::new(384),
+        )
+        .expect("publish Vault snapshot");
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    collection.reconcile(&registry, &committed);
+    let mut changes = collection.subscribe_changes().expect("watched collection");
+
+    crate::vault_mutation::VaultMutationCore::new(
+        &cache,
+        &collection,
+        crate::runtime_config::RuntimeConfig::for_tests().snapshot(),
+    )
+    .create_note(vault_id, "Home.md", "# Clobber\n", false)
+    .await
+    .expect_err("an existing note is not overwritten");
+
+    assert_eq!(
+        cache
+            .snapshot_status(vault_id)
+            .expect("snapshot status")
+            .expect("published snapshot")
+            .freshness,
+        VaultSnapshotFreshness::Fresh
+    );
+    assert!(changes.try_recv().is_err());
 }
