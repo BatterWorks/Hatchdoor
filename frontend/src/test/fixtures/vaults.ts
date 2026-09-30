@@ -49,6 +49,7 @@ const FULL_CAPABILITIES: VaultCapabilities = {
   retry: true,
   commit: true,
   sync: true,
+  publish_recovery: false,
 };
 
 export function healthyVault(

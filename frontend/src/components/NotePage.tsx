@@ -15,7 +15,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { deriveVaultSlot } from "../app/vaultSlotLogic";
+import { deriveVaultSlot, noteInSyncConflict } from "../app/vaultSlotLogic";
 import {
   parseFrontmatter,
   stripBlockIds,
@@ -720,6 +720,7 @@ export function NotePage({
     () => linesMatch(parsed.body, markdown),
     [parsed.body, markdown],
   );
+
   const inlineEditingEnabled =
     writeEnabled && !isEditing && lineMappingIntact && !!note;
 
@@ -1571,6 +1572,12 @@ export function NotePage({
             </button>
           </div>
         ) : null}
+        {writeEnabled ? (
+          <SyncConflictNotice
+            vault={activeVault}
+            relativePath={note.relative_path}
+          />
+        ) : null}
         {writeEnabled && !isEditing && !lineMappingIntact ? (
           <p className="note-editor-notice">
             This note&rsquo;s source and rendered lines don&rsquo;t line up, so
@@ -1744,5 +1751,25 @@ export function NotePage({
 
       <NoteTocDesktop headings={tocHeadings} onJump={jumpToHeadingWithTail} />
     </div>
+  );
+}
+
+/** A note in the Vault's current sync conflict stays editable, but an edit
+ * made before the conflict is resolved on the Git host can conflict again on
+ * the same lines (ADR-30), so the page says so. */
+function SyncConflictNotice({
+  vault,
+  relativePath,
+}: {
+  vault: VaultSummary | undefined;
+  relativePath: string;
+}) {
+  if (!noteInSyncConflict(vault, relativePath)) return null;
+  return (
+    <p className="note-editor-notice" role="status">
+      This note is part of a sync conflict with the Vault&rsquo;s remote. Edits
+      made before the conflict is resolved may conflict again, so resolve it
+      first from the Vault&rsquo;s settings.
+    </p>
   );
 }

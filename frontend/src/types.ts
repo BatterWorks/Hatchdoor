@@ -76,6 +76,21 @@ export type VaultCapabilities = {
    * console offering **Sync now** from one that can only offer **Commit
    * now**. */
   sync: boolean;
+  /** Whether this Vault's side of a sync conflict can be published to its
+   * recovery branch now: a Two-way Vault whose Git status reports
+   * `managed_git_conflict` (ADR-30). */
+  publish_recovery: boolean;
+};
+
+/** The outcome of the latest request to publish a Vault's side of a sync
+ * conflict to its recovery branch (ADR-30). A refusal keeps the earlier
+ * publication's fields, since that branch still stands on the remote. */
+export type RecoveryBranchStatus = {
+  branch?: string;
+  published_commit?: string;
+  conflicting_commit?: string;
+  published_at?: string;
+  error?: VaultRuntimeError;
 };
 
 /** How a git-backed Vault's history is kept: local commits only, or synced
@@ -139,6 +154,9 @@ export type VaultSummary = {
   search_error?: VaultRuntimeError;
   git_error?: VaultRuntimeError;
   watcher_error?: VaultRuntimeError;
+  /** Absent until a recovery branch is requested, once the conflict clears,
+   * and on the read-only demo. */
+  recovery_branch?: RecoveryBranchStatus;
 };
 
 export type VaultRegistryRecovery = {

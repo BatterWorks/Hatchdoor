@@ -426,6 +426,34 @@
   flex-basis: 100%;
 }
 
+/* A conflicted Vault's recovery branch (ADR-30): the explanation, the branch
+   name with its copy control, the last publish, and the publish button. Sits
+   under the file list and takes the strip's full width, like it. */
+.settings-console-recovery {
+  flex-basis: 100%;
+  display: grid;
+  gap: 0.5rem;
+  justify-items: start;
+}
+
+.settings-console-recovery-branch {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+}
+
+.settings-console-recovery-branch code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.settings-console-recovery-branch a {
+  color: inherit;
+}
+
 /* The one condition allowed to persist across visits (#149/#121): a Vault
    whose identity edit saved but whose final un-pause failed. */
 .settings-recovery-line {

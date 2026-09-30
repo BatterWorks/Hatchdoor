@@ -4,8 +4,10 @@ import { apiFetch } from "../../api/api";
 import { UnknownCount, VaultSlot } from "../../app/vaultSlot";
 import type { VaultSlotState } from "../../app/vaultSlotLogic";
 import { StateBlock } from "../../components/ui";
+import { copyText } from "../../lib/clipboard";
 import type { VaultId, VaultSource, VaultSummary } from "../../types";
 import { useVaultCollection, useVaultProjection } from "../../vaults";
+import { formatWhen } from "./relativeTime";
 import { SettingsModal } from "./SettingsModal";
 import { VaultCreationDialog } from "./VaultCreation";
 import {
@@ -16,6 +18,7 @@ import {
   clearRecoveryPending,
   DEFAULT_POLL_MINUTES,
   describeGitFailure,
+  describeRecoveryFailure,
   fetchRegistryRevision,
   type GitBehavior,
   isRecoveryPending,
@@ -26,6 +29,8 @@ import {
   missingRequiredRepositoryUrl,
   parseExcludePatterns,
   recoverPausedVault,
+  recoveryBranchName,
+  recoveryBranchUrl,
   REPOSITORY_URL_REQUIRED_MESSAGE,
   requestJson,
   sameSourceIdentity,
@@ -244,6 +249,75 @@ function failureText(payload: Record<string, unknown>, fallback: string) {
   return typeof payload.message === "string" ? payload.message : fallback;
 }
 
+/** The recovery-branch half of a conflicted Vault's Git console (ADR-30):
+ * publish this Vault's side to a branch, then merge it on the Git host.
+ * The outcome arrives on the Vault's `recovery_branch` status, not on the
+ * request, so this renders from the summary and only starts the publish. */
+function RecoveryBranchPanel({
+  vault,
+  publishing,
+  onPublish,
+}: {
+  vault: VaultSummary;
+  publishing: boolean;
+  onPublish: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const status = vault.recovery_branch;
+  const branch = recoveryBranchName(vault);
+  const url = branch ? recoveryBranchUrl(vault.source, branch) : null;
+  const configured =
+    vault.source?.type === "local" ? undefined : vault.source?.branch;
+  const published = status?.published_commit
+    ? `Published ${status.published_commit.slice(0, 7)}${
+        status.published_at ? ` ${formatWhen(status.published_at)}` : ""
+      }. Saves made since then are not on the branch until you publish again.`
+    : null;
+  return (
+    <div className="settings-console-recovery">
+      <p>
+        Publish this Vault&rsquo;s side to its own branch on the remote, merge
+        that branch into {configured ?? "the synced branch"} with your usual Git
+        tools, and syncing picks up again by itself. Hatchdoor never overwrites
+        or deletes the branch.
+      </p>
+      {branch ? (
+        <div className="settings-console-recovery-branch">
+          <code>{branch}</code>
+          <button
+            type="button"
+            className="settings-mini"
+            onClick={() => {
+              void copyText(branch).then((ok) => setCopied(ok));
+            }}
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+          {url && status?.published_commit ? (
+            <a href={url} target="_blank" rel="noreferrer">
+              Open on the Git host
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+      {published ? <p>{published}</p> : null}
+      {status?.error ? (
+        <p role="alert">{describeRecoveryFailure(status.error)}</p>
+      ) : null}
+      <button
+        type="button"
+        className="settings-btn"
+        disabled={publishing || !vault.enabled}
+        onClick={onPublish}
+      >
+        {status?.published_commit
+          ? "Publish again"
+          : "Publish my side to a branch"}
+      </button>
+    </div>
+  );
+}
+
 const LOCAL_HISTORY_CONSEQUENCE =
   "Local history creates a hidden .git folder inside this Vault's notes folder to hold its history. That folder grows permanently: every image and PDF attached stays in it, even after you delete the file from the Vault.";
 
@@ -301,6 +375,7 @@ export function VaultSettingsDetail({
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [recoveryPending, setRecoveryPending] = useState(false);
 
   const applyVault = useCallback((next: VaultSummary) => {
@@ -708,6 +783,25 @@ export function VaultSettingsDetail({
     setSyncing(false);
   };
 
+  const publishRecovery = async () => {
+    setPublishing(true);
+    setMessage(null);
+    const { ok, payload } = await requestJson(
+      `/api/v1/vaults/${vaultId}/recovery-branch`,
+      { method: "POST" },
+    );
+    if (ok)
+      setMessage(
+        "Publishing this Vault's side. The branch appears below once it is on the remote.",
+      );
+    else
+      setFailure(
+        failureText(payload, "Could not start publishing this Vault's side."),
+      );
+    await refreshCollection();
+    setPublishing(false);
+  };
+
   const gitFailure =
     vault.git === "unavailable" && vault.git_error
       ? describeGitFailure(vault.git_error)
@@ -794,6 +888,13 @@ export function VaultSettingsDetail({
                   </li>
                 ) : null}
               </ul>
+            ) : null}
+            {vault.capabilities.publish_recovery ? (
+              <RecoveryBranchPanel
+                vault={vault}
+                publishing={publishing}
+                onPublish={() => void publishRecovery()}
+              />
             ) : null}
             <button
               type="button"

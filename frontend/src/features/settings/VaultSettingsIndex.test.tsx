@@ -14,8 +14,11 @@ import {
   buildSourceForBehavior,
   clampPollMinutes,
   describeGitFailure,
+  describeRecoveryFailure,
   isRecoveryPending,
   markRecoveryPending,
+  recoveryBranchName,
+  recoveryBranchUrl,
   sameSourceIdentity,
   withIdentityFields,
 } from "./vaultGitBehavior";
@@ -61,6 +64,7 @@ function baseVault(source: unknown, overrides: Record<string, unknown> = {}) {
       retry: false,
       commit: mode === "local_history" || mode === "two_way",
       sync: mode === "pull_only" || mode === "two_way",
+      publish_recovery: false,
     },
     ...overrides,
   };
@@ -289,6 +293,75 @@ describe("pure helpers", () => {
       retryable: false,
     });
     expect(unknown.sentence).toContain("not a remote vault");
+  });
+
+  it("names the recovery branch from the last publish, else from the configured branch", () => {
+    const source = {
+      type: "managed_git",
+      repository_url: "https://example.test/notes.git",
+      branch: "main",
+      mode: "two_way",
+      poll_interval_secs: 3600,
+    };
+    expect(recoveryBranchName(baseVault(source) as never)).toBe(
+      `hatchdoor-recovery/main/${VAULT_ID}`,
+    );
+    expect(
+      recoveryBranchName(
+        baseVault(
+          { ...source, branch: undefined },
+          {
+            recovery_branch: { branch: `hatchdoor-recovery/trunk/${VAULT_ID}` },
+          },
+        ) as never,
+      ),
+    ).toBe(`hatchdoor-recovery/trunk/${VAULT_ID}`);
+    expect(
+      recoveryBranchName(baseVault({ ...source, branch: undefined }) as never),
+    ).toBeNull();
+  });
+
+  it("links a recovery branch only on an HTTPS remote without credentials", () => {
+    const branch = `hatchdoor-recovery/main/${VAULT_ID}`;
+    const source = (repository_url: string) => ({
+      type: "managed_git" as const,
+      repository_url,
+      mode: "two_way" as const,
+      poll_interval_secs: 3600,
+    });
+    expect(
+      recoveryBranchUrl(source("https://github.com/owner/notes.git"), branch),
+    ).toBe(`https://github.com/owner/notes/tree/${branch}`);
+    expect(
+      recoveryBranchUrl(
+        source("https://git.example.test/owner/notes/"),
+        branch,
+      ),
+    ).toBe(`https://git.example.test/owner/notes/tree/${branch}`);
+    expect(
+      recoveryBranchUrl(source("http://git.example.test/notes.git"), branch),
+    ).toBeNull();
+    expect(
+      recoveryBranchUrl(source("https://me:secret@example.test/n.git"), branch),
+    ).toBeNull();
+    expect(recoveryBranchUrl({ type: "local", path: "/n" }, branch)).toBeNull();
+  });
+
+  it("says why a publish published nothing", () => {
+    expect(
+      describeRecoveryFailure({
+        code: "managed_git_recovery_diverged",
+        message: "diverged",
+        retryable: false,
+      }),
+    ).toMatch(/Someone added commits to this branch/);
+    expect(
+      describeRecoveryFailure({
+        code: "managed_git_recovery_push_rejected",
+        message: "the remote refused the recovery branch: protected",
+        retryable: false,
+      }),
+    ).toMatch(/refused the branch.*protected/);
   });
 
   it("persists a recovery marker across a reload", () => {
@@ -876,6 +949,142 @@ describe("VaultSettingsDetail — sync console", () => {
     expect(screen.getByText("notes/a.md")).toBeVisible();
     expect(screen.getByText("notes/b.md")).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+
+  const conflictedSource = {
+    type: "managed_git",
+    repository_url: "https://example.test/owner/notes.git",
+    branch: "main",
+    mode: "two_way",
+    poll_interval_secs: 3600,
+  };
+  const conflictError = {
+    code: "managed_git_conflict",
+    message: "conflict",
+    retryable: false,
+    detail: { kind: "affected_paths", paths: ["notes/a.md"], total: 1 },
+  };
+  function conflictedVault(overrides: Record<string, unknown> = {}) {
+    const vault = baseVault(conflictedSource, {
+      git: "unavailable",
+      git_error: conflictError,
+      ...overrides,
+    });
+    vault.capabilities = { ...vault.capabilities, publish_recovery: true };
+    return vault;
+  }
+
+  it("offers to publish a conflicted Vault's side to its recovery branch (ADR-30)", async () => {
+    let published = false;
+    mockDetail(conflictedVault(), {
+      extraRoutes: {
+        [`/api/v1/vaults/${VAULT_ID}/recovery-branch POST`]: () => {
+          published = true;
+          return json({ vault_id: VAULT_ID, schedule: "queued" });
+        },
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(
+      screen.getByText(`hatchdoor-recovery/main/${VAULT_ID}`),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeVisible();
+    expect(
+      screen.queryByRole("link", { name: "Open on the Git host" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Publish my side to a branch" }),
+    );
+    await vi.waitFor(() => expect(published).toBe(true));
+    expect(
+      await screen.findByText(/Publishing this Vault's side/),
+    ).toBeVisible();
+  });
+
+  it("shows the published commit and a link once the branch is on the remote", async () => {
+    mockDetail(
+      conflictedVault({
+        recovery_branch: {
+          branch: `hatchdoor-recovery/main/${VAULT_ID}`,
+          published_commit: "0123456789abcdef0123456789abcdef01234567",
+          conflicting_commit: "fedcba9876543210fedcba9876543210fedcba98",
+          published_at: new Date().toISOString(),
+        },
+      }),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(screen.getByText(/Published 0123456 just now/)).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "Open on the Git host" }),
+    ).toHaveAttribute(
+      "href",
+      `https://example.test/owner/notes/tree/hatchdoor-recovery/main/${VAULT_ID}`,
+    );
+    expect(screen.getByRole("button", { name: "Publish again" })).toBeVisible();
+  });
+
+  it("says why a publish was refused", async () => {
+    mockDetail(
+      conflictedVault({
+        recovery_branch: {
+          branch: `hatchdoor-recovery/main/${VAULT_ID}`,
+          error: {
+            code: "managed_git_recovery_diverged",
+            message: "diverged",
+            retryable: false,
+          },
+        },
+      }),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(
+      screen.getByText(/Someone added commits to this branch/),
+    ).toBeVisible();
+  });
+
+  it("offers no recovery branch for a failure that is not a conflict", async () => {
+    mockDetail(
+      baseVault(conflictedSource, {
+        git: "unavailable",
+        git_error: {
+          code: "managed_git_remote_unreachable",
+          message: "unreachable",
+          retryable: true,
+        },
+      }),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(
+      screen.queryByRole("button", { name: /Publish/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("lists the conflicted files of an unfinished merge the checkout was left in", async () => {
