@@ -29,6 +29,8 @@ export function ChangesPanel({
   scope,
   partial,
   missingVaultNames,
+  error = null,
+  onRetry,
 }: {
   notes: ModifiedNote[];
   onNavigate: () => void;
@@ -39,6 +41,10 @@ export function ChangesPanel({
    * and only the empty case changes shape. */
   partial: boolean;
   missingVaultNames: string[];
+  /** The read itself failed (#334). Rendered as a failure, never as the
+   * empty "nothing has changed" state it used to collapse into. */
+  error?: string | null;
+  onRetry?: () => void;
 }) {
   const visible = notes.slice(0, VISIBLE_LIMIT);
   const overflow = notes.length - visible.length;
@@ -53,8 +59,19 @@ export function ChangesPanel({
     >
       {/* Labelled like every other section in the pane; an unlabelled list of
           notes appearing above Recently viewed reads as part of it. */}
-      <SideHead label="Changed on disk" count={notes.length} />
-      {notes.length === 0 ? (
+      <SideHead
+        label="Changed on disk"
+        count={error ? undefined : notes.length}
+      />
+      {error ? (
+        <StateBlock
+          tone="error"
+          title="Could Not Load"
+          description={error}
+          actionLabel={onRetry ? "Retry" : undefined}
+          onAction={onRetry}
+        />
+      ) : notes.length === 0 ? (
         partial ? (
           // Nothing usable: the documented error block replaces the empty
           // shell entirely rather than sitting under it. "Nothing has

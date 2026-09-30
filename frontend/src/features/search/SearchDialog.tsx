@@ -82,6 +82,23 @@ function buildFacetRows(
     });
 }
 
+/** Whether `element` takes part in layout, checked against its computed
+ * style up to `boundary` rather than its box, so the answer is the same in
+ * a browser and in a DOM without layout. */
+function isRendered(element: HTMLElement, boundary: HTMLElement): boolean {
+  for (
+    let node: HTMLElement | null = element;
+    node && node !== boundary.parentElement;
+    node = node.parentElement
+  ) {
+    const style = window.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") {
+      return false;
+    }
+  }
+  return true;
+}
+
 const EMPTY_EXPANDED_SLUGS = new Set<string>();
 
 /** Groups by `(vault_id, note_slug)` — a slug is only unique within its own
@@ -237,12 +254,21 @@ export function SearchDialog({
   // leaves a stale id behind. Seeding on that would open the dialog filtered
   // to a Vault with no row to click, with nothing selected and the raw id
   // rendered as a name. All results is the honest fallback.
-  const [vaultFilter, setVaultFilter] = useState<VaultId | "all">(() => {
+  const [chosenVaultFilter, setVaultFilter] = useState<VaultId | "all">(() => {
     const preferred = initialVaultFilter ?? scope;
     return vaults.some((vault) => vault.vault_id === preferred)
       ? preferred
       : "all";
   });
+  // The seed above runs once, but the collection can lose a Vault while the
+  // dialog is open. Read the choice through the live collection on every
+  // render, so a departed Vault never leaves the control reading "All
+  // results" while it still suppresses every result (#334).
+  const vaultFilter: VaultId | "all" =
+    chosenVaultFilter === "all" ||
+    vaults.some((vault) => vault.vault_id === chosenVaultFilter)
+      ? chosenVaultFilter
+      : "all";
   // No Vault has been asked yet — the query is still too short, or the first
   // answer has not landed. Counts would all read `0`, which is a claim about
   // the collection rather than about this search.
@@ -320,11 +346,15 @@ export function SearchDialog({
         onKeyDown={(event) => {
           if (event.key !== "Tab") return;
           const panel = event.currentTarget;
+          // Only controls that are actually rendered: the phone field strip
+          // is always in the DOM but `display: none` on desktop, and a hidden
+          // last stop meant the wrap never fired and Tab left the modal
+          // (#334).
           const focusable = Array.from(
             panel.querySelectorAll<HTMLElement>(
               "button:not([disabled]), input:not([disabled]), select:not([disabled])",
             ),
-          );
+          ).filter((element) => isRendered(element, panel));
           if (focusable.length === 0) return;
           const first = focusable[0];
           const last = focusable[focusable.length - 1];

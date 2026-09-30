@@ -3375,14 +3375,23 @@ desktop with more than one enabled Vault, the shell-owned Scope zone (#138,
 file's CSS but is not part of this capability's owned React contract.
 `ChangesPanel` lists notes changed on disk; it deliberately carries no unread
 count, because distinguishing external changes from the user's own edits needs
-backend data that does not exist yet. Recently viewed and Changed on disk both
-carry the shared `VaultPrefix` provenance marker (#140) on each row when scope
-is `all` and more than one Vault is enabled; a single-Vault instance renders
-unchanged. `useVaultTree` also exposes `modifiedNotesPartial` and
+backend data that does not exist yet. Changed on disk carries the shared
+`VaultPrefix` provenance marker (#140) on each row when scope is `all` and
+more than one Vault is enabled. Recently viewed is a viewing history rather
+than a collection read, so it spans Vaults at every scope: it carries the
+prefix whenever more than one Vault is enabled, and keys its rows by Vault
+plus slug (#334). A single-Vault instance renders neither prefix. `useVaultTree` also exposes `modifiedNotesPartial` and
 `modifiedNotesMissingVaults` from the `/recent` read's own envelope (#141);
 `ChangesPanel` never banners a partial read — a trailing warn-ink line below
 the last row names only the missing Vaults, and `StateBlock tone="error"`
-replaces the empty state outright when nothing is usable. `useVaultTree` reads once per collection revision: it records the
+replaces the empty state outright when nothing is usable. A `/recent` read
+that failed outright is `modifiedNotesError`, which `ChangesPanel` renders as
+a `Could Not Load` error block with Retry rather than as "Nothing has changed
+on disk yet" (#334). Every tree and recent read carries the current scope's
+`AbortSignal`; a scope change aborts it, and a read answers only while it is
+the newest of its kind for the scope it was started under, so a slow `all`
+answer can never land after the narrowed one that replaced it (#334).
+`useVaultTree` reads once per collection revision: it records the
 `collection_revision` its loaded tree came back with, and a revision event
 matching it is not a reload. A read still open is awaited before that
 comparison, because the discovery revision lands while the very first tree
@@ -3390,10 +3399,15 @@ read is in flight and there would otherwise be nothing to compare against. A
 collapsed folder renders none of its children — the browser hides a closed
 `<details>`' content anyway, so mounting a row per note bought DOM and render
 time and nothing else; the cost is that find-in-page no longer reaches a note
-inside a collapsed folder. The tree read's own
-`partial` (`treePartial`) is deliberately left untouched: #116 rules grouped
-surfaces (tree, graph, statistics) show a missing Vault as a visible missing
-group, which belongs to #142/#143, not this flattened-list rule.
+inside a collapsed folder. The tree read's own `partial` (`treePartial`)
+and the Vaults it left out (`treeMissingVaults`) reach `app/ExplorerPane.tsx`
+(#334): a trailing `.explorer-tree-partial` warn-ink line under the tree
+names them, an unfolded accordion Vault the read left out says it did not
+answer instead of showing an empty section, and a settled read with no tree
+at all shows a `Nothing Found` error block with Retry rather than a blank
+pane. At exactly one enabled Vault the flat tree's `Notes` head carries that
+Vault's `VaultSlot`, since no Scope zone, accordion or mobile scope row
+renders there and it is the only place the Vault's condition can show.
 `useVaultTree` additionally exposes `vaultTrees` (#142): every participating
 Vault's own tree, grouped rather than merged, straight off the `/tree`
 read's own per-Vault array. The existing merged `tree` (via `mergeVaultTrees`)
@@ -3421,7 +3435,8 @@ tree/recent/event endpoints.
 navigation tests; `app/ExplorerPane.test.tsx` covers the tree and list
 components in composition, including the single-active-highlight invariant.
 `hooks/useVaultTree.test.ts` covers the `/recent` read's partiality at three
-and eight Vaults; the rest of the hook still needs focused coverage.
+and eight Vaults, the tree read's partiality, a failed `/recent` read, and a
+superseded `all` read answering after the narrowed one (#334).
 
 ### Search dialog
 
@@ -3474,7 +3489,12 @@ deciding what was asked. Both seeds are filtered through the enabled Vaults
 and fall back to `all`, because `useVaultScope` returns the stored browsing
 scope without reconciling it against the collection: a Vault disabled since
 it was last browsed would otherwise open the dialog filtered to a row that
-does not exist. A Vault that was asked and did not answer keeps its seeded
+does not exist. The seed runs once, so the chosen filter is also read through
+the live collection on every render: a Vault that leaves the collection while
+the dialog is open drops the filter back to `all` rather than leaving the
+control reading "All results" while it hides every row (#334). The panel's
+Tab trap counts only controls that are actually rendered, because the phone
+field strip stays in the DOM under `display: none` on desktop. A Vault that was asked and did not answer keeps its seeded
 selection but suppresses the "No results in X" line — the row's own `no
 answer` and #141's partial sentence say what happened, and claiming the
 Vault has no matches would be the exact lie #141 exists to prevent. Two shapes, one meaning: a `.search-facet-rail`
@@ -3577,9 +3597,10 @@ renders it as `SavedQueryBlock` (`note-page/SavedQueryBlock.tsx`), which draws
 the table the server computed, inside the Table section's `.table-wrap`, with
 the first `file.name` or `file.basename` cell (else the first cell) linking to
 the row's note. `NotePage` fetches `GET .../notes/{slug}/saved-queries` through
-`useSavedQueries` (`note-page/savedQueries.ts`) only when the note holds a
-`base` fence, again whenever its content hash or the collection revision moves,
-and hands the results down through `SavedQueryProvider`. Each block finds its
+`useSavedQueries` (`note-page/savedQueries.ts`) only while the editor is closed
+(nothing renders the results while it is open) and only when the note holds a
+`base` fence, again whenever its content hash changes or the collection revision
+moves past the one its loaded results were evaluated at, and hands the results down through `SavedQueryProvider`. Each block finds its
 result by its position among the note's `base` fences, cross-checked against
 its source text, so two identical blocks keep their own outcomes. Refused,
 stopped, empty, loading and failed states each render a distinct line inside

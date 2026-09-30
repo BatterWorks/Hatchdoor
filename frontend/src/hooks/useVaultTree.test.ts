@@ -222,3 +222,150 @@ describe("useVaultTree — one load per collection revision", () => {
     expect(counts.recent).toBe(2);
   });
 });
+
+describe("useVaultTree — superseded reads never land (#334)", () => {
+  function treeFor(vault: (typeof THREE_VAULTS)[number]) {
+    return {
+      vault_id: vault.vault_id,
+      vault_name: vault.name,
+      tree: {
+        name: vault.name,
+        note_count: 1,
+        folders: [],
+        notes: [{ title: `${vault.name} home`, slug: "home" }],
+      },
+    };
+  }
+
+  it("drops the slow all-scope tree and recent answers once scope has narrowed", async () => {
+    const narrowed = THREE_VAULTS[0];
+    let releaseAll: () => void = () => {};
+    const allGate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    const signals: AbortSignal[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const isAll = url.includes("/vaults/all/");
+        if (isAll && init?.signal) {
+          signals.push(init.signal);
+        }
+        if (isAll) {
+          // Answers only after the narrowed read has, and ignores the abort,
+          // as a response already in the body-read phase would.
+          await allGate;
+        }
+        if (url.includes("/tree")) {
+          return jsonResponse(
+            collectionEnvelope(
+              isAll ? "all" : narrowed.vault_id,
+              isAll ? THREE_VAULTS.map(treeFor) : [treeFor(narrowed)],
+              [],
+            ),
+          );
+        }
+        if (url.includes("/recent")) {
+          return jsonResponse(
+            collectionEnvelope(
+              isAll ? "all" : narrowed.vault_id,
+              isAll
+                ? THREE_VAULTS.map((vault) => ({
+                    vault_id: vault.vault_id,
+                    title: `${vault.name} changed`,
+                    slug: "changed",
+                    relative_path: "changed",
+                    mtime_ns: 1,
+                  }))
+                : [],
+              [],
+            ),
+          );
+        }
+        return jsonResponse({ error: "not found" });
+      },
+    );
+
+    const { result, rerender } = renderHook(
+      ({ scope }) => useVaultTree(scope),
+      { initialProps: { scope: "all" as string } },
+    );
+    rerender({ scope: narrowed.vault_id });
+
+    await waitFor(() => expect(result.current.loadingTree).toBe(false));
+    expect(result.current.vaultTrees.map((tree) => tree.vault_id)).toEqual([
+      narrowed.vault_id,
+    ]);
+
+    await act(async () => {
+      releaseAll();
+      await allGate;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(result.current.vaultTrees.map((tree) => tree.vault_id)).toEqual([
+      narrowed.vault_id,
+    ]);
+    expect(result.current.tree?.notes.map((note) => note.vault_id)).toEqual([
+      narrowed.vault_id,
+    ]);
+    expect(result.current.modifiedNotes).toEqual([]);
+    expect(result.current.loadingTree).toBe(false);
+    // The outgoing read was cancelled, not just ignored.
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it("records a failed recent read as an error, apart from an empty answer", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/tree")) {
+          return jsonResponse(collectionEnvelope("all", [], []));
+        }
+        if (url.includes("/recent")) {
+          return new Response(JSON.stringify({ message: "boom" }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return jsonResponse({ error: "not found" });
+      },
+    );
+
+    const { result } = renderHook(() => useVaultTree("all"));
+
+    await waitFor(() => expect(result.current.loadingTree).toBe(false));
+    expect(result.current.modifiedNotesError).not.toBeNull();
+    expect(result.current.modifiedNotes).toEqual([]);
+  });
+
+  it("names the Vaults a partial tree read left out", async () => {
+    const participants = [
+      participantFor(THREE_VAULTS[0], "fresh"),
+      participantFor(THREE_VAULTS[1], "unavailable"),
+      participantFor(THREE_VAULTS[2], "fresh"),
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/tree")) {
+          return jsonResponse(
+            collectionEnvelope(
+              "all",
+              [treeFor(THREE_VAULTS[0]), treeFor(THREE_VAULTS[2])],
+              participants,
+            ),
+          );
+        }
+        return jsonResponse(collectionEnvelope("all", [], []));
+      },
+    );
+
+    const { result } = renderHook(() => useVaultTree("all"));
+
+    await waitFor(() => expect(result.current.loadingTree).toBe(false));
+    expect(result.current.treePartial).toBe(true);
+    expect(result.current.treeMissingVaults).toEqual([THREE_VAULTS[1].name]);
+  });
+});

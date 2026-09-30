@@ -172,59 +172,114 @@ export function savedQueryKey(source: string): string {
  *
  * While a refetch is in flight the previous results stay on screen rather than
  * collapsing every table to a loading line.
+ *
+ * `refreshKey` is the collection revision. A move to a revision the loaded
+ * results already reflect is not a refetch: the revision the collection client
+ * publishes on load lands while the first read is still open, and an autosave
+ * moves both the content hash and the revision, which used to evaluate every
+ * query twice (#334). `enabled` is false while the editor is open, because
+ * nothing renders the results there.
  */
 export function useSavedQueries(
   notePath: string,
   markdown: string | undefined,
   contentHash: string | undefined,
-  refreshKey: unknown,
+  refreshKey: number | null,
+  enabled = true,
 ): SavedQueryState {
   const [state, setState] = useState<SavedQueryState>({ status: "none" });
   const requestRef = useRef(0);
+  // The note and content the hook currently wants results for. A read keeps
+  // its answer while this still matches, even if a revision-only rerun has
+  // started since: that rerun waits for it rather than replacing it.
+  const currentKeyRef = useRef<string | null>(null);
+  // What the results on screen were read for: the note and content they
+  // answer, and the collection revision the server evaluated them at.
+  const loadedRef = useRef<{ key: string; revision: number } | null>(null);
+  const inFlightRef = useRef<{ key: string; done: Promise<void> } | null>(null);
   const wanted = markdown !== undefined && hasSavedQueryMarkup(markdown);
 
   useEffect(() => {
     const request = ++requestRef.current;
+    const key = `${notePath}\n${contentHash ?? ""}`;
     if (!wanted) {
+      currentKeyRef.current = null;
+      loadedRef.current = null;
       setState({ status: "none" });
       return;
     }
-    setState((previous) =>
-      previous.status === "ready" || previous.status === "loading"
-        ? { ...previous, status: "loading" }
-        : { status: "loading", results: [], markerProblems: [] },
-    );
+    currentKeyRef.current = key;
+    if (!enabled) {
+      return;
+    }
+    const isCovered = () => {
+      const loaded = loadedRef.current;
+      return (
+        loaded !== null &&
+        loaded.key === key &&
+        (refreshKey === null || loaded.revision >= refreshKey)
+      );
+    };
     void (async () => {
-      try {
-        const response = await apiFetch(`${notePath}/saved-queries`);
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as {
-            message?: string;
-          } | null;
-          throw new Error(
-            body?.message ?? `Saved queries failed (${response.status})`,
-          );
+      // A read for this very content may be about to answer at this revision.
+      const pending = inFlightRef.current;
+      if (pending && pending.key === key) {
+        await pending.done;
+      }
+      if (request !== requestRef.current || isCovered()) {
+        return;
+      }
+      setState((previous) =>
+        previous.status === "ready" || previous.status === "loading"
+          ? { ...previous, status: "loading" }
+          : { status: "loading", results: [], markerProblems: [] },
+      );
+      const done = (async () => {
+        try {
+          const response = await apiFetch(`${notePath}/saved-queries`);
+          if (!response.ok) {
+            const body = (await response.json().catch(() => null)) as {
+              message?: string;
+            } | null;
+            throw new Error(
+              body?.message ?? `Saved queries failed (${response.status})`,
+            );
+          }
+          const json =
+            (await response.json()) as VaultReadProjection<SavedQueriesResponse>;
+          const loaded = loadedRef.current;
+          if (
+            currentKeyRef.current !== key ||
+            (loaded?.key === key && loaded.revision > json.collection_revision)
+          ) {
+            return;
+          }
+          loadedRef.current = { key, revision: json.collection_revision };
+          setState({
+            status: "ready",
+            results: json.data.queries,
+            markerProblems: json.data.marker_problems ?? [],
+          });
+        } catch (error) {
+          if (currentKeyRef.current !== key) return;
+          loadedRef.current = null;
+          setState({
+            status: "error",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Saved queries could not be loaded",
+          });
         }
-        const json =
-          (await response.json()) as VaultReadProjection<SavedQueriesResponse>;
-        if (request !== requestRef.current) return;
-        setState({
-          status: "ready",
-          results: json.data.queries,
-          markerProblems: json.data.marker_problems ?? [],
-        });
-      } catch (error) {
-        if (request !== requestRef.current) return;
-        setState({
-          status: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Saved queries could not be loaded",
-        });
+      })();
+      const entry = { key, done };
+      inFlightRef.current = entry;
+      await done;
+      if (inFlightRef.current === entry) {
+        inFlightRef.current = null;
       }
     })();
-  }, [notePath, wanted, contentHash, refreshKey]);
+  }, [notePath, wanted, contentHash, refreshKey, enabled]);
 
   return state;
 }

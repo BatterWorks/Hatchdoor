@@ -674,3 +674,57 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
     expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
   });
 });
+
+describe("SearchDialog keeps keyboard focus and its filter honest (#334)", () => {
+  afterEach(() => {
+    cleanup();
+    document.getElementById("search-dialog-test-css")?.remove();
+  });
+
+  it("wraps Tab from the last visible control back to the first when the result list is empty at one Vault", () => {
+    // The desktop stylesheet hides the phone field strip; its Mode select is
+    // still in the DOM and used to be taken as the last stop.
+    const style = document.createElement("style");
+    style.id = "search-dialog-test-css";
+    style.textContent = ".search-field-strip { display: none; }";
+    document.head.appendChild(style);
+
+    renderDialog({ vaults: [ALPHA], results: [], query: "plan" });
+
+    const checkbox = screen.getByRole("checkbox", { name: /Keyword mode/ });
+    checkbox.focus();
+    fireEvent.keyDown(checkbox, { key: "Tab" });
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Close" }),
+    );
+
+    screen.getByRole("button", { name: "Close" }).focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(checkbox);
+  });
+
+  it("drops a filter on a Vault that has left the collection since the dialog opened", () => {
+    const withBeta: SearchResult[] = [
+      ...FACET_RESULTS,
+      resultFor(BETA.vault_id, { note_slug: "three", note_title: "Three" }),
+    ];
+    const { props, rerender } = renderDialog({
+      results: withBeta,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: BETA.vault_id,
+    });
+    expect(screen.queryByText("One")).not.toBeInTheDocument();
+
+    rerender(<SearchDialog {...props} vaults={[ALPHA, GAMMA]} />);
+
+    expect(screen.getByRole("button", { name: /All results/ })).toHaveClass(
+      "is-selected",
+    );
+    expect((screen.getByLabelText("Scope") as HTMLSelectElement).value).toBe(
+      "all",
+    );
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.queryByText(/No results in/)).not.toBeInTheDocument();
+  });
+});

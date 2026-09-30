@@ -132,9 +132,12 @@ function VaultWorkspace({
     vaultTrees,
     loadingTree,
     treeError,
+    treePartial,
+    treeMissingVaults,
     modifiedNotes,
     modifiedNotesPartial,
     modifiedNotesMissingVaults,
+    modifiedNotesError,
     vaultRevision,
     folderPathsByVault,
     noteCandidates,
@@ -818,8 +821,14 @@ function VaultWorkspace({
           modifiedNotes={modifiedNotes}
           modifiedNotesPartial={modifiedNotesPartial}
           modifiedNotesMissingVaults={modifiedNotesMissingVaults}
+          modifiedNotesError={modifiedNotesError}
+          onRetryModifiedNotes={() => {
+            void loadModifiedNotes();
+          }}
           loadingTree={loadingTree}
           treeError={treeError}
+          treePartial={treePartial}
+          treeMissingVaults={treeMissingVaults}
           tree={tree}
           vaultTrees={vaultTrees}
           expandedFolders={expandedFolders}

@@ -747,11 +747,14 @@ export function NotePage({
     [markdown, activeRange, frontmatterOffset],
   );
 
+  // Not evaluated while the editor is open: the provider that renders the
+  // results is only mounted in the reading branch.
   const savedQueries = useSavedQueries(
     notePath,
     note?.content,
     note?.content_hash,
     vaultRevision,
+    !isEditing,
   );
 
   const markdownComponents = useMemo(
