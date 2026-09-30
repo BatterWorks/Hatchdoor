@@ -1719,6 +1719,10 @@ tags, and the layer catalog. It carries no chunks — search reads those and
 their vectors through its own SQL rather than through a snapshot, so the
 `vault_chunk_vectors` join every collection read used to pay for is gone —
 and it carries note bodies only when the read asks for `NoteBodies::Load`.
+Frontmatter properties are parsed unless the pinned read asks for
+`NoteProperties::Omit`, which search does because it never returns them;
+`vault_snapshot_embeds_demoted_layers_on` reads the generation's
+`embed_layers` stamp on the same pinned read (#328).
 The detailed stats report is the only caller that does, because it counts
 words and images; bodies come back from the same pinned read as the note
 list so a projection can never pair one generation's rows with another's
@@ -1876,11 +1880,26 @@ and future Vault-scoped MCP adapters.
 - Vault-qualified search globally ranks every usable Vault snapshot, caps by
   `(Vault ID, slug)`, and never deduplicates equal content or note names across
   Vaults. Staleness is participant status, not a relevance penalty.
-- Semantic per-note-cap selection progressively enlarges its KNN candidate
-  window only as needed, stopping at candidate exhaustion or the explicit
-  200-candidate ceiling. If that bounded window is dominated by capped notes,
-  it returns the best available cap-compliant partial set without changing
-  semantic ranking.
+- Semantic and keyword per-note-cap selection share one depth policy: each
+  progressively enlarges its KNN or FTS candidate window only as needed,
+  stopping at candidate exhaustion or the explicit 200-candidate ceiling, and
+  the FTS query carries that window as a SQL `LIMIT` (#328). If that bounded
+  window is dominated by capped notes, it returns the best available
+  cap-compliant partial set without changing ranking.
+- A semantic score is the cosine similarity recovered from sqlite-vec's L2
+  distance over unit vectors (`1 - d²/2`), so it is monotonic in similarity
+  and nonzero for near matches (#328).
+- The `#tag` shorthand gives every matching Vault a turn before any Vault gets
+  a second, so a Vault with a match is dropped only when `limit` is below the
+  number of matching Vaults.
+- Participants tell the truth about degraded states: a vector-needing search
+  reports `not_searchable` for a vectorless generation whatever its freshness,
+  and for a selected demoted layer the generation built without vectors
+  (`embed_layers=false` in its snapshot metadata). A named layer is judged
+  absent only when no selected participant is unavailable; otherwise the search
+  degrades to the partial envelope (#328).
+- Search reads snapshots with `NoteProperties::Omit`, so it never parses the
+  frontmatter it does not return.
 - Participant metadata, note projections, and KNN/FTS hits for one search
   response come from one pinned SQLite generation.
 - A semantic query is embedded before that generation is pinned, never while

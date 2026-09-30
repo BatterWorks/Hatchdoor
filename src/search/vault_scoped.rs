@@ -2,7 +2,7 @@
 
 use schemars::JsonSchema;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{
     SqliteCache,
-    vault_snapshots::{NoteBodies, VaultSnapshotRead},
+    vault_snapshots::{NoteBodies, NoteProperties, VaultSnapshotNote, VaultSnapshotRead},
 };
 use crate::embed::Embedder;
-use crate::vault::{NoteMetadata, NoteSummary};
+use crate::vault::NoteMetadata;
 use crate::vault_read::{
     BrowseSurface, VaultParticipant, VaultParticipantState, VaultReadError, VaultReadProjection,
     VaultScope, selected_vaults,
@@ -29,10 +29,10 @@ use super::{LayerSelection, OutboundLink, SearchMode, tag_prefix_query};
 /// the point where repeated chunks from one note crowd out eligible notes.
 const INITIAL_DIVERSITY_OVERFETCH: usize = 4;
 
-/// Search does not make unbounded KNN requests while backfilling after the
-/// per-note cap. If this candidate ceiling is all from capped notes, callers
-/// receive the best available cap-compliant partial result set.
-const MAX_SEMANTIC_CANDIDATES: usize = 200;
+/// Search does not make unbounded KNN or FTS requests while backfilling after
+/// the per-note cap. If this candidate ceiling is all from capped notes,
+/// callers receive the best available cap-compliant partial result set.
+const MAX_RANKED_CANDIDATES: usize = 200;
 
 #[cfg(test)]
 type SnapshotReadHook = Arc<dyn Fn() + Send + Sync>;
@@ -156,12 +156,16 @@ impl<'a> VaultSearchCore<'a> {
         let mut snapshots = BTreeMap::new();
         let mut participants = Vec::with_capacity(selected.len());
         for vault in selected {
+            // Search never returns a note's frontmatter properties, so it
+            // does not pay to parse them for every note in every Vault.
             match SqliteCache::read_vault_snapshot_on(
                 &cache_snapshot,
                 vault.vault_id,
                 NoteBodies::Omit,
+                NoteProperties::Omit,
             ) {
                 Ok(Some(snapshot)) => {
+                    let read = self.surface.restrict(snapshot.read);
                     let state = match snapshot.status.freshness {
                         crate::cache::vault_snapshots::VaultSnapshotFreshness::Fresh => {
                             VaultParticipantState::Fresh
@@ -174,11 +178,23 @@ impl<'a> VaultSearchCore<'a> {
                     // vectors, so it answers keyword and tag queries in full
                     // and contributes nothing semantic. Say so rather than
                     // letting the per-chunk vector check drop it silently,
-                    // which reads to a caller as "no matches here".
+                    // which reads to a caller as "no matches here". The
+                    // vectorless axis wins over freshness: a structure-only
+                    // generation whose embedding pass failed is stale *and*
+                    // vectorless, and "stale" would claim it answered.
+                    //
+                    // The same holds for a selected demoted layer that this
+                    // generation built without vectors
+                    // (`HATCHDOOR_EMBED_LAYERS=false`): its notes are there,
+                    // but nothing semantic about them can be.
                     let state = if needs_vectors
-                        && !snapshot.status.searchable
-                        && state == VaultParticipantState::Fresh
-                    {
+                        && (!snapshot.status.searchable
+                            || selected_demoted_layers_lack_vectors(
+                                &cache_snapshot,
+                                vault.vault_id,
+                                &read,
+                                &request.layers,
+                            )?) {
                         VaultParticipantState::NotSearchable
                     } else {
                         state
@@ -189,7 +205,7 @@ impl<'a> VaultSearchCore<'a> {
                         state,
                         error: None,
                     });
-                    snapshots.insert(vault.vault_id, self.surface.restrict(snapshot.read));
+                    snapshots.insert(vault.vault_id, SearchSnapshot::new(read));
                 }
                 Ok(None) => self.push_unavailable(
                     request.scope,
@@ -213,7 +229,14 @@ impl<'a> VaultSearchCore<'a> {
             hook();
         }
 
-        validate_named_layers(&request.layers, snapshots.values())?;
+        let some_participant_unavailable = participants
+            .iter()
+            .any(|participant| participant.state == VaultParticipantState::Unavailable);
+        validate_named_layers(
+            &request.layers,
+            snapshots.values().map(|snapshot| &snapshot.read),
+            some_participant_unavailable,
+        )?;
         let results = if let Some(tag) = tag_query {
             tag_results(&request, &snapshots, &tag)
         } else {
@@ -230,8 +253,7 @@ impl<'a> VaultSearchCore<'a> {
                     None => Vec::new(),
                 },
                 SearchMode::Keyword => {
-                    let raw = keyword_hits(&request, self.cache, &cache_snapshot, &snapshots)?;
-                    apply_per_note_cap(raw, request.per_note_cap, request.limit)
+                    keyword_results(&request, self.cache, &cache_snapshot, &snapshots)?
                 }
             }
         };
@@ -293,12 +315,74 @@ fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<Vec<f32>, VaultRe
         })
 }
 
+/// One participant's published rows plus the lookups every hit needs. A hit
+/// names its note by slug and carries that note's outbound links; finding
+/// either by scanning the snapshot made each hit cost O(notes + links).
+struct SearchSnapshot {
+    read: VaultSnapshotRead,
+    note_by_slug: HashMap<String, usize>,
+    /// Source slug to the indexes of the notes it links to, in link order.
+    targets_by_source: HashMap<String, Vec<usize>>,
+}
+
+impl SearchSnapshot {
+    fn new(read: VaultSnapshotRead) -> Self {
+        let note_by_slug = read
+            .notes
+            .iter()
+            .enumerate()
+            .map(|(index, note)| (note.slug.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let mut targets_by_source = HashMap::<String, Vec<usize>>::new();
+        for link in &read.links {
+            if let Some(&target) = note_by_slug.get(&link.target_slug) {
+                targets_by_source
+                    .entry(link.source_slug.clone())
+                    .or_default()
+                    .push(target);
+            }
+        }
+        Self {
+            read,
+            note_by_slug,
+            targets_by_source,
+        }
+    }
+
+    fn note(&self, slug: &str) -> Option<&VaultSnapshotNote> {
+        self.note_by_slug
+            .get(slug)
+            .map(|&index| &self.read.notes[index])
+    }
+}
+
+/// Whether a semantic search selects demoted notes this generation holds no
+/// vectors for. Only a selection that reaches a demoted note the Vault
+/// actually has can be missing anything, so the stamp is read only then.
+fn selected_demoted_layers_lack_vectors(
+    conn: &rusqlite::Connection,
+    vault_id: VaultId,
+    read: &VaultSnapshotRead,
+    selection: &LayerSelection,
+) -> Result<bool, VaultReadError> {
+    let selects_a_demoted_note = read
+        .notes
+        .iter()
+        .any(|note| note.layer.is_some() && layer_matches(selection, note.layer.as_deref()));
+    if !selects_a_demoted_note {
+        return Ok(false);
+    }
+    SqliteCache::vault_snapshot_embeds_demoted_layers_on(conn, vault_id)
+        .map(|embedded| !embedded)
+        .map_err(|message| error(Some(vault_id), "search_unavailable", &message, true))
+}
+
 fn semantic_results(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
     conn: &rusqlite::Connection,
     query_vector: &[f32],
-    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+    snapshots: &BTreeMap<VaultId, SearchSnapshot>,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
     // `limit` and `per_note_cap` are the caller's to check: it gates the
     // embedding on them, so a zero never reaches here.
@@ -306,16 +390,26 @@ fn semantic_results(
         return Ok(Vec::new());
     }
 
-    progressively_cap_semantic_results(request.limit, request.per_note_cap, |raw_k| {
+    progressively_cap_results(request.limit, request.per_note_cap, |raw_k| {
         semantic_hits_with_vector(request, cache, conn, snapshots, query_vector, raw_k)
     })
+}
+
+/// The vec0 tables are declared without a `distance_metric`, so sqlite-vec
+/// ranks by its default, L2. Every embedder returns unit vectors, for which
+/// `L2² = 2 − 2·cos`, so this recovers the cosine similarity. `1 − L2`, the
+/// formula this replaced, went negative — and clamped to exactly 0 — for every
+/// hit at or below cosine 0.5, which is where most relevant sentence-embedding
+/// matches sit.
+fn semantic_score(l2_distance: f32) -> f32 {
+    (1.0 - l2_distance * l2_distance / 2.0).clamp(0.0, 1.0)
 }
 
 fn semantic_hits_with_vector(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
     conn: &rusqlite::Connection,
-    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+    snapshots: &BTreeMap<VaultId, SearchSnapshot>,
     query_vector: &[f32],
     raw_k: usize,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
@@ -330,7 +424,7 @@ fn semantic_hits_with_vector(
         .into_iter()
         .filter_map(|hit| {
             let snapshot = snapshots.get(&hit.vault_id)?;
-            let note = note_for(snapshot, &hit.note_slug)?;
+            let note = snapshot.note(&hit.note_slug)?;
             Some(result_for(
                 hit.vault_id,
                 snapshot,
@@ -339,42 +433,63 @@ fn semantic_hits_with_vector(
                     chunk_id: hit.chunk_id,
                     heading_path: hit.heading_path,
                     content: hit.content,
-                    score: (1.0 - hit.distance).clamp(0.0, 1.0),
+                    score: semantic_score(hit.distance),
                 },
             ))
         })
         .collect())
 }
 
-fn progressively_cap_semantic_results(
+/// One depth policy for both chunk-ranked modes: start from a window sized to
+/// the request and the per-note cap, and enlarge it only while the cap leaves
+/// the result short, never past [`MAX_RANKED_CANDIDATES`].
+fn progressively_cap_results(
     limit: usize,
     per_note_cap: usize,
     mut fetch: impl FnMut(usize) -> Result<Vec<VaultSearchResult>, VaultReadError>,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
     let mut raw_k = limit
         .saturating_mul(per_note_cap.max(INITIAL_DIVERSITY_OVERFETCH))
-        .min(MAX_SEMANTIC_CANDIDATES);
+        .min(MAX_RANKED_CANDIDATES);
     loop {
         let raw = fetch(raw_k)?;
         let raw_len = raw.len();
         let results = apply_per_note_cap(raw, per_note_cap, limit);
-        if results.len() == limit || raw_len < raw_k || raw_k == MAX_SEMANTIC_CANDIDATES {
+        if results.len() == limit || raw_len < raw_k || raw_k == MAX_RANKED_CANDIDATES {
             return Ok(results);
         }
-        raw_k = raw_k.saturating_mul(2).min(MAX_SEMANTIC_CANDIDATES);
+        raw_k = raw_k.saturating_mul(2).min(MAX_RANKED_CANDIDATES);
     }
+}
+
+fn keyword_results(
+    request: &VaultSearchRequest,
+    cache: &SqliteCache,
+    conn: &rusqlite::Connection,
+    snapshots: &BTreeMap<VaultId, SearchSnapshot>,
+) -> Result<Vec<VaultSearchResult>, VaultReadError> {
+    if request.limit == 0 || request.per_note_cap == 0 || snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
+    progressively_cap_results(request.limit, request.per_note_cap, |raw_k| {
+        keyword_hits(request, cache, conn, snapshots, raw_k)
+    })
 }
 
 fn keyword_hits(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
     conn: &rusqlite::Connection,
-    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+    snapshots: &BTreeMap<VaultId, SearchSnapshot>,
+    raw_k: usize,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
     let ids = snapshots.keys().copied().collect::<Vec<_>>();
     let raw = cache
-        .vault_fts_search_chunks(conn, &ids, &request.query, &request.layers)
+        .vault_fts_search_chunks(conn, &ids, &request.query, &request.layers, raw_k)
         .map_err(|message| error(None, "search_unavailable", &message, true))?;
+    // The window is BM25-ordered, so its best hit is the query's best hit
+    // whatever the window's size, and a hit's score does not move as the
+    // window grows.
     let max = raw
         .iter()
         .map(|hit| hit.bm25.abs())
@@ -384,7 +499,7 @@ fn keyword_hits(
         let Some(snapshot) = snapshots.get(&hit.vault_id) else {
             continue;
         };
-        let Some(note) = note_for(snapshot, &hit.note_slug) else {
+        let Some(note) = snapshot.note(&hit.note_slug) else {
             continue;
         };
         let score = if max <= f32::EPSILON {
@@ -408,37 +523,65 @@ fn keyword_hits(
     Ok(hits)
 }
 
+/// Tag matches carry no relevance: every one scores 1.0. Truncating one
+/// path-ordered list across Vaults therefore let the Vault whose folders sort
+/// first take the whole `limit` while the envelope still read complete. Each
+/// matching Vault instead takes turns, in its own path order, so a Vault with
+/// a match is left out only when `limit` is smaller than the number of Vaults
+/// with matches. The chosen notes are then shown in path order.
 fn tag_results(
     request: &VaultSearchRequest,
-    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+    snapshots: &BTreeMap<VaultId, SearchSnapshot>,
     tag: &str,
 ) -> Vec<VaultSearchResult> {
+    let mut per_vault = snapshots
+        .iter()
+        .map(|(vault_id, snapshot)| {
+            let mut matches = snapshot
+                .read
+                .notes
+                .iter()
+                .filter(|note| layer_matches(&request.layers, note.layer.as_deref()))
+                .filter(|note| {
+                    note.metadata.tags.iter().any(|candidate| {
+                        candidate == tag
+                            || candidate
+                                .strip_prefix(tag)
+                                .is_some_and(|tail| tail.starts_with('/'))
+                    })
+                })
+                .collect::<Vec<_>>();
+            matches.sort_by(|left, right| {
+                left.relative_path
+                    .cmp(&right.relative_path)
+                    .then_with(|| left.slug.cmp(&right.slug))
+            });
+            (*vault_id, snapshot, matches.into_iter())
+        })
+        .collect::<Vec<_>>();
+
     let mut results = Vec::new();
-    for (vault_id, snapshot) in snapshots {
-        for note in &snapshot.notes {
-            let summary = note_summary(note);
-            if !layer_matches(&request.layers, note.layer.as_deref()) {
-                continue;
+    let mut exhausted = false;
+    while results.len() < request.limit && !exhausted {
+        exhausted = true;
+        for (vault_id, snapshot, matches) in &mut per_vault {
+            if results.len() == request.limit {
+                break;
             }
-            if !note.metadata.tags.iter().any(|candidate| {
-                candidate == tag
-                    || candidate
-                        .strip_prefix(tag)
-                        .is_some_and(|tail| tail.starts_with('/'))
-            }) {
-                continue;
+            if let Some(note) = matches.next() {
+                exhausted = false;
+                results.push(result_for(
+                    *vault_id,
+                    snapshot,
+                    note,
+                    ResultDetails {
+                        chunk_id: 0,
+                        heading_path: None,
+                        content: format!("Matched tag: #{tag}"),
+                        score: 1.0,
+                    },
+                ));
             }
-            results.push(result_for(
-                *vault_id,
-                snapshot,
-                summary,
-                ResultDetails {
-                    chunk_id: 0,
-                    heading_path: None,
-                    content: format!("Matched tag: #{tag}"),
-                    score: 1.0,
-                },
-            ));
         }
     }
     results.sort_by(|left, right| {
@@ -447,16 +590,25 @@ fn tag_results(
             .then_with(|| left.vault_id.cmp(&right.vault_id))
             .then_with(|| left.note_slug.cmp(&right.note_slug))
     });
-    results.truncate(request.limit);
     results
 }
 
 fn validate_named_layers<'a>(
     selection: &LayerSelection,
     snapshots: impl Iterator<Item = &'a VaultSnapshotRead>,
+    some_participant_unavailable: bool,
 ) -> Result<(), VaultReadError> {
     let names = selection.named_layers();
     if names.is_empty() {
+        return Ok(());
+    }
+    // A Vault with no readable snapshot (cold start, a cache rebuild, the
+    // window before its first index) may be the one declaring the layer, and
+    // nothing here can see its catalog. Rejecting the name would tell the
+    // caller, non-retryably, that the layer does not exist; instead the search
+    // runs over the readable Vaults and the unavailable participant makes the
+    // envelope partial.
+    if some_participant_unavailable {
         return Ok(());
     }
     // Each requested name is validated independently: a name is only
@@ -493,24 +645,6 @@ fn validate_named_layers<'a>(
     }
 }
 
-fn note_for(snapshot: &VaultSnapshotRead, slug: &str) -> Option<NoteSummary> {
-    snapshot
-        .notes
-        .iter()
-        .find(|note| note.slug == slug)
-        .map(note_summary)
-}
-
-fn note_summary(note: &crate::cache::vault_snapshots::VaultSnapshotNote) -> NoteSummary {
-    NoteSummary {
-        title: note.title.clone(),
-        slug: note.slug.clone(),
-        relative_path: note.relative_path.clone(),
-        layer: note.layer.clone(),
-        metadata: note.metadata.clone(),
-    }
-}
-
 struct ResultDetails {
     chunk_id: i64,
     heading_path: Option<String>,
@@ -520,41 +654,39 @@ struct ResultDetails {
 
 fn result_for(
     vault_id: VaultId,
-    snapshot: &VaultSnapshotRead,
-    note: NoteSummary,
+    snapshot: &SearchSnapshot,
+    note: &VaultSnapshotNote,
     details: ResultDetails,
 ) -> VaultSearchResult {
     let outbound_links = snapshot
-        .links
-        .iter()
-        .filter(|link| link.source_slug == note.slug)
-        .filter_map(|link| {
-            snapshot
-                .notes
-                .iter()
-                .find(|target| target.slug == link.target_slug)
-                .map(|target| OutboundLink {
-                    slug: target.slug.clone(),
-                    title: target.title.clone(),
-                })
+        .targets_by_source
+        .get(&note.slug)
+        .into_iter()
+        .flatten()
+        .map(|&target| {
+            let target = &snapshot.read.notes[target];
+            OutboundLink {
+                slug: target.slug.clone(),
+                title: target.title.clone(),
+            }
         })
         .collect();
     VaultSearchResult {
         vault_id,
         chunk_id: details.chunk_id,
-        note_slug: note.slug,
-        note_title: note.title,
-        note_path: note.relative_path,
+        note_slug: note.slug.clone(),
+        note_title: note.title.clone(),
+        note_path: note.relative_path.clone(),
         heading_path: details.heading_path,
         content: details.content,
         score: details.score,
-        layer: note.layer,
+        layer: note.layer.clone(),
         outbound_links,
         // The empty `properties` object is the established wire shape, not an
         // omission; see the test that pins it.
         metadata: NoteMetadata {
-            tags: note.metadata.tags,
-            aliases: note.metadata.aliases,
+            tags: note.metadata.tags.clone(),
+            aliases: note.metadata.aliases.clone(),
             properties: serde_json::Value::Object(serde_json::Map::new()),
         },
     }
@@ -1122,7 +1254,7 @@ mod tests {
         candidates.push(result("bravo", 201));
         let mut requested_depths = Vec::new();
 
-        let results = super::progressively_cap_semantic_results(2, 1, |raw_k| {
+        let results = super::progressively_cap_results(2, 1, |raw_k| {
             requested_depths.push(raw_k);
             Ok(candidates[..raw_k.min(candidates.len())].to_vec())
         })
@@ -1417,5 +1549,394 @@ mod tests {
                 .iter()
                 .all(|result| result.chunk_id == 0)
         );
+    }
+
+    /// Places each document at a chosen cosine similarity to the query, so a
+    /// test can say what score a hit must carry rather than only its order.
+    struct CosineEmbedder;
+
+    impl CosineEmbedder {
+        fn unit_at(cosine: f32) -> Vec<f32> {
+            let mut vector = vec![0.0; 384];
+            vector[0] = cosine;
+            vector[1] = (1.0 - cosine * cosine).sqrt();
+            vector
+        }
+    }
+
+    impl Embedder for CosineEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.contains("nearby") {
+                        Self::unit_at(0.6)
+                    } else if text.contains("faraway") {
+                        Self::unit_at(0.3)
+                    } else {
+                        Self::unit_at(1.0)
+                    }
+                })
+                .collect())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+
+        fn identity(&self) -> String {
+            "cosine-384".to_string()
+        }
+
+        fn token_count(&self, text: &str, _add_special_tokens: bool) -> Result<usize, String> {
+            Ok(text.split_whitespace().count())
+        }
+    }
+
+    /// The vec0 distance is L2, and `1 - L2` clamps every hit at or below
+    /// cosine 0.5 to exactly 0.0. A clearly related chunk must score near its
+    /// similarity, and a less related one lower but still above zero.
+    #[test]
+    fn semantic_scores_follow_cosine_similarity_and_stay_nonzero_for_near_matches() {
+        let workspace = workspace(&[(
+            "Only",
+            &[
+                ("Near.md", "# Near\n\nnearby text"),
+                ("Far.md", "# Far\n\nfaraway text"),
+            ],
+        )]);
+        let embedder = CosineEmbedder;
+        workspace
+            .cache
+            .replace_vault_snapshot(
+                workspace.vault_ids[0],
+                &VaultIndex::build(&workspace.vault_paths[0]).expect("index"),
+                &embedder,
+            )
+            .expect("republish with controlled vectors");
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let response = core
+            .search(VaultSearchRequest {
+                mode: SearchMode::Semantic,
+                ..request(VaultScope::All, "probe")
+            })
+            .expect("semantic search");
+        let score = |slug: &str| {
+            response
+                .data
+                .results
+                .iter()
+                .find(|result| result.note_slug == slug)
+                .unwrap_or_else(|| panic!("{slug} is a hit"))
+                .score
+        };
+
+        assert!(
+            (score("near") - 0.6).abs() < 1e-3,
+            "a cosine-0.6 chunk scores its similarity, got {}",
+            score("near")
+        );
+        assert!(
+            (score("far") - 0.3).abs() < 1e-3,
+            "a cosine-0.3 chunk scores its similarity, got {}",
+            score("far")
+        );
+        assert_eq!(response.data.results[0].note_slug, "near");
+    }
+
+    /// The keyword path must bound its candidate window the way the semantic
+    /// one does, and still fill the request past a per-note cap.
+    #[test]
+    fn keyword_search_fills_the_limit_from_a_bounded_window_past_the_per_note_cap() {
+        let long_note = (0..40)
+            .map(|section| format!("## Part {section}\n\n{}", "common word here. ".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut files = vec![("Big.md".to_string(), format!("# Big\n\n{long_note}"))];
+        for index in 0..6 {
+            files.push((format!("Small{index}.md"), "# Small\n\ncommon".to_string()));
+        }
+        let files = files
+            .iter()
+            .map(|(path, body)| (path.as_str(), body.as_str()))
+            .collect::<Vec<_>>();
+        let workspace = workspace(&[("Only", &files)]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        let response = core
+            .search(VaultSearchRequest {
+                limit: 5,
+                ..request(VaultScope::All, "common")
+            })
+            .expect("keyword search");
+        let slugs = response
+            .data
+            .results
+            .iter()
+            .map(|result| result.note_slug.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(response.data.results.len(), 5);
+        assert_eq!(slugs.len(), 5, "one hit per note under a cap of one");
+        assert!(
+            response
+                .data
+                .results
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score),
+            "keyword hits stay in relevance order"
+        );
+    }
+
+    /// Search never returns frontmatter properties, so it must not read them:
+    /// a note row whose stored frontmatter JSON cannot be parsed would
+    /// otherwise fail every search over its Vault.
+    #[test]
+    fn search_does_not_parse_frontmatter_it_never_returns() {
+        let workspace = workspace(&[(
+            "Only",
+            &[("Home.md", "---\nstatus: draft\n---\n# Home\n\nneedle body")],
+        )]);
+        workspace
+            .cache
+            .connection()
+            .expect("writer")
+            .execute("UPDATE vault_notes SET frontmatter_json = 'not json'", [])
+            .expect("corrupt the stored frontmatter");
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        for (mode, query) in [
+            (SearchMode::Keyword, "needle"),
+            (SearchMode::Semantic, "needle"),
+            (SearchMode::Keyword, "#missing"),
+        ] {
+            let response = core
+                .search(VaultSearchRequest {
+                    mode,
+                    ..request(VaultScope::All, query)
+                })
+                .unwrap_or_else(|error| panic!("search {query:?}: {error:?}"));
+            // An `all` read turns a snapshot read error into an unavailable
+            // participant, so the state is where a frontmatter parse shows.
+            assert_eq!(
+                response.participants[0].state,
+                VaultParticipantState::Fresh,
+                "search {query:?} read the frontmatter it never returns"
+            );
+        }
+    }
+
+    /// Tag hits all score 1.0, so truncating one path-ordered list let the
+    /// Vault whose folders sort first take every slot while the envelope read
+    /// complete. Each Vault with a match keeps a share of the limit.
+    #[test]
+    fn tag_shorthand_across_vaults_gives_every_matching_vault_a_share_of_the_limit() {
+        let tagged = "---\ntags: [topic]\n---\n# Note";
+        let workspace = workspace(&[
+            (
+                "Early",
+                &[("a1.md", tagged), ("a2.md", tagged), ("a3.md", tagged)],
+            ),
+            (
+                "Late",
+                &[("z1.md", tagged), ("z2.md", tagged), ("z3.md", tagged)],
+            ),
+        ]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        let response = core
+            .search(VaultSearchRequest {
+                limit: 2,
+                ..request(VaultScope::All, "#topic")
+            })
+            .expect("tag shorthand");
+        let paths = response
+            .data
+            .results
+            .iter()
+            .map(|result| result.note_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            ["a1", "z1"],
+            "each Vault's first match, in path order"
+        );
+        assert!(!response.partial);
+
+        let response = core
+            .search(VaultSearchRequest {
+                limit: 5,
+                ..request(VaultScope::All, "#topic")
+            })
+            .expect("tag shorthand");
+        let paths = response
+            .data
+            .results
+            .iter()
+            .map(|result| result.note_path.as_str())
+            .collect::<Vec<_>>();
+        // Turns run in Vault-ID order, so which Vault gets the odd slot is
+        // arbitrary; that neither takes more than one slot over the other is
+        // not.
+        assert_eq!(paths.len(), 5);
+        let early = paths.iter().filter(|path| path.starts_with('a')).count();
+        assert!(
+            early == 2 || early == 3,
+            "the limit is shared between Vaults, got {paths:?}"
+        );
+        assert!(paths.is_sorted(), "results are shown in path order");
+    }
+
+    /// The Vault declaring a layer may have no readable snapshot yet (cold
+    /// start, a cache rebuild). Its catalog is invisible then, so the name
+    /// cannot be judged absent: the search degrades to a partial envelope
+    /// instead of a non-retryable `invalid_layer_selection`.
+    #[test]
+    fn a_named_layer_over_an_unavailable_declaring_vault_degrades_to_participants() {
+        let workspace = workspace(&[
+            (
+                "Layered",
+                &[
+                    ("sources/.hatchdoor-layer", "sources"),
+                    ("sources/Clipping.md", "# Clipping\n\nneedle"),
+                ],
+            ),
+            ("Plain", &[("Home.md", "# Home\n\nneedle")]),
+        ]);
+        workspace
+            .cache
+            .disconnect_vault_snapshot(workspace.vault_ids[0])
+            .expect("drop the declaring Vault's snapshot");
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let (sources, _) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+
+        for mode in [SearchMode::Keyword, SearchMode::Semantic] {
+            let response = core
+                .search(VaultSearchRequest {
+                    mode,
+                    layers: sources.clone(),
+                    ..request(VaultScope::All, "needle")
+                })
+                .expect("an unreadable declaring Vault degrades rather than failing whole");
+            assert!(response.partial);
+            assert!(response.data.results.is_empty());
+            assert!(response.participants.iter().any(|participant| {
+                participant.vault_id == workspace.vault_ids[0]
+                    && participant.state == VaultParticipantState::Unavailable
+            }));
+        }
+    }
+
+    /// A structure-only generation whose embedding pass then failed is stale
+    /// and vectorless at once. For a semantic search the vectorless axis is
+    /// the one that matters: "stale" would say the Vault answered.
+    #[test]
+    fn a_stale_vectorless_vault_reports_not_searchable_for_semantic_search() {
+        let workspace = workspace(&[("Alpha", &[("Home.md", "# Home\n\nneedle body")])]);
+        let embedder = StubEmbedder::new(384);
+        let vault_id = workspace.vault_ids[0];
+        workspace
+            .cache
+            .disconnect_vault_snapshot(vault_id)
+            .expect("drop the searchable generation");
+        workspace
+            .cache
+            .publish_vault_structure_snapshot(
+                vault_id,
+                &VaultIndex::build(&workspace.vault_paths[0]).expect("index"),
+                &embedder,
+                true,
+            )
+            .expect("publish structure-only snapshot");
+        workspace
+            .cache
+            .mark_vault_snapshot_stale(vault_id)
+            .expect("the embedding pass failed");
+
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let semantic = core
+            .search(VaultSearchRequest {
+                mode: SearchMode::Semantic,
+                ..request(VaultScope::All, "needle")
+            })
+            .expect("semantic search");
+        assert_eq!(
+            semantic.participants[0].state,
+            VaultParticipantState::NotSearchable
+        );
+
+        let keyword = core
+            .search(request(VaultScope::All, "needle"))
+            .expect("keyword search");
+        assert_eq!(keyword.participants[0].state, VaultParticipantState::Stale);
+    }
+
+    /// With `HATCHDOOR_EMBED_LAYERS=false` a demoted layer has chunk rows but
+    /// no vectors. A semantic search over it must say so through its
+    /// participant rather than return an empty answer that reads complete.
+    #[test]
+    fn a_semantic_search_over_an_unembedded_demoted_layer_reports_not_searchable() {
+        let workspace = workspace(&[(
+            "Layered",
+            &[
+                ("sources/.hatchdoor-layer", "sources"),
+                ("sources/Clip.md", "# Clip\n\nmelatonin rhythm"),
+                ("Home.md", "# Home\n\nmelatonin rhythm"),
+            ],
+        )]);
+        let embedder = StubEmbedder::new(384);
+        workspace
+            .cache
+            .replace_vault_snapshot_with_embed_layers(
+                workspace.vault_ids[0],
+                &VaultIndex::build(&workspace.vault_paths[0]).expect("index"),
+                &embedder,
+                false,
+            )
+            .expect("republish without demoted vectors");
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let (sources, _) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+
+        for layers in [sources.clone(), LayerSelection::all()] {
+            let semantic = core
+                .search(VaultSearchRequest {
+                    mode: SearchMode::Semantic,
+                    layers,
+                    ..request(VaultScope::All, "melatonin")
+                })
+                .expect("semantic search");
+            assert_eq!(
+                semantic.participants[0].state,
+                VaultParticipantState::NotSearchable
+            );
+            assert!(semantic.partial);
+        }
+
+        let default_surface = core
+            .search(VaultSearchRequest {
+                mode: SearchMode::Semantic,
+                ..request(VaultScope::All, "melatonin")
+            })
+            .expect("default-surface semantic search");
+        assert_eq!(
+            default_surface.participants[0].state,
+            VaultParticipantState::Fresh,
+            "the default surface was embedded and answered in full"
+        );
+        assert_eq!(default_surface.data.results.len(), 1);
+
+        let keyword = core
+            .search(VaultSearchRequest {
+                layers: sources,
+                ..request(VaultScope::All, "melatonin")
+            })
+            .expect("keyword search");
+        assert_eq!(keyword.participants[0].state, VaultParticipantState::Fresh);
+        assert_eq!(keyword.data.results.len(), 1);
     }
 }
