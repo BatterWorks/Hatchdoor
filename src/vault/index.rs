@@ -7,9 +7,11 @@ use walkdir::WalkDir;
 
 use super::layers::LayerMap;
 use super::links::build_link_graph;
+use super::markdown_links::{NotePaths, note_link_target};
 use super::paths::{
-    content_snippet, is_servable_asset, normalize_link_target, normalize_title,
-    relative_note_path_without_ext, slugify, split_wikilink_note_body, unique_slug,
+    content_snippet, folder_distance, is_servable_asset, normalize_link_target, normalize_title,
+    relative_note_path_without_ext, resolve_path_ladder, slugify, split_wikilink_note_body,
+    unique_slug,
 };
 use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
@@ -26,12 +28,7 @@ impl VaultIndex {
 
     pub fn build_with_config(root: impl AsRef<Path>, config: &VaultScanConfig) -> io::Result<Self> {
         let mut catalog = Self::build_catalog_with_config(root, config)?;
-        let (outgoing_by_slug, backlinks_by_slug) = build_link_graph(
-            &catalog.by_slug,
-            &catalog.by_title,
-            &catalog.by_path_title,
-            &catalog.ordered_slugs,
-        );
+        let (outgoing_by_slug, backlinks_by_slug) = build_link_graph(&catalog);
         catalog.outgoing_by_slug = outgoing_by_slug;
         catalog.backlinks_by_slug = backlinks_by_slug;
         Ok(catalog)
@@ -60,6 +57,7 @@ impl VaultIndex {
         let mut markdown_paths = Vec::new();
         let mut asset_paths = BTreeSet::new();
         let mut assets_by_name: HashMap<String, Vec<String>> = HashMap::new();
+        let mut note_paths = NotePaths::default();
 
         // Markers are collected before pruning: a marker inside a directory a
         // noise pattern would prune is still read, so per-deployment noise
@@ -149,6 +147,7 @@ impl VaultIndex {
             by_path_title
                 .entry(normalize_title(&relative_without_ext))
                 .or_insert_with(|| slug.clone());
+            note_paths.insert(&relative_without_ext, &slug);
             by_slug.insert(slug.clone(), note);
             ordered_slugs.push(slug);
         }
@@ -170,6 +169,7 @@ impl VaultIndex {
         for paths in assets_by_name.values_mut() {
             paths.sort();
         }
+        note_paths.sort();
 
         Ok(Self {
             by_slug,
@@ -178,6 +178,7 @@ impl VaultIndex {
             ordered_slugs,
             asset_paths,
             assets_by_name,
+            note_paths,
             outgoing_by_slug: HashMap::new(),
             backlinks_by_slug: HashMap::new(),
             layers,
@@ -243,45 +244,35 @@ impl VaultIndex {
     /// missing-link affordance instead of emitting a URL that 404s.
     pub fn resolve_asset(&self, raw_target: &str, note_dir: &str) -> Option<&str> {
         let target = raw_target.split(['?', '#']).next().unwrap_or(raw_target);
-        let target = target.trim().replace('\\', "/");
-        if target.is_empty() {
-            return None;
-        }
+        let (hit, _) = resolve_path_ladder(
+            target,
+            note_dir,
+            |candidate| self.asset_paths.get(candidate).map(String::as_str),
+            |name| {
+                // `candidates` is sorted, and `min_by_key` keeps the first of
+                // equal keys, so equidistant namesakes resolve by path order
+                // rather than by walk order.
+                self.assets_by_name
+                    .get(&name.to_lowercase())?
+                    .iter()
+                    .min_by_key(|candidate| folder_distance(note_dir, candidate))
+                    .map(String::as_str)
+            },
+        )?;
+        Some(hit)
+    }
 
-        if let Some(absolute) = target.strip_prefix('/') {
-            return self
-                .asset_paths
-                .get(&normalize_asset_path("", absolute)?)
-                .map(String::as_str);
-        }
-
-        if let Some(hit) = normalize_asset_path(note_dir, &target)
-            .and_then(|candidate| self.asset_paths.get(&candidate))
-        {
-            return Some(hit.as_str());
-        }
-
-        if let Some(hit) =
-            normalize_asset_path("", &target).and_then(|candidate| self.asset_paths.get(&candidate))
-        {
-            return Some(hit.as_str());
-        }
-
-        // Only a bare filename falls back to name resolution. A target that
-        // names a folder is an explicit path, and answering it with a namesake
-        // somewhere else would resolve to a file the author did not write.
-        if target.contains('/') {
-            return None;
-        }
-
-        let candidates = self.assets_by_name.get(&target.to_lowercase())?;
-        // `candidates` is sorted, and `min_by_key` keeps the first of equal
-        // keys, so equidistant namesakes resolve by path order rather than by
-        // walk order.
-        candidates
-            .iter()
-            .min_by_key(|candidate| asset_distance(note_dir, candidate))
-            .map(String::as_str)
+    /// Resolve the destination of a Markdown note link (ADR-28) to its note.
+    ///
+    /// `raw_destination` is the destination exactly as written between the
+    /// parentheses, percent-escapes and `#anchor` included; anything that is
+    /// not a note link (an external URL, a path not ending `.md`) is `None`.
+    /// `note_dir` is the linking note's Vault-relative folder. Resolution is
+    /// the path ladder attachments use, never the wikilink title rule.
+    pub fn resolve_note_link(&self, raw_destination: &str, note_dir: &str) -> Option<&NoteEntry> {
+        let target = note_link_target(raw_destination)?;
+        let (slug, _) = self.note_paths.resolve(&target.path, note_dir)?;
+        self.by_slug.get(slug)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -484,49 +475,4 @@ impl FolderBuilder {
 
 fn relative_asset_path(root: &Path, path: &Path) -> Option<String> {
     Some(path.strip_prefix(root).ok()?.to_str()?.replace('\\', "/"))
-}
-
-/// Join `target` onto `base_dir` and resolve `.`/`..`, returning `None` when the
-/// result would escape the Vault root. Escaping is rejected rather than clamped:
-/// a clamped `../../secret.png` would silently resolve to a different file than
-/// the author wrote.
-fn normalize_asset_path(base_dir: &str, target: &str) -> Option<String> {
-    let mut stack: Vec<&str> = base_dir
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    for part in target.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                stack.pop()?;
-            }
-            other => stack.push(other),
-        }
-    }
-    if stack.is_empty() {
-        return None;
-    }
-    Some(stack.join("/"))
-}
-
-/// Folder hops between the note and a candidate asset, so the nearest namesake
-/// wins a name collision.
-fn asset_distance(note_dir: &str, candidate: &str) -> usize {
-    let note: Vec<&str> = note_dir
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    let mut asset: Vec<&str> = candidate
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    asset.pop();
-
-    let shared = note
-        .iter()
-        .zip(asset.iter())
-        .take_while(|(left, right)| left == right)
-        .count();
-    (note.len() - shared) + (asset.len() - shared)
 }

@@ -3,24 +3,23 @@ use std::fs;
 
 use crate::cache::parse::for_non_code_line;
 
+use super::markdown_links::{note_dir, note_link_destinations};
 use super::paths::{normalize_link_target, normalize_title, slugify, split_wikilink_note_body};
-use super::types::NoteEntry;
+use super::types::{NoteEntry, VaultIndex};
 
 pub fn build_link_graph(
-    by_slug: &HashMap<String, NoteEntry>,
-    by_title: &HashMap<String, String>,
-    by_path_title: &HashMap<String, String>,
-    ordered_slugs: &[String],
+    index: &VaultIndex,
 ) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
     let mut outgoing_by_slug: HashMap<String, Vec<String>> = HashMap::new();
     let mut backlinks_by_slug: HashMap<String, Vec<String>> = HashMap::new();
+    let by_slug = &index.by_slug;
 
-    for slug in ordered_slugs {
+    for slug in &index.ordered_slugs {
         outgoing_by_slug.insert(slug.clone(), Vec::new());
         backlinks_by_slug.insert(slug.clone(), Vec::new());
     }
 
-    for slug in ordered_slugs {
+    for slug in &index.ordered_slugs {
         let Some(note) = by_slug.get(slug) else {
             continue;
         };
@@ -32,13 +31,21 @@ pub fn build_link_graph(
         let mut seen = HashSet::new();
         let mut outgoing = Vec::new();
 
-        for target in extract_wikilink_targets(&content) {
-            let Some(resolved_slug) =
-                resolve_target_slug(&target, by_slug, by_title, by_path_title)
-            else {
-                continue;
-            };
+        // Both forms of note link count alike (ADR-28), each through its own
+        // resolver: a wikilink names a title, a Markdown link a path relative
+        // to the note it was written in.
+        let wikilinks = extract_wikilink_targets(&content)
+            .into_iter()
+            .filter_map(|target| {
+                resolve_target_slug(&target, by_slug, &index.by_title, &index.by_path_title)
+            });
+        let folder = note_dir(&note.relative_path);
+        let markdown_links = note_link_destinations(&content)
+            .into_iter()
+            .filter_map(|destination| index.resolve_note_link(destination, folder))
+            .map(|entry| entry.slug.clone());
 
+        for resolved_slug in wikilinks.chain(markdown_links) {
             if resolved_slug == note.slug || !seen.insert(resolved_slug.clone()) {
                 continue;
             }

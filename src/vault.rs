@@ -2,6 +2,7 @@ mod exclude;
 mod index;
 mod layers;
 mod links;
+mod markdown_links;
 mod paths;
 mod seed;
 #[cfg(test)]

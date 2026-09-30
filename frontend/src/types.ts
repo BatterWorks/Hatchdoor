@@ -365,6 +365,14 @@ export type VaultResolveBatchResponse = {
     target: string;
     path: string | null;
   }>;
+  // Slugs for the request's `note_link_targets`, Markdown note links resolved
+  // by path from the note's folder (ADR-28). Optional so a response from an
+  // older server parses, leaving those links on the missing-link affordance.
+  note_link_results?: Array<{
+    target: string;
+    slug: string | null;
+    archived: boolean;
+  }>;
 };
 
 export type TagStat = { tag: string; note_count: number };

@@ -123,6 +123,12 @@ pub struct ResolveBatchRequest {
     /// targets are read from the Vault root.
     #[serde(default)]
     pub note_path: Option<String>,
+    /// Markdown note-link destinations as written, such as
+    /// `../20-projects/Beacon%20Launch.md#Goals` (ADR-28). They resolve to a
+    /// slug like `targets`, but by path from `note_path`'s folder rather than
+    /// by title. Defaulted so an older client sees no change.
+    #[serde(default)]
+    pub note_link_targets: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

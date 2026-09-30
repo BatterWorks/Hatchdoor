@@ -201,3 +201,71 @@ describe("rewriteWikilinks with an escaped alias pipe", () => {
     );
   });
 });
+
+describe("rewriteWikilinks with Markdown note links (ADR-28)", () => {
+  const resolved = new Map([
+    [
+      "../20-projects/Beacon%20Launch.md",
+      { slug: "beacon-launch", archived: false },
+    ],
+    [
+      "../20-projects/Beacon Launch.md",
+      { slug: "beacon-launch", archived: false },
+    ],
+    ["Install.md", { slug: "install", archived: false }],
+    ["Old.md", { slug: "old", archived: true }],
+  ]);
+
+  function rewrite(markdown: string): string {
+    return rewriteWikilinks(
+      VAULT_ID,
+      markdown,
+      "00-inbox/Home",
+      new Map(),
+      new Map(),
+      resolved,
+    );
+  }
+
+  it("routes a resolved link in-app and keeps its text and title", () => {
+    expect(rewrite('[x](../20-projects/Beacon%20Launch.md "t")')).toBe(
+      '[x](/v/vault-1/n/beacon-launch "t")',
+    );
+    expect(rewrite("[x](<../20-projects/Beacon Launch.md>)")).toBe(
+      "[x](/v/vault-1/n/beacon-launch)",
+    );
+  });
+
+  it("lands both anchor spellings on the same heading", () => {
+    expect(
+      rewrite("[a](Install.md#First%20Run) [b](Install.md#first-run)"),
+    ).toBe(
+      "[a](/v/vault-1/n/install#first-run) [b](/v/vault-1/n/install#first-run)",
+    );
+  });
+
+  it("rewrites a reference definition so every use follows", () => {
+    expect(rewrite("[see][i] and [i]\n\n[i]: Install.md")).toBe(
+      "[see][i] and [i]\n\n[i]: /v/vault-1/n/install",
+    );
+  });
+
+  it("sends an unresolved target to the missing-link form and an archived one to the archive", () => {
+    expect(rewrite("[x](Nope.md) [y](Old.md)")).toBe(
+      "[x](/__missing__/Nope.md) [y](/__archived__/old)",
+    );
+  });
+
+  it("leaves other links, images and code alone and keeps the line count", () => {
+    const markdown = [
+      "[pdf](report.pdf) ![x](Install.md) [web](https://example.com/a.md)",
+      "`[code](Install.md)`",
+      "```",
+      "[fenced](Install.md)",
+      "```",
+    ].join("\n");
+    const out = rewrite(markdown);
+    expect(out).toBe(markdown);
+    expect(out.split("\n")).toHaveLength(markdown.split("\n").length);
+  });
+});

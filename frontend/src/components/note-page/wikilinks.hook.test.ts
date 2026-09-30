@@ -94,3 +94,44 @@ describe("useResolvedWikilinks asset targets (#158)", () => {
     });
   });
 });
+
+describe("useResolvedWikilinks Markdown note links (ADR-28)", () => {
+  it("sends note-link targets with the note's path and routes the answer", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          vault_id: VAULT_ID,
+          results: [],
+          asset_results: [],
+          note_link_results: [
+            {
+              target: "../20-projects/Beacon%20Launch.md",
+              slug: "beacon-launch",
+              archived: false,
+            },
+          ],
+        });
+      },
+    );
+
+    const { result } = renderHook(() =>
+      useResolvedWikilinks(
+        VAULT_ID,
+        "[x](../20-projects/Beacon%20Launch.md#Goals)",
+        "00-inbox/Home",
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.resolved).toBe(
+        "[x](/v/vault-1/n/beacon-launch#goals)",
+      );
+    });
+    expect(bodies[0]).toMatchObject({
+      note_link_targets: ["../20-projects/Beacon%20Launch.md"],
+      note_path: "00-inbox/Home",
+    });
+  });
+});

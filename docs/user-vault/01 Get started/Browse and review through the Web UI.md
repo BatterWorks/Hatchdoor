@@ -47,8 +47,8 @@ deployment is in demo mode. If they are present but carry a warning about the
 Vault's filesystem not being able to swap two files in one step, editing works
 normally; [[Install Hatchdoor with Docker Compose]] explains what that costs.
 
-Hatchdoor understands wikilinks and refreshes its index when Markdown or
-attachments change. Keep the Markdown files portable: you can still open them
+Hatchdoor understands wikilinks and Markdown links to other notes, and
+refreshes its index when Markdown or attachments change. Keep the Markdown files portable: you can still open them
 in another Markdown app at any time.
 
 A note can also hold a saved query: a fenced `base` block describing which notes to list, such as every subscription that has not finished yet. The note page draws it as a table of those notes, worked out afresh each time you open the note, and each row links to its note. Click a column heading to sort the table by it; the sort stays on your screen and a reload forgets it. The table is never written into the file, so opening the same note in another Markdown app shows the block itself. [[Supported Markdown reference]] lists what a saved query can say.
