@@ -607,6 +607,44 @@ impl BrowseSurface {
     }
 }
 
+/// Which contained assets a [`BrowseSurface`] admits, captured from one
+/// authoritative index. A caller checking many paths against one Vault holds
+/// this rather than calling [`VaultReadCore::asset_on_surface`] per path,
+/// which rebuilds the index each time.
+pub struct AssetSurface {
+    surface: BrowseSurface,
+    asset_paths: BTreeSet<String>,
+    layers: crate::vault::LayerMap,
+}
+
+impl AssetSurface {
+    fn capture(surface: BrowseSurface, index: crate::vault::VaultIndex) -> Self {
+        Self {
+            surface,
+            asset_paths: index.asset_paths,
+            layers: index.layers,
+        }
+    }
+
+    /// Whether a contained, Vault-relative asset path is on this surface.
+    /// `Everything` admits every contained asset; `DefaultOnly` admits only
+    /// catalogued assets (so nothing excluded or noise) outside a demoted
+    /// layer, the same decision the asset route makes.
+    pub fn admits(&self, relative_path: &str) -> bool {
+        self.surface == BrowseSurface::Everything
+            || (self.asset_paths.contains(relative_path)
+                && !self.surface.hides(self.layers.layer_for(relative_path)))
+    }
+}
+
+/// An exact Note, the Markdown directory it was read from, and its Vault's
+/// asset surface, all from one control-block fetch and one index.
+pub struct NoteDownload {
+    pub note: VaultQualifiedNote,
+    pub vault_root: std::path::PathBuf,
+    pub assets: AssetSurface,
+}
+
 /// One Vault's resolution of a wikilink target: the Note it names, or nothing.
 ///
 /// A read projection rather than an HTTP response body — it began life in
@@ -1324,8 +1362,7 @@ impl<'a> VaultReadCore<'a> {
             return Ok(true);
         }
         let index = self.authoritative_index(vault_id)?;
-        Ok(index.asset_paths.contains(relative_path)
-            && !self.surface.hides(index.layers.layer_for(relative_path)))
+        Ok(AssetSurface::capture(self.surface, index).admits(relative_path))
     }
 
     /// The exact Note together with the local Markdown directory it was read
@@ -1335,26 +1372,27 @@ impl<'a> VaultReadCore<'a> {
     /// edit reconciles a *replacement* control block rather than mutating the
     /// current one in place, so two independent lookups could observe the
     /// note from one Vault path and resolve assets against another.
+    ///
+    /// The asset catalogue comes from the same index, so an export checks
+    /// each embedded asset against the browse surface without rebuilding the
+    /// index per asset (#342).
     pub fn exact_note_for_download(
         &self,
         vault_id: VaultId,
         slug: &str,
-    ) -> Result<Option<(VaultQualifiedNote, std::path::PathBuf)>, VaultReadError> {
+    ) -> Result<Option<NoteDownload>, VaultReadError> {
         let (control, index) = self.control_and_index(vault_id)?;
-        index
+        let note = index
             .read_note_by_slug(slug)
-            .map(|note| {
-                note.filter(|note| !self.surface.hides(note.layer.as_deref()))
-                    .map(|note| {
-                        (
-                            VaultQualifiedNote::new(vault_id, note),
-                            control.vault_path().to_path_buf(),
-                        )
-                    })
-            })
             .map_err(|error| {
                 unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
-            })
+            })?
+            .filter(|note| !self.surface.hides(note.layer.as_deref()));
+        Ok(note.map(|note| NoteDownload {
+            note: VaultQualifiedNote::new(vault_id, note),
+            vault_root: control.vault_path().to_path_buf(),
+            assets: AssetSurface::capture(self.surface, index),
+        }))
     }
 
     /// The gated Vault control block: not-found, disabled, and no-runtime all
@@ -2725,8 +2763,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        NoteQuery, NoteQueryCondition, PropertyOperator, TreeScope, VaultExplorerFolder,
-        VaultParticipantState, VaultReadCore, VaultScope, clamp_tree_max_depth,
+        NoteDownload, NoteQuery, NoteQueryCondition, PropertyOperator, TreeScope,
+        VaultExplorerFolder, VaultParticipantState, VaultReadCore, VaultScope,
+        clamp_tree_max_depth,
     };
     use crate::cache::SqliteCache;
     use crate::embed::StubEmbedder;
@@ -3553,14 +3592,16 @@ mod tests {
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         let first = workspace.vault_ids[0];
 
-        let (note, directory) = reads
+        let NoteDownload {
+            note, vault_root, ..
+        } = reads
             .exact_note_for_download(first, "home")
             .expect("lookup")
             .expect("home found");
         assert_eq!(note.vault_id, first);
         assert!(note.note.content.contains("first"));
         assert_eq!(
-            std::fs::canonicalize(&directory).expect("canonical directory"),
+            std::fs::canonicalize(&vault_root).expect("canonical directory"),
             std::fs::canonicalize(&workspace.vault_paths[0]).expect("canonical vault root")
         );
 

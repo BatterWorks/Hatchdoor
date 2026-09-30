@@ -239,11 +239,14 @@ pub async fn vault_scoped_note_download_handler(
             // *replacement* control block rather than mutating the current one
             // in place, so two independent lookups could otherwise pair this
             // note's content with a different Vault generation's directory.
-            let Some((note, vault_root)) = core.exact_note_for_download(vault_id, &lookup_slug)?
-            else {
+            let Some(download) = core.exact_note_for_download(vault_id, &lookup_slug)? else {
                 return Ok(DownloadOutcome::NotFound);
             };
-            Ok(match build_note_export(&vault_root, &note.note) {
+            // A demo zip carries only what the asset route would serve (#342).
+            let export = build_note_export(&download.vault_root, &download.note.note, |path| {
+                download.assets.admits(path)
+            });
+            Ok(match export {
                 Ok(export) => DownloadOutcome::Export(export),
                 Err(ExportError::TooLarge) => DownloadOutcome::TooLarge,
                 Err(ExportError::Failed(message)) => DownloadOutcome::ExportError(message),

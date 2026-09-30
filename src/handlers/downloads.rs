@@ -62,16 +62,26 @@ fn download_filename_for_note(note: &Note) -> String {
     }
 }
 
+/// `admit_asset` decides, per contained Vault-relative asset path, whether the
+/// export may carry it. A refused asset is treated exactly like a missing one:
+/// left out of the archive, its link left as written.
 pub(crate) fn build_note_export(
     vault_root: &FsPath,
     note: &Note,
+    admit_asset: impl Fn(&str) -> bool,
 ) -> Result<NoteExport, ExportError> {
     let markdown_filename = download_filename_for_note(note);
     let markdown = clean_markdown_export(&note.content);
     if markdown.len() > MAX_NOTE_EXPORT_BYTES {
         return Err(ExportError::TooLarge);
     }
-    let assets = export_assets(vault_root, note, &markdown, &markdown_filename);
+    let assets = export_assets(
+        vault_root,
+        note,
+        &markdown,
+        &markdown_filename,
+        &admit_asset,
+    );
     if assets.is_empty() {
         return Ok(NoteExport {
             filename: markdown_filename,
@@ -166,6 +176,7 @@ fn export_assets(
     note: &Note,
     markdown: &str,
     markdown_filename: &str,
+    admit_asset: &impl Fn(&str) -> bool,
 ) -> Vec<ExportAsset> {
     let note_dir = note
         .relative_path
@@ -192,7 +203,12 @@ fn export_assets(
         let Ok(root) = std::fs::canonicalize(vault_root) else {
             continue;
         };
-        if !source.starts_with(&root) || !source.is_file() {
+        // Contained, and named the way the asset route names a contained
+        // file: its canonical path under the canonical root.
+        let Ok(contained) = source.strip_prefix(&root) else {
+            continue;
+        };
+        if !source.is_file() || !admit_asset(&contained.to_string_lossy().replace('\\', "/")) {
             continue;
         }
         if !seen_sources.insert(source.clone()) {
@@ -768,7 +784,7 @@ mod tests {
             metadata: Default::default(),
         };
 
-        let export = build_note_export(vault, &note).expect("export");
+        let export = build_note_export(vault, &note, |_| true).expect("export");
 
         assert_eq!(export.filename, "Home.zip");
         assert_eq!(export.content_type, "application/zip");
@@ -796,6 +812,38 @@ mod tests {
     }
 
     #[test]
+    fn build_note_export_leaves_out_a_refused_asset_like_a_missing_one() {
+        // #342: the caller's surface check sees each asset by its contained
+        // Vault-relative path, and a refusal changes nothing else.
+        let dir = tempdir().expect("temp dir");
+        let vault = dir.path();
+        std::fs::create_dir_all(vault.join("Notes/private")).expect("notes dir");
+        std::fs::write(vault.join("Notes/private/hidden.png"), b"hidden").expect("asset");
+        let content = "# Home\n\n![[private/hidden.png]]\n![](../Notes/private/hidden.png)";
+        let note = Note {
+            title: "Home".to_string(),
+            slug: "home".to_string(),
+            relative_path: "Notes/Home".to_string(),
+            content: content.to_string(),
+            content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
+            metadata: Default::default(),
+        };
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let export = build_note_export(vault, &note, |path| {
+            asked.borrow_mut().push(path.to_string());
+            false
+        })
+        .expect("export");
+
+        assert_eq!(asked.into_inner(), ["Notes/private/hidden.png"; 2]);
+        assert_eq!(export.filename, "Home.md");
+        assert_eq!(export.content_type, "text/markdown; charset=utf-8");
+        assert_eq!(export.bytes, content.as_bytes());
+    }
+
+    #[test]
     fn build_note_export_bundles_an_asset_whose_size_suffix_pipe_is_escaped() {
         // #252: inside a table cell the pipe has to be written `\\|`, and the
         // export read the target as `diagram.png\\`, so the file was neither
@@ -817,7 +865,7 @@ mod tests {
             metadata: Default::default(),
         };
 
-        let export = build_note_export(vault, &note).expect("export");
+        let export = build_note_export(vault, &note, |_| true).expect("export");
 
         let reader = Cursor::new(export.bytes);
         let mut archive = zip::ZipArchive::new(reader).expect("zip archive");
