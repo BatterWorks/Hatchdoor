@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../api/api";
+import { safeGetItem, safeSetItem } from "../lib/storage";
 
 export type StartupStatus =
   | { state: "terms_required" }
@@ -66,7 +67,7 @@ export function useStartupStatus(enabled = true) {
   // retain the latch across a browser reload so a retry never re-blocks a
   // client that has already reached the workspace.
   const [hasSteppedPastGate, setHasSteppedPastGate] = useState(
-    () => window.localStorage.getItem(HAS_STEPPED_PAST_GATE_KEY) === "1",
+    () => safeGetItem(HAS_STEPPED_PAST_GATE_KEY) === "1",
   );
   const hasSteppedPastGateRef = useRef(hasSteppedPastGate);
   const activeRef = useRef(true);
@@ -97,7 +98,7 @@ export function useStartupStatus(enabled = true) {
         next.state !== "downloading"
       ) {
         hasSteppedPastGateRef.current = true;
-        window.localStorage.setItem(HAS_STEPPED_PAST_GATE_KEY, "1");
+        safeSetItem(HAS_STEPPED_PAST_GATE_KEY, "1");
         setHasSteppedPastGate(true);
       }
       shouldPoll = next.state !== "ready" && next.state !== "failed";

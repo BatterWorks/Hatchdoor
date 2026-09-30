@@ -7,11 +7,19 @@ const THEME_ICON = { auto: "◑", light: "○", dark: "●" } as const;
 
 /**
  * The full-screen model-setup gate (#150). It shrinks to exactly the model
- * step: it renders only for `terms_required`/`downloading`, and only until
- * `hasSteppedPastGate` first flips — after that it always renders `children`,
- * even if a later retry sends `state` back to `downloading`. A missing status
- * answer never locks someone out, and discovery resolves before either model
- * state can gate, so every registry condition stays in the ordinary workspace.
+ * step: it renders only for `terms_required`/`downloading`. A `downloading`
+ * state gates only until `hasSteppedPastGate` first flips — after that a
+ * retry's re-download shows in the Scope zone slot and the search dialog
+ * instead (#339). `terms_required` gates again even after the latch, since
+ * nothing else in the app can offer the model choice; a demo instance, whose
+ * server refuses the choice, is the exception once it has latched.
+ *
+ * The decision waits for its inputs (#339): until discovery has resolved and
+ * the first startup answer has landed, nothing mounts, so the workspace is
+ * never mounted only to be torn down a fetch later when that answer gates.
+ * A missing answer still never locks anyone out: a failed poll
+ * (`connectionIssue`) releases the hold, and a zero-Vault or broken-registry
+ * workspace, which never polls, is never held.
  */
 export function StartupGate({
   status,
@@ -20,6 +28,7 @@ export function StartupGate({
   discoveryLoading,
   hasRegistryRecovery,
   hasNoVaults,
+  demoMode = false,
   onAcceptGemma,
   onDeclineGemma,
   children,
@@ -30,18 +39,25 @@ export function StartupGate({
   discoveryLoading: boolean;
   hasRegistryRecovery: boolean;
   hasNoVaults: boolean;
+  demoMode?: boolean;
   onAcceptGemma: () => void;
   onDeclineGemma: () => void;
   children: ReactNode;
 }) {
   const { theme, cycleTheme } = useTheme();
 
+  const statusExpected = !hasRegistryRecovery && !hasNoVaults;
+  const deciding =
+    discoveryLoading || (statusExpected && status === null && !connectionIssue);
+  if (deciding) {
+    return <div className="startup-shell" aria-busy="true" />;
+  }
+
   const shouldGate =
-    !hasSteppedPastGate &&
-    !discoveryLoading &&
-    !hasRegistryRecovery &&
-    !hasNoVaults &&
-    (status?.state === "terms_required" || status?.state === "downloading");
+    statusExpected &&
+    ((status?.state === "terms_required" &&
+      (!hasSteppedPastGate || !demoMode)) ||
+      (status?.state === "downloading" && !hasSteppedPastGate));
   if (!shouldGate) {
     return children;
   }

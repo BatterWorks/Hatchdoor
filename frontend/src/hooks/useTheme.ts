@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { THEME_KEY } from "../app/constants";
+import { safeGetItem, safeRemoveItem, safeSetItem } from "../lib/storage";
 
 export type Theme = "auto" | "light" | "dark";
 
@@ -9,7 +10,7 @@ const THEME_COLORS: Record<Exclude<Theme, "auto">, string> = {
 };
 
 function readStoredTheme(): Theme {
-  const v = localStorage.getItem(THEME_KEY);
+  const v = safeGetItem(THEME_KEY);
   return v === "light" || v === "dark" ? v : "auto";
 }
 
@@ -45,9 +46,9 @@ export function useTheme() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     if (theme === "auto") {
-      localStorage.removeItem(THEME_KEY);
+      safeRemoveItem(THEME_KEY);
     } else {
-      localStorage.setItem(THEME_KEY, theme);
+      safeSetItem(THEME_KEY, theme);
     }
     syncThemeColor(theme);
   }, [theme]);

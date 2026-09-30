@@ -9,13 +9,47 @@ import {
 } from "../app/constants";
 import type { RecentNote, VaultId, VaultScope } from "../types";
 
+/**
+ * Read one localStorage key, or `null` when storage is unavailable. WebKit
+ * throws `SecurityError` from the `localStorage` accessor itself when the
+ * user blocks site data, and a throw from a render-path read with nothing
+ * above it is a blank page (#339). Every read on the boot path goes through
+ * here, so the app degrades to its defaults instead.
+ */
+export function safeGetItem(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Write one localStorage key, ignoring storage being unavailable: a
+ * preference that cannot be remembered is still honoured for this visit. */
+export function safeSetItem(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures (blocked site data, private mode, quota).
+  }
+}
+
+/** Remove one localStorage key, ignoring storage being unavailable. */
+export function safeRemoveItem(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures (blocked site data, private mode).
+  }
+}
+
 export function getStoredNumber(
   key: string,
   fallback: number,
   min: number,
   max: number,
 ): number {
-  const raw = window.localStorage.getItem(key);
+  const raw = safeGetItem(key);
   const value = raw ? Number(raw) : fallback;
   if (Number.isNaN(value)) {
     return fallback;
@@ -183,7 +217,7 @@ export function clearStoredLastNote(): void {
 }
 
 export function getStoredString(key: string): string | null {
-  const raw = window.localStorage.getItem(key);
+  const raw = safeGetItem(key);
   if (!raw) {
     return null;
   }

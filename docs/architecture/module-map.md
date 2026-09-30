@@ -3006,6 +3006,7 @@ boundaries are currently documentation-enforced.
 
 - `frontend/src/main.tsx`
 - `frontend/src/App.tsx`
+- `frontend/src/app/AppErrorBoundary.tsx`
 - `frontend/src/app/AppTopbar.tsx`
 - `frontend/src/app/ExplorerPane.tsx`
 - `frontend/src/app/vaultSlot.tsx`
@@ -3033,6 +3034,17 @@ cannot be trusted to mean the same one after — guarded by the persisted
 returning user has legitimately rebuilt since; six Vault-agnostic
 preferences (theme, sidebar width, drawer open state, Recent notes'
 collapsed state, the touch-edit hint, the stored bearer token) are untouched.
+`main.tsx` wraps the router in `app/AppErrorBoundary.tsx` (#339), so a render
+that throws degrades to a message and a reload button instead of a blank
+page. The boot path's own storage reads cannot be that throw: WebKit throws
+`SecurityError` from the `localStorage` accessor when site data is blocked,
+so `lib/storage.ts` exports `safeGetItem`/`safeSetItem`/`safeRemoveItem`
+(null or no-op on a throw), which `getStoredNumber`, `getStoredString`,
+`App.tsx`'s shell preferences, `hooks/useTheme.ts`,
+`startup/useStartupStatus.ts` and `NotePage.tsx`'s two preferences all use.
+`App.tsx`'s `<Routes>` ends in a `path="*"` catch-all (#339) that renders a
+"Page Not Found" `StateBlock` with a "Go to notes" action, so a stale or
+pre-#137 link never leaves the note pane empty.
 `main.tsx` also owns when the app may reload itself for a new service worker
 (#330). Registration stays `autoUpdate`, but the reload runs through
 `onNeedReload`, and both that and every `registration.update()` ask
@@ -3179,7 +3191,8 @@ surface is a coordination seam, not permission to move feature behavior into
 the shell.
 
 **Validation:** the applicable `App.*.test.tsx` (including
-`App.demo-mode.test.tsx`, #152), `app/ExplorerPane.test.tsx`,
+`App.demo-mode.test.tsx`, #152, and `App.demo-startup-boundary.test.tsx`,
+#339), `app/AppErrorBoundary.test.tsx`, `app/ExplorerPane.test.tsx`,
 `app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
 `App.scope-reconcile.test.tsx` (#335),
 `vaults/vaultCollection.test.ts`, `useTheme.test.tsx`, storage tests, then full
@@ -3340,12 +3353,24 @@ the gate inputs to `StartupGate` (#150: the gate
 shrinks to exactly the `terms_required`/first-`downloading` model step —
 `hasSteppedPastGate` latches true the first time any other state is
 observed and never re-arms, so a later retry-triggered `downloading` never
-reopens the full-screen gate). Every other state — `scanning`, `indexing`,
-`ready`, `failed`, and anything registry- or zero-Vault-related the gate
-never observed in the first place — renders the ordinary workspace, which
-reads the same `status` for its own surfaces: `app/ExplorerPane.tsx`'s Scope
-zone slot (`StartupProgress`) and `features/search/SearchDialog.tsx`'s
-work-in-flight/failed-model blocks.
+reopens the full-screen gate). `terms_required` is the exception to the
+latch (#339): nothing else in the app can accept or decline Gemma, so it
+gates again after the latch, except for a latched demo visitor, whose server
+404s the choice (`StartupGate` takes the collection's `demoMode`). The gate
+also holds its decision until discovery has resolved and the first startup
+answer has landed (#339), rendering a bare `.startup-shell` meanwhile, so the
+workspace is never mounted only to be unmounted a fetch later when that
+answer gates; a failed poll (`connectionIssue`) releases the hold, and a
+zero-Vault or broken-registry workspace, which never polls, is never held.
+Every other state — `scanning`, `indexing`, `ready`, `failed`, a post-latch
+`downloading`, and anything registry- or zero-Vault-related the gate never
+observed in the first place — renders the ordinary workspace, which reads
+the same `status` for its own surfaces: `app/ExplorerPane.tsx`'s Scope zone
+slot (`StartupProgress`, which `App.tsx`'s `deriveStartupProgress` also
+derives for a post-latch `downloading`, #339) and
+`features/search/SearchDialog.tsx`'s work-in-flight/downloading/terms/failed
+blocks. The latch itself is read and written through `lib/storage.ts`'s
+guarded helpers, so blocked site data leaves it unset rather than throwing.
 
 **Consumed dependencies:** shared API client and theme hook.
 
@@ -3531,8 +3556,13 @@ shrunk startup gate's own data (`startup/useStartupStatus.ts`): while
 carrying the same percentage the Scope zone shows, with the query input
 left enabled and the topbar's search entry point never greyed; on a failed
 model download it shows the reason with a "Retry setup" action instead of
-the ordinary empty/error states. Both replace the normal loading/error/empty
-rendering only — the facet rail and results list underneath are unaffected
+the ordinary empty/error states. A post-latch `downloading` (the re-download
+"Retry setup" starts) and `terms_required` get their own blocks too (#339),
+so neither falls through to "No matching notes." With `demoMode` (#339) the
+failed and terms states read "Search is unavailable on this demo right
+now." with no action: never the server's operator diagnostic, never a retry
+the server 404s in demo mode. All of these replace the normal
+loading/error/empty rendering only — the facet rail and results list underneath are unaffected
 (harmlessly empty, same as any other no-data state).
 
 **Consumed dependencies:** shared API/error utilities, shared UI components
@@ -3833,15 +3863,20 @@ the heading fonts do through `font-variation-settings`, so the longhands are
 composed instead. `BlockInput.tsx` hangs nothing for a `code block` unit, whose
 leading spaces are partly rendered.
 
-`hooks/useWriteMode.ts` needs no demo-mode branch of its own (#152):
-`GET .../write-capabilities` carries the same `demo_guard` layer every
+`hooks/useWriteMode.ts` fails closed in demo mode on the server's word
+(#152): `GET .../write-capabilities` carries the same `demo_guard` layer every
 mutation route does (`src/server.rs`'s route registration, grouped with
 mutations "since it is write-capability discovery, not content browsing;
 gated the same as the mutations it describes"), so the request 403s with
-`demo_read_only` in demo mode before the handler's own `enabled` field is
-ever computed, and this hook's existing catch already resolves
-`writeEnabled` to `false` — every affordance it gates (New note, Edit,
-attachment drop) is already absent with no client-side clamp needed.
+`demo_read_only` in demo mode and this hook's catch resolves `writeEnabled`
+to `false`. It also re-derives rather than reading once per Vault (#339),
+since a backend can restart into demo mode under an open tab: it takes the
+collection's `demoMode` (true resolves `writeEnabled` to `false` in the same
+render, no request needed) and `revision` (every collection revision re-asks
+`write-capabilities`), and returns `recheck`, which `handleDemoRefusal`
+calls. A first read for a Vault fails closed on any error; a re-read that
+fails for any reason other than a demo refusal keeps the answer already held,
+so a dropped connection mid-edit does not tear the editor down.
 `writeApi.ts` exports `DEMO_READ_ONLY_CODE`/`isDemoReadOnlyError`, reading
 the `code` every write error now carries (`parseError` returns `{message,
 code}` rather than a bare string) so a demo refusal can be told apart from
@@ -3850,8 +3885,8 @@ defense-in-depth backstop for a write that reaches the server anyway: one
 app-authored sentence into the shared `.write-notice` strip (never the
 server's own message, and never the generic inline failure state a note
 action's dialog or the editor would otherwise show), plus a fresh
-`loadVaults()` call — "the app re-asks the server what it is permitted to
-do" — and no retry affordance. It is threaded into `useNoteActions.ts`'s
+`loadVaults()` call and a `write-capabilities` recheck — "the app re-asks the
+server what it is permitted to do" — and no retry affordance. It is threaded into `useNoteActions.ts`'s
 five write handlers through one shared `handleDemoRefusal` closure local to
 that hook (checked first in each catch block via `if (handleDemoRefusal(error))
 return;`; closes the action dialog on a hit rather than leaving it open —

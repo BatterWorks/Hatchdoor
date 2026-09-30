@@ -31,7 +31,7 @@ import {
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import { createEditHistory } from "../lib/editHistory";
 import { holdAppReload } from "../lib/reloadGuard";
-import { isEditableTarget } from "../lib/storage";
+import { isEditableTarget, safeGetItem, safeSetItem } from "../lib/storage";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -253,7 +253,7 @@ export function NotePage({
   const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
-      return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
+      return safeGetItem(propertiesCollapsedStorageKey) !== "0";
     },
   );
   // Entering a block on touch is a double tap, which is invisible: the gutter
@@ -261,7 +261,7 @@ export function NotePage({
   // Shown once per install, on coarse pointers only, and retired as soon as the
   // gesture has demonstrably been learned.
   const [touchEditHintSeen, setTouchEditHintSeen] = useState<boolean>(() => {
-    return window.localStorage.getItem(TOUCH_EDIT_HINT_KEY) === "1";
+    return safeGetItem(TOUCH_EDIT_HINT_KEY) === "1";
   });
   // Pre-#137 drafts recovered into Settings (#151): named here, not silently
   // acted on. Dismissing is per view, not persisted — it returns on every
@@ -570,10 +570,7 @@ export function NotePage({
   ]);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      propertiesCollapsedStorageKey,
-      propertiesCollapsed ? "1" : "0",
-    );
+    safeSetItem(propertiesCollapsedStorageKey, propertiesCollapsed ? "1" : "0");
   }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
 
   const startEditing = useCallback(() => {
@@ -782,7 +779,7 @@ export function NotePage({
   const dismissTouchEditHint = useCallback(() => {
     setTouchEditHintSeen((seen) => {
       if (!seen) {
-        window.localStorage.setItem(TOUCH_EDIT_HINT_KEY, "1");
+        safeSetItem(TOUCH_EDIT_HINT_KEY, "1");
       }
       return true;
     });

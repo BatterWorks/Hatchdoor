@@ -668,6 +668,46 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
     expect(props.onRetryModelSetup).toHaveBeenCalledTimes(1);
   });
 
+  it("gives a demo visitor a neutral sentence and no retry for a failed model (#339)", () => {
+    const operatorCopy =
+      "The search model could not be downloaded or loaded. Check the Hatchdoor logs, then retry setup.";
+    renderDialog({
+      query: "plan",
+      demoMode: true,
+      startupStatus: { state: "failed", message: operatorCopy },
+    });
+
+    expect(
+      screen.getByText("Search is unavailable on this demo right now."),
+    ).toBeVisible();
+    expect(screen.queryByText(operatorCopy)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry setup" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+  });
+
+  it("says the model is downloading rather than 'No matching notes' (#339)", () => {
+    renderDialog({
+      query: "plan",
+      startupStatus: { state: "downloading", percent: 55 },
+    });
+
+    expect(
+      screen.getByText(/Downloading the search model \(55%\)/),
+    ).toBeVisible();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+  });
+
+  it("says a model choice is pending rather than 'No matching notes' (#339)", () => {
+    renderDialog({ query: "plan", startupStatus: { state: "terms_required" } });
+
+    expect(
+      screen.getByText(/waiting for a search model to be chosen/),
+    ).toBeVisible();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+  });
+
   it("does not show a work-in-flight or failed block once the gate has stepped aside", () => {
     renderDialog({ startupStatus: { state: "ready" } });
 

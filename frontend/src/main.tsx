@@ -5,6 +5,7 @@ import { registerSW } from "virtual:pwa-register";
 import "katex/dist/katex.min.css";
 import "./index.css";
 import App from "./App";
+import { AppErrorBoundary } from "./app/AppErrorBoundary";
 import { isAppReloadHeld, whenAppReloadReleased } from "./lib/reloadGuard";
 import { clearLegacyNoteScopedBrowserState } from "./lib/storage";
 import { collectLegacyHeldDrafts } from "./lib/writeDrafts";
@@ -59,8 +60,11 @@ registerSW({
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    {/* A render that throws degrades to a message, never a blank page (#339). */}
+    <AppErrorBoundary>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </AppErrorBoundary>
   </StrictMode>,
 );

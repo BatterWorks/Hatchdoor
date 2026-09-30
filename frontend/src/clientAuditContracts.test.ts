@@ -36,6 +36,23 @@ describe("client audit launch contracts", () => {
     );
   });
 
+  // WebKit throws from the `localStorage` accessor itself when site data is
+  // blocked (#339). The pre-paint theme script runs before React, outside any
+  // boundary, so it has to guard its own read and still pick a theme.
+  it("applies the auto theme pre-paint when reading storage throws", () => {
+    const script = /<script>([\s\S]*?)<\/script>/.exec(indexHtml)?.[1];
+    expect(script).toBeTruthy();
+    const blockedStorage = {
+      getItem() {
+        throw new DOMException("The operation is insecure.", "SecurityError");
+      },
+    };
+    const root = { dataset: {} as Record<string, string> };
+    const run = new Function("localStorage", "document", script!);
+    expect(() => run(blockedStorage, { documentElement: root })).not.toThrow();
+    expect(root.dataset.theme).toBe("auto");
+  });
+
   it("checks for service-worker updates during long-lived PWA sessions", () => {
     expect(mainSource).toContain("onRegisteredSW");
     expect(mainSource).toContain("registration.update()");

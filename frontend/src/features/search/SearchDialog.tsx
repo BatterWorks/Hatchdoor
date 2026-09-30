@@ -149,6 +149,11 @@ function stripSnippet(raw: string): string {
   return (lastSpace > 150 ? cut.slice(0, lastSpace) : cut) + "…";
 }
 
+/** What a demo visitor reads when search's model is missing or failed: no
+ * operator diagnostic and nothing to act on (#339), the same posture
+ * `vaultSlotLogic.ts` takes for Vault conditions in demo mode (#152). */
+const DEMO_SEARCH_UNAVAILABLE = "Search is unavailable on this demo right now.";
+
 export function SearchDialog({
   query,
   includeContent,
@@ -164,6 +169,7 @@ export function SearchDialog({
   inputRef,
   startupStatus,
   onRetryModelSetup,
+  demoMode = false,
   onClose,
   onQueryChange,
   onIncludeContentChange,
@@ -195,6 +201,11 @@ export function SearchDialog({
    * instead of blocking the whole app. Typing stays live either way. */
   startupStatus: StartupStatus | null;
   onRetryModelSetup: () => void;
+  /** A public demo (#339): model-setup trouble is described in a visitor's
+   * words, never the server's operator diagnostic, and offers no retry — the
+   * server 404s `/api/model/retry` in demo mode, so the button could never
+   * do anything. */
+  demoMode?: boolean;
   onClose: () => void;
   onQueryChange: (value: string) => void;
   onIncludeContentChange: (value: boolean) => void;
@@ -206,6 +217,13 @@ export function SearchDialog({
   const startupPercent =
     startupStatus?.state === "indexing" ? startupStatus.percent : null;
   const startupFailed = startupStatus?.state === "failed";
+  const startupDownloading = startupStatus?.state === "downloading";
+  const startupDownloadPercent =
+    startupStatus?.state === "downloading" &&
+    startupStatus.percent !== undefined
+      ? startupStatus.percent
+      : null;
+  const startupTermsRequired = startupStatus?.state === "terms_required";
   const vaultName = (vaultId: string) =>
     vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId;
   const resultsListRef = useRef<HTMLUListElement | null>(null);
@@ -472,17 +490,45 @@ export function SearchDialog({
                 : `Building the search index (${startupPercent}%). Results will appear once it's ready.`
             }
           />
-        ) : startupFailed ? (
+        ) : startupDownloading ? (
+          // A model download after the gate has stepped aside, most often
+          // the one "Retry setup" starts (#339). Search cannot answer until
+          // it lands, and "No matching notes" would be a wrong answer.
           <StateBlock
-            tone="error"
             title="Could Not Load"
             description={
-              (startupStatus?.state === "failed" && startupStatus.message) ||
-              "The search model could not be downloaded or loaded."
+              startupDownloadPercent === null
+                ? "Downloading the search model. Results will appear once it's ready."
+                : `Downloading the search model (${startupDownloadPercent}%). Results will appear once it's ready.`
             }
-            actionLabel="Retry setup"
-            onAction={onRetryModelSetup}
           />
+        ) : startupTermsRequired ? (
+          <StateBlock
+            title="Could Not Load"
+            description={
+              demoMode
+                ? DEMO_SEARCH_UNAVAILABLE
+                : "Search is waiting for a search model to be chosen. Reload the page to choose one."
+            }
+          />
+        ) : startupFailed ? (
+          demoMode ? (
+            <StateBlock
+              title="Could Not Load"
+              description={DEMO_SEARCH_UNAVAILABLE}
+            />
+          ) : (
+            <StateBlock
+              tone="error"
+              title="Could Not Load"
+              description={
+                (startupStatus?.state === "failed" && startupStatus.message) ||
+                "The search model could not be downloaded or loaded."
+              }
+              actionLabel="Retry setup"
+              onAction={onRetryModelSetup}
+            />
+          )
         ) : (
           <>
             {loading ? <p>Searching…</p> : null}
