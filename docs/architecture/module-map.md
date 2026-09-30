@@ -3908,8 +3908,10 @@ frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
 
 **Public contract:** `GraphPage`, graph simulation helpers (including the
 island layout primitives `computeIslandCenters`, `buildIslandGraphs`, and
-`createIslandSimulation` — #143), and the `/api/v1/vaults/{scope}/graph`
-payload. Under `all` with more than one participating Vault, every Vault's
+`createIslandSimulation` — #143; the screen-space hit test, wheel-delta
+normaliser, viewport cull, budgeted label placement, island caption sizing
+and count line, and island-field fit — #337), and the
+`/api/v1/vaults/{scope}/graph` payload. Under `all` with more than one participating Vault, every Vault's
 component is laid out on its own and placed as a labelled, dash-enclosed
 island on one shared canvas (one zoom, one pan); at zero or one participating
 component — including a single-enabled-Vault instance under `all` — the page

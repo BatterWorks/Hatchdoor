@@ -20,18 +20,31 @@ import type {
   VaultScope,
   VaultSummary,
 } from "../../types";
-import { StateBlock } from "../ui";
+import { StateBlock, UiButton } from "../ui";
 import {
   buildIslandGraphs,
   buildSimulationGraph,
+  circleInView,
   createGraphSimulation,
   createIslandSimulation,
+  fitIslandField,
   hitTest as hitTestNodes,
+  hubThreshold,
+  islandCaptionMetrics,
+  islandCountLine,
+  LABEL_FONT_PX,
+  layoutLabels,
   nodeKey,
   nodeRadius,
+  nodeScreenRadius,
+  normalizeWheelDelta,
   replaceSimulationGraph,
+  segmentInView,
   settleSimulationSync,
+  TOUCH_HIT_TARGET,
+  worldViewport,
   type GraphIsland,
+  type HitTarget,
   type SimLink,
   type SimNode,
 } from "./graphSimulation";
@@ -175,11 +188,30 @@ function readThemeColors(): ThemeColors {
 }
 
 const ISLAND_ENCLOSURE_MARGIN = 40;
-const ISLAND_CAPTION_GAP = 16;
-/** Leading for the caption stack, set for the 20px name line above the 13px
- * count line. Mirrored as `ISLAND_CAPTION_HEADROOM` in graphSimulation, which
- * reserves the row space these two lines need. */
-const ISLAND_CAPTION_LINE_HEIGHT = 24;
+
+/** An island's enclosure radius: its settled layout radius, measured from live
+ * node positions, plus a margin. */
+function islandEnclosureRadius(island: GraphIsland): number {
+  let maxDist = 0;
+  for (const node of island.nodes) {
+    const dist =
+      Math.hypot(node.x - island.cx, node.y - island.cy) +
+      nodeRadius(node.backlink_count);
+    if (dist > maxDist) maxDist = dist;
+  }
+  return maxDist + ISLAND_ENCLOSURE_MARGIN;
+}
+
+/** Screen pixels drawn past each canvas edge, so a node or edge sliding in
+ * from off screen does not pop into view. */
+const VIEW_MARGIN_PX = 24;
+const LABEL_FONT = `500 ${LABEL_FONT_PX}px "Inter Tight", system-ui, sans-serif`;
+/** Measured label widths kept before the cache starts over. */
+const LABEL_WIDTH_CACHE_LIMIT = 5000;
+/** How to open a note from its graph node. */
+function notePath(node: SimNode): string {
+  return `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`;
+}
 
 interface RenderIsland extends GraphIsland {
   slot: VaultSlotState;
@@ -242,6 +274,14 @@ export function GraphPage() {
   const lastClickKeyRef = useRef<string | null>(null);
   const rafRef = useRef<number>(0);
   const runningRef = useRef(false);
+  // Hub threshold for the node list it was computed from: sorting every
+  // backlink count each frame was part of the per-frame cost (#337).
+  const hubCacheRef = useRef<{ nodes: SimNode[] | null; min: number }>({
+    nodes: null,
+    min: 0,
+  });
+  // Label widths by text, at `LABEL_FONT` (#337).
+  const labelWidthsRef = useRef(new Map<string, number>());
   const themeColorsRef = useRef<ThemeColors | null>(null);
   if (themeColorsRef.current === null)
     themeColorsRef.current = readThemeColors();
@@ -368,10 +408,21 @@ export function GraphPage() {
   // ── hit test ────────────────────────────────────────────────────────────────
 
   const hitTest = useCallback(
-    (cx: number, cy: number): SimNode | null =>
-      hitTestNodes(simNodesRef.current, transformRef.current, cx, cy),
+    (cx: number, cy: number, target?: HitTarget): SimNode | null =>
+      hitTestNodes(simNodesRef.current, transformRef.current, cx, cy, target),
     [],
   );
+
+  // The selected note, mirrored into state for the "Open note" bar (#337);
+  // `selectedRef` stays the render loop's source.
+  const [selectedNote, setSelectedNote] = useState<{
+    node: SimNode;
+    title: string;
+  } | null>(null);
+  const select = useCallback((node: SimNode | null) => {
+    selectedRef.current = node;
+    setSelectedNote(node ? { node, title: node.title } : null);
+  }, []);
 
   // ── canvas rendering ────────────────────────────────────────────────────────
 
@@ -460,12 +511,13 @@ export function GraphPage() {
     }
     ctx.restore();
 
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.scale(k, k);
-
     const nodes = simNodesRef.current;
     const links = simLinksRef.current;
+
+    // Only what is on screen is drawn or labelled (#337). Zooming in used to
+    // make a frame strictly more expensive, since every node, edge and label
+    // candidate in the graph was still processed.
+    const view = worldViewport(transformRef.current, W, H, VIEW_MARGIN_PX);
 
     // determine which nodes are "visible" based on tag filter
     const isVisible = (node: SimNode) => {
@@ -473,24 +525,26 @@ export function GraphPage() {
       return node.primary_tag !== null && activeTags.has(node.primary_tag);
     };
 
-    // connected node keys for selection highlight (vault_id:slug — a slug is
-    // only unique within its own Vault, and edges never cross Vaults)
-    const connectedKeys = new Set<string>();
+    // Nodes connected to the selection, by identity: a refresh keeps the node
+    // objects (#336), and edges never cross Vaults.
+    const connected = new Set<SimNode>();
     if (selected) {
-      connectedKeys.add(nodeKey(selected));
+      connected.add(selected);
       for (const link of links) {
-        if (nodeKey(link.source) === nodeKey(selected))
-          connectedKeys.add(nodeKey(link.target));
-        if (nodeKey(link.target) === nodeKey(selected))
-          connectedKeys.add(nodeKey(link.source));
+        if (link.source === selected) connected.add(link.target);
+        if (link.target === selected) connected.add(link.source);
       }
     }
 
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(k, k);
+
     // ── island enclosures (#143) — drawn under edges/nodes, at the settled
     // layout radius (recomputed every frame from live node positions) plus a
-    // margin. World-space sizing throughout: unlike node labels below, this
-    // is canvas furniture that scales with zoom rather than staying a
-    // constant screen size (#118's resolution).
+    // margin. World-space sizing throughout: unlike node labels and island
+    // captions below, this is canvas furniture that scales with zoom rather
+    // than staying a constant screen size (#118's resolution).
     const islands = islandsRef.current;
     const islandRadii = new Map<string, number>();
     if (islands.length > 0) {
@@ -500,15 +554,9 @@ export function GraphPage() {
       ctx.lineWidth = 1.5;
       ctx.globalAlpha = 0.7;
       for (const island of islands) {
-        let maxDist = 0;
-        for (const node of island.nodes) {
-          const dist =
-            Math.hypot(node.x - island.cx, node.y - island.cy) +
-            nodeRadius(node.backlink_count);
-          if (dist > maxDist) maxDist = dist;
-        }
-        const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
+        const radius = islandEnclosureRadius(island);
         islandRadii.set(island.vaultId, radius);
+        if (!circleInView(view, island.cx, island.cy, radius)) continue;
         ctx.beginPath();
         ctx.arc(island.cx, island.cy, radius, 0, Math.PI * 2);
         ctx.stroke();
@@ -520,24 +568,22 @@ export function GraphPage() {
     for (const link of links) {
       const src = link.source;
       const tgt = link.target;
+      if (!segmentInView(view, src.x, src.y, tgt.x, tgt.y)) continue;
       const srcVis = isVisible(src);
       const tgtVis = isVisible(tgt);
+      const onSelection =
+        selected !== null && connected.has(src) && connected.has(tgt);
 
       let alpha = 0.18;
       let color = mutedColor;
 
       if (selected) {
-        const srcConn = connectedKeys.has(nodeKey(src));
-        const tgtConn = connectedKeys.has(nodeKey(tgt));
-        if (srcConn && tgtConn) {
+        if (onSelection) {
           alpha = 0.55;
           color = hotColor;
         } else alpha = 0.04;
       } else if (hovered) {
-        if (
-          nodeKey(src) === nodeKey(hovered) ||
-          nodeKey(tgt) === nodeKey(hovered)
-        ) {
+        if (src === hovered || tgt === hovered) {
           alpha = 0.6;
           color = hotColor;
         } else {
@@ -552,23 +598,22 @@ export function GraphPage() {
       ctx.lineTo(tgt.x, tgt.y);
       ctx.strokeStyle = color;
       ctx.globalAlpha = alpha;
-      ctx.lineWidth =
-        selected &&
-        connectedKeys.has(nodeKey(src)) &&
-        connectedKeys.has(nodeKey(tgt))
-          ? 1.5 / k
-          : 1 / k;
+      ctx.lineWidth = onSelection ? 1.5 / k : 1 / k;
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
 
-    // draw nodes
+    // draw nodes — never smaller than a couple of screen pixels, so a field
+    // framed well below 1x still shows its notes (#337)
+    const onScreen: SimNode[] = [];
     for (const node of nodes) {
-      const r = nodeRadius(node.backlink_count);
+      const r = nodeScreenRadius(node.backlink_count, k) / k;
+      if (!circleInView(view, node.x, node.y, r)) continue;
       const vis = isVisible(node);
-      const isHovered = hovered ? nodeKey(hovered) === nodeKey(node) : false;
-      const isSelected = selected ? nodeKey(selected) === nodeKey(node) : false;
-      const isConnected = selected ? connectedKeys.has(nodeKey(node)) : false;
+      if (vis) onScreen.push(node);
+      const isHovered = node === hovered;
+      const isSelected = node === selected;
+      const isConnected = connected.has(node);
 
       let alpha = vis ? 1 : 0.15;
       if (selected && !isConnected) alpha = vis ? 0.2 : 0.06;
@@ -605,193 +650,92 @@ export function GraphPage() {
       ctx.globalAlpha = 1;
     }
 
-    // Zoom-adaptive pre-filter: raise threshold when zoomed out so only hubs
-    // are candidates; lower it as zoom increases to admit more nodes.
-    const labelThreshold = 10 / Math.sqrt(k);
-    const LABEL_SCREEN_SIZE = 12; // px on screen — constant regardless of zoom
-    const LABEL_PAD_X = 5; // screen-px padding (converted to world below)
-    const LABEL_PAD_Y = 3;
+    // Back to screen space: labels and captions keep one size at every zoom.
+    ctx.restore();
 
-    // Hub threshold: top 10% by backlink count always get a label (guaranteed).
-    const sortedCounts = nodes
-      .map((n) => n.backlink_count)
-      .sort((a, b) => a - b);
-    const hubMinBacklinks =
-      sortedCounts[Math.floor(sortedCounts.length * 0.9)] ?? 0;
-
-    // Collect candidates: hovered/selected first, then hubs, then rest by importance.
-    const seen = new Set<string>();
-    const guaranteed = new Set<string>();
-    const labelCandidates: SimNode[] = [];
-    const pushLabel = (n: SimNode, force = false) => {
-      const key = nodeKey(n);
-      if (!seen.has(key)) {
-        seen.add(key);
-        labelCandidates.push(n);
-        if (force) guaranteed.add(key);
-      }
-    };
-
-    if (hovered) pushLabel(hovered, true);
-    if (selected && selected !== hovered) pushLabel(selected, true);
-    // Sort remaining candidates by importance so hubs win deconfliction.
-    const ranked = nodes
-      .filter(
-        (n) =>
-          isVisible(n) &&
-          (!hovered || nodeKey(n) !== nodeKey(hovered)) &&
-          (!selected || nodeKey(n) !== nodeKey(selected)) &&
-          (n.backlink_count >= hubMinBacklinks ||
-            nodeRadius(n.backlink_count) * k >= labelThreshold),
-      )
-      .sort((a, b) => b.backlink_count - a.backlink_count);
-    for (const n of ranked) pushLabel(n, n.backlink_count >= hubMinBacklinks);
-
-    // Deconfliction: track occupied regions in screen space.
-    // Pre-seed with every visible node circle so labels can't overlap nodes.
-    // Each entry carries the owning node key so a node's own label can
-    // self-exclude.
-    const NODE_MARGIN = 4; // extra px around each circle
-    const placed: Array<{
-      sx: number;
-      sy: number;
-      sw: number;
-      sh: number;
-      key?: string;
-    }> = nodes.filter(isVisible).map((n) => {
-      const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
-      return {
-        sx: n.x * k + x - rScr,
-        sy: n.y * k + y - rScr,
-        sw: rScr * 2,
-        sh: rScr * 2,
-        key: nodeKey(n),
-      };
-    });
-
-    const fontSize = LABEL_SCREEN_SIZE / k;
-    ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
-
-    const collidesWithPlaced = (
-      sx: number,
-      sy: number,
-      sw: number,
-      sh: number,
-      ownKey: string,
-    ) =>
-      placed.some(
-        (p) =>
-          p.key !== ownKey &&
-          sx < p.sx + p.sw &&
-          sx + sw > p.sx &&
-          sy < p.sy + p.sh &&
-          sy + sh > p.sy,
-      );
-
-    for (const node of labelCandidates) {
-      const r = nodeRadius(node.backlink_count);
-      const isHov = hovered ? nodeKey(node) === nodeKey(hovered) : false;
-      const isSel = selected ? nodeKey(node) === nodeKey(selected) : false;
-      const isGuaranteed = guaranteed.has(nodeKey(node));
-
-      ctx.save();
-      ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-
-      const label =
-        node.title.length > 28 ? node.title.slice(0, 26) + "…" : node.title;
-      const metrics = ctx.measureText(label);
-      const padX = LABEL_PAD_X / k;
-      const padY = LABEL_PAD_Y / k;
-      const bw = metrics.width + padX * 2;
-      const bh = fontSize + padY * 2;
-      const gap = 4 / k;
-
-      // Candidate positions: below, above, right, left.
-      const candidates = [
-        { bx: node.x - bw / 2, by: node.y + r + gap },
-        { bx: node.x - bw / 2, by: node.y - r - gap - bh },
-        { bx: node.x + r + gap, by: node.y - bh / 2 },
-        { bx: node.x - r - gap - bw, by: node.y - bh / 2 },
-      ];
-
-      // Pick the first position that doesn't collide with any placed region.
-      // Guaranteed nodes fall back to the default (below) if nothing is clear.
-      let chosen = isGuaranteed ? candidates[0] : null;
-      for (const pos of candidates) {
-        const sx = pos.bx * k + x;
-        const sy = pos.by * k + y;
-        const sw = bw * k;
-        const sh = bh * k;
-        if (!collidesWithPlaced(sx, sy, sw, sh, nodeKey(node))) {
-          chosen = pos;
-          break;
-        }
-      }
-
-      if (chosen) {
-        const { bx, by } = chosen;
-        const sx = bx * k + x;
-        const sy = by * k + y;
-        const sw = bw * k;
-        const sh = bh * k;
-        placed.push({ sx, sy, sw, sh, key: nodeKey(node) });
-
-        ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
-        ctx.fillStyle = paperColor;
-        ctx.fillRect(bx, by, bw, bh);
-        ctx.strokeStyle = ruleColor;
-        ctx.lineWidth = 1 / k;
-        ctx.strokeRect(bx, by, bw, bh);
-        ctx.fillStyle = isSel ? hotColor : inkColor;
-        ctx.fillText(label, bx + bw / 2, by + padY);
-        ctx.globalAlpha = 1;
-      }
-
-      ctx.restore();
+    // ── node labels — at most a fixed budget, placed on a screen-space
+    // occupancy grid, with widths measured once per title (#337).
+    const hubCache = hubCacheRef.current;
+    if (hubCache.nodes !== nodes) {
+      hubCache.nodes = nodes;
+      hubCache.min = hubThreshold(nodes);
     }
+    const forced: SimNode[] = [];
+    if (hovered) forced.push(hovered);
+    if (selected && selected !== hovered) forced.push(selected);
+
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const widths = labelWidthsRef.current;
+    const placements = layoutLabels({
+      nodes: onScreen,
+      forced,
+      transform: transformRef.current,
+      hubMinBacklinks: hubCache.min,
+      measure: (text) => {
+        let width = widths.get(text);
+        if (width === undefined) {
+          if (widths.size > LABEL_WIDTH_CACHE_LIMIT) widths.clear();
+          width = ctx.measureText(text).width;
+          widths.set(text, width);
+        }
+        return width;
+      },
+    });
+    ctx.lineWidth = 1;
+    for (const label of placements) {
+      const isSel = label.node === selected;
+      const isHov = label.node === hovered;
+      ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
+      ctx.fillStyle = paperColor;
+      ctx.fillRect(label.x, label.y, label.width, label.height);
+      ctx.strokeStyle = ruleColor;
+      ctx.strokeRect(label.x, label.y, label.width, label.height);
+      ctx.fillStyle = isSel ? hotColor : inkColor;
+      ctx.fillText(label.text, label.textX, label.textY);
+    }
+    ctx.globalAlpha = 1;
 
     // ── island captions (#143) — inert: drawn on canvas, not a DOM element,
     // so clicking one does nothing. Vault name in display ink over a mono
     // count line; the count line takes the condition word and its ink when
     // the Vault is not healthy (#116/#139's slot vocabulary reused verbatim).
+    // Drawn in screen space (#337) at `islandCaptionMetrics(k)`, which keeps
+    // them legible however far the field is zoomed out.
     if (islands.length > 0) {
-      ctx.save();
+      const caption = islandCaptionMetrics(k);
       ctx.textAlign = "center";
       ctx.textBaseline = "alphabetic";
       for (const island of islands) {
         const radius = islandRadii.get(island.vaultId) ?? 0;
-        const countY = island.cy - radius - ISLAND_CAPTION_GAP;
-        const nameY = countY - ISLAND_CAPTION_LINE_HEIGHT;
+        const sx = island.cx * k + x;
+        const countY = (island.cy - radius) * k + y - caption.gap;
+        const nameY = countY - caption.lineHeight;
+        if (countY < 0 || nameY - caption.nameSize > H || sx < -W || sx > W * 2)
+          continue;
 
-        ctx.font = '700 20px "Bricolage Grotesque", system-ui, sans-serif';
+        ctx.font = `700 ${caption.nameSize}px "Bricolage Grotesque", system-ui, sans-serif`;
         ctx.fillStyle = inkColor;
-        ctx.fillText(island.vaultName, island.cx, nameY);
+        ctx.fillText(island.vaultName, sx, nameY);
 
         // "49 notes", not a bare "49": the caption floats in open canvas with
         // no column header or neighbouring label to say what the figure counts,
         // unlike the sidebar slot this vocabulary came from, where the row it
-        // sits on supplies that. The condition word still replaces it outright.
-        const slot = island.slot;
-        const countLine =
-          slot.kind === "condition"
-            ? slot.word
-            : `${island.nodeCount} ${island.nodeCount === 1 ? "note" : "notes"}`;
-        const countColor =
-          slot.kind === "condition"
-            ? slot.tier === "error"
-              ? theme.err
-              : theme.warn
-            : mutedColor;
-        ctx.font = '500 13px "JetBrains Mono", "SF Mono", Menlo, monospace';
-        ctx.fillStyle = countColor;
-        ctx.fillText(countLine, island.cx, countY);
+        // sits on supplies that. A condition word, or `indexing` for a Vault
+        // whose index is still building, replaces it outright (#337).
+        const line = islandCountLine(island.slot, island.nodeCount);
+        ctx.font = `500 ${caption.countSize}px "JetBrains Mono", "SF Mono", Menlo, monospace`;
+        ctx.fillStyle =
+          line.tone === "error"
+            ? theme.err
+            : line.tone === "warn"
+              ? theme.warn
+              : mutedColor;
+        ctx.fillText(line.text, sx, countY);
       }
-      ctx.restore();
     }
 
-    ctx.restore();
     ctx.restore();
   }, []);
 
@@ -821,36 +765,15 @@ export function GraphPage() {
     let maxX = -Infinity;
     let maxY = -Infinity;
     for (const island of islands) {
-      let maxDist = 0;
-      for (const node of island.nodes) {
-        const dist =
-          Math.hypot(node.x - island.cx, node.y - island.cy) +
-          nodeRadius(node.backlink_count);
-        if (dist > maxDist) maxDist = dist;
-      }
-      const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
-      const captionHeight = ISLAND_CAPTION_GAP + ISLAND_CAPTION_LINE_HEIGHT * 2;
+      const radius = islandEnclosureRadius(island);
       minX = Math.min(minX, island.cx - radius);
       maxX = Math.max(maxX, island.cx + radius);
-      minY = Math.min(minY, island.cy - radius - captionHeight);
+      minY = Math.min(minY, island.cy - radius);
       maxY = Math.max(maxY, island.cy + radius);
     }
     if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
 
-    const pad = 32;
-    const spanX = Math.max(1, maxX - minX);
-    const spanY = Math.max(1, maxY - minY);
-    // Never zoom *in* past the single-graph landing scale: a lone small Vault
-    // should not arrive magnified just because it is the only thing on screen.
-    const k = Math.max(
-      0.1,
-      Math.min(0.9, (W - pad * 2) / spanX, (H - pad * 2) / spanY),
-    );
-    transformRef.current = {
-      x: W / 2 - ((minX + maxX) / 2) * k,
-      y: H / 2 - ((minY + maxY) / 2) * k,
-      k,
-    };
+    transformRef.current = fitIslandField({ minX, minY, maxX, maxY }, W, H);
     // The canvas-resize effect is declared after the simulation effect, so its
     // first pass would otherwise re-centre at a fixed zoom and undo this fit.
     viewInitialisedRef.current = true;
@@ -960,12 +883,16 @@ export function GraphPage() {
       },
     }));
 
-    // A note that left the graph can no longer be hovered or selected.
-    const liveKeys = new Set(nodes.map(nodeKey));
-    if (hoveredRef.current && !liveKeys.has(nodeKey(hoveredRef.current)))
-      hoveredRef.current = null;
-    if (selectedRef.current && !liveKeys.has(nodeKey(selectedRef.current)))
-      selectedRef.current = null;
+    // A note that left the graph can no longer be hovered or selected. One
+    // that stayed is carried over to its live node object, which the render
+    // pass and a tap on the selected note compare by identity (#337); a new
+    // layout builds new objects for the same notes. The bar also follows a
+    // rename.
+    const liveByKey = new Map(nodes.map((n) => [nodeKey(n), n]));
+    if (hoveredRef.current)
+      hoveredRef.current = liveByKey.get(nodeKey(hoveredRef.current)) ?? null;
+    if (selectedRef.current)
+      select(liveByKey.get(nodeKey(selectedRef.current)) ?? null);
 
     if (refresh && liveSim) {
       replaceSimulationGraph(liveSim, nodes, links);
@@ -1004,6 +931,7 @@ export function GraphPage() {
     vaultOrderKey,
     requestRender,
     fitIslandsToView,
+    select,
   ]);
 
   // The simulation outlives data refreshes, so it is stopped on unmount only.
@@ -1170,6 +1098,20 @@ export function GraphPage() {
     };
   }, [requestRender]);
 
+  // Label widths measured before the web fonts arrived are the fallback
+  // face's; measure again once they have (#337).
+  useEffect(() => {
+    let live = true;
+    void document.fonts?.ready.then(() => {
+      if (!live) return;
+      labelWidthsRef.current.clear();
+      requestRender();
+    });
+    return () => {
+      live = false;
+    };
+  }, [requestRender]);
+
   // Redraw when the tag filter changes (state only touches refs otherwise).
   useEffect(() => {
     requestRender();
@@ -1288,15 +1230,10 @@ export function GraphPage() {
           const node = dragRef.current.node;
           const key = nodeKey(node);
           if (lastClickKeyRef.current === key) {
-            void navigate(
-              `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`,
-            );
+            void navigate(notePath(node));
             lastClickKeyRef.current = null;
           } else {
-            selectedRef.current =
-              selectedRef.current && nodeKey(selectedRef.current) === key
-                ? null
-                : node;
+            select(selectedRef.current === node ? null : node);
             lastClickKeyRef.current = key;
             setTimeout(() => {
               if (lastClickKeyRef.current === key) {
@@ -1311,7 +1248,7 @@ export function GraphPage() {
         const movedX = Math.abs(cx - panRef.current.startX);
         const movedY = Math.abs(cy - panRef.current.startY);
         if (movedX < 4 && movedY < 4) {
-          selectedRef.current = null;
+          select(null);
           lastClickKeyRef.current = null;
         }
         releaseDrag();
@@ -1325,9 +1262,15 @@ export function GraphPage() {
       takeView();
       e.preventDefault();
       const { cx, cy } = getPos(e);
-      // Proportional factor: works naturally for both mouse wheels (~120/notch)
-      // and trackpad gestures (small continuous deltas).
-      const factor = Math.pow(0.999, e.deltaY);
+      // Proportional factor on a pixel-equivalent delta: Chromium reports a
+      // mouse-wheel notch as ~100-120 pixels, Firefox as 3 lines, a trackpad
+      // as small continuous pixel deltas (#337).
+      const delta = normalizeWheelDelta(
+        e.deltaY,
+        e.deltaMode,
+        canvas.clientHeight,
+      );
+      const factor = Math.pow(0.999, delta);
       const baseK = zoomAnimRef.current?.targetK ?? transformRef.current.k;
       const targetK = Math.max(0.1, Math.min(8, baseK * factor));
       zoomAnimRef.current = { targetK, cx, cy };
@@ -1380,7 +1323,7 @@ export function GraphPage() {
       if (e.touches.length === 1) {
         pinchRef.current = null;
         const { cx, cy } = getTouchPos(e.touches[0]);
-        const hit = hitTest(cx, cy);
+        const hit = hitTest(cx, cy, TOUCH_HIT_TARGET);
         if (hit) {
           dragRef.current = { node: hit, startX: cx, startY: cy };
         } else {
@@ -1470,24 +1413,15 @@ export function GraphPage() {
           Math.abs(cx - dragRef.current.startX) > 8 ||
           Math.abs(cy - dragRef.current.startY) > 8;
 
+        // A tap selects a note and a tap on the selected note opens it, with
+        // no time window (#337): a double-tap had to land twice on a ~5px
+        // target inside 500ms. The "Open note" bar offers the same step.
         if (!moved) {
           const node = dragRef.current.node;
-          const key = nodeKey(node);
-          if (lastClickKeyRef.current === key) {
-            void navigate(
-              `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`,
-            );
-            lastClickKeyRef.current = null;
+          if (selectedRef.current === node) {
+            void navigate(notePath(node));
           } else {
-            selectedRef.current =
-              selectedRef.current && nodeKey(selectedRef.current) === key
-                ? null
-                : node;
-            lastClickKeyRef.current = key;
-            setTimeout(() => {
-              if (lastClickKeyRef.current === key)
-                lastClickKeyRef.current = null;
-            }, 500);
+            select(node);
           }
         }
 
@@ -1497,7 +1431,7 @@ export function GraphPage() {
           Math.abs(cx - panRef.current.startX) > 8 ||
           Math.abs(cy - panRef.current.startY) > 8;
         if (!moved) {
-          selectedRef.current = null;
+          select(null);
           lastClickKeyRef.current = null;
         }
         releaseDrag();
@@ -1539,7 +1473,7 @@ export function GraphPage() {
       // Unmounting mid-gesture is an exit path too.
       releaseDrag();
     };
-  }, [hitTest, navigate, requestRender]);
+  }, [hitTest, navigate, requestRender, select]);
 
   // ── tag filter toggle ────────────────────────────────────────────────────────
 
@@ -1669,6 +1603,19 @@ export function GraphPage() {
 
       <div className="graph-canvas-wrap" ref={wrapRef}>
         <canvas ref={canvasRef} className="graph-canvas" />
+
+        {selectedNote && (
+          <div className="graph-selection">
+            <span className="graph-selection-title">{selectedNote.title}</span>
+            <UiButton
+              type="button"
+              className="graph-selection-open"
+              onClick={() => void navigate(notePath(selectedNote.node))}
+            >
+              Open note
+            </UiButton>
+          </div>
+        )}
 
         {effectiveLoading && (
           <div className="graph-overlay">

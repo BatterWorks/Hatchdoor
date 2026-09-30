@@ -7,7 +7,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import type { Simulation } from "d3-force";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setStoredScope } from "../../lib/storage";
@@ -803,5 +803,96 @@ describe("GraphPage — stability (#336)", () => {
         screen.queryByRole("heading", { name: "No Notes Yet" }),
       ).toBeNull();
     });
+  });
+});
+
+describe("GraphPage — opening a note on touch (#337)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn(() => 1),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.mocked(graphSimulation.createGraphSimulation).mockClear();
+    vi.mocked(graphSimulation.createIslandSimulation).mockClear();
+  });
+
+  afterEach(() => {
+    for (const sim of builtSimulations()) sim.stop();
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+  });
+
+  // One leaf note at world (0,0), which the page maps to canvas (0,0) here
+  // (jsdom lays nothing out), drawn about 3.6px across at the 0.9 landing
+  // zoom.
+  async function renderOneNode() {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    mockLiveCollection({
+      vaults: ONE_VAULT,
+      graphs: [graphFor(ONE_VAULT[0], 1)],
+    });
+    render(
+      <MemoryRouter initialEntries={["/graph"]}>
+        <Routes>
+          <Route path="/graph" element={<GraphPage />} />
+          <Route path="/v/:vaultId/n/:slug" element={<p>Opened the note</p>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(builtSimulations()).toHaveLength(1));
+  }
+
+  function tap(clientX: number, clientY: number) {
+    act(() => {
+      canvas().dispatchEvent(touchEvent("touchstart", [{ clientX, clientY }]));
+      canvas().dispatchEvent(
+        touchEvent("touchend", [], [{ clientX, clientY }]),
+      );
+    });
+  }
+
+  it("selects a leaf note with a tap 12px off its centre", async () => {
+    await renderOneNode();
+
+    tap(12, 0);
+
+    expect(screen.getByText("Note 0")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open note" })).toBeVisible();
+  });
+
+  it("opens the selected note with a second tap, however long after the first", async () => {
+    await renderOneNode();
+    tap(0, 0);
+    // Past the old 500ms double-tap window.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    tap(0, 0);
+
+    expect(await screen.findByText("Opened the note")).toBeVisible();
+  });
+
+  it("opens the selected note from the Open note button", async () => {
+    await renderOneNode();
+    tap(0, 0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open note" }));
+
+    expect(await screen.findByText("Opened the note")).toBeVisible();
+  });
+
+  it("clears the selection with a tap on open canvas", async () => {
+    await renderOneNode();
+    tap(0, 0);
+    expect(screen.getByRole("button", { name: "Open note" })).toBeVisible();
+
+    tap(200, 200);
+
+    expect(
+      screen.queryByRole("button", { name: "Open note" }),
+    ).not.toBeInTheDocument();
   });
 });

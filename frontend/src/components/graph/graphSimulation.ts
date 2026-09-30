@@ -17,6 +17,7 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 
+import type { VaultSlotState } from "../../app/vaultSlotLogic";
 import type { GraphData, VaultGraph, VaultId } from "../../types";
 
 export interface SimNode extends SimulationNodeDatum {
@@ -230,7 +231,9 @@ const ISLAND_MIN_RADIUS = 120;
 const ISLAND_RADIUS_PER_NODE = 46;
 /** Clear air between neighbouring enclosures. */
 const ISLAND_GUTTER = 48;
-/** Caption gap plus its two lines, mirrored from GraphPage's own constants. */
+/** Row space reserved above each enclosure for its caption. Captions are sized
+ * in screen pixels (`islandCaptionMetrics`, #337), so this is the full-size
+ * stack at 1x; zoomed well out, a caption may reach into the gutter above. */
 const ISLAND_CAPTION_HEADROOM = 46;
 
 /**
@@ -399,29 +402,451 @@ export function createIslandSimulation(
     .alphaDecay(0.02);
 }
 
+/** Hit-target sizing for `hitTest`, in screen (CSS) pixels. */
+export interface HitTarget {
+  /** Extra reach past a node's drawn edge. */
+  slackPx?: number;
+  /** Floor on the hit radius however small the node is drawn, so a leaf
+   * note stays grabbable when the view is zoomed out (#337). */
+  minRadiusPx?: number;
+}
+
+/** A finger covers far more than a cursor tip: at least a 28px target
+ * (radius 14), over the ~24 CSS px floor #337 asks for, and wider still around
+ * a node already drawn larger than that. */
+export const TOUCH_HIT_TARGET: HitTarget = { slackPx: 6, minRadiusPx: 14 };
+
+/** A node is never drawn smaller than this on screen (#337): the all-Vault fit
+ * can frame the field well below 1x, and a leaf note's world radius of 4 there
+ * became a sub-pixel dot. */
+export const NODE_MIN_SCREEN_RADIUS = 2;
+
+/** A node's drawn radius in screen pixels at zoom `k`. */
+export function nodeScreenRadius(backlinks: number, k: number): number {
+  return Math.max(nodeRadius(backlinks) * k, NODE_MIN_SCREEN_RADIUS);
+}
+
 /**
  * Return the closest node under a canvas point, or null. `cx`/`cy` are in
- * canvas pixels; they are mapped back into world space via `transform` before
- * the radius test (with a 2px slack to make small nodes easier to grab).
+ * canvas pixels. The test runs in screen space (#337): a node is hit within its
+ * drawn radius plus `slackPx`, or within `minRadiusPx` if that is larger, so
+ * the reach is the same number of CSS pixels at every zoom instead of
+ * shrinking with it. The mouse default is the drawn edge plus 2px.
  */
 export function hitTest(
   nodes: SimNode[],
   transform: Transform,
   cx: number,
   cy: number,
+  { slackPx = 2, minRadiusPx = 0 }: HitTarget = {},
 ): SimNode | null {
   const { x, y, k } = transform;
-  const wx = (cx - x) / k;
-  const wy = (cy - y) / k;
   let best: SimNode | null = null;
   let bestDist = Infinity;
   for (const node of nodes) {
-    const r = nodeRadius(node.backlink_count);
-    const d = Math.hypot(node.x - wx, node.y - wy);
-    if (d <= r + 2 && d < bestDist) {
+    const reach = Math.max(
+      nodeScreenRadius(node.backlink_count, k) + slackPx,
+      minRadiusPx,
+    );
+    const d = Math.hypot(node.x * k + x - cx, node.y * k + y - cy);
+    if (d <= reach && d < bestDist) {
       best = node;
       bestDist = d;
     }
   }
   return best;
+}
+
+// ── wheel zoom (#337) ───────────────────────────────────────────────────────
+
+/** Pixels one wheel "line" stands for. Firefox reports a mouse-wheel notch as
+ * three lines (`deltaMode` 1) where Chromium reports ~100-120 pixels, so 40
+ * puts a Firefox notch on a par with a Chromium one. */
+export const WHEEL_LINE_PX = 40;
+/** Cap on one wheel event's zoom, in pixel-equivalents: a page-mode delta must
+ * not cross the whole zoom range in one event. */
+export const WHEEL_MAX_DELTA_PX = 600;
+
+/**
+ * A wheel event's vertical delta in pixel-equivalents, whatever unit the
+ * browser reported it in (`deltaMode` 0 pixels, 1 lines, 2 pages), clamped
+ * to `WHEEL_MAX_DELTA_PX` either way.
+ */
+export function normalizeWheelDelta(
+  deltaY: number,
+  deltaMode: number,
+  pageHeightPx: number,
+): number {
+  const px =
+    deltaMode === 1
+      ? deltaY * WHEEL_LINE_PX
+      : deltaMode === 2
+        ? deltaY * (pageHeightPx > 0 ? pageHeightPx : 800)
+        : deltaY;
+  return Math.max(-WHEEL_MAX_DELTA_PX, Math.min(WHEEL_MAX_DELTA_PX, px));
+}
+
+// ── viewport culling and label placement (#337) ─────────────────────────────
+
+export interface WorldRect {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/** The world-space rectangle a `width` x `height` canvas shows under
+ * `transform`, grown by `marginPx` screen pixels on every side. */
+export function worldViewport(
+  transform: Transform,
+  width: number,
+  height: number,
+  marginPx = 0,
+): WorldRect {
+  const { x, y, k } = transform;
+  return {
+    minX: (-marginPx - x) / k,
+    minY: (-marginPx - y) / k,
+    maxX: (width + marginPx - x) / k,
+    maxY: (height + marginPx - y) / k,
+  };
+}
+
+/** Whether a circle of world radius `r` at (`px`, `py`) touches `view`. */
+export function circleInView(
+  view: WorldRect,
+  px: number,
+  py: number,
+  r: number,
+): boolean {
+  return (
+    px + r >= view.minX &&
+    px - r <= view.maxX &&
+    py + r >= view.minY &&
+    py - r <= view.maxY
+  );
+}
+
+/** Whether the segment's bounding box touches `view` — a cheap, conservative
+ * cull: it keeps a few edges that only pass near a corner. */
+export function segmentInView(
+  view: WorldRect,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): boolean {
+  return (
+    Math.max(ax, bx) >= view.minX &&
+    Math.min(ax, bx) <= view.maxX &&
+    Math.max(ay, by) >= view.minY &&
+    Math.min(ay, by) <= view.maxY
+  );
+}
+
+/** Label type, all in screen pixels: labels are drawn outside the zoom
+ * transform so they stay one size at every zoom. */
+export const LABEL_FONT_PX = 12;
+const LABEL_PAD_X = 5;
+const LABEL_PAD_Y = 3;
+const LABEL_GAP = 4;
+/** Clear air kept around every node circle so no label sits on one. */
+const LABEL_NODE_MARGIN = 4;
+/** Most labels one frame will try to place, beyond the hovered and selected
+ * node (#337). The pass used to consider every visible node, which past ~1.8x
+ * zoom was all of them, and compare each against every label placed before it:
+ * quadratic, every frame, for the whole settle. A screen holds far fewer
+ * legible labels than this anyway. */
+export const LABEL_BUDGET = 120;
+/** Side of one occupancy-grid cell, in screen pixels. */
+const LABEL_GRID_CELL = 48;
+const LABEL_MAX_CHARS = 28;
+
+/** The text a node's label shows: its title, cut at 28 characters. */
+export function labelText(title: string): string {
+  return title.length > LABEL_MAX_CHARS
+    ? title.slice(0, LABEL_MAX_CHARS - 2) + "…"
+    : title;
+}
+
+export interface LabelPlacement {
+  node: SimNode;
+  text: string;
+  /** Box in screen pixels. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Where the text is drawn: centred on `textX`, top at `textY`. */
+  textX: number;
+  textY: number;
+}
+
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  owner: SimNode;
+}
+
+/** Screen-space occupancy grid: a box is filed under every cell it covers, so
+ * a collision check reads only the few cells a candidate covers instead of
+ * every box placed so far. */
+class OccupancyGrid {
+  private cells = new Map<string, Box[]>();
+
+  private forEachCell(box: Omit<Box, "owner">, visit: (key: string) => void) {
+    const x0 = Math.floor(box.x / LABEL_GRID_CELL);
+    const x1 = Math.floor((box.x + box.w) / LABEL_GRID_CELL);
+    const y0 = Math.floor(box.y / LABEL_GRID_CELL);
+    const y1 = Math.floor((box.y + box.h) / LABEL_GRID_CELL);
+    for (let gx = x0; gx <= x1; gx++) {
+      for (let gy = y0; gy <= y1; gy++) visit(`${gx},${gy}`);
+    }
+  }
+
+  add(box: Box) {
+    this.forEachCell(box, (key) => {
+      const cell = this.cells.get(key);
+      if (cell) cell.push(box);
+      else this.cells.set(key, [box]);
+    });
+  }
+
+  collides(box: Box): boolean {
+    let hit = false;
+    this.forEachCell(box, (key) => {
+      if (hit) return;
+      for (const other of this.cells.get(key) ?? []) {
+        if (
+          other.owner !== box.owner &&
+          box.x < other.x + other.w &&
+          box.x + box.w > other.x &&
+          box.y < other.y + other.h &&
+          box.y + box.h > other.y
+        ) {
+          hit = true;
+          return;
+        }
+      }
+    });
+    return hit;
+  }
+}
+
+export interface LabelLayoutInput {
+  /** Nodes on screen that pass the tag filter — already culled to the view. */
+  nodes: SimNode[];
+  /** Always labelled, in this order, even over a collision: the hovered and
+   * the selected node. */
+  forced: SimNode[];
+  transform: Transform;
+  /** Backlink count at or above which a node is a hub: always a candidate,
+   * and labelled below itself even when every side collides. */
+  hubMinBacklinks: number;
+  /** Width in screen pixels of `text` set at `LABEL_FONT_PX`. The caller
+   * caches it; measuring text is the expensive part of a frame. */
+  measure: (text: string) => number;
+  budget?: number;
+}
+
+/**
+ * Choose which node labels to draw and where, in screen space: hovered and
+ * selected first, then hubs and nodes drawn large enough at this zoom, by
+ * backlink count, at most `budget` of them. Each tries below, above, right,
+ * then left of its node and takes the first spot clear of every node circle and
+ * every label already placed.
+ */
+export function layoutLabels({
+  nodes,
+  forced,
+  transform,
+  hubMinBacklinks,
+  measure,
+  budget = LABEL_BUDGET,
+}: LabelLayoutInput): LabelPlacement[] {
+  const { x, y, k } = transform;
+  const grid = new OccupancyGrid();
+  for (const n of nodes) {
+    const r = nodeScreenRadius(n.backlink_count, k) + LABEL_NODE_MARGIN;
+    grid.add({
+      x: n.x * k + x - r,
+      y: n.y * k + y - r,
+      w: r * 2,
+      h: r * 2,
+      owner: n,
+    });
+  }
+
+  // Zoom-adaptive pre-filter: only hubs when zoomed out, more as zoom grows.
+  const threshold = 10 / Math.sqrt(k);
+  const forcedSet = new Set(forced);
+  const ranked = nodes
+    .filter(
+      (n) =>
+        !forcedSet.has(n) &&
+        (n.backlink_count >= hubMinBacklinks ||
+          nodeRadius(n.backlink_count) * k >= threshold),
+    )
+    .sort((a, b) => b.backlink_count - a.backlink_count)
+    .slice(0, Math.max(0, budget));
+
+  const placements: LabelPlacement[] = [];
+  const height = LABEL_FONT_PX + LABEL_PAD_Y * 2;
+  for (const node of [...forced, ...ranked]) {
+    const text = labelText(node.title);
+    const width = measure(text) + LABEL_PAD_X * 2;
+    const r = nodeScreenRadius(node.backlink_count, k);
+    const sx = node.x * k + x;
+    const sy = node.y * k + y;
+    const spots = [
+      { x: sx - width / 2, y: sy + r + LABEL_GAP },
+      { x: sx - width / 2, y: sy - r - LABEL_GAP - height },
+      { x: sx + r + LABEL_GAP, y: sy - height / 2 },
+      { x: sx - r - LABEL_GAP - width, y: sy - height / 2 },
+    ];
+    const guaranteed =
+      forcedSet.has(node) || node.backlink_count >= hubMinBacklinks;
+    let chosen = guaranteed ? spots[0] : null;
+    for (const spot of spots) {
+      if (!grid.collides({ ...spot, w: width, h: height, owner: node })) {
+        chosen = spot;
+        break;
+      }
+    }
+    if (!chosen) continue;
+    grid.add({ ...chosen, w: width, h: height, owner: node });
+    placements.push({
+      node,
+      text,
+      x: chosen.x,
+      y: chosen.y,
+      width,
+      height,
+      textX: chosen.x + width / 2,
+      textY: chosen.y + LABEL_PAD_Y,
+    });
+  }
+  return placements;
+}
+
+/** Backlink count of the 90th-percentile node: every node at or above it is
+ * a hub and is always offered a label. */
+export function hubThreshold(nodes: SimNode[]): number {
+  const counts = nodes.map((n) => n.backlink_count).sort((a, b) => a - b);
+  return counts[Math.floor(counts.length * 0.9)] ?? 0;
+}
+
+// ── island captions (#337) ──────────────────────────────────────────────────
+
+export interface IslandCaptionMetrics {
+  /** Vault-name type size, px. */
+  nameSize: number;
+  /** Count-line type size, px. */
+  countSize: number;
+  /** Enclosure top to the count line's baseline. */
+  gap: number;
+  /** Count baseline to name baseline. */
+  lineHeight: number;
+  /** Whole stack above the enclosure, enclosure top to the name's cap. */
+  height: number;
+}
+
+/**
+ * Island caption type in screen pixels at zoom `k`. Captions are drawn outside
+ * the zoom transform (#337): drawn in world space they shrank with the fit, and
+ * the all-Vault landing view on a phone set the Vault name at about 4px. They
+ * still ease down as the view zooms out, so a caption does not swamp the
+ * island above it, but never below a legible floor, and never above the
+ * 20px/13px design size when zoomed in.
+ */
+export function islandCaptionMetrics(k: number): IslandCaptionMetrics {
+  const scale = (size: number, floor: number) =>
+    Math.max(floor, Math.min(size, size * k));
+  const nameSize = scale(20, 13);
+  const countSize = scale(13, 11);
+  const gap = scale(16, 6);
+  const lineHeight = countSize + nameSize * 0.55;
+  return {
+    nameSize,
+    countSize,
+    gap,
+    lineHeight,
+    height: gap + lineHeight + nameSize,
+  };
+}
+
+export interface IslandCountLine {
+  text: string;
+  /** Which ink the line takes: the muted count ink, or a condition tier's. */
+  tone: "muted" | "warn" | "error";
+}
+
+/**
+ * An island caption's second line (#143, #337): `49 notes` for a Vault that
+ * is answering normally, the condition word for one that is not, and
+ * `indexing` in warn ink for a Vault whose index is building or has never been
+ * built. The last case used to fall through to the count, so a Vault mid-build
+ * read `0 notes` — the same caption a genuinely empty Vault gets.
+ */
+export function islandCountLine(
+  slot: VaultSlotState,
+  nodeCount: number,
+): IslandCountLine {
+  if (slot.kind === "condition") {
+    return { text: slot.word, tone: slot.tier };
+  }
+  if (slot.kind === "indexing") {
+    return { text: "indexing", tone: "warn" };
+  }
+  return {
+    text: `${nodeCount} ${nodeCount === 1 ? "note" : "notes"}`,
+    tone: "muted",
+  };
+}
+
+/** Smallest zoom the all-Vault landing fit frames the field at (#337). A
+ * 390px phone framed three small Vaults at about 0.22, and eight or more well
+ * below that: a field of dots. Past this floor the reader pans instead. */
+export const ISLAND_FIT_MIN_SCALE = 0.2;
+/** The fit never zooms in past the single-graph landing scale: a lone small
+ * Vault should not arrive magnified just because it is the only thing on
+ * screen. */
+export const ISLAND_FIT_MAX_SCALE = 0.9;
+const ISLAND_FIT_PAD = 32;
+
+/**
+ * The transform that frames every island's enclosure (`bounds`, world units)
+ * plus the caption stack above the top row in a `width` x `height` canvas.
+ * Captions are sized in screen pixels (`islandCaptionMetrics`), so their
+ * headroom is reserved in pixels. Its height depends on the zoom being chosen,
+ * so the fit runs at the design size first and again at the size that zoom
+ * gives.
+ */
+export function fitIslandField(
+  bounds: WorldRect,
+  width: number,
+  height: number,
+): Transform {
+  const spanX = Math.max(1, bounds.maxX - bounds.minX);
+  const spanY = Math.max(1, bounds.maxY - bounds.minY);
+  const fitFor = (captionPx: number) =>
+    Math.max(
+      ISLAND_FIT_MIN_SCALE,
+      Math.min(
+        ISLAND_FIT_MAX_SCALE,
+        (width - ISLAND_FIT_PAD * 2) / spanX,
+        (height - ISLAND_FIT_PAD * 2 - captionPx) / spanY,
+      ),
+    );
+  const k = fitFor(
+    islandCaptionMetrics(fitFor(islandCaptionMetrics(1).height)).height,
+  );
+  const captionWorld = islandCaptionMetrics(k).height / k;
+  return {
+    x: width / 2 - ((bounds.minX + bounds.maxX) / 2) * k,
+    y: height / 2 - ((bounds.minY - captionWorld + bounds.maxY) / 2) * k,
+    k,
+  };
 }

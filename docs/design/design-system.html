@@ -2962,7 +2962,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       the simulation warm for about six seconds, and a view that jumps that long after you arrive reads
       as the page glitching. It stops the moment the layout cools <i>or</i> the reader pans, zooms or
       touches the canvas &mdash; an auto-fit that fights a deliberate pan is worse than none. Zoom is
-      capped at the single-graph landing scale, so a lone small Vault never arrives magnified.</p>
+      capped at the single-graph landing scale, so a lone small Vault never arrives magnified, and
+      floored at 0.2: below that a phone framed a field of dots, so past it the reader pans instead
+      (#337). A node is never drawn with a radius under 2px, for the same reason.</p>
 
       <div class="stage island-demo">
         <div class="island-demo-item">
@@ -3001,8 +3003,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <table class="token-table">
         <thead><tr><th>primitive</th><th>drawn</th><th>reads</th></tr></thead>
         <tbody>
-          <tr><td class="name">Island caption</td><td class="val">canvas space, scaled with zoom (not screen-constant like a node label)</td><td class="val">Vault name in display ink at 20px, over a 13px mono count line &mdash; <code>42 notes</code> when healthy (singular <code>1 note</code>), or the §27 condition word and ink when not. Inert: it neither narrows scope nor zooms to fit</td></tr>
+          <tr><td class="name">Island caption</td><td class="val">screen space above the enclosure: 20px/13px at 1x and closer, easing down with the zoom to a 13px/11px floor (#337) &mdash; drawn in canvas space it fell to about 4px on a phone's landing view</td><td class="val">Vault name in display ink over a mono count line &mdash; <code>42 notes</code> when healthy (singular <code>1 note</code>), the §27 condition word and ink when not, or <code>indexing</code> in warn ink while the Vault's index is building or has never been built, so a Vault mid-build never reads <code>0 notes</code>. Inert: it neither narrows scope nor zooms to fit</td></tr>
           <tr><td class="name">Island enclosure</td><td class="val">dashed circle, token rule colour</td><td class="val">the component's settled layout radius plus a margin &mdash; marks where one Vault ends without implying a container the data model doesn't have</td></tr>
+          <tr><td class="name">Selection bar</td><td class="val">DOM, pinned to the foot of the canvas, <span class="key">--paper</span> on a <span class="key">--rule</span> border</td><td class="val">the selected note's title and a default <span class="key">.ui-button</span> <code>Open note</code> (#337). The canvas's own route to a note, a double-click or a second tap on a small target, is not something a phone can rely on; this is. On touch a tap selects a note and a tap on the selected note opens it, with no time window, and a finger's hit target is at least 28px across</td></tr>
           <tr><td class="name">Not-drawn line</td><td class="val">DOM, one line under the header</td><td class="val">names every Vault that contributed no island (it could not answer), always in warn ink regardless of that Vault's own condition tier: <code>Field Station could not be drawn.</code></td></tr>
         </tbody>
       </table>
