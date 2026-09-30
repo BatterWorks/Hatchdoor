@@ -3053,6 +3053,9 @@ from `VaultSummary`'s status fields alone — no new endpoint.
 `NotePage.tsx` (#141) to detect a write-blocking Git condition on the open
 note's own Vault; this is a deliberate cross-capability import of one pure
 function rather than a duplicated copy of the condition vocabulary.
+`lib/storage.ts`'s `isEditableTarget` is imported by `NotePage.tsx` on the
+same terms (#331), so document-level undo recognises editable targets with the
+shell's own keyboard-shortcut test.
 Note counts reach the slot from the
 collection client, which reads them at `"all"` scope independently of the
 browsing scope and refreshes them on the collection revision. The topbar's `Tree Stale` badge is deleted (#139) with
@@ -3642,8 +3645,11 @@ existing generic `onWriteNotice` fallback.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, note editing (including its held-draft recovery
-model, #151), and `app/vaultSlotLogic.ts`'s `deriveVaultSlot` (Application
-shell and navigation).
+model, #151), `app/vaultSlotLogic.ts`'s `deriveVaultSlot` (Application
+shell and navigation), and `lib/storage.ts`'s `isEditableTarget` (Application
+shell and navigation, #331), which `NotePage`'s document-level undo listener
+uses to leave Ctrl/Cmd+Z and Y typed into inputs, textareas and
+contenteditables outside the open block to the browser.
 
 **Coordination paths:** `App.tsx`, `types.ts`, `app/vaultSlotLogic.ts`,
 note/link/resolve/download handlers, `NoteEditor.tsx`,
@@ -3709,7 +3715,9 @@ validation, upload normalization, frontmatter editing, conflict display,
 wikilink autocomplete, inline block editing (the editor provider/context, the
 per-block wrapper, the CodeMirror block input and its markdown syntax
 highlighting, click-to-write in the space between blocks, structural block
-operations, document-level undo, autosave scheduling and save state), line
+operations, document-level undo, which ignores Ctrl/Cmd+Z and Y aimed at an
+editable target outside `.block-input` (#331), autosave scheduling and save
+state), line
 mapping between rendered nodes and file lines, and attachment acceptance and
 insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
