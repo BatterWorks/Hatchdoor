@@ -28,7 +28,7 @@ function vault(id: string, name: string): VaultSummary {
     search: "ready",
     git: "disabled",
     watcher: "running",
-    capabilities: {} as VaultSummary["capabilities"],
+    capabilities: { mutate: true } as VaultSummary["capabilities"],
   } as VaultSummary;
 }
 
@@ -195,5 +195,56 @@ describe("UnsavedDrafts (#151)", () => {
 
     expect(screen.getByLabelText("Destination Vault")).toHaveValue("");
     expect(screen.getByRole("button", { name: "Restore" })).toBeDisabled();
+  });
+
+  it("offers only Vaults that can take the draft, naming why the others cannot (#338)", () => {
+    const readOnly = {
+      ...vault("vault-2", "Beta"),
+      local_content: "read_only",
+      capabilities: { mutate: false } as VaultSummary["capabilities"],
+    } as VaultSummary;
+    const down = {
+      ...vault("vault-3", "Gamma"),
+      activation: "unavailable",
+      local_content: "unavailable",
+      capabilities: { mutate: false } as VaultSummary["capabilities"],
+    } as VaultSummary;
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[noteDraft]}
+          vaults={[vault("vault-1", "Alpha"), readOnly, down]}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    // The one writable Vault is the only real choice, so it is pre-filled.
+    expect(screen.getByLabelText("Destination Vault")).toHaveValue("vault-1");
+    expect(screen.getByRole("option", { name: "Alpha" })).toBeEnabled();
+    expect(
+      screen.getByRole("option", { name: "Beta (read-only)" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("option", { name: "Gamma (unavailable)" }),
+    ).toBeDisabled();
+  });
+
+  it("says a Vault is not answering rather than asking for a retry that cannot work (#338)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "vault_unavailable" }, 503),
+    );
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[noteDraft]}
+          vaults={[vault("vault-1", "Alpha")]}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(await screen.findByText(/not answering right now/)).toBeVisible();
   });
 });

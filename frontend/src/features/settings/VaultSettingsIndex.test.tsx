@@ -590,7 +590,8 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
     fireEvent.click(await screen.findByRole("button", { name: "Go ahead" }));
 
-    await screen.findByRole("alert");
+    // The failure notice and the red-line recovery state are both alerts.
+    expect(await screen.findAllByRole("alert")).toHaveLength(2);
     expect(isRecoveryPending(VAULT_ID)).toBe(true);
     expect(
       screen.getByRole("button", { name: "Try to bring this Vault back" }),
@@ -1357,5 +1358,274 @@ describe("VaultSettingsDetail — the note count in the blurb (#333)", () => {
     expect(marker).toHaveTextContent("–");
     expect(marker.parentElement).toHaveTextContent(/– notes/);
     expect(screen.queryByText(/\b0 notes\b/)).not.toBeInTheDocument();
+  });
+});
+
+describe("VaultSettingsDetail — a registry that moved elsewhere (#338)", () => {
+  const conflict = (expected: unknown, current: number) =>
+    new Response(
+      JSON.stringify({
+        code: "registry_revision_conflict",
+        message: `expected registry revision ${String(expected)}, current revision is ${current}`,
+        retryable: true,
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+
+  /** A registry whose revision a test can move, as another tab or an MCP
+   * agent would, with every guarded route refusing a stale revision the way
+   * `src/vault_management.rs` does. */
+  function mockMovingRegistry(
+    onPatch?: (body: Record<string, unknown>) => void,
+  ) {
+    const registry = { revision: 3 };
+    const vault = baseVault({ type: "local", path: "/notes" });
+    const expectedFrom = (init: RequestInit | undefined, url: string) =>
+      init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+            .expected_registry_revision
+        : Number(
+            new URL(url, "http://x").searchParams.get(
+              "expected_registry_revision",
+            ),
+          );
+    const calls: string[] = [];
+    mockedApiFetch.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${url}`);
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      if (url.startsWith(`/api/v1/vaults/${VAULT_ID}/recent`))
+        return json({ data: [] });
+      if (url === "/api/v1/vaults" && method === "GET")
+        return json({
+          registry_revision: registry.revision,
+          collection_revision: registry.revision,
+          vaults: [vault],
+          demo_mode: false,
+        });
+      if (url.startsWith(`/api/v1/vaults/${VAULT_ID}`) && method !== "GET") {
+        const expected = expectedFrom(init, url);
+        if (expected !== registry.revision)
+          return conflict(expected, registry.revision);
+        if (method === "PATCH")
+          onPatch?.(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        registry.revision += 1;
+        return json({
+          vault: {
+            ...vault,
+            enabled: !url.includes("/disable"),
+          },
+          registry_revision: registry.revision,
+          collection_revision: registry.revision,
+        });
+      }
+      throw new Error(`Unexpected API request: ${method} ${url}`);
+    });
+    return { registry, calls };
+  }
+
+  function renderDetail() {
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+  }
+
+  it("pauses against the revision current at the click, not the one the page opened with", async () => {
+    const { registry, calls } = mockMovingRegistry();
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    registry.revision = 7; // another tab edited a different Vault
+    fireEvent.click(screen.getByRole("button", { name: "Pause Vault" }));
+
+    await screen.findByText("Saved.");
+    expect(calls).toContain(
+      `POST /api/v1/vaults/${VAULT_ID}/disable?expected_registry_revision=7`,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("says a Save conflict in words, as an alert, and lets the next Save through", async () => {
+    let patched: Record<string, unknown> | undefined;
+    const { registry } = mockMovingRegistry((body) => (patched = body));
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    registry.revision = 7;
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/changed elsewhere/);
+    expect(alert).not.toHaveTextContent(/registry revision/);
+    expect(patched).toBeUndefined();
+    // The typed edit survives the refusal.
+    expect(screen.getByLabelText("Vault name")).toHaveValue("Renamed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+    await screen.findByText("Saved.");
+    expect(patched?.expected_registry_revision).toBe(7);
+    expect(patched?.name).toBe("Renamed");
+  });
+});
+
+describe("VaultSettingsDetail — a Git behaviour switch clears what leaves the screen (#338)", () => {
+  const twoWay = {
+    type: "existing_git",
+    repository_path: "/notes",
+    repository_url: "https://example.test/notes.git",
+    branch: "main",
+    mode: "two_way",
+    poll_interval_secs: 3600,
+  };
+
+  it("never sends a token typed for a remote behaviour once the choice has no remote", async () => {
+    let patched: Record<string, unknown> | undefined;
+    mockDetail(baseVault(twoWay, { credential_configured: true }), {
+      onPatch: (body) => (patched = body),
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.change(screen.getByLabelText("Repository access token"), {
+      target: { value: "s3cr3t" },
+    });
+    fireEvent.change(screen.getByLabelText("Sync schedule in minutes"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    expect(
+      screen.queryByLabelText("Repository access token"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+
+    await screen.findByText("Saved.");
+    expect(patched?.https_credentials).toEqual({ action: "remove" });
+    expect(JSON.stringify(patched)).not.toContain("s3cr3t");
+    expect(
+      (patched?.source as { poll_interval_secs?: number }).poll_interval_secs,
+    ).toBe(3600);
+  });
+
+  it("brings the saved sign-in back, with an empty token field, when the choice returns to a remote", async () => {
+    mockDetail(baseVault(twoWay, { credential_configured: true }));
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.change(screen.getByLabelText("Repository access token"), {
+      target: { value: "s3cr3t" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    fireEvent.click(screen.getByRole("button", { name: "Two-way" }));
+
+    expect(screen.getByLabelText("Repository access token")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "Access token" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("VaultSettingsDetail — the last change in the blurb (#338)", () => {
+  it("never prints the previous Vault's date under a Vault whose read was refused", async () => {
+    const OTHER_ID = "00000000-0000-4000-8000-000000000002";
+    const first = baseVault({ type: "local", path: "/notes" });
+    const second = {
+      ...baseVault({ type: "local", path: "/other" }),
+      vault_id: OTHER_ID,
+      name: "Other notes",
+      search: "indexing",
+    };
+    mockedApiFetch.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      if (url === `/api/v1/vaults/${VAULT_ID}/recent?limit=1`)
+        return json({ data: [{ mtime_ns: Date.UTC(2020, 0, 15) * 1e6 }] });
+      if (url === `/api/v1/vaults/${OTHER_ID}/recent?limit=1`)
+        return new Response("{}", { status: 503 });
+      if (url === "/api/v1/vaults")
+        return json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [first, second],
+          demo_mode: false,
+        });
+      throw new Error(`Unexpected API request: ${url}`);
+    });
+
+    const { rerender } = render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByText(/changed \d/);
+
+    rerender(
+      <VaultSettingsDetail
+        vaultId={OTHER_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByText(/last change unavailable/);
+    expect(screen.queryByText(/changed \d/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Settings modals (#338)", () => {
+  it("focuses the confirmation, keeps Tab inside it, and closes it on Escape", async () => {
+    mockDetail(baseVault({ type: "local", path: "/notes" }));
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    const save = screen.getByRole("button", { name: "Save Vault" });
+    save.focus();
+    fireEvent.click(save);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Before this is saved",
+    });
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    const goAhead = within(dialog).getByRole("button", { name: "Go ahead" });
+    expect(cancel).toHaveFocus();
+
+    goAhead.focus();
+    fireEvent.keyDown(goAhead, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: "Tab", shiftKey: true });
+    expect(goAhead).toHaveFocus();
+
+    fireEvent.keyDown(goAhead, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: "Before this is saved" }),
+    ).not.toBeInTheDocument();
+    expect(save).toHaveFocus();
   });
 });

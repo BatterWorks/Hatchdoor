@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 
+import { SettingsModal } from "./SettingsModal";
 import type { GitBehavior } from "./vaultGitBehavior";
 import {
   behaviorOptions,
@@ -159,230 +160,228 @@ export function VaultCreationDialog({
   };
 
   return (
-    <div className="settings-modal-back">
-      <div
-        className="settings-modal settings-modal-form"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Add a Vault"
-      >
-        <h3>Add a Vault</h3>
+    <SettingsModal
+      label="Add a Vault"
+      className="settings-modal-form"
+      onClose={onClose}
+      closeDisabled={submitting}
+    >
+      <h3>Add a Vault</h3>
 
-        <label className="settings-row">
-          <span>
-            <span className="settings-row-label">Name</span>
-          </span>
-          <input
-            className="settings-input"
-            aria-label="Vault name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
+      <label className="settings-row">
+        <span>
+          <span className="settings-row-label">Name</span>
+        </span>
+        <input
+          className="settings-input"
+          aria-label="Vault name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+      </label>
 
-        <label className="settings-row">
-          <span>
-            <span className="settings-row-label">
-              Ignore these files and folders
-            </span>
-            <span className="settings-row-help">
-              Comma-separated patterns left out of this Vault’s search.
-            </span>
+      <label className="settings-row">
+        <span>
+          <span className="settings-row-label">
+            Ignore these files and folders
           </span>
-          <input
-            className="settings-input"
-            aria-label="Ignore these files and folders"
-            value={excludeDraft}
-            onChange={(event) => setExcludeDraft(event.target.value)}
-          />
-        </label>
+          <span className="settings-row-help">
+            Comma-separated patterns left out of this Vault’s search.
+          </span>
+        </span>
+        <input
+          className="settings-input"
+          aria-label="Ignore these files and folders"
+          value={excludeDraft}
+          onChange={(event) => setExcludeDraft(event.target.value)}
+        />
+      </label>
 
-        <div className="settings-row">
-          <span>
-            <span className="settings-row-label">Where is this Vault?</span>
-          </span>
-          <div
-            className="settings-segmented"
-            role="group"
-            aria-label="Where is this Vault?"
-          >
-            {(Object.keys(KIND_LABEL) as CreateVaultKind[]).map((item) => (
-              <button
-                key={item}
-                type="button"
-                aria-pressed={kind === item}
-                onClick={() => selectKind(item)}
-              >
-                {KIND_LABEL[item]}
-              </button>
-            ))}
-          </div>
+      <div className="settings-row">
+        <span>
+          <span className="settings-row-label">Where is this Vault?</span>
+        </span>
+        <div
+          className="settings-segmented"
+          role="group"
+          aria-label="Where is this Vault?"
+        >
+          {(Object.keys(KIND_LABEL) as CreateVaultKind[]).map((item) => (
+            <button
+              key={item}
+              type="button"
+              aria-pressed={kind === item}
+              onClick={() => selectKind(item)}
+            >
+              {KIND_LABEL[item]}
+            </button>
+          ))}
         </div>
+      </div>
 
-        {kind === "own" ? (
+      {kind === "own" ? (
+        <label className="settings-row">
+          <span>
+            <span className="settings-row-label">Folder path</span>
+            <span className="settings-row-help">
+              A folder already on this server.
+            </span>
+          </span>
+          <input
+            className="settings-input"
+            aria-label="Folder path"
+            value={pathDraft}
+            onChange={(event) => setPathDraft(event.target.value)}
+          />
+        </label>
+      ) : null}
+
+      <div className="settings-row">
+        <span>
+          <span className="settings-row-label">Git behaviour</span>
+        </span>
+        <div
+          className="settings-segmented"
+          role="group"
+          aria-label="Git behaviour"
+        >
+          {behaviorOpts.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={behavior === item.id}
+              onClick={() => selectBehavior(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {remoteBacked ? (
+        <>
           <label className="settings-row">
             <span>
-              <span className="settings-row-label">Folder path</span>
-              <span className="settings-row-help">
-                A folder already on this server.
+              <span className="settings-row-label">Repository URL</span>
+            </span>
+            <input
+              className="settings-input"
+              aria-label="Repository URL"
+              value={repoUrlDraft}
+              onChange={(event) => setRepoUrlDraft(event.target.value)}
+            />
+          </label>
+          <label className="settings-row">
+            <span>
+              <span className="settings-row-label">Branch (optional)</span>
+            </span>
+            <input
+              className="settings-input"
+              aria-label="Branch"
+              value={branchDraft}
+              onChange={(event) => setBranchDraft(event.target.value)}
+            />
+          </label>
+          <label className="settings-row">
+            <span>
+              <span className="settings-row-label">
+                Folder within the repository (optional)
               </span>
             </span>
             <input
               className="settings-input"
-              aria-label="Folder path"
-              value={pathDraft}
-              onChange={(event) => setPathDraft(event.target.value)}
+              aria-label="Folder within the repository"
+              value={subdirDraft}
+              onChange={(event) => setSubdirDraft(event.target.value)}
             />
           </label>
-        ) : null}
-
-        <div className="settings-row">
-          <span>
-            <span className="settings-row-label">Git behaviour</span>
-          </span>
-          <div
-            className="settings-segmented"
-            role="group"
-            aria-label="Git behaviour"
-          >
-            {behaviorOpts.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                aria-pressed={behavior === item.id}
-                onClick={() => selectBehavior(item.id)}
+          <div className="settings-row">
+            <span>
+              <span className="settings-row-label">Sign-in</span>
+            </span>
+            <div className="settings-choice-stack">
+              <div
+                className="settings-segmented"
+                role="group"
+                aria-label="Sign-in"
               >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {remoteBacked ? (
-          <>
-            <label className="settings-row">
-              <span>
-                <span className="settings-row-label">Repository URL</span>
-              </span>
-              <input
-                className="settings-input"
-                aria-label="Repository URL"
-                value={repoUrlDraft}
-                onChange={(event) => setRepoUrlDraft(event.target.value)}
-              />
-            </label>
-            <label className="settings-row">
-              <span>
-                <span className="settings-row-label">Branch (optional)</span>
-              </span>
-              <input
-                className="settings-input"
-                aria-label="Branch"
-                value={branchDraft}
-                onChange={(event) => setBranchDraft(event.target.value)}
-              />
-            </label>
-            <label className="settings-row">
-              <span>
-                <span className="settings-row-label">
-                  Folder within the repository (optional)
-                </span>
-              </span>
-              <input
-                className="settings-input"
-                aria-label="Folder within the repository"
-                value={subdirDraft}
-                onChange={(event) => setSubdirDraft(event.target.value)}
-              />
-            </label>
-            <div className="settings-row">
-              <span>
-                <span className="settings-row-label">Sign-in</span>
-              </span>
-              <div className="settings-choice-stack">
-                <div
-                  className="settings-segmented"
-                  role="group"
-                  aria-label="Sign-in"
+                <button
+                  type="button"
+                  aria-pressed={signIn === "none"}
+                  onClick={() => {
+                    setSignIn("none");
+                    setCredToken("");
+                  }}
                 >
-                  <button
-                    type="button"
-                    aria-pressed={signIn === "none"}
-                    onClick={() => {
-                      setSignIn("none");
-                      setCredToken("");
-                    }}
-                  >
-                    No sign-in
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={signIn === "token"}
-                    onClick={() => setSignIn("token")}
-                  >
-                    Access token
-                  </button>
-                </div>
-                {signIn === "token" ? (
-                  <input
-                    className="settings-input"
-                    type="password"
-                    aria-label="Repository access token"
-                    value={credToken}
-                    onChange={(event) => setCredToken(event.target.value)}
-                  />
-                ) : null}
+                  No sign-in
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={signIn === "token"}
+                  onClick={() => setSignIn("token")}
+                >
+                  Access token
+                </button>
               </div>
-            </div>
-            <div className="settings-row">
-              <span>
-                <span className="settings-row-label">Sync schedule</span>
-                <span className="settings-row-help">
-                  Hatchdoor has no way to be told when something is pushed, so
-                  it checks on this schedule.
-                </span>
-              </span>
-              <div className="settings-inline">
+              {signIn === "token" ? (
                 <input
-                  className="settings-input settings-input-short"
-                  type="number"
-                  min={MIN_POLL_MINUTES}
-                  max={MAX_POLL_MINUTES}
-                  aria-label="Sync schedule in minutes"
-                  value={pollMinutesDraft}
-                  onChange={(event) => setPollMinutesDraft(event.target.value)}
+                  className="settings-input"
+                  type="password"
+                  aria-label="Repository access token"
+                  value={credToken}
+                  onChange={(event) => setCredToken(event.target.value)}
                 />
-                <span className="settings-unit">minutes</span>
-              </div>
+              ) : null}
             </div>
-          </>
-        ) : null}
-
-        {error ? (
-          <div className="settings-notice settings-notice-err" role="alert">
-            {error}
           </div>
-        ) : null}
+          <div className="settings-row">
+            <span>
+              <span className="settings-row-label">Sync schedule</span>
+              <span className="settings-row-help">
+                Hatchdoor has no way to be told when something is pushed, so it
+                checks on this schedule.
+              </span>
+            </span>
+            <div className="settings-inline">
+              <input
+                className="settings-input settings-input-short"
+                type="number"
+                min={MIN_POLL_MINUTES}
+                max={MAX_POLL_MINUTES}
+                aria-label="Sync schedule in minutes"
+                value={pollMinutesDraft}
+                onChange={(event) => setPollMinutesDraft(event.target.value)}
+              />
+              <span className="settings-unit">minutes</span>
+            </div>
+          </div>
+        </>
+      ) : null}
 
-        <div className="settings-modal-actions">
-          <button
-            type="button"
-            className="settings-btn"
-            onClick={onClose}
-            disabled={submitting}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="settings-btn settings-btn-hot"
-            onClick={() => void handleSubmit()}
-            disabled={submitting}
-          >
-            {submitting ? "Creating…" : "Create Vault"}
-          </button>
+      {error ? (
+        <div className="settings-notice settings-notice-err" role="alert">
+          {error}
         </div>
+      ) : null}
+
+      <div className="settings-modal-actions">
+        <button
+          type="button"
+          className="settings-btn"
+          onClick={onClose}
+          disabled={submitting}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="settings-btn settings-btn-hot"
+          onClick={() => void handleSubmit()}
+          disabled={submitting}
+        >
+          {submitting ? "Creating…" : "Create Vault"}
+        </button>
       </div>
-    </div>
+    </SettingsModal>
   );
 }

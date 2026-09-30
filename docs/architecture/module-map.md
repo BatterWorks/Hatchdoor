@@ -3974,6 +3974,7 @@ route tests, and full frontend checks.
 - `frontend/src/features/settings/UnsavedDrafts.tsx`
 - `frontend/src/features/settings/UnsavedDrafts.test.tsx`
 - `frontend/src/features/settings/relativeTime.ts`
+- `frontend/src/features/settings/SettingsModal.tsx`
 - `frontend/src/features/settings/settings.css`
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
@@ -4132,6 +4133,25 @@ last note opened, unfolded explorer folders, explorer scroll position; six
 Vault-agnostic preferences are left untouched) both run once, synchronously,
 in `main.tsx` before the app ever renders, so every component's first read
 already reflects them.
+
+`SettingsModal.tsx` (#338) is the one shell all three Settings modals render
+through (Vault creation, the identity-change confirmation, the reindex
+confirmation): it moves focus into the dialog on open, keeps Tab inside it,
+closes on Escape (held while the dialog's own Cancel is disabled), and
+returns focus to the opener, the same contract `NoteActionsDialog.tsx` keeps
+for its own dialogs. A Vault's own page (#338) reads the registry revision
+fresh at the click for Pause, Resume and Disconnect, which carry no form
+fields; a Save and the identity round trip's pause step are checked against
+the revision the form was based on, and a `registry_revision_conflict`
+re-reads it and asks for the Save again in plain words (an alert, never the
+server's diagnostic string) rather than re-sending the stale number. A Git
+behaviour switch returns whatever it takes off the screen (typed token,
+sign-in choice, schedule, and for No Git the repository fields) to its saved
+value, and a behaviour without a remote always sends `https_credentials`
+`remove`. Each instance section's Save and Discard touch only that
+section's drafts. The unsaved-drafts destination picker disables, and names
+the reason for, every Vault whose `capabilities.mutate` is false or that is
+paused or unavailable.
 
 Out of this page's scope: giving a Vault a source it did not start with (its
 first repository, i.e. a Local Vault becoming `managed_git`, or a bare

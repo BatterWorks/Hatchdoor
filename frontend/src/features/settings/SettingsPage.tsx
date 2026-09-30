@@ -16,6 +16,7 @@ import {
   listHeldDrafts,
   type HeldDraft,
 } from "../../lib/writeDrafts";
+import { SettingsModal } from "./SettingsModal";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
@@ -406,13 +407,25 @@ export function SettingsPage({
     setDrafts((old) => ({ ...old, [key]: value }));
   };
 
+  // Discard and a successful save are scoped to the keys they were about, not
+  // the whole page: `drafts` spans every section, and the buttons that act on
+  // it name one (#338). Discard drops every key the active section owns, shown
+  // or not, so a field hidden by the Git mode does not survive it.
+  const withoutKeys = <T,>(record: Record<string, T>, keys: Set<string>) =>
+    Object.fromEntries(
+      Object.entries(record).filter(([key]) => !keys.has(key)),
+    );
+
   const discard = () => {
-    setDrafts({});
-    setErrors({});
+    const sectionKeys = new Set(
+      Object.keys(drafts).filter((key) => COPY[key]?.section === active),
+    );
+    setDrafts((old) => withoutKeys(old, sectionKeys));
+    setErrors((old) => withoutKeys(old, sectionKeys));
     setBanner(null);
     setBusy(null);
     setSaved(null);
-    setReplacing({});
+    setReplacing((old) => withoutKeys(old, sectionKeys));
   };
 
   const send = async (
@@ -470,10 +483,11 @@ export function SettingsPage({
         );
         return;
       }
+      const sentKeys = new Set(Object.keys(updates));
       setSettings(payload.settings ?? settings);
-      setDrafts({});
-      setRevealed({});
-      setReplacing({});
+      setDrafts((old) => withoutKeys(old, sentKeys));
+      setRevealed((old) => withoutKeys(old, sentKeys));
+      setReplacing((old) => withoutKeys(old, sentKeys));
       setSaved("Saved");
     } catch {
       setBanner("Settings could not be saved. Try again.");
@@ -948,40 +962,36 @@ export function SettingsPage({
       </div>
 
       {confirmation ? (
-        <div className="settings-modal-back">
-          <div
-            className="settings-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Before this is saved"
-          >
-            <h3>Before this is saved</h3>
-            <p>{CONSEQUENCE_COPY[confirmation.consequence]}</p>
-            <div className="settings-modal-actions">
-              <button
-                type="button"
-                className="settings-btn"
-                onClick={() => setConfirmation(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="settings-btn settings-btn-hot"
-                onClick={() => {
-                  const pending = confirmation;
-                  setConfirmation(null);
-                  void send(pending.updates, [
-                    ...pending.confirm,
-                    pending.consequence,
-                  ]);
-                }}
-              >
-                Go ahead
-              </button>
-            </div>
+        <SettingsModal
+          label="Before this is saved"
+          onClose={() => setConfirmation(null)}
+        >
+          <h3>Before this is saved</h3>
+          <p>{CONSEQUENCE_COPY[confirmation.consequence]}</p>
+          <div className="settings-modal-actions">
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => setConfirmation(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="settings-btn settings-btn-hot"
+              onClick={() => {
+                const pending = confirmation;
+                setConfirmation(null);
+                void send(pending.updates, [
+                  ...pending.confirm,
+                  pending.consequence,
+                ]);
+              }}
+            >
+              Go ahead
+            </button>
           </div>
-        </div>
+        </SettingsModal>
       ) : null}
     </div>
   );
