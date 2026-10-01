@@ -21,6 +21,8 @@
 
 - `append_to_note`, `edit_note` and `replace_section` rewrote the line endings of the whole note, not just the part they changed. On a note saved with Windows line endings, a one-word `edit_note` turned every line into Unix endings and added a final newline, so the Git diff for that edit touched the whole file. These three tools now leave every byte they were not asked to change exactly as it was, including line endings and a missing final newline. Line breaks in the text you send are written in the note's own line ending, CRLF or LF, whichever the note mostly uses. `quality_warnings` from these tools now names only what happened to your text: a converted line ending, or a line break added before or after it so it does not run into the next line. It no longer claims the note was normalised. `append_to_note` used to add a separating line break without saying so and now reports it. It also stops trimming the text you send, so a trailing newline you supplied is kept rather than stripped and added back, and leading spaces or blank lines reach the note as you wrote them; text made only of whitespace is still refused. `create_note` and `update_note` still normalise the whole note as before. Notes an earlier call already converted stay as they are. [#316]
 
+- A `#tag` search said it had run the mode you asked for when it had not. A query like `#project` always runs as a tag match, whichever `mode` it was sent with, but the response echoed the requested `semantic` or `keyword` back, so an agent could not tell that its rows came from a tag lookup with every score set to 1 rather than from a ranked search. The response from `search_notes` and `GET /api/v1/vaults/{scope}/search` now reports `"mode": "tag"` for such a query. Every other query still reports the mode it asked for, and `tag` cannot be sent as a requested mode. A client that only expects `semantic` or `keyword` in the response now has a third value to handle. [#354]
+
 [#80]: https://github.com/BatterWorks/Hatchdoor/issues/80
 [#242]: https://github.com/BatterWorks/Hatchdoor/issues/242
 [#258]: https://github.com/BatterWorks/Hatchdoor/issues/258
@@ -32,6 +34,7 @@
 [#306]: https://github.com/BatterWorks/Hatchdoor/issues/306
 [#316]: https://github.com/BatterWorks/Hatchdoor/issues/316
 [#345]: https://github.com/BatterWorks/Hatchdoor/issues/345
+[#354]: https://github.com/BatterWorks/Hatchdoor/issues/354
 
 ## v2.6.1 - 2026-09-08
 

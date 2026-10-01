@@ -22,7 +22,7 @@ use crate::vault_read::{
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultCollectionRuntime;
 
-use super::{LayerSelection, OutboundLink, SearchMode, tag_prefix_query};
+use super::{LayerSelection, OutboundLink, SearchMode, SearchResponseMode, tag_prefix_query};
 
 /// First KNN candidate window per requested result. The per-note cap is
 /// applied after ranking, so a small cap must not shrink the first window to
@@ -74,7 +74,7 @@ pub struct VaultSearchResult {
 
 #[derive(Debug, Clone, Serialize, JsonSchema, Deserialize)]
 pub struct VaultSearchResponse {
-    pub mode: SearchMode,
+    pub mode: SearchResponseMode,
     pub results: Vec<VaultSearchResult>,
 }
 
@@ -247,10 +247,13 @@ impl<'a> VaultSearchCore<'a> {
             snapshots.values().map(|snapshot| &snapshot.read),
             some_participant_unavailable,
         )?;
-        let results = if let Some(tag) = tag_query {
-            tag_results(&request, &snapshots, &tag)
+        let (mode, results) = if let Some(tag) = tag_query {
+            (
+                SearchResponseMode::Tag,
+                tag_results(&request, &snapshots, &tag),
+            )
         } else {
-            match request.mode {
+            let results = match request.mode {
                 SearchMode::Semantic => match &query_vector {
                     Some(query_vector) => semantic_results(
                         &request,
@@ -265,7 +268,8 @@ impl<'a> VaultSearchCore<'a> {
                 SearchMode::Keyword => {
                     keyword_results(&request, self.cache, &cache_snapshot, &snapshots)?
                 }
-            }
+            };
+            (request.mode.into(), results)
         };
         let response = VaultReadProjection {
             scope: request.scope,
@@ -274,10 +278,7 @@ impl<'a> VaultSearchCore<'a> {
                 .iter()
                 .any(|participant| participant.state != VaultParticipantState::Fresh),
             participants,
-            data: VaultSearchResponse {
-                mode: request.mode,
-                results,
-            },
+            data: VaultSearchResponse { mode, results },
         };
         cache_snapshot
             .commit()
@@ -764,7 +765,7 @@ mod tests {
 
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
-    use crate::search::{LayerSelection, SearchMode};
+    use crate::search::{LayerSelection, SearchMode, SearchResponseMode};
     use crate::vault::{NoteMetadata, VaultIndex};
     use crate::vault_read::{VaultParticipantState, VaultScope};
     use crate::vault_registry::{NewVaultDefinition, VaultId, VaultRegistryStore, VaultSource};
@@ -1526,6 +1527,57 @@ mod tests {
                 serialized["metadata"], expected,
                 "search {query:?} keeps its tags and aliases and an empty properties object"
             );
+        }
+    }
+
+    /// A `#tag` query runs as a tag match whatever mode it asked for, so its
+    /// response says `tag` rather than echoing a ranking that never ran (#354).
+    /// Anything that fails the shorthand parse keeps the requested mode.
+    #[test]
+    fn response_reports_the_mode_that_actually_ran() {
+        let workspace = workspace(&[(
+            "Alpha",
+            &[("Home.md", "---\ntags: [topic]\n---\n# Home\n\nneedle body")],
+        )]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        for (mode, query, expected) in [
+            (SearchMode::Semantic, "#topic", SearchResponseMode::Tag),
+            (SearchMode::Keyword, "#topic", SearchResponseMode::Tag),
+            (SearchMode::Semantic, "needle", SearchResponseMode::Semantic),
+            (SearchMode::Keyword, "needle", SearchResponseMode::Keyword),
+            (SearchMode::Semantic, "#", SearchResponseMode::Semantic),
+            (SearchMode::Keyword, "#", SearchResponseMode::Keyword),
+            (
+                SearchMode::Semantic,
+                "#topic needle",
+                SearchResponseMode::Semantic,
+            ),
+            (
+                SearchMode::Keyword,
+                "#topic needle",
+                SearchResponseMode::Keyword,
+            ),
+        ] {
+            let response = core
+                .search(VaultSearchRequest {
+                    mode,
+                    ..request(VaultScope::All, query)
+                })
+                .unwrap_or_else(|error| panic!("search {query:?} as {mode:?}: {error:?}"));
+            assert_eq!(response.data.mode, expected, "search {query:?} as {mode:?}");
+        }
+    }
+
+    #[test]
+    fn response_mode_serializes_lower_case_like_the_request_mode() {
+        for (mode, wire) in [
+            (SearchResponseMode::Semantic, "semantic"),
+            (SearchResponseMode::Keyword, "keyword"),
+            (SearchResponseMode::Tag, "tag"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).expect("serialize mode"), wire);
         }
     }
 

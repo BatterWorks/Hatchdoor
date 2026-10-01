@@ -18,6 +18,27 @@ pub enum SearchMode {
     Keyword,
 }
 
+/// The mode a search response reports: the ranking that actually produced its
+/// rows. A query that parses as the `#tag` shorthand runs as a tag match
+/// whatever [`SearchMode`] it asked for, and reports `Tag` (#354). Kept apart
+/// from `SearchMode` so callers still cannot request `tag`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchResponseMode {
+    Semantic,
+    Keyword,
+    Tag,
+}
+
+impl From<SearchMode> for SearchResponseMode {
+    fn from(mode: SearchMode) -> Self {
+        match mode {
+            SearchMode::Semantic => Self::Semantic,
+            SearchMode::Keyword => Self::Keyword,
+        }
+    }
+}
+
 /// One tag written the way the indexer stores it: no leading `#`, no
 /// surrounding `/`, lower-cased. `None` when nothing is left.
 ///
