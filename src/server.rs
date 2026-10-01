@@ -3563,6 +3563,262 @@ mod tests {
         assert!(!vault_root.join("big.png").exists());
     }
 
+    /// `create_upload_link` called over MCP for one target, with optional
+    /// `overwrite` and `expected_content_hash`.
+    async fn mint_upload_link(
+        app: &Router,
+        vault_id: &str,
+        target: &str,
+        overwrite: bool,
+        expected_content_hash: Option<&str>,
+    ) -> serde_json::Value {
+        let mut arguments = serde_json::json!({
+            "vault_id": vault_id,
+            "target_relative_path": target,
+            "overwrite": overwrite
+        });
+        if let Some(hash) = expected_content_hash {
+            arguments["expected_content_hash"] = serde_json::json!(hash);
+        }
+        mcp_tool_call(app, "mcp-secret", "create_upload_link", arguments).await
+    }
+
+    fn minted_url(answer: &serde_json::Value) -> String {
+        link_target(
+            answer["result"]["structuredContent"]["upload_url"]
+                .as_str()
+                .unwrap_or_else(|| panic!("upload_url in {answer:#}")),
+        )
+    }
+
+    async fn post_upload(app: &Router, url: String, bytes: &[u8]) -> Response {
+        app.clone()
+            .oneshot(upload_link_request(url, None, bytes))
+            .await
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn a_note_upload_link_imports_a_markdown_file_whole() {
+        // The #303 failure: a 599-line file that arrived 594 lines long.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Imports", 0).await;
+        let report: String = (1..=599)
+            .map(|line| format!("- gap item {line}\n"))
+            .collect::<String>()
+            .replacen("- gap item 1\n", "# Report\n", 1);
+
+        let answer = mint_upload_link(&app, &vault_id, "Imports/Report.md", false, None).await;
+        let minted = &answer["result"]["structuredContent"];
+        assert_eq!(minted["upload_kind"], "note", "{answer:#}");
+        assert_eq!(minted["expected_content_hash"], serde_json::Value::Null);
+
+        let uploaded = post_upload(&app, minted_url(&answer), report.as_bytes()).await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let written = json_body(uploaded).await;
+        assert_eq!(written["slug"], "report", "{written:#}");
+        assert_eq!(written["relative_path"], "Imports/Report");
+        assert_eq!(
+            written["content_hash"],
+            crate::cache::parse::content_hash(&report)
+        );
+        assert_eq!(written["quality_warnings"], serde_json::json!([]));
+        let on_disk = std::fs::read_to_string(vault_root.join("Imports/Report.md")).expect("note");
+        assert_eq!(on_disk.lines().count(), 599);
+        assert_eq!(on_disk, report);
+
+        // Normalised as create_note normalises, and said so.
+        let answer = mint_upload_link(&app, &vault_id, "Imports/Crlf.md", false, None).await;
+        let uploaded =
+            post_upload(&app, minted_url(&answer), b"# Crlf\r\nline one\r\nline two").await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let written = json_body(uploaded).await;
+        assert_eq!(
+            written["quality_warnings"],
+            serde_json::json!([
+                "normalized CRLF/CR line endings to LF",
+                "added final newline"
+            ])
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault_root.join("Imports/Crlf.md")).expect("note"),
+            "# Crlf\nline one\nline two\n"
+        );
+
+        // An upper-case extension is still a note, written with `.md`.
+        let answer = mint_upload_link(&app, &vault_id, "Imports/Upper.MD", false, None).await;
+        assert_eq!(answer["result"]["structuredContent"]["upload_kind"], "note");
+        let uploaded = post_upload(&app, minted_url(&answer), b"# Upper\n").await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(json_body(uploaded).await["relative_path"], "Imports/Upper");
+        assert!(vault_root.join("Imports/Upper.md").exists());
+        assert!(!vault_root.join("Imports/Upper.MD.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_note_upload_refuses_what_create_note_refuses_and_writes_nothing() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Refusals", 0).await;
+
+        for (target, bytes) in [
+            ("bad-utf8.md", &b"# Bad \xff\xfe text\n"[..]),
+            ("nul.md", &b"# Nul\n\0\n"[..]),
+        ] {
+            let answer = mint_upload_link(&app, &vault_id, target, false, None).await;
+            let refused = post_upload(&app, minted_url(&answer), bytes).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{target}");
+            assert_eq!(json_body(refused).await["code"], "invalid_write_input");
+            assert!(!vault_root.join(target).exists(), "{target}");
+        }
+
+        // Noise is refused before a link exists.
+        let noise = mint_upload_link(&app, &vault_id, ".obsidian/workspace.md", false, None).await;
+        assert!(
+            noise["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("noise-exclusion")),
+            "{noise:#}"
+        );
+        assert!(!vault_root.join(".obsidian/workspace.md").exists());
+
+        // Over the attachment limit, which is the only upload limit.
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MAX_ATTACHMENT_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("small limit");
+        let answer = mint_upload_link(&app, &vault_id, "big.md", false, None).await;
+        assert_eq!(answer["result"]["structuredContent"]["max_bytes"], 8);
+        let refused = post_upload(&app, minted_url(&answer), b"# Too big for it\n").await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(!vault_root.join("big.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_creating_note_link_never_replaces_a_note() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Creating", 0).await;
+
+        let refused = mint_upload_link(&app, &vault_id, "Home.md", false, None).await;
+        assert_eq!(refused["result"]["isError"], true, "{refused:#}");
+        assert_eq!(
+            refused["result"]["structuredContent"]["code"],
+            "write_conflict"
+        );
+
+        let answer = mint_upload_link(&app, &vault_id, "Race.md", false, None).await;
+        std::fs::write(vault_root.join("Race.md"), "# Theirs\n").expect("race");
+        let conflict = post_upload(&app, minted_url(&answer), b"# Mine\n").await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(conflict).await["code"], "write_conflict");
+        assert_eq!(
+            std::fs::read_to_string(vault_root.join("Race.md")).expect("kept"),
+            "# Theirs\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacing_note_link_writes_only_under_the_current_hash() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Replacing", 0).await;
+        let home = vault_root.join("Home.md");
+        let current = crate::cache::parse::content_hash("# Home\n");
+
+        // Refused at once: no hash, a stale hash, a missing note, a hash on a
+        // creating link, and a hash on an attachment.
+        let invalid_params = |answer: &serde_json::Value| {
+            assert_eq!(answer["error"]["code"], -32602, "{answer:#}");
+        };
+        invalid_params(&mint_upload_link(&app, &vault_id, "Home.md", true, None).await);
+        invalid_params(&mint_upload_link(&app, &vault_id, "Home.md", false, Some(&current)).await);
+        invalid_params(&mint_upload_link(&app, &vault_id, "scan.png", true, Some(&current)).await);
+        invalid_params(&mint_upload_link(&app, &vault_id, "scan.png", false, Some(" ")).await);
+        let stale = mint_upload_link(&app, &vault_id, "Home.md", true, Some("stale")).await;
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"], "write_conflict",
+            "{stale:#}"
+        );
+        let missing = mint_upload_link(&app, &vault_id, "Gone.md", true, Some(&current)).await;
+        assert_eq!(
+            missing["result"]["structuredContent"]["code"], "note_not_found",
+            "{missing:#}"
+        );
+
+        // The current hash replaces the note, and the answer chains.
+        let answer = mint_upload_link(&app, &vault_id, "Home.md", true, Some(&current)).await;
+        let minted = &answer["result"]["structuredContent"];
+        assert_eq!(minted["upload_kind"], "note");
+        assert_eq!(minted["expected_content_hash"], current);
+        let replaced = post_upload(&app, minted_url(&answer), b"# Home\n\nImported.\n").await;
+        assert_eq!(replaced.status(), StatusCode::OK);
+        let written = json_body(replaced).await;
+        assert_eq!(written["slug"], "home");
+        let next = written["content_hash"].as_str().expect("hash").to_string();
+        assert_eq!(
+            next,
+            crate::cache::parse::content_hash("# Home\n\nImported.\n")
+        );
+
+        // An edit between minting and redemption survives the upload.
+        let answer = mint_upload_link(&app, &vault_id, "Home.md", true, Some(&next)).await;
+        std::fs::write(&home, "# Home\n\nEdited meanwhile.\n").expect("edit");
+        let conflict = post_upload(&app, minted_url(&answer), b"# Home\n\nClobber.\n").await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(conflict).await["code"], "write_conflict");
+        assert_eq!(
+            std::fs::read_to_string(&home).expect("kept"),
+            "# Home\n\nEdited meanwhile.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacing_note_link_with_a_changed_hash_or_rule_is_invalid() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Tamper", 0).await;
+        let current = crate::cache::parse::content_hash("# Home\n");
+        let url =
+            minted_url(&mint_upload_link(&app, &vault_id, "Home.md", true, Some(&current)).await);
+        let (_, query) = url.split_once('?').expect("query");
+        let hash_param = query
+            .split('&')
+            .find(|pair| pair.starts_with("expected_content_hash="))
+            .expect("hash param");
+        for tampered in [
+            url.replace(hash_param, "expected_content_hash=b3RoZXI"),
+            url.replace("overwrite=true", "overwrite=false"),
+        ] {
+            let refused = post_upload(&app, tampered, b"# Swapped\n").await;
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+            assert_eq!(json_body(refused).await["code"], "transfer_link_invalid");
+        }
+        assert_eq!(
+            std::fs::read_to_string(vault_root.join("Home.md")).expect("kept"),
+            "# Home\n"
+        );
+    }
+
     /// The request span's `uri` field is the only place a request URL is
     /// logged, so a link's credential stays out of the logs if it stays out of
     /// that field. Checked on the span's own formatter rather than through a

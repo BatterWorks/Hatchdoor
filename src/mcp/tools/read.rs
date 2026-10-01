@@ -699,7 +699,7 @@ pub(super) async fn attachment_import_config_tool(
                 max_bytes: config.max_attachment_bytes,
                 recommended_for: "the default for any file size; use whenever the client can make an out-of-band HTTP request. Needs no token and no server address.",
                 requires: "ability to make an HTTP request outside MCP (e.g. shell/curl)",
-                usage: "Call create_upload_link with this vault_id and a Vault-relative `target_relative_path`, then POST multipart/form-data with the file in a field named `file` to the upload_url it returns. The link works once and expires after five minutes.",
+                usage: "Call create_upload_link with this vault_id and a Vault-relative `target_relative_path`, then POST multipart/form-data with the file in a field named `file` to the upload_url it returns. The link works once and expires after five minutes. A target ending in .md imports the file as a note, written as create_note writes one, whatever the extension list below says; to replace an existing note, pass overwrite true and expected_content_hash, the note's current hash from get_frontmatter.",
             },
             results::AttachmentImportMethod::HttpMultipart {
                 role: "alternative",
@@ -725,7 +725,7 @@ pub(super) async fn attachment_import_config_tool(
     };
 
     let usage = if enabled {
-        "Upload methods are available for this Vault. Prefer create_upload_link and send the file to the link it returns; use the bearer-token HTTP endpoint only if this client holds the token itself; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible."
+        "Upload methods are available for this Vault. Prefer create_upload_link and send the file to the link it returns; use the bearer-token HTTP endpoint only if this client holds the token itself; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible. To import an existing Markdown file as a note, use create_upload_link with a .md target: it is the only method that takes a note, and the file never passes through this conversation."
     } else if !config.write_enabled {
         "Attachment upload is disabled for this instance. An operator must set HATCHDOOR_MCP_WRITE_ENABLED; no other Vault will accept uploads either until they do."
     } else {

@@ -300,6 +300,41 @@ pub fn create_note(
     })
 }
 
+/// Where a note write addressed by path lands, checked the way `create_note`
+/// checks it: the Vault-relative path without `.md`, and whether a file is
+/// already there. An uploaded note arrives with a path rather than a slug, so
+/// this is how it finds out before the bytes do whether it would create a
+/// note or collide with one (#303).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteTarget {
+    pub relative_path: String,
+    pub exists: bool,
+    /// The path as `create_note` writes it, `.md` included.
+    normalized: String,
+}
+
+pub fn note_target(vault_root: &Path, relative_path: &str) -> Result<NoteTarget, WriteError> {
+    let path = resolve_new_note_path(vault_root, relative_path)?;
+    let normalized = normalize_note_relative_path(relative_path)?;
+    Ok(NoteTarget {
+        relative_path: strip_md_extension(&normalized).to_string(),
+        exists: path.exists(),
+        normalized,
+    })
+}
+
+/// The refusal `create_note` gives a note that already exists, for a caller
+/// that found it with [`note_target`] before writing anything.
+pub fn note_exists_conflict(target: &NoteTarget) -> WriteError {
+    WriteError::Conflict(format!("Note already exists: {}", target.normalized))
+}
+
+/// `update_note`'s hash check alone, for a caller that wants its refusal
+/// before it has the new content.
+pub fn check_note_content_hash(entry: &NoteEntry, expected: &str) -> Result<(), WriteError> {
+    ensure_content_hash(entry, expected)
+}
+
 pub fn update_note(
     entry: &NoteEntry,
     content: &str,

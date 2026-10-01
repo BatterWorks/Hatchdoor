@@ -1,6 +1,6 @@
-//! Transfer links (ADR-27): short-lived URLs, minted by an authenticated MCP
-//! call, that carry their own credential for one attachment download or one
-//! upload to one target. An agent inside an MCP client holds neither the MCP
+//! Transfer links (ADR-27, widened by ADR-32): short-lived URLs, minted by an
+//! authenticated MCP call, that carry their own credential for one attachment
+//! download or one upload to one target, an attachment or a note. An agent inside an MCP client holds neither the MCP
 //! token nor the server's address; a transfer link gives it both, for one file
 //! and five minutes, without handing over the token.
 //!
@@ -45,6 +45,9 @@ pub const LINK_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// span redacts it (`auth::redact_query_token`).
 pub const SIGNATURE_PARAM: &str = "signature";
 
+/// The query parameter a replacing note link carries its expected content
+/// hash in, base64url-encoded.
+const EXPECTED_HASH_PARAM: &str = "expected_content_hash";
 const TOKEN_KEY: &str = "HATCHDOOR_MCP_BEARER_TOKEN";
 const DOMAIN: &[u8] = b"hatchdoor transfer link v1";
 const NONCE_BYTES: usize = 16;
@@ -70,6 +73,23 @@ pub enum Grant {
         overwrite: bool,
         nonce: [u8; NONCE_BYTES],
     },
+    /// An upload that replaces an existing note, but only while the note
+    /// still has the content hash it had when the link was minted (ADR-32).
+    /// A grant of its own rather than a field on `Upload`, so an attachment
+    /// link signs and reads exactly as it did before notes could be uploaded.
+    ReplaceNote {
+        expected_content_hash: String,
+        nonce: [u8; NONCE_BYTES],
+    },
+}
+
+/// What a redeemed note upload link allows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteUploadRule {
+    /// Create the note; an existing note at the target is a conflict.
+    Create,
+    /// Replace the existing note if its content hash is still this one.
+    Replace { expected_content_hash: String },
 }
 
 /// A freshly minted link: the URL to hand the agent and the Unix second it
@@ -155,7 +175,9 @@ impl TransferLinks {
         mint(key, base, vault_id, relative_path, Grant::Download, now())
     }
 
-    /// An upload link for one target path under one overwrite rule.
+    /// An upload link for one target path under one overwrite rule. For a
+    /// note target this is the creating link only: a link that replaces a
+    /// note is [`TransferLinks::mint_note_replace`].
     pub fn mint_upload(
         &self,
         key: &SigningKey,
@@ -164,14 +186,37 @@ impl TransferLinks {
         target_relative_path: &str,
         overwrite: bool,
     ) -> MintedLink {
-        let mut nonce = [0_u8; NONCE_BYTES];
-        getrandom::fill(&mut nonce).expect("operating system randomness");
+        let nonce = fresh_nonce();
         mint(
             key,
             base,
             vault_id,
             target_relative_path,
             Grant::Upload { overwrite, nonce },
+            now(),
+        )
+    }
+
+    /// An upload link that replaces the note at `target_relative_path`, signed
+    /// with the content hash the note must still have when the upload lands.
+    pub fn mint_note_replace(
+        &self,
+        key: &SigningKey,
+        base: &str,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        expected_content_hash: &str,
+    ) -> MintedLink {
+        let nonce = fresh_nonce();
+        mint(
+            key,
+            base,
+            vault_id,
+            target_relative_path,
+            Grant::ReplaceNote {
+                expected_content_hash: expected_content_hash.to_string(),
+                nonce,
+            },
             now(),
         )
     }
@@ -196,7 +241,8 @@ impl TransferLinks {
     /// Check a presented upload link and spend it. Returns whether the link
     /// allows overwriting an existing file. A link is spent by its first
     /// redemption that gets this far, whether or not the upload that follows
-    /// succeeds.
+    /// succeeds. A link that replaces a note is not an attachment link and
+    /// is refused here.
     pub fn redeem_upload(
         &self,
         key: &SigningKey,
@@ -215,9 +261,50 @@ impl TransferLinks {
         query: Option<&str>,
         at: u64,
     ) -> Result<bool, LinkRefusal> {
+        match self.redeem_any_upload(key, vault_id, target_relative_path, query, at)? {
+            Grant::Upload { overwrite, .. } => Ok(overwrite),
+            _ => Err(LinkRefusal::Invalid),
+        }
+    }
+
+    /// [`TransferLinks::redeem_upload`] for a note target: check the link,
+    /// spend it, and say whether it creates the note or replaces it under an
+    /// expected hash. A plain upload link that allows overwriting is refused,
+    /// because no link replaces a note without its hash (ADR-32).
+    pub fn redeem_note_upload(
+        &self,
+        key: &SigningKey,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        query: Option<&str>,
+    ) -> Result<NoteUploadRule, LinkRefusal> {
+        match self.redeem_any_upload(key, vault_id, target_relative_path, query, now())? {
+            Grant::Upload {
+                overwrite: false, ..
+            } => Ok(NoteUploadRule::Create),
+            Grant::ReplaceNote {
+                expected_content_hash,
+                ..
+            } => Ok(NoteUploadRule::Replace {
+                expected_content_hash,
+            }),
+            _ => Err(LinkRefusal::Invalid),
+        }
+    }
+
+    /// Verify an upload link of either kind and spend it, returning its grant.
+    fn redeem_any_upload(
+        &self,
+        key: &SigningKey,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        query: Option<&str>,
+        at: u64,
+    ) -> Result<Grant, LinkRefusal> {
         let presented = PresentedLink::parse(query).ok_or(LinkRefusal::Invalid)?;
-        let Grant::Upload { overwrite, nonce } = presented.grant else {
-            return Err(LinkRefusal::Invalid);
+        let nonce = match &presented.grant {
+            Grant::Upload { nonce, .. } | Grant::ReplaceNote { nonce, .. } => *nonce,
+            Grant::Download => return Err(LinkRefusal::Invalid),
         };
         check(key, vault_id, target_relative_path, &presented, at)?;
 
@@ -229,8 +316,16 @@ impl TransferLinks {
         if spent.insert(nonce, presented.expires_at).is_some() {
             return Err(LinkRefusal::Spent);
         }
-        Ok(overwrite)
+        Ok(presented.grant)
     }
+}
+
+/// A random upload nonce, the one thing that makes each upload link single
+/// use. Panics only where [`TransferLinks::new`] would.
+fn fresh_nonce() -> [u8; NONCE_BYTES] {
+    let mut nonce = [0_u8; NONCE_BYTES];
+    getrandom::fill(&mut nonce).expect("operating system randomness");
+    nonce
 }
 
 fn mint(
@@ -244,8 +339,21 @@ fn mint(
     let expires_at = issued_at + LINK_LIFETIME.as_secs();
     let signature = sign(key, vault_id, relative_path, &grant, expires_at);
     let mut query = format!("expires={expires_at}");
-    if let Grant::Upload { overwrite, nonce } = &grant {
-        query.push_str(&format!("&overwrite={overwrite}&nonce={}", encode(nonce)));
+    match &grant {
+        Grant::Download => {}
+        Grant::Upload { overwrite, nonce } => {
+            query.push_str(&format!("&overwrite={overwrite}&nonce={}", encode(nonce)));
+        }
+        Grant::ReplaceNote {
+            expected_content_hash,
+            nonce,
+        } => {
+            query.push_str(&format!(
+                "&overwrite=true&nonce={}&{EXPECTED_HASH_PARAM}={}",
+                encode(nonce),
+                encode(expected_content_hash.as_bytes())
+            ));
+        }
     }
     query.push_str(&format!("&{SIGNATURE_PARAM}={}", encode(&signature)));
     MintedLink {
@@ -305,6 +413,15 @@ fn sign(
             message.update(&[u8::from(*overwrite)]);
             message.update(nonce);
         }
+        Grant::ReplaceNote {
+            expected_content_hash,
+            nonce,
+        } => {
+            message.update(b"replace note");
+            message.update(nonce);
+            message.update(&(expected_content_hash.len() as u64).to_le_bytes());
+            message.update(expected_content_hash.as_bytes());
+        }
     }
     message.finalize().into()
 }
@@ -321,6 +438,7 @@ impl PresentedLink {
         let mut expires_at = None;
         let mut overwrite = None;
         let mut nonce = None;
+        let mut expected_content_hash = None;
         let mut signature = None;
         for pair in query?.split('&') {
             let (key, value) = pair.split_once('=')?;
@@ -328,6 +446,7 @@ impl PresentedLink {
                 "expires" => &mut expires_at,
                 "overwrite" => &mut overwrite,
                 "nonce" => &mut nonce,
+                EXPECTED_HASH_PARAM => &mut expected_content_hash,
                 SIGNATURE_PARAM => &mut signature,
                 _ => continue,
             };
@@ -336,14 +455,20 @@ impl PresentedLink {
                 return None;
             }
         }
-        let grant = match (overwrite, nonce) {
-            (None, None) => Grant::Download,
-            (Some(overwrite), Some(nonce)) => Grant::Upload {
+        let grant = match (overwrite, nonce, expected_content_hash) {
+            (None, None, None) => Grant::Download,
+            (Some(overwrite), Some(nonce), None) => Grant::Upload {
                 overwrite: match overwrite {
                     "true" => true,
                     "false" => false,
                     _ => return None,
                 },
+                nonce: decode(nonce)?.try_into().ok()?,
+            },
+            // A replacing note link always says it overwrites; any other
+            // spelling is not a link this server minted.
+            (Some("true"), Some(nonce), Some(hash)) => Grant::ReplaceNote {
+                expected_content_hash: String::from_utf8(decode(hash)?).ok()?,
                 nonce: decode(nonce)?.try_into().ok()?,
             },
             _ => return None,
@@ -625,6 +750,85 @@ mod tests {
                 "a.pdf",
                 Some(&query_of(&link))
             ),
+            Err(LinkRefusal::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_note_link_creates_or_replaces_under_its_signed_hash_once() {
+        let config = RuntimeConfig::for_tests();
+        let links = TransferLinks::new();
+        let key = links.key(&config, TOKEN);
+
+        let create = links.mint_upload(&key, BASE, vault(), "Imports/Report.md", false);
+        assert_eq!(
+            links.redeem_note_upload(&key, vault(), "Imports/Report.md", Some(&query_of(&create))),
+            Ok(NoteUploadRule::Create)
+        );
+
+        let replace = links.mint_note_replace(&key, BASE, vault(), "Imports/Report.md", "abc123");
+        let query = query_of(&replace);
+        assert!(query.contains("overwrite=true"), "{query}");
+        assert_eq!(
+            links.redeem_note_upload(&key, vault(), "Imports/Other.md", Some(&query)),
+            Err(LinkRefusal::Invalid)
+        );
+        assert_eq!(
+            links.redeem_note_upload(&key, vault(), "Imports/Report.md", Some(&query)),
+            Ok(NoteUploadRule::Replace {
+                expected_content_hash: "abc123".to_string()
+            })
+        );
+        assert_eq!(
+            links.redeem_note_upload(&key, vault(), "Imports/Report.md", Some(&query)),
+            Err(LinkRefusal::Spent)
+        );
+    }
+
+    #[test]
+    fn a_replacing_note_link_cannot_lose_or_change_its_hash_or_overwrite_rule() {
+        let config = RuntimeConfig::for_tests();
+        let links = TransferLinks::new();
+        let key = links.key(&config, TOKEN);
+        let link = links.mint_note_replace(&key, BASE, vault(), "a.md", "abc123");
+        let query = query_of(&link);
+        let hash_param = format!("&expected_content_hash={}", encode(b"abc123"));
+        assert!(query.contains(&hash_param), "{query}");
+
+        for tampered in [
+            query.replace(
+                &hash_param,
+                &format!("&expected_content_hash={}", encode(b"other")),
+            ),
+            query.replace(&hash_param, ""),
+            query.replace("overwrite=true", "overwrite=false"),
+            format!("{query}{hash_param}"),
+        ] {
+            assert_eq!(
+                links.redeem_note_upload(&key, vault(), "a.md", Some(&tampered)),
+                Err(LinkRefusal::Invalid),
+                "{tampered}"
+            );
+        }
+        assert_eq!(
+            links.redeem_upload(&key, vault(), "a.md", Some(&query)),
+            Err(LinkRefusal::Invalid),
+            "a note-replacing link is not an attachment link"
+        );
+        assert_eq!(
+            links.verify_download(&key, vault(), "a.md", Some(&query)),
+            Err(LinkRefusal::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_plain_overwriting_link_never_replaces_a_note() {
+        let config = RuntimeConfig::for_tests();
+        let links = TransferLinks::new();
+        let key = links.key(&config, TOKEN);
+        let link = links.mint_upload(&key, BASE, vault(), "a.md", true);
+        assert_eq!(
+            links.redeem_note_upload(&key, vault(), "a.md", Some(&query_of(&link))),
             Err(LinkRefusal::Invalid)
         );
     }

@@ -209,14 +209,14 @@ All of the above (except attachment upload) return `VaultWriteOutcomeResponse`: 
 
 ## Transfer links
 
-Transfer links are minted over MCP, never by these routes: `get_attachment` returns a download link and `create_upload_link` an upload link (see [[MCP tools reference]]). Both address one path on this route and carry `expires`, a `signature`, and for uploads `overwrite` and `nonce`, in the query string. Send them exactly as given, with no `Authorization` header.
+Transfer links are minted over MCP, never by these routes: `get_attachment` returns a download link and `create_upload_link` an upload link (see [[MCP tools reference]]). Both address one path on this route and carry `expires`, a `signature`, for uploads `overwrite` and `nonce`, and for a link that replaces a note `expected_content_hash`, in the query string. Send them exactly as given, with no `Authorization` header.
 
 | Method | Path | Body | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/v1/vaults/{vault_id}/transfers/{*path}` | — | Download the attachment a download link names. Answers like the asset route, held to `HATCHDOOR_MCP_MAX_BASE64_BYTES` and the MCP rate quota (`429` with `Retry-After`). Usable any number of times until it expires. |
-| POST | `/api/v1/vaults/{vault_id}/transfers/{*path}` | `multipart/form-data`: `file`, and optionally `target_relative_path`, which must match the link | Upload one file to the path an upload link names, under `HATCHDOOR_MAX_ATTACHMENT_BYTES`. Returns `VaultAttachmentOutcomeResponse`. Usable once. |
+| POST | `/api/v1/vaults/{vault_id}/transfers/{*path}` | `multipart/form-data`: `file`, and optionally `target_relative_path`, which must match the link | Upload one file to the path an upload link names, under `HATCHDOOR_MAX_ATTACHMENT_BYTES`. Returns `VaultAttachmentOutcomeResponse`, or `VaultWriteOutcomeResponse` when the path ends in `.md` and the file becomes a note. Usable once. |
 
-Refusals are `403` with a stable `code`: `transfer_link_invalid` (any other path, Vault, or target; a tampered link; a link from before a restart or an MCP password change), `transfer_link_expired` (five minutes after minting), `transfer_link_spent` (an upload link's second use), `mcp_disabled` (MCP is off), and `mcp_write_disabled` (an upload while MCP writes are off). An upload whose target appeared after the link was minted, when replacing was not allowed, is `409 write_conflict`.
+Refusals are `403` with a stable `code`: `transfer_link_invalid` (any other path, Vault, or target; a tampered link; a link from before a restart or an MCP password change), `transfer_link_expired` (five minutes after minting), `transfer_link_spent` (an upload link's second use), `mcp_disabled` (MCP is off), and `mcp_write_disabled` (an upload while MCP writes are off). An upload whose target appeared after the link was minted, when replacing was not allowed, is `409 write_conflict`, and so is a note upload whose note no longer has the hash the link was minted with. A note upload that is not UTF-8 or contains a NUL byte is `400 invalid_write_input`.
 
 ---
 

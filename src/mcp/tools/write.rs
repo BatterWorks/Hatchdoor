@@ -32,10 +32,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::mcp::results::UploadKind;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{AttachmentOutcome, SectionMode};
 use crate::vault_error::VaultOperationError;
-use crate::vault_mutation::{NoteWriteOutcome, VaultMutation};
+use crate::vault_mutation::{NoteWriteOutcome, VaultMutation, is_note_upload_target};
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultControlBlock;
@@ -571,11 +572,13 @@ pub(super) async fn import_attachment_tool(
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
-/// Mint an upload transfer link (ADR-27) for one target: the route an agent
-/// takes when it can make an HTTP request but holds neither the MCP token nor
-/// the server's address. Refuses at once whatever the upload itself would
-/// refuse before the bytes arrive, so an agent never sends a file to a link
-/// that was doomed; the upload checks again when it lands.
+/// Mint an upload transfer link (ADR-27, ADR-32) for one target: the route an
+/// agent takes when it can make an HTTP request but holds neither the MCP
+/// token nor the server's address. A `.md` target is a note upload, which
+/// replaces an existing note only under its expected content hash; anything
+/// else is an attachment upload. Refuses at once whatever the upload itself
+/// would refuse before the bytes arrive, so an agent never sends a file to a
+/// link that was doomed; the upload checks again when it lands.
 pub(super) async fn create_upload_link_tool(
     state: AppState,
     vault: &McpVault,
@@ -588,33 +591,88 @@ pub(super) async fn create_upload_link_tool(
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
-    vault
-        .mutation(None)
-        .check_attachment_import(&target_relative_path, overwrite)
-        .await
-        .map_err(mutation_error)?;
+    let expected_content_hash = match args.expected_content_hash {
+        Some(hash) if hash.trim().is_empty() => {
+            return Err(JsonRpcFailure::invalid_params(
+                "expected_content_hash cannot be empty.",
+            ));
+        }
+        hash => hash.map(|hash| hash.trim().to_string()),
+    };
+    let upload_kind = if is_note_upload_target(&target_relative_path) {
+        match (overwrite, &expected_content_hash) {
+            (true, None) => {
+                return Err(JsonRpcFailure::invalid_params(
+                    "Replacing a note through an upload link requires expected_content_hash, the note's current hash from get_frontmatter or get_note.",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(JsonRpcFailure::invalid_params(
+                    "expected_content_hash applies only to a link that replaces a note; set overwrite to true, or leave the hash out to create a new note.",
+                ));
+            }
+            _ => {}
+        }
+        vault
+            .mutation(None)
+            .check_note_upload(&target_relative_path, expected_content_hash.as_deref())
+            .await
+            .map_err(mutation_error)?;
+        UploadKind::Note
+    } else {
+        if expected_content_hash.is_some() {
+            return Err(JsonRpcFailure::invalid_params(
+                "expected_content_hash applies only to a note upload, a target ending in .md.",
+            ));
+        }
+        vault
+            .mutation(None)
+            .check_attachment_import(&target_relative_path, overwrite)
+            .await
+            .map_err(mutation_error)?;
+        UploadKind::Attachment
+    };
 
     let (key, base) = super::transfer_link_signer(&state, config)?;
-    let link = state.transfer_links.mint_upload(
-        &key,
-        base,
-        vault.vault_id,
-        &target_relative_path,
-        overwrite,
-    );
+    let link = match &expected_content_hash {
+        Some(hash) => state.transfer_links.mint_note_replace(
+            &key,
+            base,
+            vault.vault_id,
+            &target_relative_path,
+            hash,
+        ),
+        None => state.transfer_links.mint_upload(
+            &key,
+            base,
+            vault.vault_id,
+            &target_relative_path,
+            overwrite,
+        ),
+    };
+    let usage = match upload_kind {
+        UploadKind::Note => NOTE_UPLOAD_USAGE,
+        UploadKind::Attachment => ATTACHMENT_UPLOAD_USAGE,
+    };
     Ok(tool_success(crate::mcp::results::result_to_value(
         &crate::mcp::results::UploadLinkResult {
             vault_id: vault.vault_id.to_string(),
             target_relative_path,
+            upload_kind,
             overwrite,
+            expected_content_hash,
             upload_url: link.url,
             method: "POST",
             expires_at: link.expires_at,
             max_bytes: config.max_attachment_bytes,
-            usage: "POST multipart/form-data to upload_url with the file in a field named `file`, e.g. curl -F file=@/path/to/file '<upload_url>'. No token or other header is needed. A `target_relative_path` field is optional and must match this link's target. The link works once and expires five minutes after it was minted; ask for a new one if it is refused.",
+            usage,
         },
     )))
 }
+
+const ATTACHMENT_UPLOAD_USAGE: &str = "POST multipart/form-data to upload_url with the file in a field named `file`, e.g. curl -F file=@/path/to/file '<upload_url>'. No token or other header is needed. A `target_relative_path` field is optional and must match this link's target. The link works once and expires five minutes after it was minted; ask for a new one if it is refused.";
+
+const NOTE_UPLOAD_USAGE: &str = "POST multipart/form-data to upload_url with the Markdown file in a field named `file`, e.g. curl -F file=@/path/to/note.md '<upload_url>'. No token or other header is needed. The file becomes a note exactly as create_note would write it: it must be UTF-8 with no NUL bytes, CRLF/CR line endings become LF and a final newline is added, and the answer is the note-write result (slug, relative_path, content_hash, layer, quality_warnings). A replacing link writes only while the note still has expected_content_hash, and otherwise fails with write_conflict. A `target_relative_path` field is optional and must match this link's target. The link works once and expires five minutes after it was minted; ask for a new one if it is refused.";
 
 pub(super) async fn move_attachment_tool(
     _state: AppState,
@@ -970,12 +1028,13 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "create_upload_link",
-            "description": "Get a short-lived upload link for one file, the recommended way to upload an attachment from any client that can make an HTTP request (shell, curl). The link carries its own credential and the server's address, so no token or endpoint knowledge is needed: POST the file to it as multipart/form-data in a field named `file`. It is good for one upload to exactly target_relative_path, works once, and expires five minutes after it is minted, or sooner if the server restarts or MCP write mode is turned off. Refused at once when the target is invalid, has an extension uploads do not allow, or already exists and overwrite is false. The size limit is max_bytes in the answer.",
+            "description": "Get a short-lived upload link for one file, the recommended way to upload an attachment, or to import an existing Markdown file as a note, from any client that can make an HTTP request (shell, curl). The link carries its own credential and the server's address, so no token or endpoint knowledge is needed: POST the file to it as multipart/form-data in a field named `file`. It is good for one upload to exactly target_relative_path, works once, and expires five minutes after it is minted, or sooner if the server restarts or MCP write mode is turned off. A target ending in .md is a note upload: the file is written the way create_note writes a note, so its content never has to pass through this conversation. Replacing an existing note needs overwrite true and expected_content_hash, the note's current hash from get_frontmatter; the upload then writes only if the note still has that hash. Refused at once when the target is invalid, has an extension uploads do not allow, already exists and overwrite is false, or is a note whose hash no longer matches. The size limit is max_bytes in the answer.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png."},
-                    "overwrite": {"type": "boolean", "default": false, "description": "Allow the upload to replace an existing file at the target."}
+                    "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png, or Imports/Report.md for a note."},
+                    "overwrite": {"type": "boolean", "default": false, "description": "Allow the upload to replace an existing file at the target. For a note this also needs expected_content_hash."},
+                    "expected_content_hash": {"type": "string", "minLength": 1, "description": "Only for replacing a note (a .md target with overwrite true): the note's current content_hash from get_frontmatter or get_note."}
                 },
                 "required": ["target_relative_path"],
                 "additionalProperties": false
@@ -1234,6 +1293,8 @@ struct CreateUploadLinkArgs {
     target_relative_path: String,
     #[serde(default)]
     overwrite: Option<bool>,
+    #[serde(default)]
+    expected_content_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -209,19 +209,33 @@ pub struct GetAttachmentResult {
     pub content: AttachmentContent,
 }
 
-/// `create_upload_link`'s answer: an upload transfer link (ADR-27) for one
-/// target, good once, until `expires_at`.
+/// `create_upload_link`'s answer: an upload transfer link (ADR-27, ADR-32)
+/// for one target, good once, until `expires_at`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct UploadLinkResult {
     pub vault_id: String,
     pub target_relative_path: String,
+    /// What the upload writes: a `.md` target is a note, anything else an
+    /// attachment.
+    pub upload_kind: UploadKind,
     pub overwrite: bool,
+    /// The hash a replacing note upload requires the note to still have;
+    /// `null` for every other link.
+    pub expected_content_hash: Option<String>,
     pub upload_url: String,
     pub method: &'static str,
     /// Unix time in seconds after which `upload_url` stops working.
     pub expires_at: u64,
     pub max_bytes: u64,
     pub usage: &'static str,
+}
+
+/// Whether an upload link writes a note or an attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadKind {
+    Note,
+    Attachment,
 }
 
 /// The receipt every note-mutation tool returns (`create_note` through

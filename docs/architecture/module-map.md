@@ -972,16 +972,23 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Owned paths:** `src/transfer_link.rs`.
 
 **Public contract:** `TransferLinks` (one instance in `AppState`), with `key`,
-`mint_download`, `mint_upload`, `verify_download`, and `redeem_upload`;
-`SigningKey`, `MintedLink`, `Grant`, `LinkRefusal` (and its stable `code`s),
-`LINK_LIFETIME`, and `SIGNATURE_PARAM`. A link is an absolute URL on the
-Vault-scoped `/transfers/{*path}` route whose query carries `expires`, for
-uploads `overwrite` and `nonce`, and a BLAKE3 keyed-hash `signature` over the
-Vault ID, the relative path, the expiry, and the grant. `key` derives the
+`mint_download`, `mint_upload`, `mint_note_replace`, `verify_download`,
+`redeem_upload`, and `redeem_note_upload`; `SigningKey`, `MintedLink`, `Grant`,
+`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`, and
+`SIGNATURE_PARAM`. A link is an absolute URL on the Vault-scoped
+`/transfers/{*path}` route whose query carries `expires`, for uploads
+`overwrite` and `nonce`, for a link that replaces a note
+`expected_content_hash`, and a BLAKE3 keyed-hash `signature` over the Vault ID,
+the relative path, the expiry, and the grant. A replacing note link is its own
+grant (`Grant::ReplaceNote`), so an attachment link signs and parses exactly as
+it did before ADR-32. `redeem_note_upload` answers `NoteUploadRule::Create` for
+a plain non-overwriting upload link and `Replace` with the signed hash for a
+replacing one, and refuses a plain overwriting link; `redeem_upload` refuses a
+replacing note link. `key` derives the
 `SigningKey` one request works under from the in-memory master key, the MCP
 token's revision, and the token the request was admitted on, so a tool call
 admitted on a token that has since rotated mints links the new token will not
-accept. See ADR-27.
+accept. See ADR-27 and ADR-32.
 
 **Consumers:** the MCP `get_attachment` and `create_upload_link` tools mint;
 `src/handlers/transfer.rs` verifies and redeems; `src/auth.rs` redacts
@@ -1005,14 +1012,9 @@ to the MCP token's revision and value, so a restart or any token change
 (including back to an old value) strands every link; a link is always
 absolute, and minting is refused when there is no address to build it on;
 no link credential reaches a log; an upload link is spent by its first
-redemption; this module never decides whether MCP or write mode is on, which
-the redeeming adapter re-reads per request.
-
-**Pending decision:** ADR-32 (accepted, not yet implemented, #303) supersedes
-ADR-27 and lets an upload link target a note: a `.md` target becomes a note
-write with `create_note`'s checks, and a replacing note link carries the
-note's expected content hash in its signature. The contract and invariants
-above describe the code as it is until that lands.
+redemption; no link replaces a note without the expected content hash signed
+into it at minting (ADR-32); this module never decides whether MCP or write
+mode is on, which the redeeming adapter re-reads per request.
 
 **Validation:** `cargo test transfer_link`, `cargo test transfer` in the server
 router tests, followed by the full backend checks.
@@ -1143,7 +1145,9 @@ shallow frontmatter merge (`update_note_frontmatter`), attachment
 operations, the Vault-wide tag rename (`rename_tag` with `TagRename`,
 `TagRenameNote`, `TagRenameError`, and `UnsupportedTagNote`), the Vault-wide
 tag delete (`delete_tag` with `TagDelete`, `TagDeleteNote`, `TagDeleteError`,
-and `NestedTag`, #258), allowed
+and `NestedTag`, #258), the path-addressed note checks a note upload makes
+before its bytes arrive (`note_target` with `NoteTarget`,
+`note_exists_conflict`, and `check_note_content_hash`, #303), allowed
 attachment extensions, `WriteOutcome`, and `WriteError`.
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
@@ -1582,7 +1586,18 @@ the seventeen primitives, which is what a standalone caller wants:
 writing, locking, or recording, whether `import_attachment` would refuse a
 target before its bytes arrive (the Vault gate, marker and noise refusals, the
 path and extension checks, and an existing file that may not be replaced), so
-an upload transfer link can be refused when minted (#310). `rename_tag` is
+an upload transfer link can be refused when minted (#310). `check_note_upload`
+is its counterpart for a note upload (ADR-32, #303): the Vault gate, marker and
+noise refusals and `create_note`'s path checks, then with no expected hash a
+note already at the path (`write_conflict`), or with one a missing note
+(`note_not_found`) or a stale hash (`write_conflict`). `upload_note` is the
+redemption: it refuses bytes over the limit or not UTF-8, then runs the
+`create_note` write without overwrite, or, under an expected hash, the
+`update_note` write (`replace_entry`, shared with `update_note`) on the note it
+finds at that path, so both carry the same refusals, normalisation, warnings,
+ledger entry and index request as the tools. `is_note_upload_target` is the
+one rule for which uploads are notes: a filename ending in `.md`, in any case. Both note-upload paths write the target with that extension in lower case (`note_upload_path`), so `Report.MD` lands at `Report.md`.
+`rename_tag` is
 the one Vault-wide mutation: without an expected plan hash it plans off the
 async runtime and records nothing; with one it
 records a single ledger entry for every note it rewrote, so a synced Vault
@@ -2591,12 +2606,16 @@ the servable-extension allow-list, the content-type table, and the size bound
 now belong to the read core (`src/vault_read/assets.rs`), which applies
 `VaultReadCore`'s browse-surface gating to them, so both surfaces refuse the
 same paths. What `assets.rs` keeps is this route's own wire shaping.
-`transfer.rs` redeems transfer links (ADR-27) on
+`transfer.rs` redeems transfer links (ADR-27, ADR-32) on
 `/api/v1/vaults/{vault_id}/transfers/{*path}`: `GET` downloads through
 `vault_scoped_asset_handler` with the `McpAssetRead` ceiling after spending the
 transport's tool budget, and `POST` uploads through the mutation core's
 `import_attachment` with the upload route's own multipart form, read by the
-shared `vault_write::read_upload_form`. Both re-read the live configuration per
+shared `vault_write::read_upload_form`. A `.md` target
+(`is_note_upload_target`) is redeemed with `redeem_note_upload` and written
+through the core's `upload_note` instead, answering the note-write shape
+(`vault_write::note_write_response`); the part's declared content type is
+ignored. Both re-read the live configuration per
 request: MCP disabled refuses every link (`mcp_disabled`), write mode off every
 upload (`mcp_write_disabled`), and a link that does not verify is `403` with
 `transfer_link_invalid`, `transfer_link_expired`, or `transfer_link_spent`. The
@@ -2935,7 +2954,14 @@ which transfer links fall back to when `HATCHDOOR_PUBLIC_URL` is unset.
 closed on an invalid pin like the attachment limits) and `link_base` picks
 between the two. `tools::transfer_link_signer` is the one place a tool gets its
 signing key and base, and refuses with `invalid_params` when there is no base.
-Catalogue grows to 44, purely additive. #258 adds `delete_tag`, the
+Catalogue grows to 44, purely additive. #303 (ADR-32) widens
+`create_upload_link` to notes without a new tool: a `.md` target asks the
+core's `check_note_upload` instead, and an optional `expected_content_hash`
+argument, required with `overwrite` on a `.md` target and refused as invalid
+params anywhere else, mints a replacing note link through
+`mint_note_replace`. `UploadLinkResult` gains `upload_kind` (`note` or
+`attachment`) and the echoed `expected_content_hash`, and its `usage` text
+differs by kind. #258 adds `delete_tag`, the
 eighteenth write tool, shaped exactly like `rename_tag`: in `WRITE_OPS`, in
 `NOT_BATCHABLE_WRITE_OPS`, answering `DeleteTagResult`, with its refusals as
 structured tool errors carrying their own codes. Catalogue grows to 45,
@@ -3066,7 +3092,8 @@ ceiling and tool budget as an MCP-admitted asset read, so it cannot reach an
 attachment `get_attachment` would refuse. `get_attachment_import_config`
 recommends the transfer link (`create_upload_link`) first, keeps the
 bearer-token multipart route as the `alternative` for clients that hold the
-token, and `import_attachment` as the base64 fallback.
+token, and `import_attachment` as the base64 fallback, and says that a `.md`
+target on the transfer link imports a note, the only method that takes one.
 `update_frontmatter` is a
 write tool over `vault/write`'s shallow top-level YAML merge primitive
 (`update_note_frontmatter`): explicit null deletes a key, unmentioned keys
