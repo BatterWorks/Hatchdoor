@@ -53,11 +53,14 @@ pub struct McpConfig {
     pub rate_limits_enabled: bool,
     /// `HATCHDOOR_PUBLIC_URL`: the address clients reach this instance at,
     /// without a trailing slash. Transfer links (ADR-27) are built on it when
-    /// set. Only needed behind a proxy or HTTPS front end.
+    /// set, whatever a proxy forwards (ADR-34). Only needed behind a proxy that
+    /// sends no forwarded headers or mounts Hatchdoor under a path prefix.
     pub public_url: Option<String>,
-    /// Not configuration: the `http://host:port` the current MCP request
-    /// arrived on, filled in per call by the adapter. Transfer links fall back
-    /// to it when `public_url` is unset. `None` outside a live MCP request.
+    /// Not configuration: the `scheme://host:port` the client reached the
+    /// current MCP request on, as a proxy's forwarded headers report it or
+    /// else as the request arrived (ADR-34), filled in per call by the adapter.
+    /// Transfer links fall back to it when `public_url` is unset. `None`
+    /// outside a live MCP request.
     pub request_origin: Option<String>,
 }
 
@@ -117,7 +120,8 @@ impl McpConfig {
     }
 
     /// The absolute origin a transfer link is built on: the configured public
-    /// address when there is one, else the address this MCP request arrived on.
+    /// address when there is one, else the address the client reached this MCP
+    /// request on.
     pub fn link_base(&self) -> Option<&str> {
         self.public_url
             .as_deref()

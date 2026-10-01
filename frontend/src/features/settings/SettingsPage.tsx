@@ -143,7 +143,7 @@ const COPY: Record<
   HATCHDOOR_PUBLIC_URL: {
     section: "agents",
     label: "Public address",
-    help: "The address people and assistants use to reach this server. Assistants download and upload files through short-lived links built on it. Only needed when Hatchdoor sits behind a proxy or HTTPS front end; left empty, links use the address the assistant connected to.",
+    help: "The address people and assistants use to reach this server. Assistants download and upload files through short-lived links built on it. Left empty, links use the address the assistant connected to, as reported by a proxy's forwarded headers (Forwarded, or X-Forwarded-Proto and X-Forwarded-Host). Set it when the proxy sends none of those or serves Hatchdoor under a path; when set, it always wins.",
     example: "https://notes.example.com",
   },
   HATCHDOOR_MAX_ATTACHMENT_BYTES: {

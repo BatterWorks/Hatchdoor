@@ -80,7 +80,7 @@ To re-import over a note that already exists, pass `overwrite: true` and `expect
 Reading an attachment is a read: `get_attachment` works whenever MCP is enabled, with no write mode required.
 
 > [!note]
-> A link stops working when it expires, when Hatchdoor restarts, when the MCP password changes, or when MCP is turned off. An upload link also stops when **Let assistants change notes** is turned off. Ask for a new one. If Hatchdoor sits behind a proxy or an HTTPS front end, set **Public address** (`HATCHDOOR_PUBLIC_URL`) so the links point where agents can reach them.
+> A link stops working when it expires, when Hatchdoor restarts, when the MCP password changes, or when MCP is turned off. An upload link also stops when **Let assistants change notes** is turned off. Ask for a new one. Behind a proxy or an HTTPS front end, links follow the address the proxy reports in its forwarded headers. If the proxy sends none, or serves Hatchdoor under a path, set **Public address** (`HATCHDOOR_PUBLIC_URL`) so the links point where agents can reach them.
 
 ## Managing attachments already in the Vault
 

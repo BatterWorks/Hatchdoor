@@ -2971,8 +2971,12 @@ success with zero rows. `get_note` reports the Note's `saved_queries` through
 target would be refused before any bytes arrive, then mints an upload transfer
 link through `AppState::transfer_links`, answering `UploadLinkResult`. It is in
 `WRITE_OPS`, so write mode gates it and `batch` may carry it. The adapter now
-records the host each tool call arrived on in `McpConfig::request_origin`,
-which transfer links fall back to when `HATCHDOOR_PUBLIC_URL` is unset.
+records the origin each tool call arrived on in `McpConfig::request_origin`,
+which transfer links fall back to when `HATCHDOOR_PUBLIC_URL` is unset. Since
+#358 (ADR-34) that origin's scheme and host each come from the first element
+of `Forwarded`, else `X-Forwarded-Proto`/`X-Forwarded-Host`, else `http` and
+`Host`, skipping unusable values; the adapter reads these headers for nothing
+else.
 `McpConfig::public_url` parses that setting (`parse_public_url`, failing
 closed on an invalid pin like the attachment limits) and `link_base` picks
 between the two. `tools::transfer_link_signer` is the one place a tool gets its

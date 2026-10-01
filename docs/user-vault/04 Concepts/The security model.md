@@ -74,7 +74,7 @@ So an authenticated MCP call can mint a **transfer link** instead. `get_attachme
 
 A leaked link exposes one file, or one upload slot, for at most five minutes. A leaked MCP token exposes every Vault until you change it.
 
-Links are built on **Public address** (`HATCHDOOR_PUBLIC_URL`) when it is set, and otherwise on the address the agent's MCP request arrived on. Behind a proxy or an HTTPS front end that arriving address is usually not the one agents can reach, so set the public address there.
+Links are built on **Public address** (`HATCHDOOR_PUBLIC_URL`) when it is set. Otherwise they use the address the agent reached the server on: the scheme and host a proxy reports in `Forwarded`, else in `X-Forwarded-Proto` and `X-Forwarded-Host`, else `http` and the request's own `Host`. Hatchdoor trusts these headers from any sender, because the link goes back only to the caller who sent them, and reads them for nothing else. A value that is not `http`/`https` or not a plain host is ignored. Set the public address when your proxy sends none of these headers or serves Hatchdoor under a path.
 
 > [!note]
 > The web token and the MCP token are unrelated on purpose. An agent's MCP token leaking doesn't hand out Settings or Web UI access, and revoking one never requires rotating the other. Give an agent the MCP token, never the web token — it should never need Settings access to do its job.

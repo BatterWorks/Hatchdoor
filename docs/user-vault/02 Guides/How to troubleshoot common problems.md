@@ -51,7 +51,7 @@ Agents move files through short-lived links that `get_attachment` and `create_up
 - **`transfer_link_spent`**: an upload link was already used. Each works once.
 - **`mcp_disabled`** or **`mcp_write_disabled`**: MCP, or **Let assistants change notes**, is off.
 
-If the agent cannot reach the link's address at all, and Hatchdoor sits behind a proxy or HTTPS front end, set **Public address** in **Settings** → **Agent access (MCP)** to the address agents use. A download over `HATCHDOOR_MCP_MAX_BASE64_BYTES` answers `413`; raise that limit in **Settings** → **Uploads**.
+If the agent cannot reach the link's address at all, or a download saves a small HTML page instead of the file, the link probably starts with `http://` while the agent reached Hatchdoor over HTTPS. Make the proxy send `X-Forwarded-Proto` and `X-Forwarded-Host` (see [[Install Hatchdoor with Docker Compose]]), or set **Public address** in **Settings** → **Agent access (MCP)** to the address agents use. A download over `HATCHDOOR_MCP_MAX_BASE64_BYTES` answers `413`; raise that limit in **Settings** → **Uploads**.
 
 ## Model download is stuck or failed
 
