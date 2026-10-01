@@ -60,26 +60,142 @@ impl HatchdoorMcpHandler {
     }
 }
 
-/// The `http://host:port` an MCP request arrived on, from its `Host` header (or
-/// an HTTP/2 request's authority). Transfer links fall back to it when no
-/// public address is configured (ADR-27). Hatchdoor serves plain HTTP itself,
-/// so the scheme is always `http`; a deployment behind an HTTPS front end sets
-/// `HATCHDOOR_PUBLIC_URL` instead. Trusting the header is safe here because the
-/// link goes back to the same caller that sent it.
+/// The `scheme://host:port` the client reached this MCP endpoint on, which
+/// transfer links fall back to when no public address is configured (ADR-34).
+/// Scheme and host are each taken from the first source that gives a usable
+/// value: the first element of `Forwarded` (RFC 7239), then the first value of
+/// `X-Forwarded-Proto` / `X-Forwarded-Host`, then `http` and the `Host` header
+/// (or an HTTP/2 request's authority). A value that is unusable is skipped, so
+/// a malformed header never fails the call. Trusting these headers from any
+/// sender is safe here because the link goes back to the same caller that sent
+/// them, and nothing else in Hatchdoor reads them.
 fn request_origin(parts: &axum::http::request::Parts) -> Option<String> {
-    let authority = match parts
+    let headers = &parts.headers;
+    let forwarded = headers
+        .get(axum::http::header::FORWARDED)
+        .and_then(|value| value.to_str().ok())
+        .map(first_forwarded_element)
+        .unwrap_or_default();
+    let scheme = forwarded
+        .proto
+        .as_deref()
+        .and_then(link_scheme)
+        .or_else(|| first_header_value(headers, "x-forwarded-proto").and_then(link_scheme))
+        .unwrap_or("http");
+    let authority = match forwarded
+        .host
+        .as_deref()
+        .and_then(link_authority)
+        .or_else(|| first_header_value(headers, "x-forwarded-host").and_then(link_authority))
+    {
+        Some(authority) => authority,
+        None => arriving_authority(parts)?,
+    };
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// The authority the request itself carries: the `Host` header, or an HTTP/2
+/// request's authority when it has none. An unusable `Host` yields `None`
+/// rather than falling through to the URI.
+fn arriving_authority(parts: &axum::http::request::Parts) -> Option<axum::http::uri::Authority> {
+    match parts
         .headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
     {
-        Some(host) => host.parse::<axum::http::uri::Authority>().ok()?,
-        None => parts.uri.authority()?.clone(),
-    };
-    // Credentials in the authority have no place in a link.
-    if authority.as_str().contains('@') {
+        Some(host) => link_authority(host),
+        None => link_authority(parts.uri.authority()?.as_str()),
+    }
+}
+
+/// A link can only be `http` or `https`; anything else is ignored.
+fn link_scheme(raw: &str) -> Option<&'static str> {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("https") {
+        Some("https")
+    } else if raw.eq_ignore_ascii_case("http") {
+        Some("http")
+    } else {
+        None
+    }
+}
+
+/// A host a link can be built on: a valid authority with no credentials in it.
+fn link_authority(raw: &str) -> Option<axum::http::uri::Authority> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('@') {
         return None;
     }
-    Some(format!("http://{authority}"))
+    raw.parse().ok()
+}
+
+/// The first comma-separated value of the first `name` header.
+fn first_header_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// The `proto` and `host` parameters of one `Forwarded` element.
+#[derive(Default)]
+struct ForwardedElement {
+    proto: Option<String>,
+    host: Option<String>,
+}
+
+impl ForwardedElement {
+    /// Keep a `name=value` pair if it is the first `proto` or `host`; any
+    /// other pair, or one without `=`, is ignored.
+    fn record(&mut self, pair: &str) {
+        let Some((name, value)) = pair.split_once('=') else {
+            return;
+        };
+        let slot = match name.trim().to_ascii_lowercase().as_str() {
+            "proto" => &mut self.proto,
+            "host" => &mut self.host,
+            _ => return,
+        };
+        if slot.is_none() {
+            *slot = Some(value.trim().to_string());
+        }
+    }
+}
+
+/// The parameters of the first element of a `Forwarded` header value. Elements
+/// end at `,` and parameters at `;`. A value that opens with `"` is a quoted
+/// string, read up to its closing quote with `\\` escaping the next character,
+/// so separators inside it do not count. Parameter names are case-insensitive.
+fn first_forwarded_element(value: &str) -> ForwardedElement {
+    let mut element = ForwardedElement::default();
+    let mut pair = String::new();
+    let mut chars = value.chars();
+    loop {
+        match chars.next() {
+            Some('"') if pair.ends_with('=') => {
+                while let Some(ch) = chars.next() {
+                    match ch {
+                        '"' => break,
+                        '\\' => pair.extend(chars.next()),
+                        _ => pair.push(ch),
+                    }
+                }
+            }
+            Some(';') => {
+                element.record(&pair);
+                pair.clear();
+            }
+            Some(',') | None => {
+                element.record(&pair);
+                return element;
+            }
+            Some(ch) => pair.push(ch),
+        }
+    }
 }
 
 impl ServerHandler for HatchdoorMcpHandler {
@@ -373,11 +489,22 @@ mod tests {
     }
 
     fn parts(host: Option<&str>) -> axum::http::request::Parts {
+        parts_with(host, &[])
+    }
+
+    fn parts_with(host: Option<&str>, headers: &[(&str, &str)]) -> axum::http::request::Parts {
         let mut request = axum::http::Request::builder().uri("/mcp");
         if let Some(host) = host {
             request = request.header(axum::http::header::HOST, host);
         }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
         request.body(()).expect("request").into_parts().0
+    }
+
+    fn origin(host: Option<&str>, headers: &[(&str, &str)]) -> Option<String> {
+        super::request_origin(&parts_with(host, headers))
     }
 
     #[test]
@@ -393,6 +520,159 @@ mod tests {
         assert_eq!(super::request_origin(&parts(None)), None);
         assert_eq!(super::request_origin(&parts(Some("bad host/x"))), None);
         assert_eq!(super::request_origin(&parts(Some("user@evil"))), None);
+    }
+
+    #[test]
+    fn x_forwarded_proto_sets_the_scheme_and_keeps_the_arriving_host() {
+        assert_eq!(
+            origin(Some("notes.lan"), &[("x-forwarded-proto", "https")]),
+            Some("https://notes.lan".to_string())
+        );
+        assert_eq!(
+            origin(Some("notes.lan"), &[("x-forwarded-proto", "https, http")]),
+            Some("https://notes.lan".to_string())
+        );
+        assert_eq!(
+            origin(Some("notes.lan"), &[("x-forwarded-proto", "HTTPS")]),
+            Some("https://notes.lan".to_string())
+        );
+    }
+
+    #[test]
+    fn x_forwarded_host_alone_changes_the_host_and_keeps_http() {
+        assert_eq!(
+            origin(
+                Some("127.0.0.1:42824"),
+                &[("x-forwarded-host", "notes.example.com, proxy.lan")]
+            ),
+            Some("http://notes.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn forwarded_gives_scheme_and_host_and_wins_over_x_forwarded() {
+        assert_eq!(
+            origin(
+                Some("127.0.0.1:42824"),
+                &[(
+                    "forwarded",
+                    "for=1.2.3.4;proto=https;host=notes.example.com"
+                )]
+            ),
+            Some("https://notes.example.com".to_string())
+        );
+        assert_eq!(
+            origin(
+                Some("127.0.0.1:42824"),
+                &[
+                    ("forwarded", "proto=https;host=notes.example.com"),
+                    ("x-forwarded-proto", "http"),
+                    ("x-forwarded-host", "other.example.com"),
+                ]
+            ),
+            Some("https://notes.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn forwarded_reads_only_its_first_element_with_quotes_and_any_case() {
+        assert_eq!(
+            origin(
+                Some("127.0.0.1"),
+                &[(
+                    "forwarded",
+                    "For=\"[2001:db8::1]\";Proto=HTTPS;Host=\"notes.example.com:8443\", proto=http;host=inner.lan"
+                )]
+            ),
+            Some("https://notes.example.com:8443".to_string())
+        );
+        // A quoted value may hold the separators; they do not end the element.
+        assert_eq!(
+            origin(
+                Some("127.0.0.1"),
+                &[("forwarded", "for=\"a,b;c\";host=notes.example.com")]
+            ),
+            Some("http://notes.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn forwarded_keeps_a_quoted_ipv6_host_and_its_port() {
+        assert_eq!(
+            origin(
+                Some("127.0.0.1"),
+                &[("forwarded", "proto=https;host=\"[2001:db8::1]:8443\"")]
+            ),
+            Some("https://[2001:db8::1]:8443".to_string())
+        );
+    }
+
+    #[test]
+    fn a_stray_quote_does_not_carry_the_parse_into_a_later_element() {
+        // The quote is not at the start of a value, so it is an ordinary
+        // character: the first element ends at the comma and has no host.
+        assert_eq!(
+            origin(
+                Some("notes.lan"),
+                &[("forwarded", "for=x\"y, proto=https;host=inner.example.com")]
+            ),
+            Some("http://notes.lan".to_string())
+        );
+    }
+
+    #[test]
+    fn scheme_and_host_fall_back_independently_between_header_families() {
+        // Forwarded gives only the host; the scheme comes from X-Forwarded-Proto.
+        assert_eq!(
+            origin(
+                Some("127.0.0.1"),
+                &[
+                    ("forwarded", "host=notes.example.com"),
+                    ("x-forwarded-proto", "https"),
+                ]
+            ),
+            Some("https://notes.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn unusable_forwarded_values_fall_back_to_the_next_source() {
+        assert_eq!(
+            origin(
+                Some("notes.lan"),
+                &[("forwarded", "proto=ftp"), ("x-forwarded-proto", "https")]
+            ),
+            Some("https://notes.lan".to_string())
+        );
+        assert_eq!(
+            origin(Some("notes.lan"), &[("x-forwarded-proto", "ftp")]),
+            Some("http://notes.lan".to_string())
+        );
+        assert_eq!(
+            origin(Some("notes.lan"), &[("x-forwarded-host", "user@evil")]),
+            Some("http://notes.lan".to_string())
+        );
+        assert_eq!(
+            origin(Some("notes.lan"), &[("x-forwarded-host", "bad host/x")]),
+            Some("http://notes.lan".to_string())
+        );
+        assert_eq!(
+            origin(
+                Some("notes.lan"),
+                &[
+                    ("forwarded", "host=\"user@evil\""),
+                    ("x-forwarded-host", "notes.example.com")
+                ]
+            ),
+            Some("http://notes.example.com".to_string())
+        );
+        assert_eq!(
+            origin(Some("notes.lan"), &[("forwarded", ";;=;garbage\"")]),
+            Some("http://notes.lan".to_string())
+        );
+        // A forwarded scheme with no usable host anywhere still has nothing to
+        // build a link on.
+        assert_eq!(origin(None, &[("x-forwarded-proto", "https")]), None);
     }
 
     #[test]

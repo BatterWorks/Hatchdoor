@@ -62,6 +62,9 @@ Do not change `HOST: 0.0.0.0`; Hatchdoor needs that value inside the container. 
 > [!warning]
 > Publishing `42824:42824` listens on every host interface. Use it only on a trusted LAN with the web and MCP passwords enabled. For internet access, put Hatchdoor behind an authenticated, encrypted access layer instead.
 
+> [!note] Behind a reverse proxy
+> Agents download and upload files through short-lived links that carry the server's address. Behind a proxy that adds HTTPS, Hatchdoor learns the address agents used from the proxy's `Forwarded` header, or its `X-Forwarded-Proto` and `X-Forwarded-Host` headers. Caddy, Traefik and Nginx Proxy Manager send them by default. Plain nginx and openresty need `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header X-Forwarded-Host $http_host;` (`$http_host` keeps a non-standard port, `$host` drops it) in the `location` block. If your proxy cannot send them, or serves Hatchdoor under a path such as `/notes`, set **Public address** in **Settings** → **Agent access (MCP)** instead.
+
 Create `.env` with your host-side Vault path:
 
 ```env

@@ -2967,18 +2967,34 @@ mod tests {
         name: &str,
         arguments: serde_json::Value,
     ) -> serde_json::Value {
+        mcp_tool_call_with_headers(app, token, name, arguments, &[]).await
+    }
+
+    /// `mcp_tool_call` with extra request headers, such as the forwarded
+    /// headers a reverse proxy adds (ADR-34).
+    async fn mcp_tool_call_with_headers(
+        app: &Router,
+        token: &str,
+        name: &str,
+        arguments: serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
         let session = initialize_mcp_session(app, token).await;
+        let mut request = Request::builder()
+            .uri("/mcp")
+            .method("POST")
+            .header("host", "localhost")
+            .header("mcp-session-id", session)
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json");
+        for (header, value) in headers {
+            request = request.header(*header, *value);
+        }
         let response = app
             .clone()
             .oneshot(
-                Request::builder()
-                    .uri("/mcp")
-                    .method("POST")
-                    .header("host", "localhost")
-                    .header("mcp-session-id", session)
-                    .header("accept", "application/json, text/event-stream")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
+                request
                     .body(Body::from(
                         serde_json::json!({
                             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -3122,6 +3138,142 @@ mod tests {
             .expect("body");
         assert_eq!(bytes.len(), manual.len());
         assert!(bytes.as_ref() == manual.as_slice(), "byte for byte");
+    }
+
+    /// Behind a TLS-terminating proxy the link carries the scheme and host the
+    /// proxy reports (ADR-34), and it still redeems: the signature covers the
+    /// path and query, not the origin, so the test sends it back to the router
+    /// as the proxy would after stripping TLS.
+    #[tokio::test]
+    async fn links_minted_behind_a_proxy_use_its_forwarded_origin_and_still_redeem() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Proxied", 0).await;
+        std::fs::write(vault_root.join("manual.pdf"), b"%PDF-1.7 bytes").expect("pdf");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "manual.pdf"}),
+            &[("x-forwarded-proto", "https")],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        let target = url
+            .strip_prefix("https://localhost")
+            .unwrap_or_else(|| panic!("https on the arriving host: {url}"));
+        let response = fetch_link(&app, target.to_string()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), b"%PDF-1.7 bytes");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "Inbox/first.pdf"}),
+            &[("x-forwarded-proto", "https")],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["upload_url"]
+            .as_str()
+            .expect("upload_url");
+        assert!(url.starts_with("https://localhost/api/v1/vaults/"), "{url}");
+
+        // Unusable forwarded values never fail the call; they fall back.
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "manual.pdf"}),
+            &[
+                ("forwarded", "proto=ftp;host=\"user@evil\";;\""),
+                ("x-forwarded-host", "bad host/x"),
+            ],
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(url.starts_with("http://localhost/api/v1/vaults/"), "{url}");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "Inbox/scan.pdf"}),
+            &[
+                (
+                    "forwarded",
+                    "for=1.2.3.4;proto=https;host=notes.example.com",
+                ),
+                ("x-forwarded-proto", "http"),
+            ],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["upload_url"]
+            .as_str()
+            .expect("upload_url");
+        let target = url
+            .strip_prefix("https://notes.example.com")
+            .unwrap_or_else(|| panic!("Forwarded wins: {url}"));
+        let uploaded = app
+            .clone()
+            .oneshot(upload_link_request(target.to_string(), None, b"scan"))
+            .await
+            .expect("response");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("Inbox/scan.pdf")).expect("written"),
+            b"scan"
+        );
+    }
+
+    /// A configured public address wins over anything a proxy forwards.
+    #[tokio::test]
+    async fn the_public_address_wins_over_forwarded_headers() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Pinned", 0).await;
+        std::fs::write(vault_root.join("clip.png"), b"png").expect("png");
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_PUBLIC_URL".to_string(),
+                "https://pinned.example.com".to_string(),
+            )])
+            .expect("public address");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "clip.png"}),
+            &[
+                ("forwarded", "proto=http;host=forwarded.example.com"),
+                ("x-forwarded-host", "other.example.com"),
+            ],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(
+            url.starts_with("https://pinned.example.com/api/v1/vaults/"),
+            "{url}"
+        );
     }
 
     #[tokio::test]

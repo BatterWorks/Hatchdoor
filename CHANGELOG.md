@@ -23,6 +23,8 @@
 
 - A `#tag` search said it had run the mode you asked for when it had not. A query like `#project` always runs as a tag match, whichever `mode` it was sent with, but the response echoed the requested `semantic` or `keyword` back, so an agent could not tell that its rows came from a tag lookup with every score set to 1 rather than from a ranked search. The response from `search_notes` and `GET /api/v1/vaults/{scope}/search` now reports `"mode": "tag"` for such a query. Every other query still reports the mode it asked for, and `tag` cannot be sent as a requested mode. A client that only expects `semantic` or `keyword` in the response now has a third value to handle. [#354]
 
+- Behind a proxy that adds HTTPS, a file link from `get_attachment` or `create_upload_link` started with `http://`, and downloading it as the tool suggested saved the proxy's redirect page instead of the file. The proxy answered the `http://` address with a redirect to `https://`, and `curl -o`, the example the tool response gives, saved that short HTML page under the file's name and reported success. A client that followed the redirect sent the link, credential included, over plain HTTP first. Hatchdoor only ever saw the plain HTTP hop from the proxy. It now reads the address the client actually used from the proxy's `Forwarded` header, or else from `X-Forwarded-Proto` and `X-Forwarded-Host`, so links start with `https://` and the proxy's host with nothing to configure. Caddy, Traefik and Nginx Proxy Manager send those headers by default; plain nginx and openresty need `proxy_set_header` lines, which the Docker Compose install guide now shows. **Public address** in Settings still wins whenever it is set, and remains the fix for a proxy that sends neither header or serves Hatchdoor under a path. A value that is not `http`/`https`, or not a plain host, is ignored and never fails the call. [#358]
+
 [#80]: https://github.com/BatterWorks/Hatchdoor/issues/80
 [#242]: https://github.com/BatterWorks/Hatchdoor/issues/242
 [#258]: https://github.com/BatterWorks/Hatchdoor/issues/258
@@ -35,6 +37,7 @@
 [#316]: https://github.com/BatterWorks/Hatchdoor/issues/316
 [#345]: https://github.com/BatterWorks/Hatchdoor/issues/345
 [#354]: https://github.com/BatterWorks/Hatchdoor/issues/354
+[#358]: https://github.com/BatterWorks/Hatchdoor/issues/358
 
 ## v2.6.1 - 2026-09-08
 
