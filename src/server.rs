@@ -9045,6 +9045,20 @@ mod tests {
         assert_eq!(empty_query.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(empty_query).await["code"], "invalid_search_query");
 
+        // `tag` is a mode a response reports, never one a caller can ask for.
+        let tag_mode = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search?q=%23topic&mode=tag")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(tag_mode.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(tag_mode).await["code"], "invalid_request_query");
+
         let absent_layer = app
             .clone()
             .oneshot(

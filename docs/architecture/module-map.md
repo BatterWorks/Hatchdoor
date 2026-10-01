@@ -1980,8 +1980,9 @@ commands when retrieval behavior may change.
 - `src/search/layer_selection.rs`
 - `src/search/vault_scoped.rs`
 
-**Public contract:** the shared search vocabulary `SearchMode`,
-`LayerSelection`, `LayerInfo`, `OutboundLink`, and the two crate-internal tag
+**Public contract:** the shared search vocabulary `SearchMode` (what a caller
+may request), `SearchResponseMode` (what a response reports ran, adding `tag`;
+#354), `LayerSelection`, `LayerInfo`, `OutboundLink`, and the two crate-internal tag
 primitives `normalize_tag_path` and `tag_matches` (#274). Those two say what a
 tag is and what "nested under it" means, which the Vault-read core's metadata
 query needs to answer a tag condition the way the indexer stored the tag.
@@ -2033,7 +2034,9 @@ and future Vault-scoped MCP adapters.
   and nonzero for near matches (#328).
 - The `#tag` shorthand gives every matching Vault a turn before any Vault gets
   a second, so a Vault with a match is dropped only when `limit` is below the
-  number of matching Vaults.
+  number of matching Vaults. It runs as a tag match whatever mode was
+  requested, and its response reports `mode: "tag"` rather than echoing that
+  request (#354).
 - Participants tell the truth about degraded states: a vector-needing search
   reports `not_searchable` for a vectorless generation whatever its freshness,
   and for a selected demoted layer the generation built without vectors

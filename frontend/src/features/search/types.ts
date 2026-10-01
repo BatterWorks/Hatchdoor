@@ -2,6 +2,11 @@ import type { NoteMetadata, VaultId } from "../../types";
 
 export type SearchMode = "semantic" | "keyword";
 
+/** The ranking a response actually ran. A `#tag` query always runs as a tag
+ * match and reports `tag`, whatever mode it asked for; callers cannot request
+ * it. */
+export type SearchResponseMode = SearchMode | "tag";
+
 export interface OutboundLink {
   slug: string;
   title: string;
@@ -29,6 +34,6 @@ export type SearchSelection = {
 };
 
 export interface SearchResponse {
-  mode: SearchMode;
+  mode: SearchResponseMode;
   results: SearchResult[];
 }

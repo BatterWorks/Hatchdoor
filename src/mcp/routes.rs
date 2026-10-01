@@ -4102,6 +4102,20 @@ mod tests {
         }
     }
 
+    /// `tag` is a mode a search response reports, never one a caller can ask
+    /// for (#354).
+    #[tokio::test]
+    async fn search_notes_rejects_tag_as_a_requested_mode() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "#topic", "mode": "tag"}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
     #[tokio::test]
     async fn list_vaults_redacts_configured_credentials() {
         let (state, _tmp) = write_state();
