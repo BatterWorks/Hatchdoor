@@ -2070,6 +2070,147 @@ async fn an_existing_git_pull_only_turn_waits_for_a_concurrent_foreground_mutati
         .expect("Git turn succeeds after the lock is released");
 }
 
+/// ADR-31 decision 4, through the real turns: the coordinator admits a
+/// Vault's commit and sync beside its own Index turn, and the Vault's
+/// mutation lock is what decides how long they wait. They wait out the read
+/// phase, when the Index turn is reading the notes they would rewrite, and
+/// never the embedding pass, which is where a large Vault spends hours.
+#[tokio::test]
+async fn a_vaults_git_work_waits_for_its_index_read_phase_but_not_its_embedding() {
+    for park_in_read_phase in [true, false] {
+        let directory = tempdir().expect("temporary state directory");
+        let (repository_path, _remote_path) = existing_git_checkout_fixture(directory.path());
+        // Two-way, so the commit turn takes the mutation lock as well as the
+        // sync does.
+        let (collection, registry, _control_block, vault_id) = existing_git_control_block(
+            directory.path(),
+            "Existing two-way lanes",
+            repository_path,
+            VaultGitMode::TwoWay,
+        );
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+        let cooldown = crate::git::CommitCooldown::new();
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let embedder: Arc<dyn Embedder> = if park_in_read_phase {
+            Arc::new(ReadPhaseBlockingEmbedder {
+                inner: StubEmbedder::new(384),
+                entered: entered.clone(),
+                release: release.clone(),
+                parked: std::sync::atomic::AtomicBool::new(false),
+            })
+        } else {
+            Arc::new(BlockingEmbedder {
+                inner: StubEmbedder::new(384),
+                entered: entered.clone(),
+                release: release.clone(),
+            })
+        };
+
+        coordinator.request(vault_id, VaultWorkKind::Index);
+        coordinator.request(vault_id, VaultWorkKind::Commit);
+        coordinator.request(vault_id, VaultWorkKind::Git);
+        let index_turn = worker.next_turn().await.expect("Index turn admitted");
+        assert_eq!(index_turn.request().kind(), VaultWorkKind::Index);
+        let index = tokio::spawn({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            async move {
+                index_turn
+                    .run(|request| dispatch_vault_index_turn(&collection, cache, embedder, request))
+                    .await
+            }
+        });
+        meet_barrier(&entered).await;
+
+        let (collection, registry, managed_git, cooldown, coordinator) = (
+            &collection,
+            &registry,
+            &managed_git,
+            &cooldown,
+            &coordinator,
+        );
+        for (position, kind) in [VaultWorkKind::Commit, VaultWorkKind::Git]
+            .into_iter()
+            .enumerate()
+        {
+            let turn = tokio::time::timeout(std::time::Duration::from_secs(1), worker.next_turn())
+                .await
+                .expect("the coordinator admits the Vault's Git work beside its Index turn")
+                .expect("Git-lane turn admitted");
+            assert_eq!(turn.request().kind(), kind);
+            let outcome = {
+                let git_work = turn.run(|request| async move {
+                    if kind == VaultWorkKind::Commit {
+                        dispatch_commit_turn(
+                            collection,
+                            registry,
+                            managed_git,
+                            cooldown,
+                            "Hatchdoor",
+                            "hatchdoor@example.test",
+                            request,
+                        )
+                        .await
+                    } else {
+                        dispatch_git_turn(
+                            collection,
+                            registry,
+                            coordinator,
+                            managed_git,
+                            "Hatchdoor",
+                            "hatchdoor@example.test",
+                            request,
+                        )
+                        .await
+                    }
+                });
+                tokio::pin!(git_work);
+
+                let raced =
+                    tokio::time::timeout(std::time::Duration::from_millis(300), &mut git_work)
+                        .await;
+                if park_in_read_phase && position == 0 {
+                    let held = raced.is_err();
+                    meet_barrier(&release).await;
+                    assert!(
+                        held,
+                        "a commit must not touch notes the Index turn is reading"
+                    );
+                    tokio::time::timeout(std::time::Duration::from_secs(5), &mut git_work)
+                        .await
+                        .expect("the commit proceeds once the read phase ends")
+                } else {
+                    let finished = raced.is_ok();
+                    if !finished && !park_in_read_phase {
+                        meet_barrier(&release).await;
+                    }
+                    assert!(
+                        finished,
+                        "{kind:?} work must not wait out its own Vault's embedding pass"
+                    );
+                    raced.expect("finished")
+                }
+            };
+            outcome
+                .result
+                .unwrap_or_else(|error| panic!("{kind:?} turn fails: {error:?}"));
+            drop(turn);
+        }
+        if !park_in_read_phase {
+            assert!(
+                !index.is_finished(),
+                "both turns finished while the Index turn was still embedding"
+            );
+            meet_barrier(&release).await;
+        }
+        index.await.expect("Index turn task");
+    }
+}
+
 /// The executor reads the author defaults from the snapshot bound to each
 /// turn rather than from a value captured once at startup, so saving a new
 /// name or email applies to the next Git turn of every Vault without its own

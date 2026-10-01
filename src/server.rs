@@ -1154,7 +1154,7 @@ pub async fn run_server() {
     // forwarding task starts below.
     let watcher_changes = vaults.subscribe_changes();
     // #90 establishes durable reconstruction and lifecycle admission. The
-    // worker loop below is the one global dispatcher for all admitted turns.
+    // dispatch loop below is the one consumer of every admitted turn.
     let (vault_work, vault_worker) = VaultWorkCoordinator::new();
     // Beside the registry, in the same durable state directory: a Vault's
     // poll interval is measured from its last remembered turn, so a redeploy
@@ -1230,17 +1230,34 @@ pub async fn run_server() {
         }
     });
 
-    // The one global consumer of `vault_work`/`vault_worker`. It takes the
-    // next coordinator position and hands it to the executor, which owns what
-    // a turn does and what the collection concludes from it. Repair remains
-    // owned by its later packet.
-    // Exits on its own once `vault_work.shutdown()` drains to quiescence.
+    // The one global consumer of `vault_work`/`vault_worker`. It takes each
+    // turn the coordinator admits and runs it on its own task through the
+    // executor, which owns what a turn does and what the collection concludes
+    // from it. The coordinator's lanes bound how many run at once (ADR-31).
+    // Repair remains owned by its later packet.
+    // Exits on its own once `vault_work.shutdown()` has discarded the queue
+    // and every running turn has published its outcome.
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
         let executor = VaultWorkExecutor::from_state(&state);
         async move {
-            while let Some(outcome) = vault_worker.run_next(|request| executor.run(request)).await {
-                executor.publish_outcome(&outcome);
+            let mut running = tokio::task::JoinSet::new();
+            while let Some(turn) = vault_worker.next_turn().await {
+                let executor = executor.clone();
+                running.spawn(async move {
+                    let outcome = turn.run(|request| executor.run(request)).await;
+                    executor.publish_outcome(&outcome);
+                    // Released only now, so the next turn in this lane
+                    // starts after this one's outcome is published, never
+                    // racing it for the Vault's status.
+                    drop(turn);
+                });
+                while let Some(finished) = running.try_join_next() {
+                    log_dispatch_join(finished);
+                }
+            }
+            while let Some(finished) = running.join_next().await {
+                log_dispatch_join(finished);
             }
         }
     });
@@ -1318,6 +1335,15 @@ pub async fn run_server() {
     }
     if let Err(error) = shutdown_task.await {
         error!(%error, "Server shutdown task exited unexpectedly");
+    }
+}
+
+/// A turn's task contains its own panics (`VaultWorkTurn::run` and
+/// `VaultWorkExecutor::publish_outcome`), so a failed join is unexpected and
+/// only logged.
+fn log_dispatch_join(finished: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = finished {
+        error!(%error, "Vault background work turn task exited unexpectedly");
     }
 }
 

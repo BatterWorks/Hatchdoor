@@ -131,8 +131,8 @@ that production inventory are still checked for stale paths and duplicates.
   `AppState::managed_git` expose the same background-work coordinator and
   managed-Git scheduler `run_server()` wires into the one dispatch loop, so an
   HTTP adapter (`handlers/vaults.rs`) can reconcile a registry mutation into
-  live runtime effects and request an immediate Git or Index turn without a
-  second execution lane. The same loop dispatches each Index turn through the
+  live runtime effects and request an immediate Git or Index turn through the
+  same coordinator lanes. The same loop dispatches each Index turn through the
   Vault-qualified Markdown scan and disposable snapshot publisher; the
   runtime's watcher intents re-enter that coordinator rather than creating a
   separate indexing path. An Index turn publishes in two passes: a Vault's
@@ -242,10 +242,13 @@ that production inventory are still checked for stale paths and duplicates.
   the write's mutation guard. A write is therefore indexed, committed and
   reported stale in the meantime whether or not a watcher exists or saw it
   (#324); the coordinator coalesces the two reports of one change.
-- The one worker loop in `run_server()` takes the next coordinator position
-  and hands it to `vault_executor::VaultWorkExecutor` — see the Vault work
-  execution boundary below. The loop itself holds no readiness policy, no turn
-  logic, and no per-turn dependency assembly.
+- The one dispatch loop in `run_server()` takes each turn the coordinator
+  admits and runs it, and then its `publish_outcome`, on a task of its own
+  through `vault_executor::VaultWorkExecutor`. It drops the turn only after
+  publishing, so the next turn in that lane cannot race the outcome (see the
+  Vault work execution boundary below). The loop itself holds no readiness
+  policy, no turn logic, no limit of its own on concurrency, and no per-turn
+  dependency assembly.
 - `reconcile_and_reconstruct` activates or deactivates a scheduler-tracked
   Vault's `ManagedGitScheduler` entry (and, on deactivation, releases any held
   checkout lease) alongside its coordinator admission — `ManagedGit`, and an
@@ -311,8 +314,19 @@ specific field, route, startup phase, or integration being changed. Adding an
 **Owned paths:** `src/vault_work.rs`.
 
 **Public contract:** `VaultWorkCoordinator` is the cloneable request side and
-`VaultWorkWorker` is the unique execution side of one instance-wide in-memory
-FIFO. `VaultWorkKind`, `VaultWorkRequest`, `ScheduleResult`, `VaultWorkOutcome`,
+`VaultWorkWorker` is the unique admission side of one instance-wide in-memory
+queue with two lanes (ADR-31). Index and Repair turns share the indexing lane,
+one turn at a time across every Vault. Git, Commit and Recovery turns share the
+Git lane: they never wait for an Index turn or for another Vault's Git work, at
+most four Vaults (`GIT_LANE_WIDTH`, a constant, not a setting) run Git work at
+once, and one Vault runs one Git-lane turn at a time. A Vault beyond the cap
+waits for a slot, never for indexing. `VaultWorkWorker::next_turn` returns a
+`VaultWorkTurn` that holds its lane slot until it is dropped, so the dispatch
+loop runs each turn on its own task and the lanes, not the loop, bound the
+overlap; the `#[cfg(test)]` `run_next` takes, runs and drops one turn for tests
+that drive turns one at a time. Both lanes share one FIFO of request
+positions, so a caller taking one turn at a time sees plain request order.
+`VaultWorkKind`, `VaultWorkRequest`, `ScheduleResult`, `VaultWorkOutcome`,
 and `VaultWorkError` expose deterministic one-operation turns, request
 coalescing, lifecycle rejection, and Vault-qualified returned outcomes. Index
 work includes local embedding work; Git, commit, and repair remain distinct
@@ -340,38 +354,43 @@ observation. A user-driven request — a manual sync or retry — still uses
 The queue owns no Markdown, SQLite, Git, or lifecycle state.
 
 **Consumers:** collection runtime reconstructs and drains work for lifecycle
-transitions. `handlers/vaults.rs` reaches the coordinator only indirectly,
+transitions; its `drain_vault` and boundary waits cover both lanes without
+knowing they exist. `handlers/vaults.rs` reaches the coordinator only indirectly,
 through `VaultCollectionRuntime::reconcile_and_reconstruct` after a registry
 mutation, and directly through `ManagedGitScheduler::sync_now`/`retry_now` for
 manual Git control and `VaultWorkCoordinator::request` for the one-Vault HTTP
 refresh control — it never calls `drain_vault` itself. Runtime
-composition dispatches every turn through `vault_executor` without additional
-execution lanes; Repair remains separately owned. `git::ManagedGitScheduler`'s
+composition (`src/server.rs`) runs every admitted turn on its own task through
+`vault_executor` and joins them all before it exits; Repair remains separately
+owned. `git::ManagedGitScheduler`'s
 `tick` is the one production caller of `request_if_idle`.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
 when their owning packets integrate the coordinator.
 
-**Invariants:** one Vault occupies at most one FIFO position; one operation runs
-per turn; duplicate pending work coalesces and duplicate active work retains at
+**Invariants:** one Vault occupies at most one FIFO position per lane; one
+operation runs per turn; at most one Index or Repair turn runs at once; at most
+four Vaults run Git-lane turns at once, and never two for the same Vault;
+Index and Repair turns run in FIFO order; duplicate pending work coalesces per
+lane and duplicate active work retains at
 most one rerun, except through `request_if_idle`, which an automatic producer
 uses to add none; remaining work returns to the tail; a returned failure completes
 its turn and remains attributable to one Vault. So does a panic in a turn's
-future: `run_next` catches it and completes the turn with a non-retryable
-`TURN_PANICKED` (`vault_work_turn_panicked`) failure, so one panicking turn
-cannot end the shared worker or leave its Vault's safe boundary unreachable
-(#326). The queue stays disposable and
-adds no priorities, throttling, persistence, second lane, generic timeout, or
-forced cancellation. Runtime lifecycle stops new work, discards queued work,
-and waits only for an active turn's safe boundary; restart reconstruction uses
-durable definitions and current local-content/Git status.
-
-**Pending decision:** ADR-31 (accepted, not yet implemented, #81) replaces
-the single FIFO for Git work: Git, Commit and Recovery turns stop waiting for
-Index turns and for other Vaults' Git work, with at most four Vaults running
-Git work at once, while indexing keeps one lane. The contract and invariants
-above describe the code as it is until that lands.
+future, in either lane: `VaultWorkTurn::run` catches it and completes the turn
+with a non-retryable `TURN_PANICKED` (`vault_work_turn_panicked`) failure, so
+one panicking turn cannot end the dispatch loop or leave its Vault's safe
+boundary unreachable (#326). A turn completes only when it is dropped, which
+also covers a turn abandoned midway; the dispatch loop drops it after
+publishing its outcome, so the next turn in that lane never races that
+publication, as in the single serial loop before ADR-31.
+The queue adds no same-Vault gate between the lanes: the Vault's mutation lock
+is the guard (ADR-25, ADR-31 decision 4), and no turn takes two Vaults' locks.
+The queue stays disposable and adds no priorities, persistence, third lane,
+configurable cap, generic timeout, or forced cancellation. Runtime lifecycle
+stops new work, discards queued work in both lanes, and waits for the safe
+boundary of whatever the Vault has running in either; restart reconstruction
+uses durable definitions and current local-content/Git status.
 
 **Validation:** `cargo test vault_work`, the runtime-composition tests when a
 consumer is integrated, and the full backend checks.
@@ -402,7 +421,10 @@ through `request_if_idle` after a backoff that starts at
 run of consecutive failures; a success resets the count. A turn that
 panicked (`TURN_PANICKED`) gets its Vault's failed search status published
 here, since the turn never reached its own publication. `publish_outcome` logs the outcome first and contains a panic in its own work, because it runs on the shared dispatch loop outside the turn's panic boundary; the Vault control block's status lock tolerates poisoning so a turn that panicked while holding it cannot make every later read or publication of that Vault panic. Per ADR-13/ADR-18 this is a plain module with a
-small public surface — no trait, no framework, no second execution lane.
+small public surface — no trait and no framework. Which turns overlap is the
+coordinator's decision (ADR-31): `publish_outcome` runs on each turn's own
+task, so the Index retry backoff and the commit cooldown behave the same
+whichever lane the turn ran in.
 
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one
   active Vault. It acquires that Vault's foreground mutation and refresh
@@ -534,7 +556,8 @@ Managed-Git dispatch is the one place outside the registry that reads
 plaintext credentials, through the crate-private `https_credentials`
 accessor, for Git authentication only.
 
-**Consumers:** `src/server.rs`'s single worker loop. Nothing else constructs a
+**Consumers:** `src/server.rs`'s dispatch loop, which runs each admitted turn
+and its `publish_outcome` on a task of its own. Nothing else constructs a
 `VaultWorkExecutor`; lifecycle tests in `src/vault_runtime/tests.rs` reach the
 `#[cfg(test)]` `dispatch_vault_index_turn` seam directly.
 
@@ -546,7 +569,7 @@ publishes through one path; the mutation lock is never acquired before the
 checkout lease; an Index turn holds the foreground mutation guard across every
 read it makes of the Vault and publishes a generation built across a foreground
 mutation as stale; a returned failure is the turn's result, not a panic; no turn
-starts a second execution lane or its own scheduler.
+starts its own scheduler or decides which other turns may overlap it.
 
 **Validation:** `cargo test vault_executor`, `cargo test vault_work`,
 `cargo test vault_runtime`, `cargo test managed_task`, followed by the full
@@ -2465,7 +2488,7 @@ hands it back with `keep_checkout_lease` once the turn completes, so the
 lease survives across turns without being borrowed across the
 `spawn_blocking` boundary — and by
 `src/server.rs`, which
-owns the one global consumer loop driving `VaultWorkWorker::run_next` — the
+owns the one global dispatch loop driving `VaultWorkWorker::next_turn` — the
 worker/scheduler-tick construction and dispatch this module map previously
 noted as missing. `run_local_history_git_turn` is likewise consumed by `plan_git_turn`'s
 `ExistingGit` + `VaultGitMode::LocalHistory` arm, off the async runtime via
