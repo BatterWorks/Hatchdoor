@@ -1321,9 +1321,11 @@ authoritative-index build, rather than one build per target. `resolve_batch`
 generalizes it to note *and* asset targets over that same one build (#158),
 taking the embedding note's Vault-relative directory because an asset target
 resolves relative to the note that names it; assets are returned as
-Vault-relative paths, since an asset has no slug. The browse surface does not
-gate them: assets carry no layer, and an embed only resolves for a caller
-already reading the note that contains it. `vault_directory`
+Vault-relative paths, since an asset has no slug. Resolution does not apply
+the browse surface: an embed only resolves for a caller already reading the
+note that contains it. Fetching the resolved asset does, through
+`asset_on_surface`, so on a demo an embed pointing under a demoted directory
+resolves but its fetch is refused (#154). `vault_directory`
 resolves one Vault's local Markdown directory under the same
 not-found/disabled/unavailable gating as exact reads (reusing
 `VaultControlBlock::ensure_accepting_operations`, widened to `pub(crate)`,

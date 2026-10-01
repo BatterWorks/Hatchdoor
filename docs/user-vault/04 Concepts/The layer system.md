@@ -46,7 +46,7 @@ This is the detail worth getting precisely right, because the two changes it mak
 2. **Browsing does not.** On an ordinary, authenticated instance, the explorer tree, the graph, the recent-notes list, and reading a note directly by its slug all show **everything**, demoted or not. Layers narrow default *search*, not the operator's or the agent's ability to look around or fetch something they already know the slug of.
 
 > [!warning]
-> A public, read-only demo deployment (`HATCHDOOR_DEMO_MODE=true`) is the one exception: with no operator and no layer toggle to speak of, it narrows every surface — tree, graph, recent, exact fetch, search — to the default layer only. An ordinary deployment never does this.
+> A public, read-only demo deployment (`HATCHDOOR_DEMO_MODE=true`) is the one exception: with no operator and no layer toggle to speak of, it narrows every surface — tree, graph, recent, exact fetch, search — to the default layer only. An ordinary deployment never does this. The same goes for images and attachments: a demo refuses any file stored under a demoted folder, even when a default-surface note embeds it, so that embed shows as broken on the demo.
 
 An agent (or a person, via the Web UI's **Keyword mode** or an explicit layer filter) that deliberately asks for a layer by name, or for `all`, gets those notes back like any other.
 
