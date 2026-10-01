@@ -15,6 +15,7 @@ use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex, normalize_title};
+use crate::vault_registry::VaultId;
 
 use super::SqliteCache;
 use super::parse::{
@@ -57,10 +58,16 @@ impl Default for BuildOptions {
 }
 
 /// What one *running* build's caller hands it beyond the index and options:
-/// where to report progress, and the Vault lock it holds only while the build
-/// is still reading Markdown from disk.
+/// which Vault it builds, where to report progress, and the Vault lock it
+/// holds only while the build is still reading Markdown from disk.
 #[derive(Default)]
 pub(crate) struct BuildHandles {
+    /// The Vault this build indexes. Every line the build logs, the progress
+    /// heartbeat's included, carries it as a `vault_id` field so a
+    /// multi-Vault instance's logs say whose index is running (issue #155).
+    /// Only the ID: the display name is user text and the path is private.
+    /// `None` for builds with no Vault behind them (tests, eval).
+    pub(crate) vault_id: Option<VaultId>,
     pub(crate) on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     /// The Index turn's foreground mutation guard, dropped the moment the last
     /// note's content is in memory, so a foreground writer does not wait out
@@ -171,9 +178,22 @@ impl SqliteCache {
         build_stamp: Option<BuildStamp>,
     ) -> Result<(), String> {
         let BuildHandles {
+            vault_id,
             on_progress,
             vault_read_guard,
         } = handles;
+        // Entered here, on the thread that runs the build, rather than relied
+        // on to cross `spawn_blocking` from the Index turn: an ambient span
+        // does not follow work onto another thread. The heartbeat thread gets
+        // this span handed to it for the same reason.
+        // Error level so the span survives any filter an operator sets: under
+        // `RUST_LOG=warn` an info span would be filtered out and take
+        // `vault_id` off the very warnings that most need it.
+        let build_span = match vault_id {
+            Some(vault_id) => tracing::error_span!("index", %vault_id),
+            None => tracing::Span::none(),
+        };
+        let _in_build_span = build_span.enter();
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
@@ -402,6 +422,8 @@ impl SqliteCache {
             total_chunks_to_embed,
             total_tokens_to_embed,
             embedding_started_at,
+            build_span.clone(),
+            progress_log_delay,
         );
         progress
             .notes_processed
@@ -833,11 +855,17 @@ impl ProgressReporter<'_> {
     }
 }
 
+/// `span` is the build's Vault span, and the heartbeat logs inside it. A new
+/// OS thread starts with neither the caller's span nor, when the caller set
+/// its subscriber per thread, the caller's subscriber, so both are carried
+/// across explicitly; otherwise the heartbeat's lines lose their `vault_id`.
 fn start_indexing_heartbeat(
     total_notes: usize,
     total_chunks: usize,
     total_tokens: usize,
     started_at: Instant,
+    span: tracing::Span,
+    log_delay: fn(bool) -> Duration,
 ) -> (
     Arc<IndexingProgress>,
     mpsc::Sender<()>,
@@ -846,10 +874,12 @@ fn start_indexing_heartbeat(
     let progress = Arc::new(IndexingProgress::default());
     let heartbeat_progress = progress.clone();
     let (stop_tx, stop_rx) = mpsc::channel();
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
     let heartbeat = thread::spawn(move || {
+        let _dispatch = tracing::dispatcher::set_default(&dispatch);
+        let _in_span = span.enter();
         let mut has_logged = false;
-        while let Err(mpsc::RecvTimeoutError::Timeout) =
-            stop_rx.recv_timeout(progress_log_delay(has_logged))
+        while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(log_delay(has_logged))
         {
             log_indexing_progress(
                 heartbeat_progress.notes_processed.load(Ordering::Relaxed),
@@ -1963,6 +1993,58 @@ fn preserve_existing_vectors(
     Ok(out)
 }
 
+/// Captures log lines the way production formats them (`config::init_logging`
+/// uses the compact formatter without targets), so a test can assert on the
+/// fields an operator would actually see.
+#[cfg(test)]
+pub(super) mod log_capture {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub(in crate::cache) struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        /// A dispatcher writing here at `level` and above. Set it per thread
+        /// with `tracing::dispatcher::with_default`; the build must carry it
+        /// into any thread it starts itself.
+        pub(in crate::cache) fn dispatch(&self, level: tracing::Level) -> tracing::Dispatch {
+            let sink = self.clone();
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_max_level(level)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .compact()
+                    .with_writer(move || sink.clone())
+                    .finish(),
+            )
+        }
+
+        pub(in crate::cache) fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("captured logs lock").clone())
+                .expect("UTF-8 log output")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured logs lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2612,18 +2694,21 @@ mod tests {
 #[cfg(test)]
 mod chunk_integration_tests {
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use tempfile::TempDir;
+    use tempfile::{TempDir, tempdir};
 
     use super::{
-        BuildOptions, embedding_reuse_hash, estimated_remaining, format_count, format_elapsed,
-        format_eta, format_note_count, indexing_progress_message, progress_log_delay,
+        BuildHandles, BuildOptions, embedding_reuse_hash, estimated_remaining, format_count,
+        format_elapsed, format_eta, format_note_count, indexing_progress_message, log_capture,
+        progress_log_delay, start_indexing_heartbeat,
     };
     use crate::cache::SqliteCache;
     use crate::chunk::ChunkOptions;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
+    use crate::vault_registry::VaultId;
 
     fn make_vault(files: &[(&str, &str)]) -> TempDir {
         let dir = TempDir::new().expect("tempdir");
@@ -3119,6 +3204,194 @@ mod chunk_integration_tests {
             total_vectors, total_chunks,
             "no orphan vectors after delete"
         );
+    }
+
+    /// Every line of the given message must carry exactly `vault`'s ID, once.
+    fn assert_lines_belong_to(lines: &[String], message: &str, vault: VaultId, other: VaultId) {
+        let matching: Vec<&String> = lines.iter().filter(|line| line.contains(message)).collect();
+        assert!(!matching.is_empty(), "no `{message}` line in {lines:#?}");
+        for line in matching {
+            assert_eq!(
+                line.matches(&format!("vault_id={vault}")).count(),
+                1,
+                "`{message}` line lacks its Vault's ID: {line}"
+            );
+            assert!(
+                !line.contains(&other.to_string()),
+                "`{message}` line carries the other Vault's ID: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_builds_label_every_line_with_their_own_vault() {
+        let first = VaultId::generate().expect("Vault ID");
+        let second = VaultId::generate().expect("Vault ID");
+        let first_dir = tempdir().expect("temp dir");
+        std::fs::write(first_dir.path().join("One.md"), "# One\n\nfirst Vault").expect("note");
+        std::fs::write(
+            first_dir.path().join("Broken.md"),
+            "---\ntags: [unclosed\n---\n# Broken\n\nbody",
+        )
+        .expect("note");
+        let second_dir = tempdir().expect("temp dir");
+        for name in ["A", "B", "C"] {
+            std::fs::write(
+                second_dir.path().join(format!("{name}.md")),
+                format!("# {name}\n\nsecond Vault"),
+            )
+            .expect("note");
+        }
+        let logs = log_capture::CapturedLogs::default();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let builds: Vec<_> = [(first, first_dir.path()), (second, second_dir.path())]
+            .into_iter()
+            .map(|(vault_id, path)| {
+                let index = VaultIndex::build(path).expect("index");
+                let dispatch = logs.dispatch(tracing::Level::DEBUG);
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        let cache = SqliteCache::in_memory(384).expect("cache");
+                        barrier.wait();
+                        cache
+                            .replace_with_options(
+                                &index,
+                                &StubEmbedder::new(384),
+                                BuildHandles {
+                                    vault_id: Some(vault_id),
+                                    ..BuildHandles::default()
+                                },
+                                true,
+                                &BuildOptions::default(),
+                            )
+                            .expect("populate");
+                    });
+                })
+            })
+            .collect();
+        for build in builds {
+            build.join().expect("build thread");
+        }
+
+        let lines = logs.lines();
+        assert_lines_belong_to(&lines, "Preparing search index for 2 notes", first, second);
+        assert_lines_belong_to(&lines, "Preparing search index for 3 notes", second, first);
+        assert_lines_belong_to(&lines, "Ignoring malformed YAML frontmatter", first, second);
+        assert_lines_belong_to(&lines, "Search index ready: 2 notes", first, second);
+        assert_lines_belong_to(&lines, "Search index ready: 3 notes", second, first);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("Updating links between notes"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("Indexing performance summary"))
+                .count(),
+            2
+        );
+        // Nothing the builds logged is left unattributed, and no line names a
+        // Vault's directory.
+        for line in &lines {
+            assert_eq!(line.matches("vault_id=").count(), 1, "unattributed: {line}");
+            for dir in [&first_dir, &second_dir] {
+                assert!(
+                    !line.contains(&*dir.path().to_string_lossy()),
+                    "path leaked: {line}"
+                );
+            }
+        }
+    }
+
+    /// An operator who turns logging down to warnings still sees whose
+    /// warnings they are.
+    #[test]
+    fn per_note_warnings_keep_their_vault_id_at_warn_level() {
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
+        std::fs::write(dir.path().join("binary.md"), [0xff_u8, 0xfe, 0x00, 0x9c])
+            .expect("write non-UTF-8 note");
+        let index = VaultIndex::build(dir.path()).expect("index");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let logs = log_capture::CapturedLogs::default();
+
+        tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::WARN), || {
+            cache
+                .replace_with_options(
+                    &index,
+                    &FailingEmbedder {
+                        inner: StubEmbedder::new(384),
+                    },
+                    BuildHandles {
+                        vault_id: Some(vault_id),
+                        ..BuildHandles::default()
+                    },
+                    true,
+                    &BuildOptions::default(),
+                )
+                .expect("populate");
+        });
+
+        let lines = logs.lines();
+        for message in ["Per-note embedding failed", "Skipping unreadable note"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains(message)
+                        && line.contains(&format!("vault_id={vault_id}"))),
+                "no `{message}` line carrying the Vault's ID in {lines:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_heartbeats_each_log_their_own_vault() {
+        let logs = log_capture::CapturedLogs::default();
+        let heartbeats: Vec<_> = [
+            (VaultId::generate().expect("Vault ID"), 4),
+            (VaultId::generate().expect("Vault ID"), 7),
+        ]
+        .into_iter()
+        .map(|(vault_id, total_notes)| {
+            let dispatch = logs.dispatch(tracing::Level::DEBUG);
+            let logs = logs.clone();
+            thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    let span = tracing::error_span!("index", %vault_id);
+                    let (_progress, stop, heartbeat) = start_indexing_heartbeat(
+                        total_notes,
+                        10,
+                        100,
+                        Instant::now(),
+                        span,
+                        |_| Duration::from_millis(5),
+                    );
+                    let line = format!("Indexing: 0 of {total_notes} notes");
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !logs.lines().iter().any(|logged| logged.contains(&line)) {
+                        assert!(Instant::now() < deadline, "no heartbeat line `{line}`");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    stop.send(()).expect("stop heartbeat");
+                    heartbeat.join().expect("heartbeat thread");
+                });
+                vault_id
+            })
+        })
+        .collect();
+        let ids: Vec<VaultId> = heartbeats
+            .into_iter()
+            .map(|heartbeat| heartbeat.join().expect("heartbeat owner"))
+            .collect();
+
+        let lines = logs.lines();
+        assert_lines_belong_to(&lines, "Indexing: 0 of 4 notes", ids[0], ids[1]);
+        assert_lines_belong_to(&lines, "Indexing: 0 of 7 notes", ids[1], ids[0]);
     }
 
     #[test]

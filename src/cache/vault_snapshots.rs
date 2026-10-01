@@ -244,6 +244,7 @@ impl SqliteCache {
                 index,
                 embedder,
                 BuildHandles {
+                    vault_id: Some(vault_id),
                     on_progress,
                     vault_read_guard,
                 },
@@ -315,7 +316,10 @@ impl SqliteCache {
                 // No read guard to hand over: the Index turn still holds its
                 // own across this pass — which reads every note's content —
                 // and releases it inside the embedding build that follows.
-                BuildHandles::default(),
+                BuildHandles {
+                    vault_id: Some(vault_id),
+                    ..BuildHandles::default()
+                },
                 embed_layers,
                 &BuildOptions {
                     embed: false,
@@ -1609,6 +1613,39 @@ mod tests {
         assert_eq!(read.notes.len(), 2, "browsing has every Note");
         assert_eq!(read.links.len(), 1, "and the links between them");
         assert_eq!(vectored_chunks(&cache, id), 0);
+    }
+
+    /// Both passes of an Index turn hand the build their Vault, so every line
+    /// either pass logs names it (issue #155).
+    #[test]
+    fn both_index_passes_log_their_vault_id() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[("Home.md", "# Home\n\nhome body")]);
+        let logs = crate::cache::populate::log_capture::CapturedLogs::default();
+
+        tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::DEBUG), || {
+            cache
+                .publish_vault_structure_snapshot(id, &index, &StubEmbedder::new(384), true)
+                .expect("publish structure-only snapshot");
+            cache
+                .replace_vault_snapshot(id, &index, &StubEmbedder::new(384))
+                .expect("publish searchable snapshot");
+        });
+
+        let lines = logs.lines();
+        for message in ["Preparing search index", "Search index ready"] {
+            let matching: Vec<&String> =
+                lines.iter().filter(|line| line.contains(message)).collect();
+            assert_eq!(
+                matching.len(),
+                2,
+                "one `{message}` line per pass: {lines:#?}"
+            );
+            for line in matching {
+                assert!(line.contains(&format!("vault_id={id}")), "{line}");
+            }
+        }
     }
 
     /// The trap this design has to clear: the structure pass writes note rows

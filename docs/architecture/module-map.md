@@ -1920,6 +1920,11 @@ and embedder identity/dimensions.
   slug moved to another path - before it writes any row. A slug is unique and
   migrates between paths whenever a note is added, moved, or renamed beside a
   same-named sibling, so releasing it late fails the whole turn (issue #226).
+- Every line a Vault's build logs, the progress heartbeat thread's included,
+  carries that Vault's `vault_id` and never its name, path, or remote. The ID
+  travels on `BuildHandles` and the heartbeat receives the build's span
+  explicitly, because a span does not follow work onto another thread
+  (issue #155).
 
 **Validation:** `cargo test cache` and full backend checks. Schema/population
 changes require search and application-state tests too.
