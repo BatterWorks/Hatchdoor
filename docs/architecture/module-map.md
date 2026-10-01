@@ -367,6 +367,12 @@ forced cancellation. Runtime lifecycle stops new work, discards queued work,
 and waits only for an active turn's safe boundary; restart reconstruction uses
 durable definitions and current local-content/Git status.
 
+**Pending decision:** ADR-31 (accepted, not yet implemented, #81) replaces
+the single FIFO for Git work: Git, Commit and Recovery turns stop waiting for
+Index turns and for other Vaults' Git work, with at most four Vaults running
+Git work at once, while indexing keeps one lane. The contract and invariants
+above describe the code as it is until that lands.
+
 **Validation:** `cargo test vault_work`, the runtime-composition tests when a
 consumer is integrated, and the full backend checks.
 
