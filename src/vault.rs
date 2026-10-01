@@ -24,11 +24,11 @@ pub use types::{
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,
 };
 pub use write::{
-    AttachmentInfo, AttachmentOutcome, NestedTag, SectionMode, TagDelete, TagDeleteError,
-    TagDeleteNote, TagRename, TagRenameError, TagRenameNote, UnsupportedTagNote, WriteError,
-    WriteOutcome, allowed_attachment_extensions, append_note, archive_note,
-    check_attachment_import_target, create_note, delete_attachment, delete_note, delete_tag,
-    edit_note, import_attachment_bytes, list_note_attachments, move_attachment,
-    move_or_rename_note, rename_attachment, rename_tag, replace_section, update_note,
-    update_note_frontmatter,
+    AttachmentInfo, AttachmentOutcome, NestedTag, NoteTarget, SectionMode, TagDelete,
+    TagDeleteError, TagDeleteNote, TagRename, TagRenameError, TagRenameNote, UnsupportedTagNote,
+    WriteError, WriteOutcome, allowed_attachment_extensions, append_note, archive_note,
+    check_attachment_import_target, check_note_content_hash, create_note, delete_attachment,
+    delete_note, delete_tag, edit_note, import_attachment_bytes, list_note_attachments,
+    move_attachment, move_or_rename_note, note_exists_conflict, note_target, rename_attachment,
+    rename_tag, replace_section, update_note, update_note_frontmatter,
 };

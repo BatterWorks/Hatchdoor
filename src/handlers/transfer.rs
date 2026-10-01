@@ -1,4 +1,4 @@
-//! HTTP redemption of transfer links (ADR-27).
+//! HTTP redemption of transfer links (ADR-27, widened by ADR-32).
 //!
 //! `GET /api/v1/vaults/{vault_id}/transfers/{*path}` downloads one attachment
 //! and `POST` on the same path uploads one file, each on the strength of the
@@ -11,7 +11,9 @@
 //! MCP write mode off refuses every upload link. Once admitted, a download runs
 //! through the asset handler under the same byte ceiling and tool budget an
 //! MCP-admitted asset read gets, and an upload through the same mutation core
-//! the upload route uses, under `HATCHDOOR_MAX_ATTACHMENT_BYTES`.
+//! the upload route uses, under `HATCHDOOR_MAX_ATTACHMENT_BYTES`. An upload to
+//! a `.md` target is a note write, `create_note`'s or `update_note`'s, and
+//! answers as one; the multipart part's declared content type plays no part.
 
 use std::sync::Arc;
 
@@ -24,13 +26,13 @@ use crate::auth::{McpAssetRead, too_many_requests};
 use crate::handlers::vault_content::vault_scoped_asset_handler;
 use crate::handlers::vault_write::{
     UploadForm, attachment_outcome_response, invalid_input_error, mutation_error_response,
-    read_upload_form,
+    note_write_response, read_upload_form,
 };
 use crate::handlers::vaults::{VaultApiError, internal_error_response, parse_vault_id};
 use crate::mcp::limits::RateLimiter;
 use crate::mcp::subscriptions::McpBearerToken;
-use crate::transfer_link::{LinkRefusal, SigningKey};
-use crate::vault_mutation::VaultMutationCore;
+use crate::transfer_link::{LinkRefusal, NoteUploadRule, SigningKey};
+use crate::vault_mutation::{VaultMutationCore, is_note_upload_target};
 use crate::vault_registry::VaultId;
 
 /// `GET /api/v1/vaults/{vault_id}/transfers/{*path}` — redeem a download link.
@@ -106,14 +108,20 @@ pub async fn upload_transfer_handler(
         .respond(StatusCode::FORBIDDEN);
     }
     // Spent here, before the body is read: a link is good for one attempt.
-    let overwrite =
-        match state
-            .transfer_links
+    let links = &state.transfer_links;
+    let kind = if is_note_upload_target(&path) {
+        links
+            .redeem_note_upload(&live.key, vault_id, &path, uri.query())
+            .map(RedeemedUpload::Note)
+    } else {
+        links
             .redeem_upload(&live.key, vault_id, &path, uri.query())
-        {
-            Ok(overwrite) => overwrite,
-            Err(refusal) => return link_refusal(refusal, Some(vault_id)),
-        };
+            .map(|overwrite| RedeemedUpload::Attachment { overwrite })
+    };
+    let kind = match kind {
+        Ok(kind) => kind,
+        Err(refusal) => return link_refusal(refusal, Some(vault_id)),
+    };
 
     let UploadForm {
         target_relative_path,
@@ -141,19 +149,44 @@ pub async fn upload_transfer_handler(
         }
     };
 
-    match VaultMutationCore::from_state(&state)
-        .import_attachment(
-            vault_id,
-            &path,
-            file_bytes,
-            live.max_attachment_bytes,
-            overwrite,
-        )
-        .await
-    {
-        Ok(outcome) => attachment_outcome_response(vault_id, outcome),
-        Err(error) => mutation_error_response(error),
-    }
+    let core = VaultMutationCore::from_state(&state);
+    let written = match kind {
+        RedeemedUpload::Attachment { overwrite } => core
+            .import_attachment(
+                vault_id,
+                &path,
+                file_bytes,
+                live.max_attachment_bytes,
+                overwrite,
+            )
+            .await
+            .map(|outcome| attachment_outcome_response(vault_id, outcome)),
+        RedeemedUpload::Note(rule) => {
+            let expected_content_hash = match &rule {
+                NoteUploadRule::Create => None,
+                NoteUploadRule::Replace {
+                    expected_content_hash,
+                } => Some(expected_content_hash.as_str()),
+            };
+            core.upload_note(
+                vault_id,
+                &path,
+                file_bytes,
+                live.max_attachment_bytes,
+                expected_content_hash,
+            )
+            .await
+            .map(|outcome| note_write_response(vault_id, outcome))
+        }
+    };
+    written.unwrap_or_else(mutation_error_response)
+}
+
+/// What a redeemed upload link writes: an attachment under its overwrite
+/// rule, or a note under its create-or-replace rule.
+enum RedeemedUpload {
+    Attachment { overwrite: bool },
+    Note(NoteUploadRule),
 }
 
 /// What one redemption binds from the live configuration: the limits it runs

@@ -186,7 +186,7 @@ pub(crate) fn mutation_error_response(error: VaultOperationError) -> Response {
 
 /// The success half of that mapping: the core's typed outcome, already
 /// carrying its resolved layer, shaped into this route's response body.
-fn note_write_response(vault_id: VaultId, outcome: NoteWriteOutcome) -> Response {
+pub(crate) fn note_write_response(vault_id: VaultId, outcome: NoteWriteOutcome) -> Response {
     (
         StatusCode::OK,
         Json(VaultWriteOutcomeResponse {

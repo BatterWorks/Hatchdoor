@@ -29,9 +29,10 @@ use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
     AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagDelete, TagDeleteError,
     TagRename, TagRenameError, VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
-    check_attachment_import_target, create_note, delete_attachment, delete_note, delete_tag,
-    edit_note, import_attachment_bytes, move_attachment, move_or_rename_note, rename_attachment,
-    rename_tag, replace_section, update_note, update_note_frontmatter,
+    check_attachment_import_target, check_note_content_hash, create_note, delete_attachment,
+    delete_note, delete_tag, edit_note, import_attachment_bytes, move_attachment,
+    move_or_rename_note, note_exists_conflict, note_target, rename_attachment, rename_tag,
+    replace_section, update_note, update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
 use crate::vault_read::VaultReadCore;
@@ -403,6 +404,47 @@ impl<'a> VaultMutationCore<'a> {
     ) -> Result<(), VaultOperationError> {
         self.open(vault_id)?
             .check_attachment_import(target_relative_path, overwrite)
+            .await
+    }
+
+    /// Whether a note upload to `target_relative_path` would be refused before
+    /// its bytes arrive (ADR-32): the Vault gate, the marker and noise
+    /// refusals, the path checks, and then, with no `expected_content_hash`,
+    /// a note already there, or with one, a note that is missing or no longer
+    /// has that hash. Writes nothing and takes no lock, so the upload checks
+    /// again when it lands.
+    pub async fn check_note_upload(
+        &self,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        expected_content_hash: Option<&str>,
+    ) -> Result<(), VaultOperationError> {
+        self.open(vault_id)?
+            .check_note_upload(target_relative_path, expected_content_hash)
+            .await
+    }
+
+    /// Write an uploaded Markdown file as a note (ADR-32): the note write
+    /// `create_note` performs with no `expected_content_hash`, and the one
+    /// `update_note` performs with one. `max_bytes` is the authoritative check
+    /// on the uploaded length, as for an attachment.
+    pub async fn upload_note(
+        &self,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        bytes: Vec<u8>,
+        max_bytes: u64,
+        expected_content_hash: Option<&str>,
+    ) -> Result<NoteWriteOutcome, VaultOperationError> {
+        let target = self.open(vault_id)?;
+        let _guard = target.acquire_mutation().await?;
+        target
+            .upload_note(
+                target_relative_path,
+                bytes,
+                max_bytes,
+                expected_content_hash,
+            )
             .await
     }
 
@@ -820,10 +862,29 @@ impl VaultMutation {
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let index = self.authoritative_index().await?;
         let entry = self.note_entry(&index, slug)?;
-        let content = content.to_string();
+        self.replace_entry(
+            &index,
+            entry,
+            slug,
+            content.to_string(),
+            expected_content_hash,
+        )
+        .await
+    }
+
+    /// The whole-content replace `update_note` and a replacing note upload
+    /// share, once the note is resolved.
+    async fn replace_entry(
+        &self,
+        index: &VaultIndex,
+        entry: NoteEntry,
+        addressed: &str,
+        content: String,
+        expected_content_hash: &str,
+    ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write("update", slug, move || {
+            .run_write("update", addressed, move || {
                 update_note(&entry, &content, &expected_content_hash)
             })
             .await?;
@@ -1106,6 +1167,72 @@ impl VaultMutation {
             .map_err(|error| write_operation_error(self.vault_id, error))
     }
 
+    /// [`VaultMutationCore::check_note_upload`] on a Vault already gated.
+    pub async fn check_note_upload(
+        &self,
+        target_relative_path: &str,
+        expected_content_hash: Option<&str>,
+    ) -> Result<(), VaultOperationError> {
+        let target_relative_path = &note_upload_path(target_relative_path);
+        self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(target_relative_path)?;
+        let Some(expected_content_hash) = expected_content_hash else {
+            let target = self.note_target(target_relative_path).await?;
+            if target.exists {
+                return Err(write_operation_error(
+                    self.vault_id,
+                    note_exists_conflict(&target),
+                ));
+            }
+            return Ok(());
+        };
+        let catalog = self.authoritative_catalog().await?;
+        let entry = self.note_at_path(&catalog, target_relative_path).await?;
+        let expected_content_hash = expected_content_hash.to_string();
+        offload(move || check_note_content_hash(&entry, &expected_content_hash))
+            .await
+            .map_err(|error| write_operation_error(self.vault_id, error))
+    }
+
+    /// [`VaultMutationCore::upload_note`] on a Vault already gated.
+    pub async fn upload_note(
+        &self,
+        target_relative_path: &str,
+        bytes: Vec<u8>,
+        max_bytes: u64,
+        expected_content_hash: Option<&str>,
+    ) -> Result<NoteWriteOutcome, VaultOperationError> {
+        let invalid = |message: String| {
+            write_operation_error(self.vault_id, WriteError::InvalidInput(message))
+        };
+        let size = bytes.len() as u64;
+        if size > max_bytes {
+            return Err(invalid(format!(
+                "uploaded note exceeds max size: {size} > {max_bytes}"
+            )));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_| invalid("an uploaded note must be valid UTF-8 text".to_string()))?;
+        let target_relative_path = &note_upload_path(target_relative_path);
+        let Some(expected_content_hash) = expected_content_hash else {
+            return self
+                .create_note(target_relative_path, &content, false)
+                .await;
+        };
+        self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(target_relative_path)?;
+        let index = self.authoritative_index().await?;
+        let entry = self.note_at_path(&index, target_relative_path).await?;
+        self.replace_entry(
+            &index,
+            entry,
+            target_relative_path,
+            content,
+            expected_content_hash,
+        )
+        .await
+    }
+
     /// Move one attachment, rewriting every reference to it.
     pub async fn move_attachment(
         &self,
@@ -1292,6 +1419,34 @@ impl VaultMutation {
             .ok_or_else(|| self.note_not_found(slug))
     }
 
+    /// Where a note write addressed by path would land, with `create_note`'s
+    /// path refusals.
+    async fn note_target(
+        &self,
+        relative_path: &str,
+    ) -> Result<crate::vault::NoteTarget, VaultOperationError> {
+        let vault_path = self.control.vault_path().to_path_buf();
+        let relative_path = relative_path.to_string();
+        offload(move || note_target(&vault_path, &relative_path))
+            .await
+            .map_err(|error| write_operation_error(self.vault_id, error))
+    }
+
+    /// The note an index holds at a Vault-relative path, for the writes that
+    /// address a note by path rather than slug.
+    async fn note_at_path(
+        &self,
+        index: &VaultIndex,
+        relative_path: &str,
+    ) -> Result<NoteEntry, VaultOperationError> {
+        let target = self.note_target(relative_path).await?;
+        index
+            .ordered_entries()
+            .into_iter()
+            .find(|entry| entry.relative_path == target.relative_path)
+            .ok_or_else(|| self.note_not_found(relative_path))
+    }
+
     fn note_not_found(&self, slug: &str) -> VaultOperationError {
         VaultOperationError::new(
             "note_not_found",
@@ -1424,6 +1579,32 @@ impl VaultMutation {
     }
 }
 
+/// Whether an upload to `target_relative_path` is a note upload rather than
+/// an attachment one (ADR-32): its filename ends in `.md`, in any case. A path
+/// with no extension is not a note, though `create_note` would add one.
+pub fn is_note_upload_target(target_relative_path: &str) -> bool {
+    std::path::Path::new(target_relative_path.trim())
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// The path a note upload writes: the target with its `.md` extension in
+/// lower case, so a link for `Report.MD` writes `Report.md` rather than
+/// `create_note`'s `Report.MD.md`, and replaces the note the index knows
+/// there.
+fn note_upload_path(target_relative_path: &str) -> String {
+    let trimmed = target_relative_path.trim();
+    match trimmed.len().checked_sub(3) {
+        Some(stem)
+            if trimmed.is_char_boundary(stem) && trimmed[stem..].eq_ignore_ascii_case(".md") =>
+        {
+            format!("{}.md", &trimmed[..stem])
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
 /// Run a blocking `vault/write` call on the blocking pool, turning a panic
 /// into a `write_failed` rather than letting it unwind through the adapter.
 async fn offload<T: Send + 'static, E: From<WriteError> + Send + 'static>(
@@ -1463,7 +1644,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{VaultMutationCore, VaultOperationError};
+    use super::{VaultMutationCore, VaultOperationError, is_note_upload_target, note_upload_path};
     use crate::cache::SqliteCache;
     use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
     use crate::vault::SectionMode;
@@ -1471,6 +1652,23 @@ mod tests {
         NewVaultDefinition, VaultGitMode, VaultId, VaultRegistryStore, VaultSource,
     };
     use crate::vault_runtime::VaultCollectionRuntime;
+
+    #[test]
+    fn a_note_upload_target_ends_in_md_in_any_case_and_nothing_else_is_one() {
+        for note in ["Report.md", "Imports/Report.md", " Notes/x.MD ", "a.b.Md"] {
+            assert!(is_note_upload_target(note), "{note}");
+        }
+        for other in ["Report", "Imports/scan.png", ".md", "a.mdx", "md"] {
+            assert!(!is_note_upload_target(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_note_upload_writes_its_target_with_a_lower_case_extension() {
+        assert_eq!(note_upload_path(" Imports/Report.MD "), "Imports/Report.md");
+        assert_eq!(note_upload_path("a.Md"), "a.md");
+        assert_eq!(note_upload_path("Imports/Report.md"), "Imports/Report.md");
+    }
 
     /// One Vault on a real filesystem, reconciled through the real registry
     /// and runtime, so a core test exercises the same gating, index build, and

@@ -57,6 +57,14 @@ instance, never accepts writes).
 
 All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. Neither creates the embed syntax in a note for you — write the returned `attachment.relative_path` into the note yourself, as a link or with `![[...]]` embed syntax, the same way you'd write any other Markdown.
 
+### Importing a Markdown file as a note
+
+An agent that already has a Markdown file on disk, say a report another tool wrote, should not read it and retype it through `create_note`. That pays for the content twice and depends on the model copying every line. Send it through an upload link instead: give `create_upload_link` a target ending in `.md`, such as `Imports/Report.md`, and `POST` the file to the link it returns with `curl -F file=@report.md '<upload_url>'`. The `.md` target makes it a note upload, which bypasses the extension list above.
+
+The file is written the way `create_note` writes a note. Line endings become LF and a final newline is added if missing, and `quality_warnings` says so, so a byte comparison against the source has to allow for both. A file that is not UTF-8 text, or contains a NUL byte, is refused and nothing is written. The answer is a note-write result with the new note's `slug` and `content_hash`.
+
+To re-import over a note that already exists, pass `overwrite: true` and `expected_content_hash`, the note's current hash from `get_frontmatter`. The upload then replaces the note only if nobody has changed it since you read that hash, and otherwise fails with `write_conflict` and leaves their edit alone. The size limit is the same `HATCHDOOR_MAX_ATTACHMENT_BYTES`. The Web UI's drop zone still refuses Markdown files.
+
 > [!tip]
 > There's no requirement to use the Vault-root `Attachments/` folder the Web UI uses — `target_relative_path` is any Vault-relative path you choose. Keeping the Web UI's convention makes files easy to find by browsing, but an agent following its own filing scheme (per-note folders, a `Sources/` layer) works just as well.
 
