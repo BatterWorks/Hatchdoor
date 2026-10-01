@@ -91,6 +91,10 @@ _Avoid_: Note ID, permalink, handle, key
 A reference from one note to another, written either as a wikilink (`[[Title]]`) or as a Markdown link whose target is a `.md` path. Both forms are the same thing: each navigates, and each counts toward backlinks, the Links panel, the graph, and statistics. A Markdown link to anything that is not a `.md` file is an attachment reference or an external link, never a note link.
 _Avoid_: Wikilink (when meant to cover both forms), internal link
 
+**Link style**:
+The form a vault writes new note links and attachment embeds in, either wikilinks or Markdown links, and for Markdown links the path form (relative, from the vault root, or shortest). It belongs to the vault and is read from it, never chosen in Hatchdoor: Obsidian's recorded setting when the vault has one, otherwise the form most of the vault's links already use.
+_Avoid_: Link format, link mode, link preference
+
 **Note property**:
 A labelled fact in one note's frontmatter, such as a price or a renewal date. Distinct from the frontmatter block itself, which is where properties live; a query tests properties, not the block.
 _Avoid_: Field, attribute, metadata
