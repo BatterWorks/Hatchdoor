@@ -72,11 +72,11 @@ the collection of vaults is not itself another layer.
 _Avoid_: Vault layer
 
 **Index turn**:
-One unit of background indexing work for exactly one vault, requested through the shared work coordinator by the file watcher, a settings change, a manual rebuild, or activation. It scans that vault's Markdown, builds a candidate snapshot, and publishes it in two passes: structure first, so browsing does not wait, then vectors. A vault occupies at most one coordinator position, so repeated requests coalesce into the next turn. A long turn pauses when another vault is waiting to index, keeps the embedding progress it has made, and resumes from it when its vault's turn comes round again; the vault is meanwhile waiting for its turn.
+One unit of background indexing work for exactly one vault, requested through the shared work coordinator by the file watcher, a settings change, a manual rebuild, or activation. It scans that vault's Markdown, builds a candidate snapshot, and publishes it in two passes: structure first, so browsing does not wait, then vectors. Index turns share one lane across the whole instance, so only one vault indexes at a time, and a vault occupies at most one position in it, so repeated requests coalesce into the next turn. A long turn pauses when another vault is waiting to index, keeps the embedding progress it has made, and resumes from it when its vault's turn comes round again; the vault is meanwhile waiting for its turn.
 _Avoid_: Reindex, rebuild, refresh (when meant instance-wide)
 
 **Git turn**:
-One unit of background Git work for exactly one vault, requested through the same work coordinator by the managed-Git scheduler, a manual sync or retry, or activation, and run under that vault's mutation lock. The vault source and Git mode select the operation: acquire or reuse and synchronise a managed checkout, synchronise an existing checkout with its remote, or commit local history.
+One unit of background Git work for exactly one vault, requested through the same work coordinator by the managed-Git scheduler, a manual sync or retry, or activation, and run under that vault's mutation lock. Git turns, commit turns and recovery turns have their own lane and never wait for an Index turn: up to four vaults run them at once, each vault one turn at a time. On its own vault a Git turn waits only while an Index turn is reading notes, because both take the mutation lock. The vault source and Git mode select the operation: acquire or reuse and synchronise a managed checkout, synchronise an existing checkout with its remote, or commit local history.
 _Avoid_: Sync task, git sync, debounce (when meant instance-wide)
 
 **Recovery branch**:

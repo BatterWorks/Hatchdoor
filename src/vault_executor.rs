@@ -12,7 +12,8 @@
 //! dependency assembly.
 //!
 //! Per ADR-13 and ADR-18 this is a plain module with a small public surface —
-//! no trait, no framework, and no second execution lane.
+//! no trait and no framework. Which turns may run at the same time is the
+//! coordinator's decision (ADR-31), never a turn's.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -135,7 +136,7 @@ const INDEX_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 /// How many automatic retries one Vault's run of consecutive Index failures
 /// gets before it waits for something else (a change, a refresh, a restart)
 /// to ask for another turn. Bounded so a Vault that cannot index at all does
-/// not keep the one shared worker busy forever.
+/// not keep the one indexing lane busy forever.
 const INDEX_RETRY_LIMIT: u32 = 5;
 
 /// Each Vault's count of consecutive retryable Index failures, so the retry a
