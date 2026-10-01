@@ -269,3 +269,38 @@ describe("rewriteWikilinks with Markdown note links (ADR-28)", () => {
     expect(out.split("\n")).toHaveLength(markdown.split("\n").length);
   });
 });
+
+describe("rewriteWikilinks with Markdown images (ADR-33 inserts)", () => {
+  const rewriteImages = (
+    markdown: string,
+    assets: Map<string, string | null>,
+  ) => rewriteWikilinks(VAULT_ID, markdown, "Notes/Home.md", new Map(), assets);
+
+  it("points root-anchored, bare-name and encoded images at the resolved file", () => {
+    const assets = new Map<string, string | null>([
+      ["/Attachments/a b.png", "Attachments/a b.png"],
+      ["c.png", "Attachments/c.png"],
+      ["../Attachments/d (1).pdf", "Attachments/d (1).pdf"],
+    ]);
+    expect(
+      rewriteImages(
+        "![](/Attachments/a%20b.png)\n![](c.png) ![](<../Attachments/d (1).pdf>)",
+        assets,
+      ),
+    ).toBe(
+      "![](/api/v1/vaults/vault-1/assets/Attachments/a%20b.png)\n" +
+        "![](/api/v1/vaults/vault-1/assets/Attachments/c.png) " +
+        "![](/api/v1/vaults/vault-1/assets/Attachments/d%20(1).pdf)",
+    );
+  });
+
+  it("leaves unresolved, external and code images as written", () => {
+    const markdown = [
+      "![](missing.png) ![](https://example.com/x.png)",
+      "`![](c.png)`",
+    ].join("\n");
+    expect(rewriteImages(markdown, new Map([["missing.png", null]]))).toBe(
+      markdown,
+    );
+  });
+});

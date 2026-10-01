@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ATTACHMENT_MAX_BYTES,
   attachmentEmbedPath,
+  attachmentEmbedText,
   attachmentRejection,
   insertEmbedAt,
   insertionLineForDrop,
@@ -263,5 +264,106 @@ describe("insertEmbedAt", () => {
 
   it("keeps the file's trailing newline", () => {
     expect(insertEmbedAt("one\n", 1, "a.png")).toBe("one\n\n![[a.png]]\n");
+  });
+});
+
+describe("attachmentEmbedText", () => {
+  const upload = {
+    embedPath: "../Attachments/my shot (1).png",
+    vaultPath: "Attachments/my shot (1).png",
+  };
+  const unused = vi.fn(async () => new Map<string, string | null>());
+
+  it("inserts exactly today's wikilink embed in a wikilink Vault", async () => {
+    expect(
+      await attachmentEmbedText(
+        { style: "wikilink", pathForm: "shortest" },
+        upload,
+        "Notes/Home",
+        unused,
+      ),
+    ).toBe("![[../Attachments/my shot (1).png]]");
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("writes a relative or absolute Markdown embed without asking the server", async () => {
+    expect(
+      await attachmentEmbedText(
+        { style: "markdown", pathForm: "relative" },
+        upload,
+        "Notes/Home",
+        unused,
+      ),
+    ).toBe("![](../Attachments/my%20shot%20%281%29.png)");
+    expect(
+      await attachmentEmbedText(
+        { style: "markdown", pathForm: "absolute" },
+        upload,
+        "Notes/Home",
+        unused,
+      ),
+    ).toBe("![](/Attachments/my%20shot%20%281%29.png)");
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it("writes the bare name for shortest when the server resolves it to the upload", async () => {
+    const resolve = vi.fn(
+      async (targets: string[]) =>
+        new Map(targets.map((target) => [target, upload.vaultPath])),
+    );
+    expect(
+      await attachmentEmbedText(
+        { style: "markdown", pathForm: "shortest" },
+        upload,
+        "Notes/Home",
+        resolve,
+      ),
+    ).toBe("![](my%20shot%20%281%29.png)");
+    expect(resolve).toHaveBeenCalledWith([
+      "my shot (1).png",
+      "Attachments/my shot (1).png",
+      "/Attachments/my shot (1).png",
+    ]);
+  });
+
+  it("falls back along the shortest candidates, ending at the root path", async () => {
+    const nameTaken = async () =>
+      new Map<string, string | null>([
+        ["my shot (1).png", "Other/my shot (1).png"],
+        ["Attachments/my shot (1).png", upload.vaultPath],
+      ]);
+    expect(
+      await attachmentEmbedText(
+        { style: "markdown", pathForm: "shortest" },
+        upload,
+        "Notes/Home",
+        nameTaken,
+      ),
+    ).toBe("![](Attachments/my%20shot%20%281%29.png)");
+
+    const offline = async (): Promise<Map<string, string | null>> => {
+      throw new Error("offline");
+    };
+    expect(
+      await attachmentEmbedText(
+        { style: "markdown", pathForm: "shortest" },
+        upload,
+        "Notes/Home",
+        offline,
+      ),
+    ).toBe("![](/Attachments/my%20shot%20%281%29.png)");
+  });
+});
+
+describe("insertEmbedAt with an embed in the Vault's style", () => {
+  it("inserts the given embed as its own block", () => {
+    expect(
+      insertEmbedAt(
+        "one\ntwo",
+        1,
+        "Attachments/a.png",
+        "![](Attachments/a.png)",
+      ),
+    ).toBe("one\n\n![](Attachments/a.png)\n\ntwo");
   });
 });

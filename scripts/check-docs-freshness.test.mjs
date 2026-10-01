@@ -18,8 +18,9 @@ const UI_NOTE =
 const ATTACHMENTS_NOTE =
   "docs/user-vault/02 Guides/How to import and work with attachments.md";
 
-// Every note the mcp-tools, web-ui, attachments, and write-mutations surfaces
-// name. The script refuses to print a reading list containing a file it cannot
+// Every note the surfaces these tests trigger name: mcp-tools, web-ui,
+// attachments, write-mutations, link-inserts, vault-shape and
+// vault-lifecycle. The script refuses to print a reading list containing a file it cannot
 // open, so a fixture that triggers a surface must carry that surface's whole
 // note set.
 const FIXTURE_NOTES = [
@@ -29,6 +30,11 @@ const FIXTURE_NOTES = [
   "docs/user-vault/01 Get started/Connect your agent.md",
   "docs/user-vault/01 Get started/Search and change notes with your agent.md",
   "docs/user-vault/02 Guides/How to edit notes with the live editor.md",
+  "docs/user-vault/03 Reference/Supported Markdown reference.md",
+  "docs/user-vault/03 Reference/HTTP API reference.md",
+  "docs/user-vault/02 Guides/How to manage multiple Vaults.md",
+  "docs/user-vault/01 Get started/Connect your first Vault.md",
+  "docs/user-vault/04 Concepts/Vault lifecycle states.md",
 ];
 
 function run(root, args = []) {
@@ -185,6 +191,33 @@ test("an attachment mutation change names the attachments guide too", async () =
   const result = run(root);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /How to import and work with attachments\.md/);
+  assert.match(result.stderr, /MCP tools reference\.md/);
+});
+
+test("a link-style change names every note describing the inserts", async () => {
+  const root = await fixture();
+  await write(
+    root,
+    "frontend/src/components/note-page/linkStyle.ts",
+    "// a new path form\n",
+  );
+  await commit(root, "link style");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Supported Markdown reference\.md/);
+  assert.match(result.stderr, /How to import and work with attachments\.md/);
+  assert.match(result.stderr, /How to edit notes with the live editor\.md/);
+});
+
+test("a Vault shape change names both API references", async () => {
+  const root = await fixture();
+  await write(root, "src/vault_management.rs", "// a new Vault field\n");
+  await commit(root, "vault shape");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /HTTP API reference\.md/);
   assert.match(result.stderr, /MCP tools reference\.md/);
 });
 

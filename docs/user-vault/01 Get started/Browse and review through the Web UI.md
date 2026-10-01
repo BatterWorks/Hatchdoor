@@ -47,7 +47,8 @@ deployment is in demo mode. If they are present but carry a warning about the
 Vault's filesystem not being able to swap two files in one step, editing works
 normally; [[Install Hatchdoor with Docker Compose]] explains what that costs.
 
-Hatchdoor understands wikilinks and Markdown links to other notes, and
+Hatchdoor understands wikilinks and Markdown links to other notes, writes the
+links you add in whichever of the two your Vault already uses, and
 refreshes its index when Markdown or attachments change. Keep the Markdown files portable: you can still open them
 in another Markdown app at any time.
 

@@ -47,10 +47,14 @@ pub(crate) enum MarkdownLink {
         text: Range<usize>,
         label: String,
     },
+    /// `![alt](destination)`. Never a note link (ADR-28); recorded only so
+    /// the link style vote (ADR-33) can count Markdown embeds.
+    Image { destination: LinkDestination },
 }
 
 /// Every Markdown link in `content` outside fenced code and inline code spans,
-/// in document order. Image syntax (`![t](p)`) and wikilinks are skipped.
+/// in document order. Wikilinks are skipped, and of image syntax only the
+/// inline `![t](p)` form is recorded, as [`MarkdownLink::Image`].
 pub(crate) fn scan_markdown_links(content: &str) -> Vec<MarkdownLink> {
     let mut links = Vec::new();
     let mut fenced_marker: Option<(u8, usize)> = None;
@@ -120,16 +124,19 @@ fn scan_inline(line: &str, offset: usize, links: &mut Vec<MarkdownLink>) {
                 if bytes.get(close + 1) == Some(&b'(')
                     && let Some((destination, end)) = parse_inline_destination(bytes, close + 1)
                 {
-                    if !is_image {
-                        links.push(MarkdownLink::Inline {
+                    let destination = LinkDestination {
+                        span: shift(destination.span),
+                        angle: destination.angle,
+                    };
+                    links.push(if is_image {
+                        MarkdownLink::Image { destination }
+                    } else {
+                        MarkdownLink::Inline {
                             whole: shift(idx..end),
                             text: shift(text),
-                            destination: LinkDestination {
-                                span: shift(destination.span),
-                                angle: destination.angle,
-                            },
-                        });
-                    }
+                            destination,
+                        }
+                    });
                     idx = end;
                     continue;
                 }
@@ -608,13 +615,28 @@ pub(crate) fn note_link_destinations(content: &str) -> Vec<&str> {
                     destinations.push(&content[destination.span.clone()]);
                 }
             }
-            MarkdownLink::Definition { .. } => {}
+            MarkdownLink::Definition { .. } | MarkdownLink::Image { .. } => {}
         }
     }
     destinations
         .into_iter()
         .filter(|destination| note_link_target(destination).is_some())
         .collect()
+}
+
+/// How many vault files `content` embeds with inline Markdown image syntax.
+/// An external URL or a protocol-relative one is not a vault file.
+pub(crate) fn local_image_count(content: &str) -> usize {
+    scan_markdown_links(content)
+        .iter()
+        .filter(|link| match link {
+            MarkdownLink::Image { destination } => {
+                let raw = &content[destination.span.clone()];
+                !raw.is_empty() && !raw.starts_with("//") && !has_url_scheme(raw)
+            }
+            _ => false,
+        })
+        .count()
 }
 
 fn first_definitions(links: &[MarkdownLink]) -> HashMap<&str, &LinkDestination> {
@@ -667,7 +689,7 @@ pub(crate) fn rewrite_note_links(
                 label,
                 destination,
             } => (destination, line, None, Some(label)),
-            MarkdownLink::Reference { .. } => continue,
+            MarkdownLink::Reference { .. } | MarkdownLink::Image { .. } => continue,
         };
         let raw = &content[destination.span.clone()];
         let Some(target) = note_link_target(raw) else {

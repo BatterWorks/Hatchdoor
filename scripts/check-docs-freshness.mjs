@@ -137,8 +137,39 @@ const SURFACES = [
   {
     id: "markdown",
     label: "Markdown parsing, links, and note paths",
-    paths: ["src/vault/links.rs", "src/vault/paths.rs", "src/cache/parse.rs"],
+    paths: [
+      "src/vault/links.rs",
+      "src/vault/markdown_links.rs",
+      "src/vault/paths.rs",
+      "src/cache/parse.rs",
+    ],
     notes: [`${REFERENCE}/Supported Markdown reference.md`],
+  },
+  {
+    id: "link-inserts",
+    label: "Links and embeds Hatchdoor inserts, in the Vault's link style",
+    // ADR-33: the style is read on the server and followed by the editor's
+    // autocomplete and attachment inserts, which three notes describe.
+    paths: [
+      "src/vault/link_style.rs",
+      "frontend/src/components/note-page/autocomplete.ts",
+      "frontend/src/components/note-page/attachmentDrop.ts",
+      "frontend/src/components/note-page/linkStyle.ts",
+    ],
+    notes: [
+      `${REFERENCE}/Supported Markdown reference.md`,
+      `${GUIDES}/How to import and work with attachments.md`,
+      `${GUIDES}/How to edit notes with the live editor.md`,
+    ],
+  },
+  {
+    id: "vault-shape",
+    label: "The Vault shape list_vaults and GET /api/v1/vaults return",
+    paths: ["src/vault_management.rs"],
+    notes: [
+      `${REFERENCE}/HTTP API reference.md`,
+      `${REFERENCE}/MCP tools reference.md`,
+    ],
   },
   {
     id: "write-mutations",

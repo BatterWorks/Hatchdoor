@@ -33,7 +33,7 @@ Both limits are adjustable at runtime in **Settings → Uploads** — see [[Sett
 Paste an image, or drag and drop an image or PDF, directly into the note editor. Hatchdoor:
 
 1. Uploads it into a Vault-root `Attachments/` folder, numbering the filename (`report-1.pdf`, `report-2.pdf`, ...) if one with that name already exists rather than overwriting it.
-2. Inserts the right embed syntax at the cursor, with a relative path that walks back out to the vault root correctly even for a note several folders deep.
+2. Inserts an embed at the cursor in the Vault's link style. A wikilink Vault gets `![[...]]` with a relative path that walks back out to the vault root, even for a note several folders deep. A Markdown-link Vault gets `![](...)`, with the path written in the Vault's path form. See [[Supported Markdown reference#Which link style Hatchdoor writes]].
 
 An unsupported file type or an oversized file is rejected inline with the reason (wrong extension, or how many MB over the limit) — nothing partially uploads.
 
@@ -55,7 +55,7 @@ instance, never accepts writes).
 | `POST /api/v1/vaults/{vault_id}/attachments` | Only for a client that holds a bearer token and knows the server's address itself | `multipart/form-data` with fields `target_relative_path` and `file`. Accepts either the web bearer token or a live MCP bearer token. |
 | `import_attachment` (MCP tool) | The fallback, for clients that genuinely cannot make an out-of-band HTTP request | `content` (base64), `target_relative_path`. Rides inside the JSON-RPC message, so it gets unreliable as files approach the base64 size limit — prefer the HTTP path whenever it's available. |
 
-All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. Neither creates the embed syntax in a note for you — write the returned `attachment.relative_path` into the note yourself, as a link or with `![[...]]` embed syntax, the same way you'd write any other Markdown.
+All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. Neither creates the embed syntax in a note for you — write the returned `attachment.relative_path` into the note yourself, in the Vault's link style. `list_vaults` reports it on each Vault as `link_style` (`wikilink` for `![[...]]`, `markdown` for `![](...)`) and `link_path_form`. Hatchdoor writes what you send as-is and never converts it.
 
 ### Importing a Markdown file as a note
 

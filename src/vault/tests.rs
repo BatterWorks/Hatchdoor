@@ -782,3 +782,78 @@ fn markdown_note_links_count_as_links_alongside_wikilinks() {
         "links in code and unused definitions are not links"
     );
 }
+
+#[test]
+fn note_links_and_embeds_are_counted_by_form_for_the_link_style() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("Attachments")).expect("attachments");
+    fs::write(root.join("Attachments/pic.png"), b"png").expect("asset");
+    fs::write(root.join("Other.md"), "# Other").expect("note");
+    let home = root.join("Home.md");
+    fs::write(
+        &home,
+        "[[Other]] and ![[pic.png]]\n\
+         [md](Other.md) ![](Attachments/pic.png) ![](pic.png)\n\
+         ![remote](https://example.com/x.png) [site](https://example.com)\n\
+         `[[Code]]` and `[code](Code.md)`\n\
+         ```\n[[Fenced]] [f](Fenced.md) ![](fenced.png)\n```\n",
+    )
+    .expect("note");
+
+    let counts = super::links::note_link_forms(&fs::read_to_string(&home).expect("note"));
+
+    assert_eq!(counts.wikilinks, 2);
+    assert_eq!(counts.markdown, 3);
+}
+
+/// ADR-33's inserts, byte for byte what the editor's `noteLinkText` writes
+/// for each path form, resolve through ADR-28 and count as backlinks.
+#[test]
+fn markdown_links_in_each_inserted_path_form_resolve_and_count_as_backlinks() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("Projects")).expect("projects");
+    fs::create_dir_all(root.join("Archive")).expect("archive");
+    fs::write(root.join("Projects/Plan (v2) #1 [draft].md"), "plan").expect("target");
+    fs::write(root.join("Projects/日本語 ノート.md"), "jp").expect("target");
+    fs::write(
+        root.join("Archive/Home.md"),
+        "[Plan (v2) #1 \\[draft\\]](../Projects/Plan%20%28v2%29%20%231%20%5Bdraft%5D.md)\n",
+    )
+    .expect("relative");
+    fs::write(
+        root.join("Archive/Abs.md"),
+        "[Plan (v2) #1 \\[draft\\]](/Projects/Plan%20%28v2%29%20%231%20%5Bdraft%5D.md)\n",
+    )
+    .expect("absolute");
+    fs::write(
+        root.join("Archive/Short.md"),
+        "[Plan (v2) #1 \\[draft\\]](Plan%20%28v2%29%20%231%20%5Bdraft%5D.md) [日本語 ノート](日本語%20ノート.md)\n",
+    )
+    .expect("shortest");
+
+    let index = VaultIndex::build(root).expect("index");
+    let slug_at = |path: &str| {
+        index
+            .ordered_entries()
+            .into_iter()
+            .find(|entry| entry.relative_path == path)
+            .expect("note")
+            .slug
+    };
+    let plan = slug_at("Projects/Plan (v2) #1 [draft]");
+    let backlinks: Vec<String> = index
+        .note_links(&plan)
+        .expect("links")
+        .backlinks
+        .into_iter()
+        .map(|link| link.relative_path)
+        .collect();
+    assert_eq!(backlinks, ["Archive/Abs", "Archive/Home", "Archive/Short"]);
+
+    let japanese = slug_at("Projects/日本語 ノート");
+    let backlinks = index.note_links(&japanese).expect("links").backlinks;
+    assert_eq!(backlinks.len(), 1);
+    assert_eq!(backlinks[0].relative_path, "Archive/Short");
+}

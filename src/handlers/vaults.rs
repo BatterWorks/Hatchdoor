@@ -189,9 +189,15 @@ fn schedule_response(response: VaultScheduleResponse) -> Response {
 /// credentials, only `credential_configured`. Reachable unauthenticated in
 /// demo mode (#109), where the core answers with its public projection.
 pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
-    match VaultCollectionManagement::new(&state).list() {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
+    // Off the async runtime: a Vault's link style can mean reading every note.
+    let listing =
+        tokio::task::spawn_blocking(move || VaultCollectionManagement::new(&state).list()).await;
+    match listing {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(error)) => management_error_response(error),
+        Err(join_error) => {
+            internal_error_response(format!("background task panicked: {join_error}"), None)
+        }
     }
 }
 
@@ -552,6 +558,83 @@ mod tests {
         // An authenticated read always carries the operator's own input.
         assert!(vaults[0]["source"].is_object());
         assert!(vaults[0]["capabilities"].is_object());
+    }
+
+    async fn create_local_vault(state: &AppState, name: &str, path: std::path::PathBuf) {
+        let expected_registry_revision = VaultCollectionManagement::new(state)
+            .list()
+            .expect("list")
+            .registry_revision
+            .expect("registry revision");
+        VaultCollectionManagement::new(state)
+            .create(CreateVaultRequest {
+                expected_registry_revision,
+                name: name.to_string(),
+                enabled: true,
+                source: VaultSource::Local { path },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })
+            .await
+            .expect("create the Vault");
+    }
+
+    async fn listed_vaults(state: &AppState) -> Vec<serde_json::Value> {
+        let response = list_vaults_handler(State(state.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("discovery body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("discovery JSON");
+        body["vaults"].as_array().expect("vaults array").clone()
+    }
+
+    fn named<'a>(vaults: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+        vaults
+            .iter()
+            .find(|vault| vault["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+    }
+
+    /// ADR-33 on the wire: each Vault reports the style it is read to have,
+    /// re-read on every listing, and a Vault that cannot be read is still
+    /// listed, just without one.
+    #[tokio::test]
+    async fn discovery_reports_each_vaults_link_style_from_its_own_files() {
+        let (state, _worker, directory) = test_state();
+        let obsidian = directory.path().join("obsidian");
+        std::fs::create_dir_all(obsidian.join(".obsidian")).expect("obsidian dir");
+        let app_json = obsidian.join(".obsidian/app.json");
+        std::fs::write(
+            &app_json,
+            r#"{"useMarkdownLinks":true,"newLinkFormat":"absolute"}"#,
+        )
+        .expect("app.json");
+        let counted = directory.path().join("counted");
+        std::fs::create_dir_all(&counted).expect("counted dir");
+        std::fs::write(counted.join("A.md"), "[b](B.md) [c](C.md) [[B]]").expect("note");
+        std::fs::write(counted.join("B.md"), "plain").expect("note");
+        let gone = directory.path().join("gone");
+        std::fs::create_dir_all(&gone).expect("gone dir");
+        create_local_vault(&state, "Obsidian", obsidian).await;
+        create_local_vault(&state, "Counted", counted).await;
+        create_local_vault(&state, "Gone", gone.clone()).await;
+        std::fs::remove_dir_all(&gone).expect("remove the Vault directory");
+
+        let vaults = listed_vaults(&state).await;
+        assert_eq!(named(&vaults, "Obsidian")["link_style"], "markdown");
+        assert_eq!(named(&vaults, "Obsidian")["link_path_form"], "absolute");
+        assert_eq!(named(&vaults, "Counted")["link_style"], "markdown");
+        assert_eq!(named(&vaults, "Counted")["link_path_form"], "relative");
+        assert!(named(&vaults, "Gone").get("link_style").is_none());
+        assert!(named(&vaults, "Gone").get("link_path_form").is_none());
+
+        std::fs::write(&app_json, r#"{"useMarkdownLinks":false}"#).expect("flip the switch");
+        let vaults = listed_vaults(&state).await;
+        assert_eq!(named(&vaults, "Obsidian")["link_style"], "wikilink");
+        assert_eq!(named(&vaults, "Obsidian")["link_path_form"], "shortest");
     }
 
     /// The two statuses this adapter adds on top of the core's typed

@@ -26,7 +26,33 @@ export type MarkdownNoteLink = {
  * use). Fenced code, inline code, images and wikilinks are skipped.
  */
 export function findMarkdownNoteLinks(markdown: string): MarkdownNoteLink[] {
+  return scanMarkdown(markdown).links;
+}
+
+/** One inline Markdown image's destination, located in the scanned text. */
+export type MarkdownImage = {
+  /** Where the destination starts and ends, `<` and `>` excluded. */
+  start: number;
+  end: number;
+  angle: boolean;
+  /** The destination as written. */
+  raw: string;
+};
+
+/**
+ * Every inline Markdown image `![alt](destination)` outside code, so its
+ * destination can be pointed at the file the server resolves it to.
+ */
+export function findMarkdownImages(markdown: string): MarkdownImage[] {
+  return scanMarkdown(markdown).images;
+}
+
+function scanMarkdown(markdown: string): {
+  links: MarkdownNoteLink[];
+  images: MarkdownImage[];
+} {
   const links: MarkdownNoteLink[] = [];
+  const images: MarkdownImage[] = [];
   let fence: { marker: string; length: number } | null = null;
   let lineStart = 0;
   for (const rawLine of markdown.split("\n")) {
@@ -53,9 +79,9 @@ export function findMarkdownNoteLinks(markdown: string): MarkdownNoteLink[] {
       pushNoteLink(links, line, offset, definition);
       continue;
     }
-    scanInline(line, offset, links);
+    scanInline(line, offset, links, images);
   }
-  return links;
+  return { links, images };
 }
 
 type Destination = { start: number; end: number; angle: boolean };
@@ -92,7 +118,12 @@ function fenceMarker(
   return length >= 3 ? { marker, length } : null;
 }
 
-function scanInline(line: string, offset: number, links: MarkdownNoteLink[]) {
+function scanInline(
+  line: string,
+  offset: number,
+  links: MarkdownNoteLink[],
+  images: MarkdownImage[],
+) {
   let idx = 0;
   while (idx < line.length) {
     const ch = line[idx];
@@ -115,7 +146,15 @@ function scanInline(line: string, offset: number, links: MarkdownNoteLink[]) {
           ? parseInlineDestination(line, close + 1)
           : null;
       if (inline) {
-        if (!isImage) {
+        if (isImage) {
+          const { start, end, angle } = inline.destination;
+          images.push({
+            start: start + offset,
+            end: end + offset,
+            angle,
+            raw: line.slice(start, end),
+          });
+        } else {
           pushNoteLink(links, line, offset, inline.destination);
         }
         idx = inline.end;

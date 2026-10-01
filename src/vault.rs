@@ -1,6 +1,7 @@
 mod exclude;
 mod index;
 mod layers;
+mod link_style;
 mod links;
 mod markdown_links;
 mod paths;
@@ -12,6 +13,7 @@ mod write;
 
 pub use exclude::{DEFAULT_EXCLUDE_PATTERNS, ExcludeMatcher};
 pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME};
+pub use link_style::{LinkPathForm, LinkStyle, VaultLinkStyle, count_link_forms, vault_link_style};
 #[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{

@@ -9,7 +9,7 @@ import { useState } from "react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { NoteEditor } from "./NoteEditor";
+import { NoteEditor, type UploadedAttachment } from "./NoteEditor";
 
 afterEach(() => {
   cleanup();
@@ -24,7 +24,7 @@ function FrontmatterHarness({
 }: {
   initialContent: string;
   onSaveContent: (content: string) => void;
-  uploadAttachment?: (file: File) => Promise<string>;
+  uploadAttachment?: (file: File) => Promise<UploadedAttachment>;
   conflictReview?: ComponentProps<typeof NoteEditor>["conflictReview"];
   onDemoRefusal?: (error: unknown) => boolean;
 }) {
@@ -72,9 +72,10 @@ describe("NoteEditor frontmatter properties", () => {
 
 describe("NoteEditor attachment uploads", () => {
   it("uploads a pasted image and inserts an Obsidian image embed", async () => {
-    const uploadAttachment = vi
-      .fn()
-      .mockResolvedValue("Attachments/pasted.png");
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: "Attachments/pasted.png",
+      embed: "![[Attachments/pasted.png]]",
+    });
     const saveContent = vi.fn();
 
     render(
@@ -102,9 +103,10 @@ describe("NoteEditor attachment uploads", () => {
   });
 
   it("uploads Safari pasted images exposed only through clipboard items", async () => {
-    const uploadAttachment = vi
-      .fn()
-      .mockResolvedValue("Attachments/safari-paste.png");
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: "Attachments/safari-paste.png",
+      embed: "![[Attachments/safari-paste.png]]",
+    });
     const saveContent = vi.fn();
 
     render(
@@ -143,9 +145,10 @@ describe("NoteEditor attachment uploads", () => {
   });
 
   it("uploads a dropped PDF and inserts an embed", async () => {
-    const uploadAttachment = vi
-      .fn()
-      .mockResolvedValue("Attachments/report.pdf");
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: "Attachments/report.pdf",
+      embed: "![[Attachments/report.pdf]]",
+    });
 
     render(
       <FrontmatterHarness
@@ -351,5 +354,80 @@ describe("NoteEditor conflict review", () => {
       container.querySelectorAll(".note-editor-conflict-line.disk"),
     ).toHaveLength(0);
     expect(screen.getByText("57 unchanged lines")).toBeInTheDocument();
+  });
+});
+
+describe("NoteEditor link style (ADR-33)", () => {
+  function AutocompleteHarness({
+    formatNoteLink,
+  }: {
+    formatNoteLink?: ComponentProps<typeof NoteEditor>["formatNoteLink"];
+  }) {
+    const [content, setContent] = useState("See ");
+    return (
+      <NoteEditor
+        content={content}
+        saving={false}
+        error={null}
+        noteCandidates={[
+          { vault_id: "vault-1", slug: "project-plan", title: "Project Plan" },
+        ]}
+        formatNoteLink={formatNoteLink}
+        onChange={setContent}
+        onSave={() => {}}
+        onCancel={() => {}}
+      />
+    );
+  }
+
+  function pickSuggestion() {
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    const typed = "See [[Pro";
+    fireEvent.change(textarea, { target: { value: typed } });
+    textarea.setSelectionRange(typed.length, typed.length);
+    fireEvent.select(textarea);
+    fireEvent.mouseDown(screen.getByRole("option", { name: "Project Plan" }));
+    return textarea;
+  }
+
+  it("inserts [[title]] when no formatter is given", () => {
+    render(<AutocompleteHarness />);
+    expect(pickSuggestion()).toHaveValue("See [[Project Plan]]");
+  });
+
+  it("inserts the link the Vault's style formats", () => {
+    const formatNoteLink = vi.fn(() => "[Project Plan](Project%20Plan.md)");
+    render(<AutocompleteHarness formatNoteLink={formatNoteLink} />);
+    expect(pickSuggestion()).toHaveValue(
+      "See [Project Plan](Project%20Plan.md)",
+    );
+    expect(formatNoteLink).toHaveBeenCalledWith(
+      expect.objectContaining({ slug: "project-plan" }),
+    );
+  });
+
+  it("inserts the embed the upload answers with, in the Vault's style", async () => {
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: "Attachments/pasted.png",
+      embed: "![](Attachments/pasted.png)",
+    });
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    textarea.setSelectionRange(7, 7);
+    const file = new File(["png"], "pasted.png", { type: "image/png" });
+    fireEvent.paste(textarea, { clipboardData: { files: [file] } });
+
+    await screen.findByText("Inserted attachment: Attachments/pasted.png");
+    expect(textarea).toHaveValue("# Body\n![](Attachments/pasted.png)");
   });
 });

@@ -3,6 +3,12 @@
 import { normalizeImageForUpload } from "../../lib/imageUpload";
 import { detectLineEnding } from "../../lib/sourceMap";
 import type { AttachmentOutcome } from "../../types";
+import {
+  encodeLinkPath,
+  markdownLinkPath,
+  shortestPathCandidates,
+  type VaultLinkStyle,
+} from "./linkStyle";
 
 const ATTACHMENT_FOLDER = "Attachments";
 
@@ -58,7 +64,10 @@ export type UploadAttachmentFn = (
 ) => Promise<AttachmentOutcome>;
 
 export type NoteAttachmentUpload = {
+  /** The wikilink embed path, relative to the note. */
   embedPath: string;
+  /** Where the attachment landed, Vault-relative. */
+  vaultPath: string;
 };
 
 /**
@@ -88,6 +97,7 @@ export async function uploadNoteAttachment(
           outcome.attachment.relative_path,
           noteRelativePath,
         ),
+        vaultPath: outcome.attachment.relative_path,
       };
     } catch (error) {
       attempt += 1;
@@ -135,6 +145,44 @@ export function attachmentEmbedPath(
   return "../".repeat(Math.max(depth - 1, 0)) + vaultRelativePath;
 }
 
+/** Which of `targets` resolve, from a note, to which Vault-relative file. */
+export type ResolveAssetsFn = (
+  targets: string[],
+) => Promise<Map<string, string | null>>;
+
+/**
+ * The embed to insert for an uploaded attachment, in the Vault's link style
+ * (ADR-33). A wikilink Vault gets exactly the `![[path]]` it always got. For
+ * the `shortest` path form `resolveAssets` asks the server which candidate
+ * still names this file; when it cannot answer, the root-anchored path is used,
+ * which always does.
+ */
+export async function attachmentEmbedText(
+  linkStyle: VaultLinkStyle,
+  upload: NoteAttachmentUpload,
+  noteRelativePath: string,
+  resolveAssets: ResolveAssetsFn,
+): Promise<string> {
+  if (linkStyle.style === "wikilink") {
+    return `![[${upload.embedPath}]]`;
+  }
+  let resolved = new Map<string, string | null>();
+  if (linkStyle.pathForm === "shortest") {
+    try {
+      resolved = await resolveAssets(shortestPathCandidates(upload.vaultPath));
+    } catch {
+      // Falls through to the root-anchored path.
+    }
+  }
+  const path = markdownLinkPath(
+    linkStyle.pathForm,
+    noteRelativePath,
+    upload.vaultPath,
+    (candidate) => resolved.get(candidate) === upload.vaultPath,
+  );
+  return `![](${encodeLinkPath(path)})`;
+}
+
 export type DropBlock = {
   startLine: number;
   endLine: number;
@@ -167,16 +215,18 @@ export function insertionLineForDrop(blocks: DropBlock[], y: number): number {
 
 /**
  * `content` with an embed inserted as its own block after `line`, kept apart by
- * blank lines so it does not join the paragraph above or below it.
+ * blank lines so it does not join the paragraph above or below it. `embed` is
+ * the text to insert, in the Vault's link style; it defaults to the wikilink
+ * embed of `embedPath`.
  */
 export function insertEmbedAt(
   content: string,
   line: number,
   embedPath: string,
+  embed = `![[${embedPath}]]`,
 ): string {
   const ending = detectLineEnding(content);
   const lines = content.split(/\r?\n/);
-  const embed = `![[${embedPath}]]`;
 
   const before = lines.slice(0, line);
   const after = lines.slice(line);

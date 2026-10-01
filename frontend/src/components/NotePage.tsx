@@ -59,14 +59,19 @@ import {
   loadNoteDraft,
   saveNoteDraft,
 } from "../lib/writeDrafts";
-import { NoteEditor } from "./NoteEditor";
+import { NoteEditor, type UploadedAttachment } from "./NoteEditor";
+import type { NoteCandidate } from "../lib/noteCandidates";
+import { refreshVaultCollection } from "../vaults";
+import { linkStyleOf, noteLinkText } from "./note-page/linkStyle";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { SaveState } from "./note-page/SaveState";
 import {
+  attachmentEmbedText,
   attachmentRejection,
   insertEmbedAt,
   insertionLineForDrop,
   uploadNoteAttachment,
+  type NoteAttachmentUpload,
 } from "./note-page/attachmentDrop";
 import { BlockGap } from "./note-page/BlockGap";
 import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
@@ -85,7 +90,10 @@ import {
   NoteTocMobile,
   SearchHitNavigator,
 } from "./note-page/sections";
-import { useResolvedWikilinks } from "./note-page/wikilinks";
+import {
+  resolveAssetTargets,
+  useResolvedWikilinks,
+} from "./note-page/wikilinks";
 
 const TOUCH_EDIT_HINT_KEY = "hatchdoor.touchEditHintSeen";
 
@@ -175,7 +183,7 @@ export function NotePage({
    * diagnostic to a demo visitor), and suppresses the held-drafts banner
    * entirely, since it names and links to the withheld Settings surface. */
   demoMode?: boolean;
-  noteCandidates?: ExplorerNote[];
+  noteCandidates?: NoteCandidate[];
   vaults: VaultSummary[];
 }) {
   const params = useParams<{ vaultId: string; slug: string }>();
@@ -215,6 +223,18 @@ export function NotePage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
+  // An upload reads the Vault's link style after re-reading the Vault list,
+  // so it needs the Vault as it stands then, not as this render saw it.
+  const latestVaultRef = useRef(activeVault);
+  useEffect(() => {
+    latestVaultRef.current = activeVault;
+  }, [activeVault]);
+  // The style can change outside Hatchdoor, so opening the editor re-reads it.
+  useEffect(() => {
+    if (isEditing) {
+      void refreshVaultCollection();
+    }
+  }, [isEditing]);
   const [draftContent, setDraftContent] = useState("");
   const [editBaseHash, setEditBaseHash] = useState("");
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
@@ -1091,6 +1111,24 @@ export function NotePage({
 
   const [dropActive, setDropActive] = useState(false);
 
+  // What autocomplete and the attachment inserts write follows the Vault's
+  // link style (ADR-33). The style is read from the Vault and can change in
+  // another editor, so opening the editor and every upload re-read the Vault
+  // list. An upload uses the style as it stands once `refreshing` has landed.
+  const embedForUpload = async (
+    upload: NoteAttachmentUpload,
+    noteRelativePath: string,
+    refreshing: Promise<void>,
+  ): Promise<string> => {
+    await refreshing.catch(() => undefined);
+    return attachmentEmbedText(
+      linkStyleOf(latestVaultRef.current),
+      upload,
+      noteRelativePath,
+      (targets) => resolveAssetTargets(vaultId, noteRelativePath, targets),
+    );
+  };
+
   const handleBodyDrop = async (event: React.DragEvent<HTMLDivElement>) => {
     setDropActive(false);
     if (!inlineEditingEnabled || !note) {
@@ -1155,16 +1193,22 @@ export function NotePage({
     }
 
     try {
+      const refreshing = refreshVaultCollection();
       const result = await uploadNoteAttachment(
         file,
         note.relative_path,
         (uploadFile, targetRelativePath) =>
           uploadAttachment(vaultId, uploadFile, targetRelativePath),
       );
+      const embed = await embedForUpload(
+        result,
+        note.relative_path,
+        refreshing,
+      );
       // Not note.content: that is the document this render closed over, and a
       // block committed above has already moved past it.
       handleInlineChange(
-        insertEmbedAt(latestContentRef.current, line, result.embedPath),
+        insertEmbedAt(latestContentRef.current, line, result.embedPath, embed),
       );
     } catch (uploadError) {
       if (onDemoRefusal?.(uploadError)) {
@@ -1506,14 +1550,41 @@ export function NotePage({
     );
   };
 
-  const handleUploadAttachment = async (file: File): Promise<string> => {
+  const handleUploadAttachment = async (
+    file: File,
+  ): Promise<UploadedAttachment> => {
+    const refreshing = refreshVaultCollection();
     const result = await uploadNoteAttachment(
       file,
       note.relative_path,
       (uploadFile, targetRelativePath) =>
         uploadAttachment(vaultId, uploadFile, targetRelativePath),
     );
-    return result.embedPath;
+    return {
+      path: result.embedPath,
+      embed: await embedForUpload(result, note.relative_path, refreshing),
+    };
+  };
+
+  // Links never cross Vaults, and a Markdown link needs a path in this one.
+  const vaultNoteCandidates = noteCandidates.filter(
+    (candidate) => candidate.vault_id === vaultId,
+  );
+
+  const formatNoteLink = (candidate: ExplorerNote): string => {
+    const target = vaultNoteCandidates.find(
+      (vaultNote) => vaultNote.slug === candidate.slug,
+    );
+    if (!target) {
+      return `[[${candidate.title}]]`;
+    }
+    return noteLinkText(
+      linkStyleOf(activeVault),
+      candidate.title,
+      target.relativePath,
+      note.relative_path,
+      vaultNoteCandidates.map((vaultNote) => vaultNote.relativePath),
+    );
   };
 
   return (
@@ -1675,7 +1746,12 @@ export function NotePage({
                 : draftNotice
             }
             canReload={conflict || noteChangedOnDisk || draftStale}
-            noteCandidates={noteCandidates}
+            noteCandidates={
+              activeVault?.link_style === "markdown"
+                ? vaultNoteCandidates
+                : noteCandidates
+            }
+            formatNoteLink={formatNoteLink}
             conflictReview={
               conflictNote
                 ? {
