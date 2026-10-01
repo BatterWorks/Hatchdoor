@@ -985,6 +985,12 @@ no link credential reaches a log; an upload link is spent by its first
 redemption; this module never decides whether MCP or write mode is on, which
 the redeeming adapter re-reads per request.
 
+**Pending decision:** ADR-32 (accepted, not yet implemented, #303) supersedes
+ADR-27 and lets an upload link target a note: a `.md` target becomes a note
+write with `create_note`'s checks, and a replacing note link carries the
+note's expected content hash in its signature. The contract and invariants
+above describe the code as it is until that lands.
+
 **Validation:** `cargo test transfer_link`, `cargo test transfer` in the server
 router tests, followed by the full backend checks.
 
