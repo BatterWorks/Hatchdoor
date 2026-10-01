@@ -25,4 +25,4 @@ pub use tags::{
     NestedTag, TagDelete, TagDeleteError, TagDeleteNote, TagRename, TagRenameError, TagRenameNote,
     UnsupportedTagNote, delete_tag, rename_tag,
 };
-pub use types::{AttachmentInfo, AttachmentOutcome, WriteError, WriteOutcome};
+pub use types::{AttachmentInfo, AttachmentOutcome, UnrewritableNote, WriteError, WriteOutcome};

@@ -1159,7 +1159,8 @@ tag delete (`delete_tag` with `TagDelete`, `TagDeleteNote`, `TagDeleteError`,
 and `NestedTag`, #258), the path-addressed note checks a note upload makes
 before its bytes arrive (`note_target` with `NoteTarget`,
 `note_exists_conflict`, and `check_note_content_hash`, #303), allowed
-attachment extensions, `WriteOutcome`, and `WriteError`.
+attachment extensions, `WriteOutcome`, `WriteError`, and `UnrewritableNote`,
+which `WriteError::LinkRewriteUnsupported` carries (#360).
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
 (ADR-13), and its second caller is the Vault-wide tag rename and delete in
@@ -1271,6 +1272,14 @@ write API/types, and configuration for archive or upload limits.
   targets the same path rather than replacing it. `rewritten_notes` still
   counts only the other notes, so a rename whose one stale link is the note's
   own reports zero. Delete leaves the trashed body's self-link as written.
+- A note the link planners cannot read is skipped, never rewritten (#360).
+  One that cannot be opened at all, a dangling `.md` symlink being the
+  example, holds no link the index knows of, as `build_link_graph` skips it
+  too. One that is not valid UTF-8 is planned over its lossy text: skipped
+  when nothing in it would change, and otherwise the whole rename, move,
+  archive, delete or attachment move is refused before anything is written,
+  folders included, naming every such note under `link_rewrite_unsupported`.
+  The tag rename and delete skip an unopenable note the same way.
 - An asset travels with its note only from inside the note's own folder (#225),
   and an occupied destination refuses the whole write - except where that
   destination is the asset's own file, which is a move to nowhere rather than a
@@ -1628,7 +1637,10 @@ answers for the filesystem rather than for the Vault's permissions, so it is
 `None` only where the filesystem could not be asked and is never `Some(false)`
 for a Vault that is merely read-only (ADR-26, #345). An I/O write failure and
 a `write_recovery_required` failure are both logged server-side before being
-mapped, so neither reaches only the client's log. A caller whose critical section spans several
+mapped, so neither reaches only the client's log. `write_operation_error`
+maps a link rewrite the planners refused (#360) onto
+`link_rewrite_unsupported`, not retryable, with every affected note named in
+the message; the HTTP adapter answers it with `409`. A caller whose critical section spans several
 operations on one Vault builds a `VaultMutation` with `VaultMutation::gated`
 and takes the lock itself through its `acquire_mutation`: the MCP `batch` tool
 holds one Vault's lock for a whole call, and `tokio::sync::Mutex` is not

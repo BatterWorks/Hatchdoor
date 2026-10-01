@@ -289,6 +289,8 @@ fn annotate_rollback_succeeded(error: WriteError) -> WriteError {
         WriteError::Conflict(message) => WriteError::Conflict(annotate(message)),
         WriteError::InvalidInput(message) => WriteError::InvalidInput(annotate(message)),
         WriteError::Io(message) => WriteError::Io(annotate(message)),
+        // Raised while planning, before anything exists to roll back.
+        refused @ WriteError::LinkRewriteUnsupported(_) => refused,
     }
 }
 

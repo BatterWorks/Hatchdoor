@@ -36,11 +36,23 @@ pub struct AttachmentOutcome {
     pub affected_paths: Vec<std::path::PathBuf>,
 }
 
+/// A note that links to what an operation is moving, renaming or deleting,
+/// but whose link cannot be rewritten in place, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrewritableNote {
+    pub relative_path: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
     Conflict(String),
     InvalidInput(String),
     Io(String),
+    /// Every note, in path order, whose link to the subject of a move, rename
+    /// or delete would have to change but cannot be rewritten. Nothing was
+    /// written (#360).
+    LinkRewriteUnsupported(Vec<UnrewritableNote>),
 }
 
 impl WriteError {
