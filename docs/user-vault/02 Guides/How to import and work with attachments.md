@@ -95,6 +95,8 @@ These tools act on bytes the Vault already stores, so the upload list does not a
 
 One limit worth knowing: reference rewriting keys on the file extension, so a link to a file with no extension at all is left exactly as written when that file moves. Rename the file to carry an extension if you want its links to follow it.
 
+A note that is not valid UTF-8 text, such as a Latin-1 export from an older tool, cannot have its references rewritten without damaging the bytes that are not text. If one references the attachment you move, rename or delete, the call is refused with `link_rewrite_unsupported` and nothing is written; the message names each such note. Re-save those notes as UTF-8 and try again.
+
 The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write — see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); it is best-effort, so read each item's own `ok` rather than assuming the whole set landed.
 
 ---

@@ -15,6 +15,7 @@ use super::paths::{
     resolve_existing_attachment_path, resolve_new_attachment_path,
     unique_trash_attachment_relative_path, vault_relative_file_path,
 };
+use super::rewrites::refuse_unrewritable;
 use super::types::{AttachmentInfo, AttachmentOutcome, MutationPhase, WriteError};
 
 pub fn list_note_attachments(
@@ -171,8 +172,9 @@ pub fn delete_attachment(
     // creates a trash folder for a file that is not going there.
     ensure_movable_attachment_path(vault_root, &source_path)?;
     let trash_relative = unique_trash_attachment_relative_path(vault_root, source_relative_path)?;
+    // The trash folder is created by the move once its plan stands, so a
+    // refused delete leaves none behind either (#360).
     let trash_path = vault_root.join(&trash_relative);
-    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
     move_attachment_by_paths_with_hook(
         vault_root,
         index,
@@ -204,9 +206,18 @@ fn move_attachment_by_paths_with_hook(
     ensure_existing_path_inside_root(vault_root, source_path)?;
     ensure_movable_attachment_path(vault_root, source_path)?;
     ensure_movable_attachment_path(vault_root, target_path)?;
+    let mut unrewritable = Vec::new();
+    let rewrites = asset_reference_rewrite_plan(
+        vault_root,
+        index,
+        "",
+        source_path,
+        target_path,
+        &[],
+        &mut unrewritable,
+    );
+    refuse_unrewritable(unrewritable)?;
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
-    let rewrites =
-        asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
     let mut journal = MutationJournal::new(vault_root);
     if let Err(error) = journal.move_file(MutationPhase::Asset, source_path, target_path) {
         return Err(journal.rollback(error));

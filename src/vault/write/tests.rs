@@ -2348,9 +2348,16 @@ fn every_path_a_planned_asset_move_hands_the_filesystem_is_accepted_by_the_move_
     let index = build(root);
     let entry = index.find_by_slug("b").expect("b").clone();
     let destination = root.join("deeper/nest/B.md");
-    let (moves, _rewrites) =
-        super::assets::asset_move_plan(root, &index, &entry, &destination, false, &[])
-            .expect("plan");
+    let (moves, _rewrites) = super::assets::asset_move_plan(
+        root,
+        &index,
+        &entry,
+        &destination,
+        false,
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("plan");
 
     assert_eq!(moves.len(), 1, "only the note's own asset travels");
     for asset_move in &moves {
@@ -2363,6 +2370,9 @@ fn every_path_a_planned_asset_move_hands_the_filesystem_is_accepted_by_the_move_
                 path.display()
             );
         }
+        // Planning creates no folders; the caller does once the plan stands.
+        fs::create_dir_all(asset_move.destination.parent().expect("parent"))
+            .expect("destination folder");
         super::fs_ops::move_file_no_follow(&asset_move.source, &asset_move.destination)
             .expect("the move primitive must accept every path the planner produced");
     }
@@ -5037,4 +5047,270 @@ fn renaming_a_note_in_place_leaves_its_own_links_to_other_notes_as_written() {
     .expect("rename");
 
     assert_eq!(read(root, "20-projects/Kickoff.md"), body);
+}
+
+// #360: one note the link planners cannot read as text must not stop every
+// rename, move and delete in its Vault.
+
+/// Bytes that are not valid UTF-8 inside an otherwise ordinary note, the
+/// shape a Latin-1 export from an older tool leaves behind.
+const LATIN1_NOTE: &[u8] = b"# Caf\xe9\nNo links here.\n";
+
+/// Every path under `root` with its bytes, or its link target for a symlink,
+/// so a refused operation can be shown to have written nothing at all, not
+/// even an empty folder.
+fn vault_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("inside root")
+                .to_string_lossy()
+                .into_owned();
+            let metadata = fs::symlink_metadata(&path).expect("metadata");
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path).expect("link target");
+                out.push((relative, target.to_string_lossy().into_owned().into_bytes()));
+            } else if metadata.is_dir() {
+                out.push((format!("{relative}/"), Vec::new()));
+                walk(root, &path, out);
+            } else {
+                out.push((relative, fs::read(&path).expect("file bytes")));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+fn unrewritable_paths(error: WriteError) -> Vec<String> {
+    match error {
+        WriteError::LinkRewriteUnsupported(notes) => {
+            for note in &notes {
+                assert!(
+                    note.reason.contains("UTF-8"),
+                    "the reason names the problem: {note:?}"
+                );
+            }
+            notes.into_iter().map(|note| note.relative_path).collect()
+        }
+        other => panic!("expected a link rewrite refusal, got {other:?}"),
+    }
+}
+
+/// What one note-moving operation did to a fresh Vault: the Vault itself,
+/// how it looked before the call, and the call's result.
+struct NoteOperationRun {
+    operation: &'static str,
+    vault: TempDir,
+    before: Vec<(String, Vec<u8>)>,
+    result: Result<WriteOutcome, WriteError>,
+}
+
+/// A Vault holding `Notes/Target.md`, a note that links to it, and `extra`
+/// laid down by the caller, run through each note-moving operation in turn on
+/// a fresh copy. The links are path-qualified, so every operation, a move
+/// that keeps the title included, has to rewrite them.
+fn each_note_operation(extra: impl Fn(&Path)) -> Vec<NoteOperationRun> {
+    let operations: [&'static str; 5] = ["rename", "move", "move-rename", "archive", "delete"];
+    operations
+        .into_iter()
+        .map(|operation| {
+            let tmp = TempDir::new().expect("tempdir");
+            let root = tmp.path();
+            fs::create_dir_all(root.join("Notes")).expect("notes");
+            fs::write(root.join("Notes/Target.md"), "target").expect("target");
+            fs::write(root.join("Linker.md"), "See [[Notes/Target]]").expect("linker");
+            extra(root);
+            let before = vault_snapshot(root);
+            let index = build(root);
+            let entry = index.find_by_slug("target").expect("target entry").clone();
+            let hash = content_hash("target");
+            let result = match operation {
+                "rename" => move_or_rename_note(root, &index, &entry, "Notes/Renamed.md", &hash),
+                "move" => move_or_rename_note(root, &index, &entry, "Elsewhere/Target.md", &hash),
+                "move-rename" => {
+                    move_or_rename_note(root, &index, &entry, "Elsewhere/Renamed.md", &hash)
+                }
+                "archive" => archive_note(root, &index, &entry, "Archive", &hash),
+                _ => delete_note(root, &index, &entry, &hash),
+            };
+            NoteOperationRun {
+                operation,
+                vault: tmp,
+                before,
+                result,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn note_operations_skip_a_non_utf8_note_that_does_not_link_to_the_moved_note() {
+    for run in each_note_operation(|root| {
+        fs::write(root.join("Latin1.md"), LATIN1_NOTE).expect("latin-1 note");
+    }) {
+        let operation = run.operation;
+        run.result
+            .unwrap_or_else(|error| panic!("{operation} failed: {error:?}"));
+        assert_eq!(
+            fs::read(run.vault.path().join("Latin1.md")).expect("latin-1 note"),
+            LATIN1_NOTE,
+            "{operation} must leave the unreadable note's bytes alone"
+        );
+        assert_ne!(
+            fs::read_to_string(run.vault.path().join("Linker.md")).expect("linker"),
+            "See [[Notes/Target]]",
+            "{operation} still rewrites the readable backlink"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn note_operations_skip_a_dangling_markdown_symlink() {
+    for run in each_note_operation(|root| {
+        std::os::unix::fs::symlink(root.join("missing.md"), root.join("Dangling.md"))
+            .expect("dangling link");
+    }) {
+        let operation = run.operation;
+        run.result
+            .unwrap_or_else(|error| panic!("{operation} failed: {error:?}"));
+        let link = run.vault.path().join("Dangling.md");
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|meta| meta.file_type().is_symlink()),
+            "{operation} must leave the dangling symlink in place"
+        );
+        assert_eq!(
+            fs::read_link(&link).expect("target"),
+            run.vault.path().join("missing.md")
+        );
+    }
+}
+
+#[test]
+fn note_operations_refuse_when_a_non_utf8_note_links_to_the_moved_note() {
+    for run in each_note_operation(|root| {
+        fs::write(root.join("Wiki.md"), b"[[Notes/Target]] caf\xe9").expect("wikilink note");
+        fs::write(root.join("Markdown.md"), b"[t](Notes/Target.md) caf\xe9")
+            .expect("markdown note");
+    }) {
+        let operation = run.operation;
+        let error = run.result.expect_err(operation);
+        assert_eq!(
+            unrewritable_paths(error),
+            vec!["Markdown".to_string(), "Wiki".to_string()],
+            "{operation} names every note it could not rewrite"
+        );
+        assert_eq!(
+            vault_snapshot(run.vault.path()),
+            run.before,
+            "{operation} must write nothing"
+        );
+    }
+}
+
+#[test]
+fn a_note_move_refuses_when_a_non_utf8_note_references_an_asset_travelling_with_it() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Trip.md"), "![](photo.png)").expect("note");
+    fs::write(root.join("Notes/photo.png"), "png").expect("asset");
+    fs::write(root.join("Album.md"), b"![](Notes/photo.png) caf\xe9").expect("album");
+    let before = vault_snapshot(root);
+    let index = build(root);
+    let entry = index.find_by_slug("trip").expect("trip").clone();
+
+    let error = move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "Travel/Trip.md",
+        &content_hash("![](photo.png)"),
+    )
+    .expect_err("the album cannot be rewritten");
+
+    assert_eq!(unrewritable_paths(error), vec!["Album".to_string()]);
+    assert_eq!(
+        vault_snapshot(root),
+        before,
+        "not even the Travel folder is created"
+    );
+}
+
+#[test]
+fn attachment_moves_refuse_when_a_non_utf8_note_references_the_attachment() {
+    for operation in ["move", "rename", "delete"] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Media")).expect("media");
+        fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+        fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("readable note");
+        fs::write(root.join("Old.md"), b"![](Media/photo.jpg) caf\xe9").expect("old note");
+        fs::write(root.join("Older.md"), b"![[Media/photo.jpg]] \xff").expect("older note");
+        fs::write(root.join("Latin1.md"), LATIN1_NOTE).expect("unrelated note");
+        let before = vault_snapshot(root);
+        let index = build(root);
+
+        let error = match operation {
+            "move" => move_attachment(root, &index, "Media/photo.jpg", "Archive/photo.jpg"),
+            "rename" => rename_attachment(root, &index, "Media/photo.jpg", "picture.jpg"),
+            _ => delete_attachment(root, &index, "Media/photo.jpg"),
+        }
+        .expect_err(operation);
+
+        assert_eq!(
+            unrewritable_paths(error),
+            vec!["Old".to_string(), "Older".to_string()],
+            "{operation} names both notes and not the unrelated one"
+        );
+        assert_eq!(
+            vault_snapshot(root),
+            before,
+            "{operation} must write nothing"
+        );
+    }
+}
+
+#[test]
+fn attachment_moves_skip_a_non_utf8_note_that_does_not_reference_the_attachment() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("note");
+    fs::write(root.join("Latin1.md"), LATIN1_NOTE).expect("latin-1 note");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("missing.md"), root.join("Dangling.md"))
+        .expect("dangling link");
+    let index = build(root);
+
+    move_attachment(root, &index, "Media/photo.jpg", "Archive/photo.jpg").expect("move attachment");
+
+    assert_eq!(read(root, "Note.md"), "![](Archive/photo.jpg)");
+    assert_eq!(
+        fs::read(root.join("Latin1.md")).expect("latin-1"),
+        LATIN1_NOTE
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_rename_and_delete_skip_a_dangling_markdown_symlink() {
+    let dir = tag_vault(&[("Tagged.md", "---\ntags: [draft]\n---\nbody\n")]);
+    let root = dir.path();
+    std::os::unix::fs::symlink(root.join("missing.md"), root.join("Dangling.md"))
+        .expect("dangling link");
+
+    let renamed = apply_tag(root, "draft", "review");
+    assert_eq!(renamed.notes.len(), 1);
+    assert_eq!(read(root, "Tagged.md"), "---\ntags: [review]\n---\nbody\n");
+
+    let deleted = apply_delete(root, "review");
+    assert_eq!(deleted.notes.len(), 1);
+    assert_eq!(read(root, "Tagged.md"), "---\ntags: []\n---\nbody\n");
 }

@@ -36,6 +36,7 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::MutationJournal;
+use super::rewrites::read_note_text;
 use super::types::{TextRewrite, WriteError};
 
 /// A rename that was planned, or planned and applied.
@@ -223,7 +224,10 @@ fn plan(index: &VaultIndex, old: &str, new: &str) -> Result<Plan, TagRenameError
     let mut unsupported = Vec::new();
     let mut already_tagged_notes = 0usize;
     for entry in index.ordered_entries() {
-        let note = read_note(&entry, TagOperation::Rename)?;
+        // A note that cannot be opened carries no tag the index knows of.
+        let Some(note) = read_note_text(&entry.path) else {
+            continue;
+        };
         let tags = extract_tags(&note.content);
         if tags.iter().any(|tag| tag_matches(tag, new)) {
             already_tagged_notes += 1;
@@ -456,6 +460,7 @@ fn write_error_message(error: &WriteError) -> &str {
         WriteError::Conflict(message)
         | WriteError::InvalidInput(message)
         | WriteError::Io(message) => message,
+        WriteError::LinkRewriteUnsupported(_) => "a linking note cannot be rewritten",
     }
 }
 
@@ -637,33 +642,6 @@ fn write_rewrites(
     Ok(affected_paths)
 }
 
-/// A note's text as the index reads it: lossily when the file is not valid
-/// UTF-8, in which case `utf8` is false.
-struct NoteText {
-    content: String,
-    utf8: bool,
-}
-
-fn read_note(entry: &NoteEntry, operation: TagOperation) -> Result<NoteText, WriteError> {
-    let bytes = fs::read(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}' for tag {}: {error}",
-            entry.relative_path,
-            operation.noun()
-        ))
-    })?;
-    Ok(match String::from_utf8(bytes) {
-        Ok(content) => NoteText {
-            content,
-            utf8: true,
-        },
-        Err(error) => NoteText {
-            content: String::from_utf8_lossy(error.as_bytes()).into_owned(),
-            utf8: false,
-        },
-    })
-}
-
 /// The index reads a note that is not valid UTF-8 lossily, so it may well
 /// report the tag. It cannot be rewritten without replacing the bytes that are
 /// not text, so it is refused when it carries the tag and skipped otherwise.
@@ -772,7 +750,9 @@ fn plan_delete(
     let mut notes = Vec::new();
     let mut rewrites = Vec::new();
     for entry in index.ordered_entries() {
-        let note = read_note(&entry, TagOperation::Delete)?;
+        let Some(note) = read_note_text(&entry.path) else {
+            continue;
+        };
         let tags = extract_tags(&note.content);
         for carried in tags.iter().filter(|carried| carried.as_str() != tag) {
             if tag_matches(carried, tag) {

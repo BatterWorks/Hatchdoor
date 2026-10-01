@@ -14,7 +14,7 @@ use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
 };
-use super::rewrites::{MovedTo, backlink_rewrite_plan, merge_rewrites};
+use super::rewrites::{MovedTo, backlink_rewrite_plan, merge_rewrites, refuse_unrewritable};
 use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
 use crate::cache::parse::frontmatter_span;
 
@@ -733,6 +733,7 @@ fn move_or_rename_note_with_hook(
     let target_without_ext =
         strip_md_extension(&normalize_note_relative_path(target_relative_path)?).to_string();
     let slug = slug_for_relative_path(index, &target_without_ext, &target_path, Some(&entry.slug));
+    let mut unrewritable = Vec::new();
     let backlink_rewrites = backlink_rewrite_plan(
         index,
         &entry.slug,
@@ -740,7 +741,8 @@ fn move_or_rename_note_with_hook(
             new_target: &target_without_ext,
             destination: target_path.as_path(),
         }),
-    )?;
+        &mut unrewritable,
+    );
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
         index,
@@ -748,12 +750,13 @@ fn move_or_rename_note_with_hook(
         &target_path,
         false,
         &backlink_rewrites,
+        &mut unrewritable,
     )?;
+    refuse_unrewritable(unrewritable)?;
     // Created after planning, so a plan the planner refuses outright leaves no
-    // empty destination folder behind. A plan that carries assets still creates
-    // folders while planning them; the pre-existing empty-folder-after-rollback
-    // case is unchanged and tracked separately.
-    create_parent_dir_inside_root(vault_root, &target_path, "destination")?;
+    // empty destination folder behind. The pre-existing
+    // empty-folder-after-rollback case is unchanged and tracked separately.
+    create_destination_dirs(vault_root, &target_path, "destination", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
         entry,
@@ -865,7 +868,8 @@ fn delete_note_with_hook(
     // No destination: the link is removed from every other note, and the
     // trashed body's link to itself is left as written, since the note is gone
     // from the Vault and the link is moot in the trash (#254).
-    let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, None)?;
+    let mut unrewritable = Vec::new();
+    let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, None, &mut unrewritable);
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
         index,
@@ -873,8 +877,10 @@ fn delete_note_with_hook(
         &trash_path,
         true,
         &backlink_rewrites,
+        &mut unrewritable,
     )?;
-    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
+    refuse_unrewritable(unrewritable)?;
+    create_destination_dirs(vault_root, &trash_path, "trash", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
         entry,
@@ -906,6 +912,21 @@ fn delete_note_with_hook(
         trashed_path: Some(trash_relative),
         affected_paths,
     })
+}
+
+/// Create the folders a planned note mutation lands in, once nothing refused
+/// it: the note's own, under `note_label`, and each travelling asset's.
+fn create_destination_dirs(
+    vault_root: &Path,
+    note_path: &Path,
+    note_label: &str,
+    asset_moves: &[AssetMove],
+) -> Result<(), WriteError> {
+    create_parent_dir_inside_root(vault_root, note_path, note_label)?;
+    for asset in asset_moves {
+        create_parent_dir_inside_root(vault_root, &asset.destination, "asset")?;
+    }
+    Ok(())
 }
 
 struct CompletedNoteMutation {

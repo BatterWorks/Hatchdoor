@@ -167,7 +167,11 @@ pub(crate) fn mutation_error_response(error: VaultOperationError) -> Response {
         // its message survives rather than collapsing into the generic
         // sanitized internal error.
         "write_recovery_required" => StatusCode::INTERNAL_SERVER_ERROR,
-        "write_conflict" | "capability_unavailable" => StatusCode::CONFLICT,
+        // A note holding a link the operation cannot rewrite is Vault state
+        // the caller has to change before retrying, like a write conflict.
+        "write_conflict" | "capability_unavailable" | "link_rewrite_unsupported" => {
+            StatusCode::CONFLICT
+        }
         "invalid_write_input" | "noise_excluded_write" | "layer_marker_write" => {
             StatusCode::BAD_REQUEST
         }

@@ -5726,6 +5726,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rename_a_non_utf8_backlink_cannot_follow_is_refused_with_its_own_code() {
+        // #360: the refusal reaches an HTTP caller as a 409 under its own
+        // code, naming the note, rather than as a sanitized internal error.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let root = tmp.path().join("latin1");
+        std::fs::create_dir_all(&root).expect("vault directory");
+        std::fs::write(root.join("Latin1.md"), b"[[Target]] caf\xe9").expect("latin-1 note");
+        let vault_id =
+            create_vault_with_files(&app, "Latin1", &root, &[("Target.md", "target")], 0).await;
+        let hash = crate::cache::parse::content_hash("target");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/target/rename"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"new_title":"Renamed","expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "link_rewrite_unsupported", "{body:#}");
+        assert_eq!(body["retryable"], false);
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("'Latin1'")
+                    && message.contains("Nothing was written")),
+            "{body:#}"
+        );
+        assert!(root.join("Target.md").exists());
+        assert!(!root.join("Renamed.md").exists());
+    }
+
+    #[tokio::test]
     async fn vault_scoped_creates_renames_moves_archives_and_deletes_note() {
         // One status-and-envelope mapping pass over all five note routes.
         // What each mutation does to the Vault is asserted at the mutation

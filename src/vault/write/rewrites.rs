@@ -1,5 +1,4 @@
 use std::fs;
-use std::io;
 use std::path::Path;
 
 use crate::cache::parse::{content_hash, parse_fence_marker};
@@ -11,7 +10,57 @@ use crate::vault::paths::{
 };
 use crate::vault::types::{NoteEntry, VaultIndex};
 
-use super::types::{TextRewrite, WriteError};
+use super::types::{TextRewrite, UnrewritableNote, WriteError};
+
+/// A note's text as the index reads it: lossily when the file is not valid
+/// UTF-8, in which case `utf8` is false.
+pub(super) struct NoteText {
+    pub(super) content: String,
+    pub(super) utf8: bool,
+}
+
+/// Read a note the way the index does, or `None` when it cannot be read at
+/// all.
+///
+/// A Vault-wide planner skips a note it cannot open, such as a dangling `.md`
+/// symlink, because `build_link_graph` skips the same file: it holds no link
+/// the index knows about, so there is nothing to plan for it (#360). A note
+/// that is not valid UTF-8 is read lossily, so the planner can still tell
+/// whether it holds anything the operation would change.
+pub(super) fn read_note_text(path: &Path) -> Option<NoteText> {
+    let bytes = fs::read(path).ok()?;
+    Some(match String::from_utf8(bytes) {
+        Ok(content) => NoteText {
+            content,
+            utf8: true,
+        },
+        Err(error) => NoteText {
+            content: String::from_utf8_lossy(error.as_bytes()).into_owned(),
+            utf8: false,
+        },
+    })
+}
+
+/// Why a note that is not valid UTF-8 cannot take a planned rewrite: writing
+/// it back would replace every byte that is not text.
+pub(super) fn non_utf8_note(relative_path: &str) -> UnrewritableNote {
+    UnrewritableNote {
+        relative_path: relative_path.to_string(),
+        reason: "the note is not valid UTF-8 text".to_string(),
+    }
+}
+
+/// Refuse the whole operation when any planner found a note it could not
+/// rewrite, naming each one once, in path order. Called before anything is
+/// written, folders included.
+pub(super) fn refuse_unrewritable(mut notes: Vec<UnrewritableNote>) -> Result<(), WriteError> {
+    if notes.is_empty() {
+        return Ok(());
+    }
+    notes.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    notes.dedup_by(|left, right| left.relative_path == right.relative_path);
+    Err(WriteError::LinkRewriteUnsupported(notes))
+}
 
 /// Where a note is going, in the two forms a rewrite needs: the link target
 /// other notes will point at, and the filesystem path its own body will be
@@ -47,11 +96,18 @@ pub(super) struct MovedTo<'a> {
 /// holding both forms gets one rewrite: see [`retarget_markdown_link`] for
 /// how a path keeps its form, and on delete each link is removed with its
 /// text kept.
+///
+/// A note that cannot be read is skipped, and a note that is not valid UTF-8
+/// is planned over its lossy text: it is skipped when nothing in it would
+/// change and added to `unrewritable` when something would (#360). The caller
+/// refuses the operation with [`refuse_unrewritable`] once every planner has
+/// run.
 pub(super) fn backlink_rewrite_plan(
     index: &VaultIndex,
     moved_slug: &str,
     moved_to: Option<MovedTo<'_>>,
-) -> Result<Vec<TextRewrite>, WriteError> {
+    unrewritable: &mut Vec<UnrewritableNote>,
+) -> Vec<TextRewrite> {
     let new_target = moved_to.map(|moved| moved.new_target);
     let entries = index.ordered_entries();
     let bare_new_target =
@@ -71,12 +127,10 @@ pub(super) fn backlink_rewrite_plan(
             Some(moved) => moved.destination.to_path_buf(),
             None => continue,
         };
-        let content = fs::read_to_string(&entry.path).map_err(|error| {
-            WriteError::Io(format!(
-                "failed to read note '{}' for backlink rewrite: {error}",
-                entry.relative_path
-            ))
-        })?;
+        let Some(note) = read_note_text(&entry.path) else {
+            continue;
+        };
+        let content = note.content;
         let rewritten = transform_wikilinks(&content, |target| {
             let Some(candidate) = index.resolve_wikilink(target) else {
                 return Some(target.to_string());
@@ -131,7 +185,9 @@ pub(super) fn backlink_rewrite_plan(
                 target_after,
             )
         });
-        if rewritten != content {
+        if rewritten != content && !note.utf8 {
+            unrewritable.push(non_utf8_note(&entry.relative_path));
+        } else if rewritten != content {
             rewrites.push(TextRewrite {
                 path: rewrite_path,
                 // The hash of what is on disk now, for the note this rewrite
@@ -143,7 +199,7 @@ pub(super) fn backlink_rewrite_plan(
             });
         }
     }
-    Ok(rewrites)
+    rewrites
 }
 
 /// The path a Markdown note link should carry once a move has happened.
@@ -367,6 +423,9 @@ pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) ->
 pub(super) struct RewriteBase {
     pub(super) content: String,
     pub(super) original_hash: String,
+    /// False when `content` is a lossy reading of a note that is not valid
+    /// UTF-8, which no rewrite may be built from (#360).
+    pub(super) utf8: bool,
 }
 
 /// The base a plan already holds for `path`, if any rewrite targets it.
@@ -390,25 +449,26 @@ pub(super) fn planned_base(path: &Path, rewrites: &[TextRewrite]) -> Option<Rewr
         .find(|rewrite| rewrite.path == path)?
         .original_hash
         .clone();
+    // A planner never plans a rewrite of a note that is not UTF-8, so any
+    // planned content is.
     Some(RewriteBase {
         content,
         original_hash,
+        utf8: true,
     })
 }
 
-pub(super) fn rewrite_base_or_read(
-    path: &Path,
-    rewrites: &[TextRewrite],
-) -> Result<RewriteBase, io::Error> {
-    match planned_base(path, rewrites) {
-        Some(base) => Ok(base),
-        None => {
-            let content = fs::read_to_string(path)?;
-            let original_hash = content_hash(&content);
-            Ok(RewriteBase {
-                content,
-                original_hash,
-            })
-        }
+/// The base a later planner composes onto for `path`: the planned one when
+/// there is one, otherwise the note as [`read_note_text`] reads it, or `None`
+/// when it cannot be read at all.
+pub(super) fn rewrite_base_or_read(path: &Path, rewrites: &[TextRewrite]) -> Option<RewriteBase> {
+    if let Some(base) = planned_base(path, rewrites) {
+        return Some(base);
     }
+    let note = read_note_text(path)?;
+    Some(RewriteBase {
+        original_hash: content_hash(&note.content),
+        content: note.content,
+        utf8: note.utf8,
+    })
 }

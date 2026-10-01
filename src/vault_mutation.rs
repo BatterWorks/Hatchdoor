@@ -580,6 +580,19 @@ pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOpera
             );
             ("write_failed", message, false)
         }
+        WriteError::LinkRewriteUnsupported(notes) => {
+            let listed = notes
+                .iter()
+                .map(|note| format!("'{}' ({})", note.relative_path, note.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let message = format!(
+                "Nothing was written: {} note(s) link to what this operation moves or deletes, \
+                 and their links cannot be rewritten in place. Fix them in the vault, then try again: {listed}",
+                notes.len()
+            );
+            ("link_rewrite_unsupported", message, false)
+        }
     };
     VaultOperationError::new(code, message, Some(vault_id), retryable)
 }

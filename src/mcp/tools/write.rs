@@ -934,7 +934,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_note",
-            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -950,7 +950,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_note",
-            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -966,7 +966,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_rename_note",
-            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -982,7 +982,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "archive_note",
-            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -997,7 +997,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_note",
-            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references is trashed with it. The trashed copy keeps the link it holds to itself as written, since the note it names is gone either way. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references is trashed with it. The trashed copy keeps the link it holds to itself as written, since the note it names is gone either way. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1043,7 +1043,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_attachment",
-            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
+            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1058,7 +1058,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_attachment",
-            "description": "Rename an existing attachment in its current folder and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
+            "description": "Rename an existing attachment in its current folder and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1073,7 +1073,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_attachment",
-            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
+            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1436,6 +1436,31 @@ mod finalize_tests {
             advertised, declared,
             "WRITE_OPS and write_tools_list() must name exactly the same tools"
         );
+    }
+
+    /// Every tool that rewrites other notes' links names the refusal it gives
+    /// when one of those notes is not valid UTF-8 text (#360).
+    #[test]
+    fn link_rewriting_tools_name_the_unrewritable_note_refusal() {
+        let rewriting = [
+            "rename_note",
+            "move_note",
+            "move_rename_note",
+            "archive_note",
+            "delete_note",
+            "move_attachment",
+            "rename_attachment",
+            "delete_attachment",
+        ];
+        for tool in write_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            let description = tool["description"].as_str().expect("description");
+            assert_eq!(
+                description.contains("link_rewrite_unsupported"),
+                rewriting.contains(&name),
+                "{name}"
+            );
+        }
     }
 
     /// The two whole-content tools normalise the note and say so in their own

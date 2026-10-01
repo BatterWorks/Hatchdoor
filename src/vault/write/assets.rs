@@ -7,13 +7,21 @@ use crate::vault::paths::split_wikilink_asset_body;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
-    create_parent_dir_inside_root, ensure_existing_path_inside_root, is_markdown_path,
-    is_trashed_path, relative_link_target, resolve_reference_inside_root, same_existing_path,
-    unique_trash_attachment_relative_path, vault_relative_dir,
+    ensure_existing_path_inside_root, is_markdown_path, is_trashed_path, relative_link_target,
+    resolve_reference_inside_root, same_existing_path, unique_trash_attachment_relative_path,
+    vault_relative_dir,
 };
-use super::rewrites::{RewriteBase, planned_base, rewrite_base_or_read};
-use super::types::{AssetMove, TextRewrite, WriteError};
+use super::rewrites::{RewriteBase, non_utf8_note, planned_base, rewrite_base_or_read};
+use super::types::{AssetMove, TextRewrite, UnrewritableNote, WriteError};
 
+/// Plan which assets travel with a moving note and every reference rewrite
+/// that follows from it.
+///
+/// Planning creates nothing: the caller creates each move's destination
+/// folder once the whole operation is known to go ahead, so a refusal leaves
+/// the Vault exactly as it was. A note whose reference to a travelling asset
+/// cannot be rewritten is added to `unrewritable`, as
+/// [`asset_reference_rewrite_plan`] describes.
 pub(super) fn asset_move_plan(
     vault_root: &Path,
     index: &VaultIndex,
@@ -21,6 +29,7 @@ pub(super) fn asset_move_plan(
     destination_note: &Path,
     allow_trash_collision: bool,
     baseline_rewrites: &[TextRewrite],
+    unrewritable: &mut Vec<UnrewritableNote>,
 ) -> Result<(Vec<AssetMove>, Vec<TextRewrite>), WriteError> {
     let content = fs::read_to_string(&moved_entry.path).map_err(|error| {
         WriteError::Io(format!(
@@ -111,12 +120,10 @@ pub(super) fn asset_move_plan(
         // identity rather than string equality, so a destination reached through
         // a symlink counts as in place too - the asset stays put and the
         // reference still resolves to it. A trash destination is always a fresh
-        // unique path and never matches its own source. Checked before any
-        // directory is created so a no-op leaves the Vault untouched.
+        // unique path and never matches its own source.
         if same_existing_path(&source_asset, &destination_asset) {
             continue;
         }
-        create_parent_dir_inside_root(vault_root, &destination_asset, "asset")?;
         if !allow_trash_collision && destination_asset.exists() {
             return Err(WriteError::Conflict(format!(
                 "Destination asset already exists: {}",
@@ -136,7 +143,8 @@ pub(super) fn asset_move_plan(
             &source_asset,
             &destination_asset,
             &baseline,
-        )?);
+            unrewritable,
+        ));
     }
     // The moving note is excluded from `asset_reference_rewrite_plan` because a
     // reference to an asset travelling with it stays valid. A reference to an
@@ -160,6 +168,7 @@ pub(super) fn asset_move_plan(
         let base = planned.unwrap_or_else(|| RewriteBase {
             original_hash: content_hash(&content),
             content: content.clone(),
+            utf8: true,
         });
         let rewritten = transform_asset_references(&base.content, |target| {
             stationary
@@ -187,6 +196,13 @@ pub(super) fn referenced_assets(content: &str) -> Vec<PathBuf> {
     assets
 }
 
+/// Repoint every other note's reference to `source_asset` at
+/// `destination_asset`.
+///
+/// A note that cannot be read is skipped. A note that is not valid UTF-8 is
+/// skipped when it holds no reference to the asset and added to
+/// `unrewritable` when it does, for the caller to refuse the operation
+/// (#360).
 pub(super) fn asset_reference_rewrite_plan(
     vault_root: &Path,
     index: &VaultIndex,
@@ -194,18 +210,16 @@ pub(super) fn asset_reference_rewrite_plan(
     source_asset: &Path,
     destination_asset: &Path,
     baseline_rewrites: &[TextRewrite],
-) -> Result<Vec<TextRewrite>, WriteError> {
+    unrewritable: &mut Vec<UnrewritableNote>,
+) -> Vec<TextRewrite> {
     let mut rewrites = Vec::new();
     for entry in index.ordered_entries() {
         if entry.slug == moved_slug {
             continue;
         }
-        let base = rewrite_base_or_read(&entry.path, baseline_rewrites).map_err(|error| {
-            WriteError::Io(format!(
-                "failed to read note '{}' for asset reference rewrite: {error}",
-                entry.relative_path
-            ))
-        })?;
+        let Some(base) = rewrite_base_or_read(&entry.path, baseline_rewrites) else {
+            continue;
+        };
         let content = base.content;
         let rewritten = transform_asset_references(&content, |target| {
             let note_dir = entry.path.parent().unwrap_or(vault_root);
@@ -216,7 +230,9 @@ pub(super) fn asset_reference_rewrite_plan(
             relative_link_target(vault_root, &entry.path, destination_asset)
                 .unwrap_or_else(|| target.to_string_lossy().into_owned())
         });
-        if rewritten != content {
+        if rewritten != content && !base.utf8 {
+            unrewritable.push(non_utf8_note(&entry.relative_path));
+        } else if rewritten != content {
             rewrites.push(TextRewrite {
                 path: entry.path,
                 original_hash: base.original_hash,
@@ -224,7 +240,7 @@ pub(super) fn asset_reference_rewrite_plan(
             });
         }
     }
-    Ok(rewrites)
+    rewrites
 }
 
 fn transform_asset_references<F>(content: &str, transform_target: F) -> String
@@ -507,6 +523,7 @@ mod tests {
             &root.join("deeper/nest/Note.md"),
             false,
             &[],
+            &mut Vec::new(),
         )
         .expect("plan must succeed");
 
@@ -562,8 +579,16 @@ mod tests {
 
         // Deleting to trash must not fail just because the asset name already
         // exists in trash; it should relocate to a unique name instead.
-        let (moves, _rewrites) = asset_move_plan(root, &index, &entry, &trash_note, true, &[])
-            .expect("plan must succeed");
+        let (moves, _rewrites) = asset_move_plan(
+            root,
+            &index,
+            &entry,
+            &trash_note,
+            true,
+            &[],
+            &mut Vec::new(),
+        )
+        .expect("plan must succeed");
         assert_eq!(moves.len(), 1);
         assert_eq!(
             moves[0].destination,
