@@ -72,7 +72,7 @@ the collection of vaults is not itself another layer.
 _Avoid_: Vault layer
 
 **Index turn**:
-One unit of background indexing work for exactly one vault, requested through the shared work coordinator by the file watcher, a settings change, a manual rebuild, or activation. It scans that vault's Markdown, builds a candidate snapshot, and publishes it in two passes: structure first, so browsing does not wait, then vectors. A vault occupies at most one coordinator position, so repeated requests coalesce into the next turn.
+One unit of background indexing work for exactly one vault, requested through the shared work coordinator by the file watcher, a settings change, a manual rebuild, or activation. It scans that vault's Markdown, builds a candidate snapshot, and publishes it in two passes: structure first, so browsing does not wait, then vectors. A vault occupies at most one coordinator position, so repeated requests coalesce into the next turn. A long turn pauses when another vault is waiting to index, keeps the embedding progress it has made, and resumes from it when its vault's turn comes round again; the vault is meanwhile waiting for its turn.
 _Avoid_: Reindex, rebuild, refresh (when meant instance-wide)
 
 **Git turn**:
