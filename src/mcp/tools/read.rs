@@ -772,7 +772,14 @@ pub(super) async fn list_vaults_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let _: EmptyArgs = parse("list_vaults", arguments)?;
-    management_result::<results::ListVaultsResult>(VaultCollectionManagement::new(&state).list())
+    // Off the async runtime: a Vault's link style can mean reading every note.
+    let listing =
+        tokio::task::spawn_blocking(move || VaultCollectionManagement::new(&state).list())
+            .await
+            .map_err(|join_error| {
+                JsonRpcFailure::internal(format!("background task panicked: {join_error}"))
+            })?;
+    management_result::<results::ListVaultsResult>(listing)
 }
 
 /// Registry writes go straight to the Vault collection management core, the

@@ -41,7 +41,12 @@ type NoteEditorProps = {
     onUseDisk: () => void;
     onKeepDraft: () => void;
   } | null;
-  onUploadAttachment?: (file: File) => Promise<string>;
+  /** Uploads the file and answers with where it landed, for the notice, and
+   * the embed to insert, already in the Vault's link style. */
+  onUploadAttachment?: (file: File) => Promise<UploadedAttachment>;
+  /** The link autocomplete inserts for a chosen note, in the Vault's link
+   * style. Absent means `[[title]]`. */
+  formatNoteLink?: (note: ExplorerNote) => string;
   /** A demo_read_only refusal on an attachment upload takes over entirely
    * (#152): the app's own sentence lands in the shared notice strip instead
    * of this editor's own inline attachment notice. Returns whether the
@@ -53,6 +58,8 @@ type NoteEditorProps = {
   onReload?: () => void | Promise<void>;
   renderPreview?: (content: string) => ReactNode;
 };
+
+export type UploadedAttachment = { path: string; embed: string };
 
 type AttachmentNotice = {
   tone: "loading" | "success" | "error";
@@ -68,6 +75,7 @@ export function NoteEditor({
   noteCandidates = [],
   conflictReview,
   onUploadAttachment,
+  formatNoteLink,
   onDemoRefusal,
   onChange,
   onSave,
@@ -137,6 +145,7 @@ export function NoteEditor({
       textarea.selectionStart,
       trigger.start,
       note.title,
+      formatNoteLink?.(note),
     );
     pendingCaretRef.current = result.caret;
     updateContentBody(result.text);
@@ -162,10 +171,9 @@ export function NoteEditor({
   };
 
   const insertAttachmentAtCaret = (
-    relativePath: string,
+    { path, embed }: UploadedAttachment,
     textarea: HTMLTextAreaElement,
   ) => {
-    const embed = `![[${relativePath}]]`;
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const nextBody =
@@ -174,7 +182,7 @@ export function NoteEditor({
     updateContentBody(nextBody);
     setAttachmentNotice({
       tone: "success",
-      message: `Inserted attachment: ${relativePath}`,
+      message: `Inserted attachment: ${path}`,
     });
   };
 
@@ -195,8 +203,7 @@ export function NoteEditor({
       message: "Uploading attachment...",
     });
     try {
-      const relativePath = await onUploadAttachment(file);
-      insertAttachmentAtCaret(relativePath, textarea);
+      insertAttachmentAtCaret(await onUploadAttachment(file), textarea);
     } catch (error) {
       if (onDemoRefusal?.(error)) {
         setAttachmentNotice(null);

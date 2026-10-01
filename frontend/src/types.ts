@@ -157,7 +157,16 @@ export type VaultSummary = {
   /** Absent until a recovery branch is requested, once the conflict clears,
    * and on the read-only demo. */
   recovery_branch?: RecoveryBranchStatus;
+  /** The form this Vault writes new note links and embeds in (ADR-33), read
+   * from the Vault on every listing. Absent when the Vault cannot be read and
+   * on the read-only demo; treat absent as `"wikilink"`. */
+  link_style?: LinkStyle;
+  /** The path form a Markdown link takes in this Vault. */
+  link_path_form?: LinkPathForm;
 };
+
+export type LinkStyle = "wikilink" | "markdown";
+export type LinkPathForm = "relative" | "absolute" | "shortest";
 
 export type VaultRegistryRecovery = {
   code: "vault_registry_recovery_required";

@@ -39,9 +39,11 @@ Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — thes
 
 A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps describing its Git schedule: `last_checked_at`, when Hatchdoor last tried to check the remote — whether that check succeeded or failed, so read it alongside the Vault's Git status rather than as a successful sync — and `next_attempt_at`, when the next scheduled check is due. `last_checked_at` is absent until the first check completes; both are absent for a Vault with no remote and in demo mode. They are described in full under **Git schedule fields on a listed Vault** in [[HTTP API reference]], whose Vault shape `list_vaults` returns verbatim.
 
+Each listed Vault also carries its link style: `link_style` (`wikilink` or `markdown`) and `link_path_form` (`relative`, `absolute` or `shortest`). Write new note links and embeds in that form, `[[Note]]` and `![[file.png]]` for `wikilink`, `[Note](path/Note.md)` and `![](path/file.png)` for `markdown`, so the Vault keeps one style; Hatchdoor stores what you send as-is and never converts it. Both fields are absent for a Vault Hatchdoor cannot read and in demo mode. **Link style fields on a listed Vault** in [[HTTP API reference]] describes them, and [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is read.
+
 | Tool | Gating | Purpose |
 | --- | --- | --- |
-| `list_vaults` | Always | Every Vault's ID, name, status, redacted source, capabilities, and Git schedule, plus the registry's `registry_revision`. Call this first — every write below needs a fresh `expected_registry_revision`. |
+| `list_vaults` | Always | Every Vault's ID, name, status, redacted source, capabilities, Git schedule, and link style, plus the registry's `registry_revision`. Call this first — every write below needs a fresh `expected_registry_revision`. |
 | `create_vault` | Write mode | Create a Vault definition. The registry assigns the Vault ID; read it back from `list_vaults`. |
 | `edit_vault` | Write mode | Replace one Vault definition wholesale (not a patch — send back every field you want to keep). |
 | `enable_vault` | Write mode | Enable a disabled Vault definition. |

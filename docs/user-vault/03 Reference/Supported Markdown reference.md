@@ -118,7 +118,7 @@ Local Markdown image syntax works as expected:
 ![Alt text](image-file-name.jpg)
 ```
 
-Store an image near the note that references it, and use safe filenames — lowercase ASCII letters, numbers, and hyphens. A Markdown link to a local PDF is marked as a document and opens in a new tab: `[Open the report](report.pdf)`. The same attachment can instead be embedded inline, with page controls, using Obsidian's embed syntax: `![[report.pdf]]`.
+Store an image near the note that references it, and use safe filenames — lowercase ASCII letters, numbers, and hyphens. The path is read the way a Markdown note link's is (below): a leading `/` starts at the Vault root, a bare filename is found anywhere in the Vault, and a space can be written as `%20`. A Markdown link to a local PDF is marked as a document and opens in a new tab: `[Open the report](report.pdf)`. The same attachment can instead be embedded inline, with page controls, using Obsidian's embed syntax: `![[report.pdf]]`.
 
 ## Wikilinks
 
@@ -144,7 +144,26 @@ The target is a path, not a title. Hatchdoor reads it the way it reads an attach
 
 Only a target ending in `.md` counts. A link written without the extension, a link to any other file or to a web address, and image syntax pointing at a `.md` file, `![x](Note.md)`, are left as they always were. Links inside code are not links.
 
-When a note is renamed or moved, Hatchdoor rewrites the Markdown links that point at it and keeps the form you wrote: a relative path is worked out again from the linking note, a path starting with `/` keeps its `/`, and a bare filename stays bare while that name still reaches the note. The link text is never changed. A reference-style link changes on its definition line only. Moving the note that holds the links rewrites them from its new folder so they still reach the same notes. Deleting a note removes each Markdown link to it and keeps the link text as plain words, so `see [the plan](Plan.md) today` becomes `see the plan today`. When Hatchdoor writes a path it escapes only spaces, `%`, `#`, square brackets and parentheses; accented and non-Latin letters stay readable. Hatchdoor itself still writes new links as wikilinks.
+When a note is renamed or moved, Hatchdoor rewrites the Markdown links that point at it and keeps the form you wrote: a relative path is worked out again from the linking note, a path starting with `/` keeps its `/`, and a bare filename stays bare while that name still reaches the note. The link text is never changed. A reference-style link changes on its definition line only. Moving the note that holds the links rewrites them from its new folder so they still reach the same notes. Deleting a note removes each Markdown link to it and keeps the link text as plain words, so `see [the plan](Plan.md) today` becomes `see the plan today`. When Hatchdoor writes a path it escapes only spaces, `%`, `#`, square brackets and parentheses; accented and non-Latin letters stay readable.
+
+## Which link style Hatchdoor writes
+
+A Vault has one link style, wikilinks or Markdown links, and every link Hatchdoor inserts follows it: a note picked from the editor's `[[` suggestions, and an attachment pasted, uploaded or dropped into a note. You don't set it in Hatchdoor. It is read from the Vault each time:
+
+- If the Vault has Obsidian's settings file, `.obsidian/app.json`, its **Use `[[Wikilinks]]`** switch decides. Obsidian stores the switch turned off as `"useMarkdownLinks": true`. With the switch on, the key missing, or a file Hatchdoor cannot read, the Vault uses wikilinks, as Obsidian does.
+- Otherwise Hatchdoor counts the note links and attachment embeds already in the Vault, and the form most of them use wins. No links at all, or an exact tie, means wikilinks.
+
+In a wikilink Vault, Hatchdoor inserts `[[Note Title]]` and `![[path/to/file.png]]`, exactly as it always has. In a Markdown-link Vault it inserts `[Note Title](path/to/Note%20Title.md)` and `![](path/to/file.png)`. The link text is the note's title, with any `[`, `]`, `` ` `` or `\` escaped.
+
+The path in a Markdown link has one of three forms. With Obsidian's settings file, its **New link format** setting picks it (`newLinkFormat` in the file, **Shortest path when possible** when the key is missing). Without one, Hatchdoor writes relative paths.
+
+| Form | Example from `Projects/Plan.md` | Written as |
+|---|---|---|
+| Relative | `../Areas/Budget.md` | From the linking note's folder |
+| Absolute | `/Areas/Budget.md` | From the Vault root, with a leading `/` |
+| Shortest | `Budget.md` | The bare file name when no other file in the Vault shares it, otherwise the path from the Vault root, or with a leading `/` when that path would be read from the note's folder first |
+
+Paths are escaped the way a rename rewrites them. Change the switch in Obsidian and the next link Hatchdoor inserts follows it, with no restart; the editor re-reads the Vault's style when it opens and before each attachment upload. Hatchdoor reads `.obsidian/app.json` and never writes to it. Agents see the same two values on the Vault, as `link_style` and `link_path_form`, and are expected to match them; Hatchdoor never rewrites the text an agent sends.
 
 ## Horizontal rule
 

@@ -34,6 +34,7 @@ use tracing::error;
 
 use crate::app_state::AppState;
 use crate::git::GitPollingClock;
+use crate::vault::{LinkPathForm, LinkStyle};
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::{
     HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
@@ -104,6 +105,15 @@ pub struct VaultSummary {
     /// detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_branch: Option<RecoveryBranchStatus>,
+    /// The form this Vault writes new note links and embeds in (ADR-33), read
+    /// from the Vault on every listing. Absent when the Vault cannot be read,
+    /// on a read-only demo, and on a mutation response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_style: Option<LinkStyle>,
+    /// The path form a Markdown link takes in this Vault. Present whenever
+    /// `link_style` is, whichever style that is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_path_form: Option<LinkPathForm>,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
@@ -484,6 +494,8 @@ fn vault_summary(
         git_error: snapshot.git_error.clone(),
         watcher_error: snapshot.watcher_error.clone(),
         recovery_branch: snapshot.recovery_branch.clone(),
+        link_style: None,
+        link_path_form: None,
     }
 }
 
@@ -536,6 +548,8 @@ fn public_vault_summary(
         git_error: None,
         watcher_error: None,
         recovery_branch: None,
+        link_style: None,
+        link_path_form: None,
     }
 }
 
@@ -611,11 +625,16 @@ impl<'a> VaultCollectionManagement<'a> {
                             if demo_mode {
                                 public_vault_summary(&definition, &runtime_snapshot)
                             } else {
-                                vault_summary(
+                                let mut summary = vault_summary(
                                     &definition,
                                     &runtime_snapshot,
                                     self.state.managed_git.polling_clock(definition.vault_id()),
-                                )
+                                );
+                                if let Some(style) = self.link_style(definition.vault_id()) {
+                                    summary.link_style = Some(style.style);
+                                    summary.link_path_form = Some(style.path_form);
+                                }
+                                summary
                             }
                         })
                         .collect()
@@ -639,6 +658,22 @@ impl<'a> VaultCollectionManagement<'a> {
             }),
             Err(error) => Err(internal_error(error.to_string(), None)),
         }
+    }
+
+    /// One active Vault's link style, read from its directory now (ADR-33).
+    /// Without Obsidian settings it walks the Vault and reads every note
+    /// changed since the last listing, so this blocks on disk and the callers
+    /// of [`Self::list`] run it off the async runtime.
+    fn link_style(&self, vault_id: VaultId) -> Option<crate::vault::VaultLinkStyle> {
+        let control = self.state.vaults.runtime(vault_id)?;
+        let root = control.vault_path();
+        crate::vault::vault_link_style(root, || {
+            let catalog = control.authoritative_catalog().ok()?;
+            Some(crate::vault::count_link_forms(
+                root,
+                catalog.by_slug.values().map(|note| note.path.as_path()),
+            ))
+        })
     }
 
     /// Create a new Vault definition, seeding it when it qualifies.

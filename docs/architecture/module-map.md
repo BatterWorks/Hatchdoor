@@ -1055,6 +1055,7 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/exclude.rs`
 - `src/vault/index.rs`
 - `src/vault/layers.rs`
+- `src/vault/link_style.rs`
 - `src/vault/links.rs`
 - `src/vault/markdown_links.rs`
 - `src/vault/paths.rs`
@@ -1087,6 +1088,16 @@ calls too) over `note_paths`, the catalogue's notes keyed by path and by
 filename. `markdown_links.rs` is the one scanner for Markdown links: the link
 graph reads it, and so does the write layer's rename, move and delete
 rewriting, through `rewrite_note_links`.
+`link_style.rs` answers a Vault's link style (ADR-33) through
+`vault_link_style`: `.obsidian/app.json` decides when it exists, read and
+never written, and otherwise the Vault's existing links vote. The vote is
+`count_link_forms` over the Vault's notes: `links::note_link_forms` counts one
+note's wikilinks and `![[...]]` embeds against its Markdown note links and
+local `![](...)` images, with the same readers the link graph uses, and a
+process-wide memo keeps each note's counts until its size or modification
+time changes, so a listing re-reads only changed notes. The scanner records
+inline images as `MarkdownLink::Image` for that count only, and no rewriter
+touches them.
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
 currently supplies content hashing to the index and, since #248, the shared
@@ -1720,6 +1731,14 @@ with `capability_unavailable` otherwise, and `VaultSummary` carries the
 runtime's `recovery_branch` status on an authenticated read and withholds it
 from the demo projection.
 
+`list()` also fills `link_style` and `link_path_form` (ADR-33) on an
+authenticated read, read from each active Vault's directory through
+`vault::vault_link_style` on every listing, and leaves them absent for a
+Vault it cannot read, in the demo projection and on mutation responses.
+Without an Obsidian settings file that read walks the Vault's catalog and
+re-reads every note changed since the last listing, so both adapters (`GET /api/v1/vaults`, MCP `list_vaults`) run `list()` on
+the blocking pool.
+
 `VaultSummary` carries two optional RFC 3339 UTC timestamps
 alongside the status fields — `last_checked_at` and `next_attempt_at`, read
 from `git::ManagedGitScheduler::polling_clock` — so a caller can tell a Vault
@@ -1773,8 +1792,9 @@ reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
 notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
 `vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
-`vault_migration::start_with_no_vaults`, `vault::seed_new_vault`, and
-`AppState`'s composed handles including `demo_mode` and the pending
+`vault_migration::start_with_no_vaults`, `vault::seed_new_vault`,
+`vault::{vault_link_style, count_link_forms}`, `VaultControlBlock::{vault_path,
+authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode` and the pending
 `legacy_migration_recovery` flag.
 
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
@@ -3657,6 +3677,9 @@ folder paths, and flattened note candidates. Since #192 the tree route sends
 notes without a `vault_id` — the tree they hang from carries it — so
 `lib/vaultTrees.ts` stamps each note with its Vault as the response is parsed,
 before `useVaultTree` merges or flattens the trees and the grouping is gone.
+Each flattened candidate (`NoteCandidate`) also carries its Vault-relative
+`relativePath`, built from the folder chain and the note's title, which is its
+file name; the editor writes a Markdown link's path from it (ADR-33).
 `WireVaultTree` is the payload shape and `VaultTree` the attributed one every
 component below the hook consumes. The sidebar is three zones — a
 fixed rail, a scrolling nav, a fixed footer — and `.explorer-nav` is the scroll
@@ -3887,7 +3910,12 @@ target, because the same filename in notes at two depths can be two files; it
 also sends Markdown note links (ADR-28, found by `markdownLinks.ts`, which
 skips code, images and wikilinks) as `note_link_targets` and rewrites each
 destination to the same note route, archived route or `/__missing__/` form a
-wikilink gets, so `renderers.tsx` needs no branch for them — heading/search-hit navigation, Markdown transformations,
+wikilink gets, so `renderers.tsx` needs no branch for them. Local Markdown
+images (`findMarkdownImages`) go out as `asset_targets` too, decoded, and a
+resolved one is pointed at the asset route, so a root-anchored or bare-name
+`![](path)`, the forms ADR-33's inserts can write, renders; an unresolved
+image keeps its destination. `resolveAssetTargets` is the uncached form the
+editor asks when choosing a `shortest` attachment path — heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the editable-block component map produced by
 `createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one
@@ -4076,11 +4104,16 @@ fragment jump), Markdown/heading/search/state tests,
 - `frontend/src/components/note-page/conflictDiff.ts`
 - `frontend/src/components/note-page/frontmatter.ts`
 - `frontend/src/components/note-page/inlineEditorContext.ts`
+- `frontend/src/components/note-page/linkStyle.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
 components, note-action/write-mode hooks, local draft behavior, client path
 validation, upload normalization, frontmatter editing, conflict display,
-wikilink autocomplete, inline block editing (the editor provider/context, the
+note-link autocomplete and attachment inserts written in the Vault's link
+style (`linkStyle.ts`, ADR-33: `[[Title]]`/`![[path]]` in a wikilink Vault,
+`[Title](path.md)`/`![](path)` in a Markdown one, with paths encoded as the
+rename rewriter encodes them), inline block editing (the editor
+provider/context, the
 per-block wrapper, the CodeMirror block input and its markdown syntax
 highlighting, click-to-write in the space between blocks, structural block
 operations, document-level undo, which ignores Ctrl/Cmd+Z and Y aimed at an

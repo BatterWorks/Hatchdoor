@@ -72,6 +72,15 @@ Hatchdoor also waits before updating itself. A new version installs in the backg
 
 The **Edit** button next to the note title opens the older, full-note Markdown editor with an explicit Save button. Use it for anything block editing can't do: restructuring a table, editing display math or raw HTML, and resolving a conflict flagged by the **Review** button above. It's always there as a fallback — nothing you can do in Source mode is off-limits, it's just not block-by-block.
 
+### Linking to another note
+
+In Source mode, type `[[` and keep typing part of a note's title to get a list of matching notes. Pick one with the arrow keys and Enter, or click it, and Hatchdoor replaces what you typed with a link in the Vault's link style:
+
+- In a wikilink Vault, `[[Note Title]]`.
+- In a Markdown-link Vault, `[Note Title](path/to/Note%20Title.md)`, with the path written in the Vault's path form. Only notes in the same Vault are offered, because a link never reaches into another Vault.
+
+Opening Source mode re-reads the Vault's style, so a change made in Obsidian applies to the next link without restarting anything. Attachments pasted or dropped into the editor, or dropped onto a note while block editing, follow the same style. [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is worked out.
+
 ---
 
 Related: [[Browse and review through the Web UI]] · [[Supported Markdown reference]] · [[How to import and work with attachments]]
