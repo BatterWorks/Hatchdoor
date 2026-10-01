@@ -608,9 +608,9 @@ impl BrowseSurface {
 }
 
 /// Which contained assets a [`BrowseSurface`] admits, captured from one
-/// authoritative index. A caller checking many paths against one Vault holds
+/// catalog of its Vault. A caller checking many paths against one Vault holds
 /// this rather than calling [`VaultReadCore::asset_on_surface`] per path,
-/// which rebuilds the index each time.
+/// which rebuilds the catalog each time.
 pub struct AssetSurface {
     surface: BrowseSurface,
     asset_paths: BTreeSet<String>,
@@ -765,7 +765,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultQualifiedNote>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         index
             .read_note_by_slug(slug)
             .map(|note| {
@@ -782,7 +782,10 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultQualifiedLinks>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self
+            .control_block(vault_id)?
+            .linked_index()
+            .map_err(|error| runtime_error(vault_id, error))?;
         if self.hidden_slug(&index, slug) {
             return Ok(None);
         }
@@ -804,7 +807,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         raw_target: &str,
     ) -> Result<Option<ResolvedVaultNote>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         Ok(index
             .resolve_wikilink(raw_target)
             .filter(|note| !self.surface.hides(note.layer.as_deref()))
@@ -815,10 +818,10 @@ impl<'a> VaultReadCore<'a> {
             }))
     }
 
-    /// Resolve every target against one authoritative index build, for
-    /// batch-resolve adapters. `resolve_wikilink` builds a fresh index per
-    /// call, which is correct for one target but would otherwise cost a full
-    /// Vault scan per batch entry.
+    /// Resolve every target against one catalog build, for batch-resolve
+    /// adapters. `resolve_wikilink` builds a fresh catalog per call, which is
+    /// correct for one target but would otherwise walk the Vault once per
+    /// batch entry.
     pub fn resolve_wikilinks(
         &self,
         vault_id: VaultId,
@@ -828,7 +831,7 @@ impl<'a> VaultReadCore<'a> {
     }
 
     /// Resolve a note's wikilink targets — notes and assets alike — against one
-    /// authoritative-index build.
+    /// catalog build.
     ///
     /// Assets resolve separately from notes because they are addressed
     /// differently: a note has a slug, an asset only ever has a path, and an
@@ -848,7 +851,7 @@ impl<'a> VaultReadCore<'a> {
         note_link_targets: &[String],
         note_dir: &str,
     ) -> Result<ResolvedVaultTargets, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         let visible = |note: &crate::vault::NoteEntry| ResolvedVaultNote {
             vault_id,
             slug: note.slug.clone(),
@@ -1200,7 +1203,7 @@ impl<'a> VaultReadCore<'a> {
     }
 
     /// The requested Vault's resolved local Markdown directory, gated by the
-    /// same not-found/disabled/unavailable checks as `authoritative_index`,
+    /// same not-found/disabled/unavailable checks as `catalog`,
     /// without paying the cost of parsing every note. For adapters (contained
     /// asset/attachment/download serving) that only need the directory.
     ///
@@ -1254,7 +1257,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultNoteFrontmatter>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
@@ -1289,7 +1292,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<Vec<crate::vault::AttachmentInfo>>, VaultReadError> {
-        let (control, index) = self.control_and_index(vault_id)?;
+        let (control, index) = self.control_and_catalog(vault_id)?;
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
@@ -1361,7 +1364,7 @@ impl<'a> VaultReadCore<'a> {
         if self.surface == BrowseSurface::Everything {
             return Ok(true);
         }
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         Ok(AssetSurface::capture(self.surface, index).admits(relative_path))
     }
 
@@ -1381,7 +1384,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<NoteDownload>, VaultReadError> {
-        let (control, index) = self.control_and_index(vault_id)?;
+        let (control, index) = self.control_and_catalog(vault_id)?;
         let note = index
             .read_note_by_slug(slug)
             .map_err(|error| {
@@ -1398,7 +1401,7 @@ impl<'a> VaultReadCore<'a> {
     /// The gated Vault control block: not-found, disabled, and no-runtime all
     /// resolve here, and callers that go on to build an index or read the
     /// filesystem must also apply an accepting-operations/existence check of
-    /// their own kind, since only `control_and_index` bundles the exact-read
+    /// their own kind, since only `control_and_catalog` bundles the exact-read
     /// gate and `vault_directory` bundles the directory-existence gate.
     ///
     /// Widened to `pub(crate)` for `handlers/vault_write.rs` (#101), the first
@@ -1436,11 +1439,16 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
-    /// The gated control block together with its freshly built authoritative
-    /// index, shared by every exact-read method that needs a parsed index
-    /// (`authoritative_index` discards the control block;
-    /// `exact_note_for_download` keeps it for `vault_path()`).
-    fn control_and_index(
+    /// The gated control block together with a freshly built catalog of its
+    /// Vault, shared by every exact-read method that needs one (`catalog`
+    /// discards the control block; `exact_note_for_download` keeps it for
+    /// `vault_path()`).
+    ///
+    /// A catalog walks the Vault's paths and reads no note's content, so a
+    /// read of one Note costs a directory walk and that Note's own file, never
+    /// a pass over every other Note (#361). Only `exact_note_links` needs the
+    /// link graph, and it asks the runtime for that by itself.
+    fn control_and_catalog(
         &self,
         vault_id: VaultId,
     ) -> Result<
@@ -1452,16 +1460,13 @@ impl<'a> VaultReadCore<'a> {
     > {
         let control = self.control_block(vault_id)?;
         let index = control
-            .authoritative_index()
+            .authoritative_catalog()
             .map_err(|error| runtime_error(vault_id, error))?;
         Ok((control, index))
     }
 
-    fn authoritative_index(
-        &self,
-        vault_id: VaultId,
-    ) -> Result<crate::vault::VaultIndex, VaultReadError> {
-        self.control_and_index(vault_id).map(|(_, index)| index)
+    fn catalog(&self, vault_id: VaultId) -> Result<crate::vault::VaultIndex, VaultReadError> {
+        self.control_and_catalog(vault_id).map(|(_, index)| index)
     }
 
     /// The shared one-or-all read: select the Vaults, project each one that has
@@ -3609,6 +3614,103 @@ mod tests {
             .exact_note_for_download(first, "does-not-exist")
             .expect("lookup succeeds");
         assert!(missing.is_none());
+    }
+
+    /// Reading one Note must not read every other one (#361). The counter is
+    /// on the full build itself, so a read that went back to scanning the
+    /// Vault's content fails here however it got there.
+    #[test]
+    fn single_note_reads_never_read_the_content_of_other_notes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Home.md",
+                    "---\ntags: [alpha]\n---\n# Home\n\n[[Other]] ![[pic.png]]",
+                ),
+                ("Other.md", "# Other"),
+                ("pic.png", "png"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        let other = workspace.vault_paths[0].join("Other.md");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o000))
+            .expect("make the unrelated note unreadable");
+
+        let note = reads.exact_note(first, "home").expect("note read");
+        let frontmatter = reads
+            .exact_note_frontmatter(first, "home")
+            .expect("frontmatter read");
+        let resolved = reads.resolve_wikilink(first, "Other").expect("resolve");
+        let (notes, assets, _) = reads
+            .resolve_batch(
+                first,
+                &["Other".to_string()],
+                &["pic.png".to_string()],
+                &[],
+                "",
+            )
+            .expect("resolve batch");
+        let attachments = reads.note_attachments(first, "home").expect("attachments");
+        let download = reads
+            .exact_note_for_download(first, "home")
+            .expect("download");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the unrelated note");
+
+        assert!(note.expect("home").note.content.contains("[[Other]]"));
+        assert_eq!(frontmatter.expect("home").metadata.tags, ["alpha"]);
+        assert_eq!(resolved.expect("other").slug, "other");
+        assert_eq!(notes[0].as_ref().expect("other").slug, "other");
+        assert_eq!(assets[0].as_deref(), Some("pic.png"));
+        assert!(attachments.is_some());
+        assert!(download.is_some());
+        let control = reads.control_block(first).expect("control block");
+        assert_eq!(
+            control.full_index_builds(),
+            0,
+            "no single-note read may build the link graph"
+        );
+
+        reads
+            .exact_note_links(first, "home")
+            .expect("links")
+            .expect("home links");
+        assert_eq!(
+            control.full_index_builds(),
+            1,
+            "a links read needs the graph"
+        );
+    }
+
+    /// No note content is cached: what an outside process wrote a moment ago
+    /// is what the next read returns, hash included.
+    #[test]
+    fn a_note_read_returns_what_an_outside_process_just_wrote() {
+        let workspace = workspace(&[("First", &[("Home.md", "# Home\n\nbefore")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        let before = reads
+            .exact_note(first, "home")
+            .expect("first read")
+            .expect("home");
+
+        std::fs::write(workspace.vault_paths[0].join("Home.md"), "# Home\n\nafter")
+            .expect("outside write");
+        let after = reads
+            .exact_note(first, "home")
+            .expect("second read")
+            .expect("home");
+
+        assert!(after.note.content.ends_with("after"));
+        assert_eq!(
+            after.note.content_hash,
+            crate::cache::parse::content_hash("# Home\n\nafter")
+        );
+        assert_ne!(after.note.content_hash, before.note.content_hash);
     }
 
     #[test]

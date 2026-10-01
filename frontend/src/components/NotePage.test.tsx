@@ -1187,3 +1187,92 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     expect(disk.home.content).toBe("Home body.\n");
   });
 });
+
+describe("NotePage body before links (#361)", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  function mockHeldLinks(links: Promise<Response>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/notes/home/links")) {
+          return links;
+        }
+        if (url.endsWith("/notes/home")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "The body arrives first.",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: "vault-1", results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+  }
+
+  it("renders the note body while its links read is still open, then fills in the links", async () => {
+    const links = deferred<Response>();
+    mockHeldLinks(links.promise);
+
+    renderNote("vault-1");
+
+    expect(
+      await screen.findByText("The body arrives first."),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Note links")).not.toBeInTheDocument();
+
+    links.resolve(
+      jsonResponse({
+        vault_id: "vault-1",
+        outgoing: [],
+        backlinks: [
+          {
+            vault_id: "vault-1",
+            link: {
+              title: "Elsewhere",
+              slug: "elsewhere",
+              relative_path: "Elsewhere",
+              layer: null,
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(await screen.findByLabelText("Note links")).toBeInTheDocument();
+    expect(screen.getByText("Elsewhere")).toBeInTheDocument();
+  });
+
+  it("keeps the body on screen when the links read fails", async () => {
+    const links = deferred<Response>();
+    mockHeldLinks(links.promise);
+
+    renderNote("vault-1");
+    expect(
+      await screen.findByText("The body arrives first."),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      links.resolve(jsonResponse({ error: "boom" }, 500));
+      await links.promise;
+    });
+
+    expect(screen.getByText("The body arrives first.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Note links")).not.toBeInTheDocument();
+  });
+});

@@ -124,6 +124,20 @@ that production inventory are still checked for stale paths and duplicates.
   them. It also owns the Vault's `git::NoteHistory` (#300), which does not
   move on rotation: a definition edit may point the Vault at another
   repository, so the replacement starts with an empty history cache.
+  It also keeps the Vault's built link graph between links reads (#361),
+  through `VaultControlBlock::linked_index`. The graph does not move on
+  rotation either, so no graph outlives the definition (path, exclude
+  patterns) it was scanned under, and a disabled or disconnected Vault's
+  revoked block refuses before it reaches the graph. The block subscribes to
+  the collection's change channel and drops the graph on any report for its
+  Vault, a lagged receiver included. That channel carries both the watcher's
+  debounced report of an outside edit and the mutation core's
+  `report_write`, sent before a write's response, so a Hatchdoor write shows
+  on the next links read and an outside edit once the watcher reports it (up
+  to `WATCH_MAX_DEBOUNCE`). A Vault whose watcher is not running, or a
+  collection that does not watch, never keeps a graph and builds one per
+  links read; replacing a watcher moves an epoch that retires any graph kept
+  under the old one.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
@@ -1370,7 +1384,7 @@ ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
 a caller passes as the `scope` path segment, rather than serde's derived
 externally-tagged shape. `resolve_wikilinks` resolves every target in a batch
 against one
-authoritative-index build, rather than one build per target. `resolve_batch`
+catalog build, rather than one build per target. `resolve_batch`
 generalizes it to note *and* asset targets over that same one build (#158),
 taking the embedding note's Vault-relative directory because an asset target
 resolves relative to the note that names it; assets are returned as
@@ -1524,12 +1538,23 @@ and one index build. That is required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control
 block rather than mutating the current one in place, so two independent
 `exact_note`/`vault_directory` calls could otherwise observe different Vault
-generations. The private `control_and_index` seam shares the
-control-block-then-index-build sequence between `authoritative_index` and
+generations. The private `control_and_catalog` seam shares the
+control-block-then-catalog-build sequence between `catalog` and
 `exact_note_for_download` so the two cannot diverge on identical failure
 conditions.
+Every exact read except `exact_note_links` builds only the Vault's catalog
+(`VaultControlBlock::authoritative_catalog`), which walks paths and reads no
+note's content (#361): a note read, a frontmatter read, wikilink resolution
+(single and batch), attachment listing, download and the demo asset check
+cost one directory walk plus the requested Note's own file. The Note's
+content and `content_hash` are read from disk on every call and never
+cached. `exact_note_links` alone needs the link graph and takes it from
+`VaultControlBlock::linked_index`, which reuses the graph until the Vault
+reports a change (see Runtime composition). The browse surface is applied
+after the graph is fetched, so one kept graph serves both surfaces.
 
-**Consumed dependencies:** the Vault runtime's authoritative per-Vault index,
+**Consumed dependencies:** the Vault runtime's authoritative per-Vault catalog
+and kept link graph,
 the shared cache's published Vault snapshot seam, existing Vault note/link
 types, and Runtime Search's two tag primitives (`normalize_tag_path`,
 `tag_matches`) for a query's tag condition. That last one is a dependency on
@@ -1547,12 +1572,23 @@ no read domain logic of their own. The core has no adapter or route ownership.
 
 **Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
 Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
-`src/vault_runtime.rs` for the authoritative exact-read index boundary.
+`src/vault_runtime.rs` for the authoritative exact-read catalog and the kept
+link graph.
 
 **Invariants:**
 
 - Exact reads inspect the requested Vault's Markdown directory; SQLite remains
   a disposable projection (ADR-01).
+- Note content and its hash are never older than disk. Links and backlinks
+  are the one exception the maintainer accepted (#361): after an edit made
+  outside Hatchdoor they may lag disk until the watcher reports the change,
+  at most `WATCH_MAX_DEBOUNCE` after the burst began. A Hatchdoor write never
+  lags, and a Vault with no running watcher never serves a kept graph. The
+  bound is only as good as the watcher: an edit inotify never sees (another
+  host writing to a network mount, a subdirectory past `max_user_watches`, a
+  Vault root replaced underneath it) leaves the graph stale until the next
+  Hatchdoor write or watcher replacement, the same limit search indexing
+  already has.
 - Every selected or returned note identity includes an immutable Vault ID; no
   default or sole-Vault inference exists.
 - One-Vault snapshots are explicit about stale availability, unavailable
@@ -4078,7 +4114,10 @@ are rebuilt rather than passed through, so their positions do not survive and a
 line's **index** is the only thing mapping it back to the file, which is why no
 interior line is dropped while splitting and why a list item whose rendered line
 count disagrees with the span it claims is addressed whole rather than written to
-a guessed line.
+a guessed line. The note body never waits for the links read (#361): the note
+page fetches the note and its links at once, drops the skeleton when the note
+lands, and fills the links panel when its read settles, so a failed links read
+hides only the panel.
 
 **Validation:** note-page unit tests, `NotePage.test.tsx` (write/read
 escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
