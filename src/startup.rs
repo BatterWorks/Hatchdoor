@@ -84,7 +84,12 @@ impl StartupTracker {
         self.0.set_downloading(model, downloaded_bytes, total_bytes);
     }
 
-    pub fn set_indexing(&self, progress: IndexingProgressSnapshot) {
+    /// Move the tracker to `Indexing` even when it has settled `Ready`, for
+    /// fixtures that need an instance still indexing. Test-only so production
+    /// code can report progress only through [`Self::report_indexing_progress`]
+    /// and its latch.
+    #[cfg(test)]
+    pub(crate) fn set_indexing(&self, progress: IndexingProgressSnapshot) {
         self.0.set_indexing(progress);
     }
 
@@ -128,12 +133,14 @@ impl StartupTracker {
     /// and the Vault collection.
     ///
     /// Deliberately not the negation of [`Self::collection_indexes_ready`].
-    /// This tracker's phase does double duty: it carries the first-run setup
-    /// lifecycle, and it is also the channel `VaultWorkExecutor` reports live
-    /// indexing progress on, for whichever Vault currently has an Index turn.
-    /// So a routine post-write reindex leaves `Ready` for `Indexing` on an
-    /// instance whose setup finished long ago, and reading that as a setup
-    /// answer is what #191 was.
+    /// This tracker's phase carries the first-run setup lifecycle and the
+    /// first-run indexing progress `VaultWorkExecutor` reports. Once the
+    /// collection settles `Ready`, [`Self::report_indexing_progress`] drops
+    /// further progress, so a routine reindex no longer moves the phase; it is
+    /// reported per Vault through `VaultSearchStatus`, and only model setup
+    /// leaves `Ready` again. Before that, a Vault still in its first index, or
+    /// an `Unavailable` that is not a setup failure, is neither ready nor a
+    /// setup problem. Reading "not ready" as a setup answer is what #191 was.
     ///
     /// Only a pending terms choice, a download in flight, and a failed setup
     /// are conditions the setup tools can act on. Validating, scanning and

@@ -286,7 +286,10 @@ impl VaultRuntime {
         snapshot.error = None;
     }
 
-    pub fn set_indexing(&self, progress: IndexingProgressSnapshot) {
+    /// Unconditional; production reports progress through
+    /// [`Self::set_indexing_unless_ready`].
+    #[cfg(test)]
+    pub(crate) fn set_indexing(&self, progress: IndexingProgressSnapshot) {
         let mut snapshot = self
             .snapshot
             .write()
@@ -300,9 +303,10 @@ impl VaultRuntime {
         snapshot.error = None;
     }
 
-    /// [`Self::set_indexing`], unless the phase is already `Ready`. Decided
-    /// under the one write lock, so a concurrent `set_ready` cannot be undone
-    /// by a progress report that read the phase just before it.
+    /// Move the phase to `Indexing` with `progress`, unless it is already
+    /// `Ready`. Decided under the one write lock, so a concurrent `set_ready`
+    /// cannot be undone by a progress report that read the phase just before
+    /// it.
     pub fn set_indexing_unless_ready(&self, progress: IndexingProgressSnapshot) {
         let mut snapshot = self
             .snapshot
