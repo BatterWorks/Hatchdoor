@@ -157,6 +157,19 @@ export type ExpandedFoldersUpdate = (
   previous: Record<string, boolean>,
 ) => Record<string, boolean>;
 
+const NO_FOLDERS: ReadonlySet<string> = new Set();
+
+type ClosedByReader = { currentPath: string; paths: ReadonlySet<string> };
+
+/** The folders the reader closed while `currentPath` was the open note. A
+ * record kept for another note no longer counts. */
+function closedFor(
+  closed: ClosedByReader,
+  currentPath: string,
+): ReadonlySet<string> {
+  return closed.currentPath === currentPath ? closed.paths : NO_FOLDERS;
+}
+
 export function FolderTree({
   root,
   currentPath,
@@ -179,6 +192,41 @@ export function FolderTree({
     () => collectAncestorFolderPaths(root, pathToNoteIdentity(currentPath)),
     [currentPath, root],
   );
+  // Folders above the open note that the reader closed while it was open.
+  // Showing a note's folders is temporary and never saved (#365), so this
+  // lives here rather than in the record, and belongs to one open note: when
+  // the note changes it is empty again, and a folder holding the new note
+  // opens to show it.
+  const [closedByReader, setClosedByReader] = useState<ClosedByReader>(() => ({
+    currentPath,
+    paths: NO_FOLDERS,
+  }));
+  // Forget them as soon as the note changes, not merely while it differs:
+  // returning to a note later is opening it again, and must show its folders.
+  if (closedByReader.currentPath !== currentPath) {
+    setClosedByReader({ currentPath, paths: NO_FOLDERS });
+  }
+  const closedForThisNote = closedFor(closedByReader, currentPath);
+  const foldersShownForNote = useMemo(
+    () =>
+      new Set(
+        [...activePathFolders].filter((path) => !closedForThisNote.has(path)),
+      ),
+    [activePathFolders, closedForThisNote],
+  );
+
+  const onToggleFolder = (path: string, open: boolean) => {
+    setClosedByReader((previous) => {
+      const paths = new Set(closedFor(previous, currentPath));
+      if (open) {
+        paths.delete(path);
+      } else if (activePathFolders.has(path)) {
+        paths.add(path);
+      }
+      return { currentPath, paths };
+    });
+    onExpandedFoldersChange((previous) => ({ ...previous, [path]: open }));
+  };
 
   return (
     <ul className="tree root-tree">
@@ -189,15 +237,10 @@ export function FolderTree({
           currentPath={currentPath}
           folderPath={folder.name}
           expandedFolders={expandedFolders}
-          activePathFolders={activePathFolders}
+          foldersShownForNote={foldersShownForNote}
           writeEnabled={writeEnabled}
           onCreateNoteInFolder={onCreateNoteInFolder}
-          onToggleFolder={(path, open) =>
-            onExpandedFoldersChange((previous) => ({
-              ...previous,
-              [path]: open,
-            }))
-          }
+          onToggleFolder={onToggleFolder}
         />
       ))}
       {root.notes.map((note, index) => (
@@ -217,7 +260,7 @@ function FolderNode({
   currentPath,
   folderPath,
   expandedFolders,
-  activePathFolders,
+  foldersShownForNote,
   writeEnabled,
   onCreateNoteInFolder,
   onToggleFolder,
@@ -226,13 +269,13 @@ function FolderNode({
   currentPath: string;
   folderPath: string;
   expandedFolders: Record<string, boolean>;
-  activePathFolders: Set<string>;
+  foldersShownForNote: ReadonlySet<string>;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
   onToggleFolder: (path: string, open: boolean) => void;
 }) {
   const shouldOpen =
-    activePathFolders.has(folderPath) || expandedFolders[folderPath] === true;
+    foldersShownForNote.has(folderPath) || expandedFolders[folderPath] === true;
   // What the element itself last reported. The browser opens a <details>
   // before any state hears about it, so the children follow this as well as
   // `shouldOpen`: a folder the reader sees open always has its contents
@@ -253,6 +296,14 @@ function FolderNode({
           }
           const open = event.currentTarget.open;
           setElementOpen(open);
+          // The browser fires `toggle` when `open` changes for any reason,
+          // and does not say why. When the element now matches what this
+          // render asked for, React set it: the folder mounted open, or the
+          // open note moved. Only the reader's own toggle disagrees with the
+          // prop, and only that is saved (#365).
+          if (open === shouldOpen) {
+            return;
+          }
           onToggleFolder(folderPath, open);
         }}
       >
@@ -290,7 +341,7 @@ function FolderNode({
                   currentPath={currentPath}
                   folderPath={`${folderPath}/${child.name}`}
                   expandedFolders={expandedFolders}
-                  activePathFolders={activePathFolders}
+                  foldersShownForNote={foldersShownForNote}
                   writeEnabled={writeEnabled}
                   onCreateNoteInFolder={onCreateNoteInFolder}
                   onToggleFolder={onToggleFolder}

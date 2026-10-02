@@ -3773,7 +3773,8 @@ next record, and the accordion applies its per-Vault namespacing inside it
 through `app/vaultAccordion.ts`'s `vaultFolderUpdate`:
 React dispatches `toggle` through every ancestor `<details>`, so several
 folders can write in one batch, and each write has to see the others. A
-`FolderNode` ignores a toggle whose target is not its own element. The tree read's own `partial` (`treePartial`)
+`FolderNode` ignores a toggle whose target is not its own element.
+Showing the open note's folders is temporary and never written to the record (#365). A `FolderNode` saves a toggle only when the element disagrees with its own `open` prop, which means the reader clicked it. `FolderTree` remembers the folders the reader closed above the open note for that note alone, so a note's folders close again when the reader moves on and reopen for a later note inside them. The tree read's own `partial` (`treePartial`)
 and the Vaults it left out (`treeMissingVaults`) reach `app/ExplorerPane.tsx`
 (#334): a trailing `.explorer-tree-partial` warn-ink line under the tree
 names them, an unfolded accordion Vault the read left out says it did not
@@ -3813,8 +3814,8 @@ tree/recent/event endpoints.
 **Validation:** folder/note-candidate/state comparison tests and affected App
 navigation tests; `components/Explorer.test.tsx` covers nested folder
 open/close, the active note's ancestors, and the open-but-empty invariant
-(#305); `app/ExplorerPane.test.tsx` covers the tree and list
-components in composition, including the single-active-highlight invariant.
+(#305), plus the note's folders shown without being saved and the reader's close above the open note lasting until the note changes (#365); `app/ExplorerPane.test.tsx` covers the tree and list
+components in composition, including the single-active-highlight invariant and the accordion's namespaced record staying empty for a shown note while a reader's close is saved under the Vault's key (#365).
 `hooks/useVaultTree.test.ts` covers the `/recent` read's partiality at three
 and eight Vaults, the tree read's partiality, a failed `/recent` read, a
 superseded `all` read answering after the narrowed one (#334), and the 25-row `/recent` read (#341); `app/ExplorerPane.test.tsx` covers the panel's fifteen rows, `and N more` line and head count (#341).

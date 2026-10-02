@@ -1209,6 +1209,84 @@ describe("ExplorerPane accordion (#142)", () => {
     expect(screen.getByText("Alpha rack")).toBeInTheDocument();
   });
 
+  it("shows the open note's folders without saving them, and saves the reader's close under the Vault's key (#365)", async () => {
+    const alpha = THREE_VAULTS[0];
+    const vaultTrees = THREE_VAULTS.map((vault) => {
+      const entry = vaultTreeFor(vault);
+      entry.tree.folders[0].folders = [
+        {
+          name: "Hosts",
+          folders: [],
+          notes: [
+            {
+              vault_id: vault.vault_id,
+              title: `${vault.name} host`,
+              slug: `${vault.vault_id}-host`,
+            },
+          ],
+        },
+      ];
+      return entry;
+    });
+    let record: Record<string, boolean> = {};
+    function Wrapper({ path }: { path: string }) {
+      const [expandedFolders, setExpandedFolders] = useState<
+        Record<string, boolean>
+      >({});
+      record = expandedFolders;
+      return (
+        <ExplorerPane
+          {...defaultPaneProps()}
+          vaults={THREE_VAULTS}
+          vaultTrees={vaultTrees}
+          scope="all"
+          locationPathname={path}
+          expandedFolders={expandedFolders}
+          onExpandedFoldersChange={setExpandedFolders}
+        />
+      );
+    }
+    const at = (slug: string) => (
+      <MemoryRouter>
+        <Wrapper path={`/v/${alpha.vault_id}/n/${slug}`} />
+      </MemoryRouter>
+    );
+    const settle = () =>
+      act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    const details = (path: string) =>
+      screen.getByTitle(path).closest("details") as HTMLDetailsElement;
+
+    const { rerender } = render(at(`${alpha.vault_id}-host`));
+    // A browser fires `toggle` for each <details> that mounts open.
+    for (const element of document.querySelectorAll("details")) {
+      if (element.open) element.dispatchEvent(new Event("toggle"));
+    }
+    await settle();
+
+    expect(details("Journal").open).toBe(true);
+    expect(details("Journal/Hosts").open).toBe(true);
+    expect(record).toEqual({});
+
+    details("Journal/Hosts").open = false;
+    await settle();
+    rerender(at(`${alpha.vault_id}-host`));
+    await settle();
+
+    expect(details("Journal/Hosts").open).toBe(false);
+    expect(record).toEqual({
+      [`${alpha.vault_id}\u0001Journal/Hosts`]: false,
+    });
+
+    rerender(at(`${alpha.vault_id}-entry`));
+    await settle();
+
+    expect(details("Journal").open).toBe(true);
+    expect(details("Journal/Hosts").open).toBe(false);
+    expect(record).toEqual({
+      [`${alpha.vault_id}\u0001Journal/Hosts`]: false,
+    });
+  });
+
   it("narrowing to one Vault renders exactly today's explorer, with the count-or-condition slot on the Notes head", () => {
     renderPane({
       vaults: THREE_VAULTS,
