@@ -177,6 +177,14 @@ docs-freshness base="development":
 docs-freshness-ack base="development":
     node scripts/check-docs-freshness.mjs --base '{{base}}' --acknowledge
 
+# Opens pull requests and a draft release; never merges. Re-run it after the
+# version-bump pull request merges to open the release pull request. See
+# ADR-36.
+#
+# Prepare a release: bump the version, then open the release pull request.
+release-prepare version:
+    node scripts/release-prepare.mjs '{{version}}'
+
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.
 prod-check: _prepare-cargo
