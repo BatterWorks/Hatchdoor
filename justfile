@@ -163,13 +163,15 @@ _check-frontend:
     cd frontend && npm run build
 
 # Exits non-zero so the review cannot be skipped silently. Pass a different
-# base with `just docs-freshness main`.
+# base with `just docs-freshness main`. Also fails when shipped code changed
+# with no CHANGELOG.md edit and no `Changelog: none, <reason>` trailer.
 #
-# Before merging into development: which user-vault notes need a re-read?
+# Before merging into development: are the user-vault notes and changelog fresh?
 docs-freshness base="development":
     node scripts/check-docs-freshness.mjs --base '{{base}}'
 
-# Only run this after actually reading the notes it named.
+# Only run this after actually reading the notes it named. It does not waive
+# a missing changelog entry.
 #
 # Record that the documentation freshness review happened.
 docs-freshness-ack base="development":

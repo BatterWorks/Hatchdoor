@@ -103,6 +103,14 @@ just docs-freshness-ack
 A note the script marks "edited on this branch" only means the file moved. That
 is not evidence it is correct. Acknowledging without reading defeats the gate.
 
+The same script refuses a branch that changes code Hatchdoor ships without editing `CHANGELOG.md`, and acknowledging does not waive that. Add an entry under `## Unreleased` for anything a user, operator or agent can notice. When nothing noticeable changed, such as a test-only change or an internal refactor, put a trailer on one of the branch's commits instead:
+
+```text
+Changelog: none, <reason>
+```
+
+The list of shipped paths is `SHIPPED_PATHS` in the script; test files under them do not count.
+
 The script's surface-to-note table lives in
 [`scripts/check-docs-freshness.mjs`](scripts/check-docs-freshness.mjs). When you
 add a user-facing surface it does not know about, or rename a note it points at,
