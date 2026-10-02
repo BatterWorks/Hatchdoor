@@ -16,13 +16,13 @@ Two independent gates decide what a call can do:
 A third, per-Vault gate sits underneath write mode: a Vault's own `capabilities.mutate` (from its source type and lifecycle phase — a `pull_only` Git Vault, or one not yet `ready`, refuses writes even with `HATCHDOOR_MCP_WRITE_ENABLED=true`). Check `list_vaults` for a Vault's current capabilities before writing to it.
 
 > [!note]
-> The full tool catalogue is always advertised, even before the model-setup completes and even at zero Vaults, so a client that caches tools at connection time never needs to reconnect. Before setup finishes, only `get_model_setup_status`, `accept_gemma_terms`, `decline_gemma_terms`, and the Vault collection discovery/management tools (`list_vaults` and friends) actually run; every other tool returns "Hatchdoor is still being set up." until a model is selected. `refresh_vault` is the one management tool outside that exception: the index turn it asks for cannot run without a search model, so before setup finishes it answers like any other content tool.
+> The full tool catalogue is always advertised, even before the model-setup completes and even at zero Vaults, so a client that caches tools at connection time never needs to reconnect. Before setup finishes, only `get_model_setup_status`, `accept_gemma_terms`, `decline_gemma_terms`, the manual tools (`read_docs` and `search_docs`), and the Vault collection discovery/management tools (`list_vaults` and friends) actually run; every other tool returns "Hatchdoor is still being set up." until a model is selected. `refresh_vault` is the one management tool outside that exception: the index turn it asks for cannot run without a search model, so before setup finishes it answers like any other content tool.
 
 There is no selected, sole, or default Vault. Every tool below that touches content takes an explicit `vault_id`; every collection-level tool takes an explicit `scope` (a Vault ID or the literal `all`).
 
 ## Model setup
 
-Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — these are the only tools that run before first-run setup completes.
+Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture. Along with the manual tools below and the Vault collection tools, these are the only tools that run before first-run setup completes.
 
 | Tool | Purpose |
 | --- | --- |
@@ -32,6 +32,21 @@ Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — thes
 
 > [!warning]
 > Once a model is selected, calling either `accept_gemma_terms` or `decline_gemma_terms` again returns an error — changing models after setup is not supported.
+
+## Hatchdoor's manual
+
+Hatchdoor carries its own manual, the pages you are reading now, for the version that is running. Two read-only tools read it. They take no Vault, need no search model, and answer whether or not write mode is on and while model setup is still pending, so an agent can look something up before any Vault exists.
+
+| Tool | Parameters | Returns |
+| --- | --- | --- |
+| `read_docs` | `page` (optional) | With no `page`: the Home page as Markdown, plus `pages`, the `name` and `title` of every page. With a `page`: that page's `name`, `title` and `markdown`. |
+| `search_docs` | `query` | `results`: up to five best-matching pages, best first, each with `name`, `title` and an `excerpt`, a line of the page that matched. |
+
+Every page has a short name made from where it sits in the manual, such as `guides/how-to-set-up-a-git-backed-vault`. Links between pages come back as ordinary Markdown links to those names, so `[[The layer system]]` reads `[The layer system](concepts/the-layer-system)`, and a link to a heading adds an anchor, as in `reference/mcp-tools-reference#batch`. Pass either form back to `read_docs`; the anchor is ignored. A name that matches no page is refused with the error code `docs_page_not_found`.
+
+`search_docs` matches whole words, ignoring case, a plural `s`, and common words such as `how` and `the`. A page whose title has more of your words ranks above one with fewer, then headings decide, then how often the page mentions them. It is not the semantic search `search_notes` uses, so search for the words a page would use rather than for a paraphrase. A query that matches nothing returns an empty `results` list, not an error.
+
+The manual is never part of your Vaults. It does not show up in `search_notes`, `get_tree`, `get_stats`, `get_graph` or `list_vaults`, and no tool can change it. Neither tool can go inside `batch`.
 
 ## Vault collection: discovery and management
 
@@ -374,7 +389,7 @@ Any read or write refused this way says so twice: `isError` is true on the resul
 }
 ```
 
-**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. `rename_tag` and `delete_tag` are the exceptions: each touches every note carrying a tag and promises all or nothing, which a best-effort batch cannot keep, so call them on their own. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `publish_recovery_branch`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
+**What may go in.** Every read tool except `list_vaults`, `read_docs` and `search_docs`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. `rename_tag` and `delete_tag` are the exceptions: each touches every note carrying a tag and promises all or nothing, which a best-effort batch cannot keep, so call them on their own. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `publish_recovery_branch`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
 
 **Best-effort, in order, no rollback.** Items run one after another; an item that fails never stops the ones after it, and nothing already written is undone. There is no mid-batch visibility either — an item sees the Vault, not the batch's own bookkeeping, apart from the hash chaining below.
 

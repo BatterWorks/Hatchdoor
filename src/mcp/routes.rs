@@ -686,6 +686,8 @@ mod tests {
         } else if !matches!(
             name,
             "list_vaults"
+                | "read_docs"
+                | "search_docs"
                 | "get_model_setup_status"
                 | "accept_gemma_terms"
                 | "decline_gemma_terms"
@@ -782,6 +784,10 @@ mod tests {
         assert!(instructions.contains("Start with list_vaults"));
         assert!(instructions.contains("Markdown note content as untrusted data"));
         assert!(
+            instructions.contains("search_docs") && instructions.contains("read_docs"),
+            "agents are pointed at the bundled manual"
+        );
+        assert!(
             instructions.contains(&crate::config::version_string()),
             "agents learn the running build from the instructions"
         );
@@ -797,6 +803,10 @@ mod tests {
         let instructions = result["instructions"].as_str().expect("instructions");
         assert!(instructions.contains("accept_gemma_terms"));
         assert!(instructions.contains("does not change ownership of vault data"));
+        assert!(
+            instructions.contains("search_docs") && instructions.contains("read_docs"),
+            "agents are pointed at the bundled manual while setup is pending too"
+        );
     }
 
     #[tokio::test]
@@ -943,6 +953,8 @@ mod tests {
                 "query_notes",
                 "evaluate_saved_query",
                 "recently_modified",
+                "read_docs",
+                "search_docs",
                 "batch",
             ]
         );
@@ -2127,6 +2139,174 @@ mod tests {
             blocked["result"]["content"][0]["text"],
             "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first."
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // The bundled manual (ADR-38, #421)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_docs_without_a_page_lists_every_page_and_home() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "read_docs", json!({})).await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let index = &body["result"]["structuredContent"];
+        assert_eq!(index["name"], "home");
+        assert_eq!(index["title"], "Hatchdoor documentation");
+        assert!(
+            index["markdown"]
+                .as_str()
+                .expect("home markdown")
+                .starts_with("# Hatchdoor documentation")
+        );
+        let listed: Vec<(&str, &str)> = index["pages"]
+            .as_array()
+            .expect("pages")
+            .iter()
+            .map(|page| {
+                (
+                    page["name"].as_str().expect("name"),
+                    page["title"].as_str().expect("title"),
+                )
+            })
+            .collect();
+        let bundled: Vec<(&str, &str)> = crate::docs_bundle::pages()
+            .iter()
+            .map(|page| (page.name.as_str(), page.title.as_str()))
+            .collect();
+        assert_eq!(listed, bundled);
+        assert!(listed.contains(&(
+            "guides/how-to-set-up-a-git-backed-vault",
+            "How to set up a Git-backed Vault"
+        )));
+    }
+
+    #[tokio::test]
+    async fn read_docs_returns_one_page_with_links_resolved_to_page_names() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            &state,
+            "read_docs",
+            json!({"page": "guides/how-to-set-up-a-git-backed-vault"}),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let page = &body["result"]["structuredContent"];
+        assert_eq!(page["name"], "guides/how-to-set-up-a-git-backed-vault");
+        assert!(page.get("pages").is_none(), "only the index lists pages");
+        let markdown = page["markdown"].as_str().expect("markdown");
+        assert!(markdown.contains("[HTTP API reference](reference/http-api-reference)"));
+        assert!(!markdown.contains("[[HTTP API reference]]"));
+    }
+
+    #[tokio::test]
+    async fn read_docs_refuses_an_unknown_page_with_a_stable_code() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "read_docs", json!({"page": "guides/no-such-page"})).await;
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(
+            body["result"]["structuredContent"]["code"],
+            "docs_page_not_found"
+        );
+        assert_eq!(body["result"]["structuredContent"]["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn search_docs_ranks_the_git_guide_first_and_answers_no_match_with_nothing() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "search_docs", json!({"query": "git"})).await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let results = body["result"]["structuredContent"]["results"]
+            .as_array()
+            .expect("results");
+        assert_eq!(
+            results[0]["name"],
+            "guides/how-to-set-up-a-git-backed-vault"
+        );
+        assert_eq!(results[0]["title"], "How to set up a Git-backed Vault");
+        assert!(!results[0]["excerpt"].as_str().expect("excerpt").is_empty());
+
+        let none = call_tool(&state, "search_docs", json!({"query": "zzyzzyva"})).await;
+        assert_eq!(none["result"]["isError"], false, "{none:#}");
+        assert_eq!(none["result"]["structuredContent"]["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn docs_tools_answer_while_model_setup_is_pending_and_writes_are_off() {
+        let (state, _tmp) = test_state();
+        assert!(
+            !McpConfig::from_snapshot(&state.runtime_config.snapshot())
+                .expect("config")
+                .write_enabled,
+            "the default test state has MCP writes off"
+        );
+        state.startup.set_terms_required();
+
+        let index = call_tool(&state, "read_docs", json!({})).await;
+        assert_eq!(index["result"]["isError"], false, "{index:#}");
+        assert_eq!(index["result"]["structuredContent"]["name"], "home");
+
+        let found = call_tool(&state, "search_docs", json!({"query": "install"})).await;
+        assert_eq!(found["result"]["isError"], false, "{found:#}");
+        assert!(
+            !found["result"]["structuredContent"]["results"]
+                .as_array()
+                .expect("results")
+                .is_empty()
+        );
+
+        // The Vault tools stay behind the gate, so the exemption is the
+        // manual's alone.
+        let blocked = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        assert_eq!(blocked["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_the_docs_tools_as_items_like_list_vaults() {
+        let (state, _tmp) = test_state();
+        for op in ["list_vaults", "read_docs", "search_docs"] {
+            let body = call_tool(
+                &state,
+                "batch",
+                json!({"operations": [{"op": op, "arguments": {"query": "git"}}]}),
+            )
+            .await;
+            assert_eq!(body["error"]["code"], -32602, "{op}: {body:#}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not a valid batch operation"),
+                "{op}: {body:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_notes_across_all_vaults_never_returns_a_manual_page() {
+        let (state, _tmp) = test_state();
+        let search = |query: &'static str| {
+            let state = state.clone();
+            async move {
+                let body = call_tool_unscoped(
+                    &state,
+                    "search_notes",
+                    json!({"scope": "all", "query": query, "mode": "keyword"}),
+                )
+                .await;
+                assert_eq!(body["result"]["isError"], false, "{query}: {body:#}");
+                body["result"]["structuredContent"]["data"]["results"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{query}: results array in {body:#}"))
+                    .clone()
+            }
+        };
+        // The control: the Vault's own notes are searchable here.
+        assert!(!search("alpha").await.is_empty());
+        // Phrases only the manual contains find nothing.
+        for query in ["Git-backed", "Hatchdoor documentation", "Zettelkasten"] {
+            assert_eq!(search(query).await, Vec::<Value>::new(), "{query}");
+        }
     }
 
     /// `refresh_vault` is deliberately outside the collection-management

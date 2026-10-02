@@ -87,6 +87,16 @@ pub async fn handle_tools_call(
         )));
     }
 
+    // The bundled manual (ADR-38) takes no Vault and needs no model, so it
+    // answers ahead of the environment-cleanup and model-setup gates, under
+    // read and write permission alike. Like `list_vaults` it stays out of
+    // `READ_OPS`, so a `batch` item never names it.
+    match name {
+        "read_docs" => return read::read_docs_tool(arguments),
+        "search_docs" => return read::search_docs_tool(arguments),
+        _ => {}
+    }
+
     if !runs_during_environment_cleanup(name)
         && let Some(refusal) = environment_cleanup_refusal(&state)
     {

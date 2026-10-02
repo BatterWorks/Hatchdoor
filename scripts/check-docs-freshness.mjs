@@ -226,6 +226,14 @@ const SURFACES = [
     ],
   },
   {
+    id: "bundled-manual",
+    label: "The manual bundled into the binary and its MCP tools",
+    // ADR-38: the pages themselves ship, so their names, titles and links
+    // reach agents through read_docs and search_docs.
+    paths: ["src/docs_bundle.rs"],
+    notes: [`${REFERENCE}/MCP tools reference.md`],
+  },
+  {
     id: "deployment",
     label: "Deployment and packaging",
     paths: ["Dockerfile", "docker-compose.yml", ".env.example"],
@@ -252,6 +260,7 @@ const SHIPPED_PATHS = [
   "docker-compose.yml",
   ".env.example",
   "docs/starter-vault/",
+  "docs/user-vault/",
 ];
 
 // Test code sits inside the shipped trees but never ships.

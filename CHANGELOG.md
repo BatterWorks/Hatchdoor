@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Hatchdoor now carries its own manual, and agents can read it. Every page of the manual is built into the binary, so an install always has the version that matches what it runs, and two new read-only MCP tools reach it. `read_docs` with no argument returns the Home page and the name and title of every page; given a page name, such as `guides/how-to-set-up-a-git-backed-vault`, it returns that page as Markdown, with links between pages pointing at page names. `search_docs` finds pages by plain word matching, title matches first, and returns each page's name, title and a matching line. Neither needs a Vault or the search model, so they answer while model setup is still pending, which is when an agent helping someone install Hatchdoor needs them most. They work with MCP writes on or off, cannot go inside `batch`, and the manual never appears in note search, the tree, stats, the graph or the Vault list. A name that matches no page is refused with `docs_page_not_found`. [#421]
+
+[#421]: https://github.com/BatterWorks/Hatchdoor/issues/421
+
 ## v2.7.0 - 2026-10-02
 
 ### Added

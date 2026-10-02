@@ -447,6 +447,29 @@ test("test-only changes need no changelog entry", async () => {
   assert.doesNotMatch(result.stderr, /CHANGELOG/);
 });
 
+test("a bundled manual change names the MCP tools reference", async () => {
+  const root = await fixture();
+  await write(root, "src/docs_bundle.rs", "// a new page name rule\n");
+  await commit(root, "manual bundle");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /MCP tools reference\.md/);
+});
+
+// The manual ships inside the binary (ADR-38), so editing a page changes
+// what an install serves.
+test("a manual page edit needs a changelog entry", async () => {
+  const root = await fixture();
+  await write(root, UI_NOTE, "# Browse and review through the Web UI\nNew.\n");
+  await commit(root, "manual");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /CHANGELOG ENTRY MISSING/);
+  assert.match(result.stderr, /Browse and review through the Web UI\.md/);
+});
+
 test("a dependency change needs a changelog entry", async () => {
   const root = await fixture();
   await write(root, "Cargo.toml", "[package]\n");

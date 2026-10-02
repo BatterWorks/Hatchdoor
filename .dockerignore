@@ -16,4 +16,6 @@ docs
 docs/*
 !docs/starter-vault/
 !docs/starter-vault/**
+!docs/user-vault/
+!docs/user-vault/**
 AGENTS.md

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cache;
 pub mod chunk;
 pub mod config;
+pub mod docs_bundle;
 pub mod embed;
 pub mod eval;
 pub mod git;

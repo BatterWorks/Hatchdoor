@@ -21,6 +21,7 @@ FROM chef AS planner
 COPY --chown=builder:builder Cargo.toml Cargo.lock ./
 COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/starter-vault ./docs/starter-vault
+COPY --chown=builder:builder docs/user-vault ./docs/user-vault
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS dependencies
@@ -37,6 +38,7 @@ FROM dependencies AS rust-builder
 COPY --chown=builder:builder Cargo.toml Cargo.lock ./
 COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/starter-vault ./docs/starter-vault
+COPY --chown=builder:builder docs/user-vault ./docs/user-vault
 ARG GIT_SHA=""
 # Cache mounts are not image layers: export the binary before unmounting target.
 RUN --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
@@ -50,6 +52,7 @@ FROM chef AS verification
 COPY --chown=builder:builder Cargo.toml Cargo.lock ./
 COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/starter-vault ./docs/starter-vault
+COPY --chown=builder:builder docs/user-vault ./docs/user-vault
 ARG GIT_SHA=""
 RUN --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-git-${TARGETPLATFORM},target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
