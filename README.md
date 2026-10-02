@@ -496,15 +496,7 @@ npm test
 npm run build
 ```
 
-Build and publish the Docker image (requires BuildKit; see
-[container build targets and Cargo caching](docs/development/container-builds.md)):
-
-```bash
-docker build -t battermanz/hatchdoor:latest .
-docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.6.1
-docker push battermanz/hatchdoor:2.6.1
-docker push battermanz/hatchdoor:latest
-```
+Releases, including the published Docker images, are cut by the maintainer with `just release-prepare` and `just release-publish`; see the [release runbook](docs/maintenance/release-runbook.md). To build an image locally, see [container build targets and Cargo caching](docs/development/container-builds.md).
 
 ## Project Docs
 

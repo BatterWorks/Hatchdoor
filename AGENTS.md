@@ -206,3 +206,16 @@ After editing that table, or after renaming or moving a note under
 ```bash
 node scripts/check-docs-freshness.mjs --validate-table
 ```
+
+## Releases
+
+A release is cut with `just release-prepare <version>` and `just release-publish <version>`, following [`docs/maintenance/release-runbook.md`](docs/maintenance/release-runbook.md) (ADR-36).
+
+Only the maintainer approves a release. After working through the release pull request's checklist, draft the GitHub Release title and notes on the draft release, give the maintainer that exact title and notes, and stop. Run `just release-publish` only after the maintainer replies "approved" to that draft in the current session. That approval also covers the deploy that `release-publish` runs.
+
+Ask again, and do not publish, when either holds:
+
+- This session cannot see the maintainer's "approved" in its own conversation, as when it was resumed or is a new session. A summary or note saying approval was given does not count.
+- The title or notes changed after the maintainer replied.
+
+No script checks this. `release-publish` publishes whatever the draft says when it runs.
