@@ -38,6 +38,7 @@
 - Opening a note was slow on a large Vault. Every note read reread every note in the Vault to rebuild the link graph, and the page waited for the note and then its links one after the other; on 4,000 notes that was about six seconds, twice. A note read now only looks up paths, and the link graph is kept until the Vault changes. The page loads the note and its links at the same time and shows the text as soon as it arrives, with the Links panel filling in after. [#361]
 - Indexing log lines now say which Vault they belong to. The start, progress, link pass, completion and per-note warnings of an index run carried no Vault, so on an instance with several Vaults they could not be told apart. Each now carries the Vault ID, also at `RUST_LOG=warn`. Only the ID is logged, never the Vault's name, path or remote. [#155]
 - On a public demo, downloading a note bundled images the demo refuses to serve, such as ones under a demoted layer or an excluded folder. The download now leaves those out and keeps their links as written, the same as for a missing file. Ordinary instances are unchanged. [#342]
+- On a public demo, every image on a note page made the server walk the whole Vault before sending it, so a note with ten images walked it ten times. The demo now checks images against the list its last indexing pass made, and walks the Vault only before that first pass. One visible difference: an image added to a demo Vault is served once the indexing pass that follows it finishes, usually within seconds, instead of straight away. Ordinary instances are unchanged. [#377]
 - The **Changed on disk** panel never showed more than five notes, so its "and N more" line and count could never say more existed. It now shows fifteen, newest first across all Vaults, and the count is right up to 25. **Recently viewed** keeps its five. [#341]
 - The server-wide Git commit name and email were missing from Settings on most installs. The rows only appeared when a retired setting that defaults to off was turned on, so a fresh install could neither see nor change the identity every Vault without its own falls back to. They now always show, and their help says a Vault's own commit identity overrides them. [#340]
 - Opening an address the app does not know, directly or after a reload, gave an empty `404` page instead of the app's own not-found screen. The server now answers with the app and a `404` status. Paths under `/api/`, `/vault-assets/` and `/health` still get a bare `404`. [#302]
@@ -121,6 +122,7 @@
 [#365]: https://github.com/BatterWorks/Hatchdoor/issues/365
 [#372]: https://github.com/BatterWorks/Hatchdoor/issues/372
 [#373]: https://github.com/BatterWorks/Hatchdoor/issues/373
+[#377]: https://github.com/BatterWorks/Hatchdoor/issues/377
 
 ## v2.6.1 - 2026-09-08
 

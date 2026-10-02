@@ -620,8 +620,33 @@ pub struct VaultControlBlock {
     /// under one watcher is never trusted under the next: the directory it
     /// watches may have been lost and cloned again in between.
     watcher_epoch: Arc<AtomicU64>,
+    /// The asset catalog and layer map from this Vault's latest Index turn
+    /// scan, so a demo's asset check reads it instead of walking the Vault on
+    /// every request (#377). A fresh block starts empty, so no catalog
+    /// outlives the path and exclusions it was scanned under.
+    indexed_assets: Arc<RwLock<Option<Arc<IndexedAssets>>>>,
     #[cfg(test)]
     full_index_builds: Arc<AtomicU64>,
+    #[cfg(test)]
+    catalog_builds: Arc<AtomicU64>,
+}
+
+/// Which contained assets one scan of a Vault catalogued, and the layer each
+/// path falls under: everything a browse-surface asset check needs from an
+/// index, and nothing else.
+#[derive(Debug)]
+pub(crate) struct IndexedAssets {
+    pub(crate) asset_paths: BTreeSet<String>,
+    pub(crate) layers: crate::vault::LayerMap,
+}
+
+impl IndexedAssets {
+    pub(crate) fn of(index: &crate::vault::VaultIndex) -> Self {
+        Self {
+            asset_paths: index.asset_paths.clone(),
+            layers: index.layers.clone(),
+        }
+    }
 }
 
 /// One Vault's built link graph and what can still vouch for it.
@@ -802,8 +827,11 @@ impl VaultControlBlock {
                 watching.map(|watching| watching.changes.subscribe()),
             ))),
             watcher_epoch: Arc::new(AtomicU64::new(0)),
+            indexed_assets: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             full_index_builds: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            catalog_builds: Arc::new(AtomicU64::new(0)),
         };
         if active {
             block.start_note_history();
@@ -986,6 +1014,31 @@ impl VaultControlBlock {
         self.full_index_builds.load(Ordering::SeqCst)
     }
 
+    /// How many times this block has walked its Vault to build a catalog.
+    #[cfg(test)]
+    pub(crate) fn catalog_builds(&self) -> u64 {
+        self.catalog_builds.load(Ordering::SeqCst)
+    }
+
+    /// Keep the asset catalog and layer map an Index turn just scanned,
+    /// replacing the previous turn's (#377).
+    pub(crate) fn retain_indexed_assets(&self, index: &crate::vault::VaultIndex) {
+        let assets = Arc::new(IndexedAssets::of(index));
+        *self
+            .indexed_assets
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(assets);
+    }
+
+    /// The asset catalog from this Vault's latest Index turn, or `None`
+    /// before one has scanned it.
+    pub(crate) fn indexed_assets(&self) -> Option<Arc<IndexedAssets>> {
+        self.indexed_assets
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Build this Vault's metadata-only catalog (slug/title/layer
     /// bookkeeping, no wikilink graph) from its own Markdown directory. It
     /// answers every exact read except links (#361) and every write response
@@ -1001,6 +1054,8 @@ impl VaultControlBlock {
                 retryable: false,
                 detail: None,
             })?;
+        #[cfg(test)]
+        self.catalog_builds.fetch_add(1, Ordering::SeqCst);
         crate::vault::VaultIndex::build_catalog_with_config(
             self.vault_path(),
             &crate::vault::VaultScanConfig { exclude },

@@ -16,7 +16,7 @@ use crate::search::LayerSelection;
 use crate::vault::{Note, NoteLink, NoteLinks};
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::VaultId;
-use crate::vault_runtime::{VaultCapabilities, VaultCollectionRuntime};
+use crate::vault_runtime::{IndexedAssets, VaultCapabilities, VaultCollectionRuntime};
 
 mod assets;
 mod query;
@@ -609,21 +609,19 @@ impl BrowseSurface {
 
 /// Which contained assets a [`BrowseSurface`] admits, captured from one
 /// catalog of its Vault. A caller checking many paths against one Vault holds
-/// this rather than calling [`VaultReadCore::asset_on_surface`] per path,
-/// which rebuilds the catalog each time.
+/// this rather than calling [`VaultReadCore::asset_on_surface`] per path.
 pub struct AssetSurface {
     surface: BrowseSurface,
-    asset_paths: BTreeSet<String>,
-    layers: crate::vault::LayerMap,
+    assets: Arc<IndexedAssets>,
 }
 
 impl AssetSurface {
-    fn capture(surface: BrowseSurface, index: crate::vault::VaultIndex) -> Self {
-        Self {
-            surface,
-            asset_paths: index.asset_paths,
-            layers: index.layers,
-        }
+    fn capture(surface: BrowseSurface, index: &crate::vault::VaultIndex) -> Self {
+        Self::over(surface, Arc::new(IndexedAssets::of(index)))
+    }
+
+    fn over(surface: BrowseSurface, assets: Arc<IndexedAssets>) -> Self {
+        Self { surface, assets }
     }
 
     /// Whether a contained, Vault-relative asset path is on this surface.
@@ -632,8 +630,10 @@ impl AssetSurface {
     /// layer, the same decision the asset route makes.
     pub fn admits(&self, relative_path: &str) -> bool {
         self.surface == BrowseSurface::Everything
-            || (self.asset_paths.contains(relative_path)
-                && !self.surface.hides(self.layers.layer_for(relative_path)))
+            || (self.assets.asset_paths.contains(relative_path)
+                && !self
+                    .surface
+                    .hides(self.assets.layers.layer_for(relative_path)))
     }
 }
 
@@ -1351,11 +1351,17 @@ impl<'a> VaultReadCore<'a> {
 
     /// Whether a contained asset path belongs to this core's selected browse
     /// surface. An ordinary instance retains the legacy contained-asset
-    /// behavior. A demo accepts only an asset present in the authoritative
-    /// index's asset catalog, which has already applied the complete
-    /// exclusion/noise policy, and then applies the layer map to that path.
-    /// Assets do not carry a layer of their own, so this is the same
-    /// path-to-surface decision the index uses for Notes.
+    /// behavior. A demo accepts only an asset present in the Vault's asset
+    /// catalog, which has already applied the complete exclusion/noise
+    /// policy, and then applies the layer map to that path. Assets do not
+    /// carry a layer of their own, so this is the same path-to-surface
+    /// decision the index uses for Notes.
+    ///
+    /// The catalog is the one the Vault's latest Index turn scanned, so a
+    /// page of embeds does not walk the Vault once per image (#377); a file
+    /// added, removed or moved under a layer marker changes the answer when
+    /// the turn that follows it lands. Before the Vault's first turn has
+    /// scanned it, a one-off catalog build answers instead.
     pub fn asset_on_surface(
         &self,
         vault_id: VaultId,
@@ -1364,8 +1370,17 @@ impl<'a> VaultReadCore<'a> {
         if self.surface == BrowseSurface::Everything {
             return Ok(true);
         }
-        let index = self.catalog(vault_id)?;
-        Ok(AssetSurface::capture(self.surface, index).admits(relative_path))
+        let control = self.control_block(vault_id)?;
+        let surface = match control.indexed_assets() {
+            Some(assets) => {
+                control
+                    .ensure_accepting_operations()
+                    .map_err(|error| runtime_error(vault_id, error))?;
+                AssetSurface::over(self.surface, assets)
+            }
+            None => AssetSurface::capture(self.surface, &self.catalog(vault_id)?),
+        };
+        Ok(surface.admits(relative_path))
     }
 
     /// The exact Note together with the local Markdown directory it was read
@@ -1394,7 +1409,7 @@ impl<'a> VaultReadCore<'a> {
         Ok(note.map(|note| NoteDownload {
             note: VaultQualifiedNote::new(vault_id, note),
             vault_root: control.vault_path().to_path_buf(),
-            assets: AssetSurface::capture(self.surface, index),
+            assets: AssetSurface::capture(self.surface, &index),
         }))
     }
 
