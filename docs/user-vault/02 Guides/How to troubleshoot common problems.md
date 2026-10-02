@@ -90,9 +90,9 @@ Do not chase permissions for this one. The `chown` above cannot fix it, and `loc
 
 The cause is the filesystem. Hatchdoor commits a save by swapping the new copy of the note with the old one in a single step, and not every filesystem can do that. ZFS gained the ability in OpenZFS 2.2, and Ubuntu 22.04's standard kernel ships 2.1.5; anything mounted through FUSE cannot do it either. Confirm with `zfs version` on the host and look for `zfs-kmod-2.1.x`.
 
-**Hatchdoor 2.6.2 and later fixes this.** It falls back to checking the note and then replacing it, so every write works again. Upgrade, and nothing else is needed. Nothing was damaged while it was failing: those writes were refused, not half applied.
+**Hatchdoor 2.7.0 and later fixes this.** It falls back to checking the note and then replacing it, so every write works again. Upgrade, and nothing else is needed. Nothing was damaged while it was failing: those writes were refused, not half applied.
 
-On a version before 2.6.2, the only other way out is to move the Vault onto a filesystem that can do the swap, such as ext4 or XFS.
+On a version before 2.7.0, the only other way out is to move the Vault onto a filesystem that can do the swap, such as ext4 or XFS.
 
 After upgrading, a Vault on such a filesystem writes with slightly weaker protection, and Hatchdoor says so rather than leaving you to guess:
 
@@ -106,7 +106,7 @@ After upgrading, a Vault on such a filesystem writes with slightly weaker protec
 
 ## A write fails for some other reason
 
-Any save that fails for a filesystem reason is written to Hatchdoor's own log from 2.6.2 onwards, not only to the log of the agent or browser that asked. Check the server log first; it names the Vault and the underlying error.
+Any save that fails for a filesystem reason is written to Hatchdoor's own log from 2.7.0 onwards, not only to the log of the agent or browser that asked. Check the server log first; it names the Vault and the underlying error.
 
 One failure deserves its own treatment: `write_recovery_required`. It means the opposite of every other write failure. The new content *was* written and then could not be checked or put back, because something outside Hatchdoor changed the Vault directory mid-write. Do not retry it. The message names the note and the leftover file holding the previous content, and a person has to decide which version the note should keep. It is logged on the server too.
 
@@ -116,7 +116,7 @@ Check the Vault's Git console for the specific failure rather than assuming. (It
 
 - **Authentication failed** — the stored HTTPS token was rejected by the remote. Re-enter it under **Sign-in** on the Vault's own page; see [[How to set up a Git-backed Vault]].
 - **Clone/fetch failed, or the remote is unreachable** — a network or DNS problem, or the repository URL itself is wrong. Confirm the URL resolves from wherever the container runs, not just from your own machine. A remote that stops answering is reported the same way: Hatchdoor gives up after 15 seconds trying to connect or 120 seconds without data, and retries on its own. An interrupted clone needs no cleanup; the next attempt removes what it left behind and clones again.
-- **The checkout could not be installed** — the clone itself worked, but Hatchdoor could not move it into place. The message says why, with the underlying error. It no longer names the checkout's path on the server, since every client that reads the Vault's status sees it. Before 2.6.2 this reported only "could not be installed atomically" with the real cause discarded, and the usual cause was the filesystem described under **Editing a note fails but creating one works**; upgrading fixes both.
+- **The checkout could not be installed** — the clone itself worked, but Hatchdoor could not move it into place. The message says why, with the underlying error. It no longer names the checkout's path on the server, since every client that reads the Vault's status sees it. Before 2.7.0 this reported only "could not be installed atomically" with the real cause discarded, and the usual cause was the filesystem described under **Editing a note fails but creating one works**; upgrading fixes both.
 - **The push was rejected by the remote** (`managed_git_push_rejected`) — Hatchdoor reached the remote and sent its commits, and the remote refused to apply them: a protected branch, a server-side hook, a quota. The message carries the remote's own reason. Nothing landed on the remote, and nothing local was lost. Change the remote's rules or point the Vault at a branch it may push to, then press **Try again**. Before this was checked, such a Vault reported a successful sync while nothing reached the remote.
 - **A conflict with the remote** (`managed_git_conflict`) — the same notes changed on both sides. Hatchdoor puts the checkout back exactly as it was before the merge, with no conflict markers left in your notes, and lists the conflicting files. The failure stays on the Vault's status while Hatchdoor keeps committing your saves locally, until a sync succeeds. Hatchdoor never chooses a winner. Publish its side to a branch on the remote and merge it there; see [[#Resolving a sync conflict]].
 - **Files changed by hand in the checkout** (`managed_git_dirty_working_copy`, shown as **sync stopped** in the sidebar). Files in the Vault's repository changed outside Hatchdoor where it will not commit them for you: outside the Vault's own folder, or any local change at all on a Pull-only Vault. The Vault's page lists them. Your notes keep saving to disk; only commit and sync wait. Commit, revert or remove those files with Git in that checkout, then press **Try again**.

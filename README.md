@@ -78,7 +78,10 @@ under close human review, with tests and a documented safety model.
   source, git sync, and agent scope.
 - Clean note URLs at `/n/:slug`.
 - Obsidian-style wikilinks for `[[Note]]`, `[[Folder/Note]]`, and
-  `[[Note|Alias]]`.
+  `[[Note|Alias]]`, and Markdown links to `.md` files, both kept up to date
+  through renames and moves. New links follow each vault's own link style.
+- Saved queries: a fenced `base` block in Obsidian's Bases syntax draws a live
+  table of the notes it selects, for people and agents alike.
 - Markdown rendering with GitHub-flavored Markdown, math, Mermaid diagrams,
   frontmatter, images, attachments, and broken-link styling.
 - Keyword search and semantic search.
@@ -87,8 +90,11 @@ under close human review, with tests and a documented safety model.
 - Attachment uploads, local asset serving, and inline previews for linked PDF
   vault assets.
 - A first-class MCP server so AI agents can read, search, create, edit, and link
-  notes with the same safety as the UI.
-- Optional automatic git commits and pushes for Hatchdoor writes.
+  notes with the same safety as the UI, rename or delete a tag across a whole
+  vault in one checked operation, and move attachments of any size through
+  short-lived download and upload links.
+- Optional automatic git commits and pushes for Hatchdoor writes, with sync
+  conflicts resolved on your Git host through a recovery branch.
 - PWA assets and service worker caching for common read paths.
 - Distroless, rootless container image (no shell, runs as `nonroot`) that
   deploys with either Docker or Podman.
@@ -264,7 +270,7 @@ setup finishes.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.6.1
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.7.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 

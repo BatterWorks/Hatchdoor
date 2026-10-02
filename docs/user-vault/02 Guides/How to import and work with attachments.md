@@ -55,7 +55,7 @@ instance, never accepts writes).
 | `POST /api/v1/vaults/{vault_id}/attachments` | Only for a client that holds a bearer token and knows the server's address itself | `multipart/form-data` with fields `target_relative_path` and `file`. Accepts either the web bearer token or a live MCP bearer token. |
 | `import_attachment` (MCP tool) | The fallback, for clients that genuinely cannot make an out-of-band HTTP request | `content` (base64), `target_relative_path`. Rides inside the JSON-RPC message, so it gets unreliable as files approach the base64 size limit — prefer the HTTP path whenever it's available. |
 
-All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. Neither creates the embed syntax in a note for you — write the returned `attachment.relative_path` into the note yourself, in the Vault's link style. `list_vaults` reports it on each Vault as `link_style` (`wikilink` for `![[...]]`, `markdown` for `![](...)`) and `link_path_form`. Hatchdoor writes what you send as-is and never converts it.
+All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. None of them creates the embed syntax in a note for you — write the returned `attachment.relative_path` into the note yourself, in the Vault's link style. `list_vaults` reports it on each Vault as `link_style` (`wikilink` for `![[...]]`, `markdown` for `![](...)`) and `link_path_form`. Hatchdoor writes what you send as-is and never converts it.
 
 ### Importing a Markdown file as a note
 
