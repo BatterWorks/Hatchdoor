@@ -129,7 +129,7 @@ Only the maintainer approves a release's title and notes, and the approval is gi
 
 ## The release hook
 
-Everything the public repository does not know about, the build machines, the internal registry and the servers that run releases, sits behind one executable outside this repository. It lives in the maintainer's private repository and is not documented here. `release-publish` knows only this contract:
+The build machines, the internal registry and the servers that run releases are not described in this repository. One executable outside it handles all of them. It lives in the maintainer's private repository and is not documented here. `release-publish` knows only this contract:
 
 - `HATCHDOOR_RELEASE_HOOK` holds its path. A bare command name is not looked up on `PATH`.
 - It is called from the repository root as `<hook> images <version>` and `<hook> deploy <version>`, with the bare version, such as `2.7.0`. Its output streams to the terminal.
@@ -160,6 +160,8 @@ Every refusal names its check in brackets, as in `release-prepare refused (chang
 | `clean working tree` | Local changes would leak into the bump commit. | Commit, stash or remove them. |
 | `version` | Not a bare version, not higher than the latest `v*` tag, or already published. | Pick the next version. A published one is never reused. |
 | `changelog` | `## Unreleased` on `development` is empty, or neither it nor the dated section exists. | Nothing is ready to release, or the changelog was hand-edited. Fix it through an ordinary pull request first. |
+| `changelog` | The dated `## v<version>` section on the bump branch has no entries. | Add the entries on `docs/release-v<version>`, commit, and run again. |
+| `changelog` | The bump has merged, but `CHANGELOG.md` on `development` has no `## v<version>` section. | Something changed the changelog after the bump. Stop and ask the maintainer. |
 | `version files` | The four files do not agree on the version after the bump. | Fix the disagreeing file on `docs/release-v<version>`, commit, and run again. |
 | `changelog links` | A `[#N]` in the section has no `[#N]: <url>` definition. | Add the definition above the first release heading on the bump branch, commit, and run again. |
 | `just check-full` | A test or check failed. | Fix it on the bump branch, commit, and run again. |
@@ -173,17 +175,24 @@ While the version-bump pull request is open, the command prints its URL and exit
 
 | Refusal | What happened | What to do |
 | --- | --- | --- |
+| `version` | The argument is not a bare version such as `2.7.0`. | Pass the version without a `v` or a suffix. |
 | `release hook` | `HATCHDOOR_RELEASE_HOOK` is unset or does not name an executable file. | Set it to the hook's path. |
 | `release pull request` | No open or merged pull request from `development` into `main` is titled exactly `Release v<version>`. | Restore the title if it was edited, or run `just release-prepare <version>`. |
 | `release checklist` | An item is unticked, or its wording was changed or deleted. | Do the check and tick the box, or restore the item's exact text. |
-| `draft release` | The draft is missing, already published, or has no title or notes. | Run `just release-prepare <version>` to recreate a missing draft, or finish drafting it, and get the maintainer's approval again if the text changed. |
+| `draft release` | Before the merge: the draft has no title or notes. | Finish drafting it, and get the maintainer's approval again, since the text changed. |
+| `draft release` | Before the merge: there is no draft. | Run `just release-prepare <version>` to create it, redraft the title and notes, and get the maintainer's approval again. |
+| `draft release` | The release was published before its pull request merged, or the draft went missing after the merge. | `release-prepare` cannot repair either, because the version then counts as published or tagged. Stop and ask the maintainer. |
 | `changelog` | `## Unreleased` on `development` has entries merged after the bump. | Those changes are not in this release's notes. Stop and ask the maintainer: they belong to the next version. |
 | `development tip` | The bump has not merged, or something merged into `development` after it. | Merge the bump, or stop and ask the maintainer, as above. |
 | `tag` | A `v<version>` tag exists before the merge, the local and remote tags differ, the tag is not annotated, or it points away from the release merge. | A tag is never moved. Delete it by hand only if the version was never published; otherwise work out which is right before going further. |
-| `merge commit` | The release merge is not on `origin/main`, or its second parent is not the version-bump merge. | Nothing was tagged. Look at what landed on `main` before going further. |
+| `merge commit` | The release merge is not on `origin/main`, its second parent is not the version-bump merge, or the release pull request merged but no merged version-bump pull request from `docs/release-v<version>` exists. | This check runs before tagging, so a first run tagged nothing. Look at what landed on `main` before going further, and stop and ask the maintainer. |
 | `images` | The hook's `images` step failed. The tag is pushed and the release is still a draft. | Fix the cause from the hook's output and run again. Publishing waits for the images. |
 | `deploy` | The hook's `deploy` step failed. The release is published. | Fix the cause, or apply the revert the hook printed, and run again to retry the deploy. |
 
-If GitHub refuses the merge itself, `development` moved after the checks. Running again reports it as a `development tip` refusal.
+### Errors without a check name
+
+A failed `git` or `gh` call, such as a push, a fetch, `gh pr create` or the merge request to GitHub, is not a refusal. It stops the run with the command that failed and its error output, often with a stack trace. Fix the cause, whether authentication, the network, a conflict or branch protection, and run the same command again; it resumes from where git and GitHub say the release stands.
+
+When GitHub refuses the merge, the usual cause is that `development` moved after the checks, because the merge is pinned to the tip that was checked. Running again then reports a `development tip` refusal. A merge conflict or branch protection produces the same kind of error and needs fixing on GitHub first.
 
 A release that turns out broken after publishing is never fixed by republishing its version. Release the next patch version.

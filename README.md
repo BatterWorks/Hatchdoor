@@ -496,7 +496,7 @@ npm test
 npm run build
 ```
 
-Releases, including the published Docker images, are cut by the maintainer with `just release-prepare` and `just release-publish`; see the [release runbook](docs/maintenance/release-runbook.md). To build an image locally, see [container build targets and Cargo caching](docs/development/container-builds.md).
+`just release-prepare` and `just release-publish` cut a release and publish its Docker images; see the [release runbook](docs/maintenance/release-runbook.md). A release needs the maintainer's build machine and credentials, so contributors cannot cut one. To build an image locally, see [container build targets and Cargo caching](docs/development/container-builds.md).
 
 ## Project Docs
 
