@@ -1,10 +1,10 @@
 // Shared release logic for `just release-prepare` and `just release-publish`
-// (ADR-36). Everything here is pure text handling: version strings, the
-// version files, the changelog, and the release pull request checklist. The
-// scripts that call it do the git and GitHub work.
+// (ADR-36, ADR-37). Everything here is pure text handling: version strings,
+// the version files, the changelog, and the release checklist. The scripts
+// that call it do the git and GitHub work.
 //
 // The checklist is a contract between two scripts and an agent. Prepare
-// renders it into the release pull request, the agent ticks the boxes on
+// renders it into the version-bump pull request, the agent ticks the boxes on
 // GitHub, and publish parses it back and refuses while any box is unticked.
 // Only this file renders or parses it, so the wording cannot drift between
 // the two ends.
@@ -280,7 +280,8 @@ export function setVersions(files, version) {
 }
 
 // ---------------------------------------------------------------------------
-// Release pull request checklist (ADR-36 decision 3)
+// Release checklist (ADR-36 decision 3, on the version-bump pull request per
+// ADR-37)
 
 export const DOCS_FRESHNESS_ITEM =
   "The notes named by `just docs-freshness main` were read, and the review was recorded with `just docs-freshness-ack main`.";

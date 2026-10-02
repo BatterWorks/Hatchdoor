@@ -64,6 +64,7 @@ if (noun === "pr" && verb === "list") {
   if (!release) { console.error("release not found"); process.exit(1); }
   console.log(JSON.stringify({ isDraft: release.isDraft, url: release.url }));
 } else if (noun === "release" && verb === "create") {
+  if (process.env.STUB_FAIL_RELEASE_CREATE) { save(); console.error("HTTP 502"); process.exit(1); }
   const url = "https://github.test/releases/untagged-" + (state.releases.length + 1);
   state.releases.push({ tag: args[2], isDraft: args.includes("--draft"), target: option("--target"), title: option("--title"), notes: option("--notes"), url });
   save();
@@ -291,7 +292,7 @@ function today() {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-test("opens the bump, then the release pull request and draft release, without duplicating any", async () => {
+test("opens the bump with the checklist and draft release, ships a review fix through it, then opens the release pull request, without duplicating any", async () => {
   const context = await fixture();
 
   const first = prepare(context);
@@ -340,67 +341,26 @@ test("opens the bump, then the release pull request and draft release, without d
 
   let state = await stubState(context);
   assert.equal(state.pulls.length, 1);
-  assert.equal(state.pulls[0].base, "development");
-  assert.equal(state.pulls[0].head, BRANCH);
-  assert.doesNotMatch(state.pulls[0].body, /close/i);
-  assert.equal((await calls(context, "just", "check-full")).length, 1);
-
-  const waiting = prepare(context);
-  assert.equal(waiting.status, 0, waiting.stderr);
-  assert.match(
-    waiting.stdout,
-    /waiting to be merged: https:\/\/github\.test\/pull\/1/,
-  );
-  assert.equal((await stubState(context)).pulls.length, 1);
-  assert.equal((await calls(context, "just", "check-full")).length, 1);
-
-  await mergeBump(context);
-  // The local main falls behind origin, as it does between releases.
-  git(
-    context.root,
-    "push",
-    "--quiet",
-    "origin",
-    "origin/development:refs/heads/main",
-  );
-  assert.notEqual(
-    git(context.root, "rev-parse", "main"),
-    git(context.root, "rev-parse", "origin/development"),
-  );
-  const released = prepare(context);
-  assert.equal(released.status, 0, released.stderr);
-  assert.equal(
-    git(context.root, "branch", "--show-current"),
-    BRANCH,
-    "returns to the starting branch",
-  );
-  assert.equal(
-    git(context.root, "rev-parse", "main"),
-    git(context.root, "rev-parse", "origin/main"),
-    "fast-forwards the local main first",
-  );
-
-  state = await stubState(context);
-  assert.equal(state.pulls.length, 2);
-  const release = state.pulls[1];
-  assert.equal(release.base, "main");
-  assert.equal(release.head, "development");
-  assert.doesNotMatch(release.body, /close/i);
-  const checklist = parseChecklist(release.body);
+  const bump = state.pulls[0];
+  assert.equal(bump.base, "development");
+  assert.equal(bump.head, BRANCH);
+  assert.doesNotMatch(bump.body, /close/i);
+  const checklist = parseChecklist(bump.body);
   assert.deepEqual(checklist.missing, []);
   assert.equal(checklist.items.length, CHECKLIST_ITEMS.length);
   assert.ok(checklist.items.every((item) => !item.checked));
   assert.match(
-    release.body,
+    bump.body,
     /^ {4}docs\/user-vault\/Some note\.md {2}\(UNTOUCHED\)$/m,
   );
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
 
   const freshness = await calls(context, "just", "docs-freshness");
   assert.equal(freshness.length, 1);
   assert.equal(
     freshness[0].at(-1),
-    git(context.root, "rev-parse", "origin/development"),
-    "reviews the tip of development",
+    git(context.root, "rev-parse", `origin/${BRANCH}`),
+    "reviews the bump branch",
   );
 
   assert.equal(state.releases.length, 1);
@@ -418,6 +378,68 @@ test("opens the bump, then the release pull request and draft release, without d
     "### Added\n- A new thing. [#12]\n\n### Fixed\n- An old thing. [#3]\n\n[#12]: https://github.test/issues/12\n\n[#3]: https://github.test/issues/3\n",
   );
 
+  const waiting = prepare(context);
+  assert.equal(waiting.status, 0, waiting.stderr);
+  assert.match(waiting.stdout, /is open: https:\/\/github\.test\/pull\/1/);
+  assert.match(waiting.stdout, /draft release already exists/);
+  state = await stubState(context);
+  assert.equal(state.pulls.length, 1);
+  assert.equal(state.releases.length, 1);
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
+  assert.equal((await calls(context, "just", "docs-freshness")).length, 1);
+
+  // The review finds a stale note and fixes it on the bump branch.
+  await write(context.root, "docs/user-vault/Some note.md", "Fixed.\n");
+  git(context.root, "add", ".");
+  git(context.root, "commit", "--quiet", "-m", "docs: fix a stale note");
+  const fix = git(context.root, "rev-parse", "HEAD");
+  const pushed = prepare(context);
+  assert.equal(pushed.status, 0, pushed.stderr);
+  assert.equal(
+    git(context.root, "ls-remote", "--heads", "origin", BRANCH).split(/\s/)[0],
+    fix,
+    "pushes the fix to the bump branch",
+  );
+  const checks = await calls(context, "just", "check-full");
+  assert.equal(checks.length, 2);
+  assert.equal(checks[1].at(-1), fix, "tests the fix before pushing it");
+  state = await stubState(context);
+  assert.equal(state.pulls.length, 1);
+  assert.equal(state.releases.length, 1);
+
+  await mergeBump(context);
+  // The local main falls behind origin, as it does between releases.
+  git(
+    context.root,
+    "push",
+    "--quiet",
+    "origin",
+    "origin/development:refs/heads/main",
+  );
+  const released = prepare(context);
+  assert.equal(released.status, 0, released.stderr);
+  assert.equal(
+    git(context.root, "branch", "--show-current"),
+    BRANCH,
+    "stays on the starting branch",
+  );
+
+  state = await stubState(context);
+  assert.equal(state.pulls.length, 2);
+  const release = state.pulls[1];
+  assert.equal(release.base, "main");
+  assert.equal(release.head, "development");
+  assert.equal(release.title, "Release v1.1.0");
+  assert.doesNotMatch(release.body, /close/i);
+  assert.match(release.body, /https:\/\/github\.test\/pull\/1/);
+  assert.equal(
+    parseChecklist(release.body).items.length,
+    0,
+    "the release pull request carries no checklist",
+  );
+  assert.equal(state.releases.length, 1);
+  assert.equal((await calls(context, "just", "docs-freshness")).length, 1);
+
   const again = prepare(context);
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /already open: https:\/\/github\.test\/pull\/2/);
@@ -425,12 +447,52 @@ test("opens the bump, then the release pull request and draft release, without d
   state = await stubState(context);
   assert.equal(state.pulls.length, 2);
   assert.equal(state.releases.length, 1);
-  assert.equal((await calls(context, "just", "docs-freshness")).length, 1);
   assert.equal(
     (await calls(context, "gh", "pr")).filter((call) => call[2] === "merge")
       .length,
     0,
   );
+});
+
+test("fast-forwards the local main before the docs-freshness run", async () => {
+  const context = await fixture();
+  // A release landed on main since this clone last fetched it.
+  git(context.root, "switch", "--quiet", "--create", "hotfix", "main");
+  await write(context.root, "hotfix.txt", "x\n");
+  git(context.root, "add", ".");
+  git(context.root, "commit", "--quiet", "-m", "hotfix");
+  git(context.root, "push", "--quiet", "origin", "hotfix:main");
+  git(context.root, "switch", "--quiet", "development");
+  git(context.root, "branch", "--quiet", "-D", "hotfix");
+  git(context.root, "fetch", "--quiet", "origin");
+  assert.notEqual(
+    git(context.root, "rev-parse", "main"),
+    git(context.root, "rev-parse", "origin/main"),
+  );
+
+  const result = prepare(context);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    git(context.root, "rev-parse", "main"),
+    git(context.root, "rev-parse", "origin/main"),
+  );
+});
+
+test("a run that opened the bump but failed to create the draft release creates it on the re-run", async () => {
+  const context = await fixture();
+  const failed = prepare(context, ["1.1.0"], { STUB_FAIL_RELEASE_CREATE: "1" });
+  assert.notEqual(failed.status, 0);
+  let state = await stubState(context);
+  assert.equal(state.pulls.length, 1);
+  assert.equal(state.releases.length, 0);
+
+  const resumed = prepare(context);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  state = await stubState(context);
+  assert.equal(state.pulls.length, 1);
+  assert.equal(state.releases.length, 1);
+  assert.equal(state.releases[0].isDraft, true);
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
 });
 
 test("refuses a dirty working tree", async () => {
@@ -574,6 +636,23 @@ test("a run that pushed but failed to open the pull request opens it on the re-r
   assert.equal((await calls(context, "just", "check-full")).length, 1);
 });
 
+test("refuses before testing when the remote bump branch holds an untested commit", async () => {
+  const context = await fixture();
+  assert.equal(prepare(context).status, 0);
+  // A commit pushed to the bump branch from another clone.
+  git(context.root, "switch", "--quiet", "--detach");
+  await write(context.root, "elsewhere.txt", "x\n");
+  git(context.root, "add", ".");
+  git(context.root, "commit", "--quiet", "-m", "pushed elsewhere");
+  git(context.root, "push", "--quiet", "origin", `HEAD:refs/heads/${BRANCH}`);
+  git(context.root, "switch", "--quiet", BRANCH);
+
+  const result = prepare(context);
+  assertRefused(result, "bump branch");
+  assert.match(result.stderr, /git pull --ff-only/);
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
+});
+
 test("a closed bump pull request blocks until its branch is deleted", async () => {
   const context = await fixture();
   assert.equal(prepare(context).status, 0);
@@ -593,16 +672,21 @@ test("a closed bump pull request blocks until its branch is deleted", async () =
   assert.equal((await stubState(context)).pulls.length, 2);
 });
 
-test("a failing docs-freshness run refuses and opens nothing", async () => {
+test("a failing docs-freshness run refuses and opens nothing, and the re-run does not test again", async () => {
   const context = await fixture();
-  assert.equal(prepare(context).status, 0);
-  await mergeBump(context);
   const result = prepare(context, ["1.1.0"], { STUB_FRESHNESS_EXIT: "2" });
   assertRefused(result, "docs-freshness");
-  const state = await stubState(context);
-  assert.equal(state.pulls.length, 1);
+  let state = await stubState(context);
+  assert.equal(state.pulls.length, 0);
   assert.equal(state.releases.length, 0);
   assert.equal(git(context.root, "branch", "--show-current"), BRANCH);
+
+  const resumed = prepare(context);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  state = await stubState(context);
+  assert.equal(state.pulls.length, 1);
+  assert.equal(state.releases.length, 1);
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
 });
 
 test("refuses a resumed bump whose version files no longer agree", async () => {
@@ -650,17 +734,15 @@ test("refuses when the open release pull request belongs to another version", as
   const result = prepare(context);
   assertRefused(result, "release pull request");
   assert.match(result.stderr, /"Release v1\.0\.5", not "Release v1\.1\.0"/);
-  assert.equal((await stubState(context)).releases.length, 0);
+  assert.equal((await stubState(context)).pulls.length, 2);
 });
 
 test("a docs-freshness exit 1 without a reading list is a failure, not a result", async () => {
   const context = await fixture();
-  assert.equal(prepare(context).status, 0);
-  await mergeBump(context);
   const result = prepare(context, ["1.1.0"], {
     STUB_FRESHNESS_CHANGELOG_ONLY: "1",
   });
   assertRefused(result, "docs-freshness");
   assert.match(result.stderr, /changelog needs an entry/);
-  assert.equal((await stubState(context)).pulls.length, 1);
+  assert.equal((await stubState(context)).pulls.length, 0);
 });
