@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -35,7 +35,8 @@ const TREE: ExplorerFolder = {
 
 /** Renders `FolderTree` over real state, with the React setter as the change
  * callback so the component's updates land exactly as `App.tsx`'s do.
- * `record()` reads the latest committed record. */
+ * `record()` reads the latest committed record; `openNote()` moves the open
+ * note the way navigation does, keeping the record and the component state. */
 function renderTree({
   initial = {},
   currentPath = "/",
@@ -44,13 +45,13 @@ function renderTree({
   currentPath?: string;
 } = {}) {
   let latest = initial;
-  function Wrapper() {
+  function Wrapper({ path }: { path: string }) {
     const [expandedFolders, setExpandedFolders] = useState(initial);
     latest = expandedFolders;
     return (
       <FolderTree
         root={TREE}
-        currentPath={currentPath}
+        currentPath={path}
         expandedFolders={expandedFolders}
         onExpandedFoldersChange={setExpandedFolders}
         writeEnabled={false}
@@ -60,10 +61,34 @@ function renderTree({
   }
   const utils = render(
     <MemoryRouter>
-      <Wrapper />
+      <Wrapper path={currentPath} />
     </MemoryRouter>,
   );
-  return { ...utils, record: () => latest };
+  const openNote = async (slug: string) => {
+    utils.rerender(
+      <MemoryRouter>
+        <Wrapper path={`/v/${VAULT_ID}/n/${slug}`} />
+      </MemoryRouter>,
+    );
+    await settle();
+  };
+  return { ...utils, record: () => latest, openNote };
+}
+
+/** Lets queued `toggle` events and the renders they cause land. */
+async function settle() {
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+}
+
+/** A browser fires `toggle` for each <details> that mounts already open;
+ * jsdom does not, so a test that mounts with a note open sends them itself. */
+async function fireMountToggles() {
+  for (const details of document.querySelectorAll("details")) {
+    if (details.open) {
+      details.dispatchEvent(new Event("toggle"));
+    }
+  }
+  await settle();
 }
 
 function folder(path: string): HTMLDetailsElement {
@@ -76,8 +101,7 @@ function folder(path: string): HTMLDetailsElement {
  * changes state, then the browser (jsdom too) queues a `toggle` event. */
 async function setOpen(path: string, open: boolean) {
   folder(path).open = open;
-  // Let the queued toggle event and the render it causes land.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle();
 }
 
 /** Every folder the reader sees open must show its contents. */
@@ -136,25 +160,21 @@ describe("FolderTree nested folders (#305)", () => {
     expect(record()).toEqual({ homelab: true, "homelab/hosts": false });
   });
 
-  it("opening a deep note opens its ancestors without erasing other folders' entries", async () => {
+  it("showing a deep note leaves other folders' entries alone", async () => {
     const { record } = renderTree({
       initial: { archive: true },
       currentPath: `/v/${VAULT_ID}/n/h1`,
     });
-    // A browser fires `toggle` for each <details> that mounts already open;
-    // jsdom does not, so both are sent here, back to back as one batch.
+    // Both ancestors mount open, so a browser fires both toggles, back to
+    // back as one batch.
     folder("homelab").dispatchEvent(new Event("toggle"));
     folder("homelab/hosts").dispatchEvent(new Event("toggle"));
+    await settle();
 
-    await waitFor(() =>
-      expect(record()).toEqual({
-        archive: true,
-        homelab: true,
-        "homelab/hosts": true,
-      }),
-    );
+    expect(record()).toEqual({ archive: true });
     expect(folder("homelab").open).toBe(true);
     expect(folder("homelab/hosts").open).toBe(true);
+    expect(folder("archive").open).toBe(true);
     expect(screen.getByText("h1 note")).toBeInTheDocument();
     expectNoOpenEmptyFolder();
   });
@@ -189,6 +209,141 @@ describe("FolderTree nested folders (#305)", () => {
     await setOpen("homelab", true);
 
     expect(screen.getByText("top note")).toBeInTheDocument();
+    expectNoOpenEmptyFolder();
+  });
+});
+
+describe("FolderTree folders shown for the open note (#365)", () => {
+  afterEach(cleanup);
+
+  const DEEP_FOLDERS = ["homelab", "homelab/hosts", "homelab/hosts/rack"];
+
+  it("shows a deep note's folders without saving them", async () => {
+    const { record } = renderTree({ currentPath: `/v/${VAULT_ID}/n/r1` });
+    await fireMountToggles();
+
+    for (const path of DEEP_FOLDERS) {
+      expect(folder(path).open).toBe(true);
+    }
+    expect(screen.getByText("r1 note")).toBeInTheDocument();
+    expect(record()).toEqual({});
+    expectNoOpenEmptyFolder();
+  });
+
+  it("closes them again when a note elsewhere opens", async () => {
+    const { record, openNote } = renderTree({
+      currentPath: `/v/${VAULT_ID}/n/r1`,
+    });
+    await fireMountToggles();
+
+    await openNote("old");
+
+    expect(folder("homelab").open).toBe(false);
+    expect(screen.queryByTitle("homelab/hosts")).toBeNull();
+    expect(folder("archive").open).toBe(true);
+    expect(record()).toEqual({});
+    expectNoOpenEmptyFolder();
+  });
+
+  it("keeps a folder the reader opened, while its note-opened children close", async () => {
+    const { record, openNote } = renderTree();
+    await setOpen("homelab", true);
+
+    await openNote("r1");
+    await openNote("old");
+
+    expect(folder("homelab").open).toBe(true);
+    expect(folder("homelab/hosts").open).toBe(false);
+    expect(screen.queryByTitle("homelab/hosts/rack")).toBeNull();
+    expect(record()).toEqual({ homelab: true });
+    expectNoOpenEmptyFolder();
+  });
+
+  it("respects the reader closing the folder that holds the open note", async () => {
+    const { record, openNote } = renderTree({
+      currentPath: `/v/${VAULT_ID}/n/h1`,
+    });
+    await fireMountToggles();
+
+    await setOpen("homelab/hosts", false);
+    // The same note again: a re-render must not reopen it.
+    await openNote("h1");
+
+    expect(folder("homelab/hosts").open).toBe(false);
+    expect(screen.queryByText("h1 note")).toBeNull();
+    expect(record()).toEqual({ "homelab/hosts": false });
+  });
+
+  it("opens a closed folder again when a note inside it opens", async () => {
+    const { record, openNote } = renderTree({
+      currentPath: `/v/${VAULT_ID}/n/h1`,
+    });
+    await fireMountToggles();
+    await setOpen("homelab/hosts", false);
+
+    await openNote("r1");
+
+    expect(folder("homelab/hosts").open).toBe(true);
+    expect(folder("homelab/hosts/rack").open).toBe(true);
+    expect(screen.getByText("r1 note")).toBeInTheDocument();
+    expect(record()).toEqual({ "homelab/hosts": false });
+    expectNoOpenEmptyFolder();
+  });
+
+  it("opens a closed folder again when the reader returns to the note it was closed at", async () => {
+    const { openNote } = renderTree({ currentPath: `/v/${VAULT_ID}/n/top` });
+    await fireMountToggles();
+    await setOpen("homelab", false);
+
+    await openNote("old");
+    await openNote("top");
+
+    expect(folder("homelab").open).toBe(true);
+    expect(screen.getByText("top note")).toBeInTheDocument();
+    expectNoOpenEmptyFolder();
+  });
+
+  it("leaves a closed folder closed when a note outside it opens", async () => {
+    const { record, openNote } = renderTree({
+      currentPath: `/v/${VAULT_ID}/n/top`,
+    });
+    await fireMountToggles();
+    await setOpen("homelab", false);
+
+    await openNote("old");
+
+    expect(folder("homelab").open).toBe(false);
+    expect(record()).toEqual({ homelab: false });
+  });
+
+  it("saves a folder the reader reopens above the open note, and keeps it open elsewhere", async () => {
+    const { record, openNote } = renderTree({
+      currentPath: `/v/${VAULT_ID}/n/top`,
+    });
+    await fireMountToggles();
+    await setOpen("homelab", false);
+    await setOpen("homelab", true);
+
+    expect(record()).toEqual({ homelab: true });
+    await openNote("old");
+
+    expect(folder("homelab").open).toBe(true);
+    expect(record()).toEqual({ homelab: true });
+    expectNoOpenEmptyFolder();
+  });
+
+  it("shows the open note's folders after a reload, whatever the record says, and writes nothing", async () => {
+    const saved = { homelab: false, "homelab/hosts": false, archive: true };
+    const { record } = renderTree({
+      initial: saved,
+      currentPath: `/v/${VAULT_ID}/n/h1`,
+    });
+    await fireMountToggles();
+
+    expect(folder("homelab").open).toBe(true);
+    expect(folder("homelab/hosts").open).toBe(true);
+    expect(screen.getByText("h1 note")).toBeInTheDocument();
+    expect(record()).toEqual(saved);
     expectNoOpenEmptyFolder();
   });
 });
