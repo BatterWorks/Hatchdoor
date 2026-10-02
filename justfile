@@ -185,6 +185,14 @@ docs-freshness-ack base="development":
 release-prepare version:
     node scripts/release-prepare.mjs '{{version}}'
 
+# Run only after the maintainer approved the release title and notes in this
+# session. Needs HATCHDOOR_RELEASE_HOOK; re-run it to resume after a failure.
+# See ADR-36.
+#
+# Publish a release: merge, tag, build images, publish, deploy.
+release-publish version:
+    node scripts/release-publish.mjs '{{version}}'
+
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.
 prod-check: _prepare-cargo
