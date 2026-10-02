@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::cache::{BuildHandles, BuildOptions, SqliteCache};
+use crate::cache::{BuildHandles, BuildOptions, IndexYield, SqliteCache};
 use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, VaultIndex};
 use crate::vault_registry::VaultId;
@@ -114,6 +114,10 @@ pub(crate) struct VaultSnapshotRead {
 pub(crate) enum SnapshotPublication {
     Published,
     Superseded,
+    /// The build stopped early so another Vault could index (ADR-35
+    /// decision 3). Nothing was published; the vectors it computed are in
+    /// the Vault's saved progress for its next turn to resume from.
+    Paused,
 }
 
 /// A participant state and every row used to project it, read from one pinned
@@ -419,6 +423,7 @@ impl SqliteCache {
             embed_layers,
             None,
             None,
+            None,
         )
     }
 
@@ -426,6 +431,10 @@ impl SqliteCache {
     /// mutation lock, released at the read/embed boundary inside the build and
     /// retaken to publish. See [`MutationGuardHandoff`]; `None` builds exactly
     /// as before and publishes fresh.
+    ///
+    /// `index_yield` lets the build stop early for another Vault, in which
+    /// case it publishes nothing and returns [`SnapshotPublication::Paused`].
+    #[allow(clippy::too_many_arguments)] // The Index turn's three optional handles.
     pub(crate) fn replace_vault_snapshot_with_embed_layers_and_progress(
         &self,
         vault_id: VaultId,
@@ -434,6 +443,7 @@ impl SqliteCache {
         embed_layers: bool,
         on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
         mutation_guard: Option<MutationGuardHandoff>,
+        index_yield: Option<&IndexYield>,
     ) -> Result<SnapshotPublication, String> {
         let _epoch = self
             .snapshot_model_epoch
@@ -491,6 +501,7 @@ impl SqliteCache {
                     on_progress,
                     vault_read_guard,
                     saved_embeddings,
+                    index_yield,
                 },
                 embed_layers,
                 &BuildOptions::default(),
@@ -513,6 +524,11 @@ impl SqliteCache {
                 freshness,
             )
         })();
+        // A pause is not a failure. The retained generation was marked stale
+        // when the turn began, which is all an unfinished rebuild shows.
+        if result.is_err() && index_yield.is_some_and(IndexYield::yielded) {
+            return Ok(SnapshotPublication::Paused);
+        }
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
         }
@@ -3268,6 +3284,7 @@ mod tests {
                 Some(Arc::new(move |progress| {
                     sink.lock().expect("reports").push(progress)
                 })),
+                None,
                 None,
             )
             .expect("publish");

@@ -162,7 +162,11 @@ that production inventory are still checked for stale paths and duplicates.
   structural rows first (`VaultSearchStatus::Browsable`), then the same Vault
   again once its vectors exist (`Ready`), so browsing does not wait on
   embedding. The structure pass is skipped for a Vault that already has a
-  searchable generation, which keeps search answering across a rebuild.
+  searchable generation, which keeps search answering across a rebuild. A
+  long Index turn takes turns with other Vaults (ADR-35): after
+  `INDEX_TURN_SLICE` of embedding with another Vault's indexing queued, it
+  stops at a chunk boundary, keeps its saved progress, and rejoins the back of
+  the indexing lane.
   `AppState::runtime_config` supplies the immutable settings snapshot each
   reindex binds before it starts, including `HATCHDOOR_EMBED_LAYERS` for the
   per-Vault disposable candidate cache. `request_collection_reindex` is the
@@ -216,7 +220,12 @@ that production inventory are still checked for stale paths and duplicates.
   Unavailable. Each enabled block owns its
   definition and resolved Markdown root, capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
-  independently cancellable watcher. Status changes and `reconcile()` advance a
+  independently cancellable watcher. Its `index_turn` (`VaultIndexTurn`:
+  `running` or `waiting`, absent when idle) is the Vault's place in the
+  indexing lane, published by `refresh_index_turn`, which reads the lane
+  under the Vault's status lock; it is independent of `search`, which keeps
+  saying what the Vault can answer while it waits (ADR-35). Status changes and
+  `reconcile()` advance a
   revisioned collection snapshot and publish a `VaultCollectionRevisionEvent`
   (`collection_revision`, the affected Vault IDs, and a broad
   `VaultChangeCategory` of `definition` or `status`) over
@@ -346,7 +355,19 @@ specific field, route, startup phase, or integration being changed. Adding an
 **Public contract:** `VaultWorkCoordinator` is the cloneable request side and
 `VaultWorkWorker` is the unique admission side of one instance-wide in-memory
 queue with two lanes (ADR-31). Index and Repair turns share the indexing lane,
-one turn at a time across every Vault. Git, Commit and Recovery turns share the
+one turn at a time across every Vault. An Index turn may pause part-way for
+another Vault and rejoin that lane (ADR-35): `another_vault_waits_to_index`
+is the question it asks, and `requeue_paused_index_turn` moves its Vault's
+one indexing position to the back, folding in any rerun requested while it
+ran, and refuses a drained Vault so lifecycle still discards paused work.
+`index_lane_state` (`IndexLaneState::Running` or `Waiting`) says where a
+Vault's indexing stands, and the one observer set with `observe_index_lane`
+is called, outside the queue lock, with each Vault whose indexing may have
+moved; it re-reads the state rather than being told it, so racing
+notifications cannot publish an older answer. Setting it reports every Vault
+already queued, since startup reconstruction queues first Index turns before
+the executor sets it. Git, Commit and Recovery turns
+share the
 Git lane: they never wait for an Index turn or for another Vault's Git work, at
 most four Vaults (`GIT_LANE_WIDTH`, a constant, not a setting) run Git work at
 once, and one Vault runs one Git-lane turn at a time. A Vault beyond the cap
@@ -393,7 +414,9 @@ refresh control — it never calls `drain_vault` itself. Runtime
 composition (`src/server.rs`) runs every admitted turn on its own task through
 `vault_executor` and joins them all before it exits; Repair remains separately
 owned. `git::ManagedGitScheduler`'s
-`tick` is the one production caller of `request_if_idle`.
+`tick` is the one production caller of `request_if_idle`. `vault_executor`
+is the one caller of `requeue_paused_index_turn` and
+`another_vault_waits_to_index`, and sets the index-lane observer.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
@@ -402,7 +425,9 @@ when their owning packets integrate the coordinator.
 **Invariants:** one Vault occupies at most one FIFO position per lane; one
 operation runs per turn; at most one Index or Repair turn runs at once; at most
 four Vaults run Git-lane turns at once, and never two for the same Vault;
-Index and Repair turns run in FIFO order; duplicate pending work coalesces per
+Index and Repair turns run in FIFO order, and a paused Index turn goes
+behind everything already queued, never ahead; duplicate pending work
+coalesces per
 lane and duplicate active work retains at
 most one rerun, except through `request_if_idle`, which an automatic producer
 uses to add none; remaining work returns to the tail; a returned failure completes
@@ -462,7 +487,19 @@ task, so the Index retry backoff and the commit cooldown behave the same
 whichever lane the turn ran in.
 
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one
-  active Vault. It acquires that Vault's foreground mutation and refresh
+  active Vault. Through `dispatch_vault_index_turn_with_progress`, `run`
+  hands it an `IndexTurnSlicing` (the coordinator and `INDEX_TURN_SLICE`,
+  five minutes of embedding, a constant per ADR-14; tests shorten the
+  executor's `index_slice`). Once the build has embedded for a slice, it asks
+  before each further chunk whether another Vault is waiting to index, and
+  if one is, the build stops (`cache::IndexYield`,
+  `SnapshotPublication::Paused`). The turn then requeues its Vault behind
+  every Vault already waiting, publishes the search status its retained
+  generation supports with no error (`retained_search_status`, shared with
+  the failure path), and returns `Ok`: a pause is not a failure, and the
+  next turn resumes from the saved progress. A turn that has embedded
+  nothing yet, or has nothing left to embed, never pauses. It acquires that
+  Vault's foreground mutation and refresh
   boundaries, builds an authoritative Markdown index and isolated candidate
   cache off the async runtime, hands that scan's asset catalog and layer map
   to the control block for the demo asset check (#377), publishes a structure-only participating
@@ -591,6 +628,11 @@ and the startup tracker — every one of them a field of `AppState`, which
 Managed-Git dispatch is the one place outside the registry that reads
 plaintext credentials, through the crate-private `https_credentials`
 accessor, for Git authentication only.
+
+`report_index_lane_on_vault_status`, called from `from_state`, sets the
+coordinator's index-lane observer so every change to a Vault's place in the
+indexing lane reaches its `index_turn` status, whichever producer queued the
+work (ADR-35 decision 5).
 
 **Consumers:** `src/server.rs`'s dispatch loop, which runs each admitted turn
 and its `publish_outcome` on a task of its own. Nothing else constructs a
@@ -1806,7 +1848,9 @@ with no Git at all, not every Vault with no remote.
 while the Vault's runtime reports the `publish_recovery` capability, refusing
 with `capability_unavailable` otherwise, and `VaultSummary` carries the
 runtime's `recovery_branch` status on an authenticated read and withholds it
-from the demo projection.
+from the demo projection. `VaultSummary::index_turn` (ADR-35) copies the
+runtime's place in the indexing lane onto both projections, the demo's
+included, since it is status rather than deployment detail.
 
 `list()` also fills `link_style` and `link_path_form` (ADR-33) on an
 authenticated read, read from each active Vault's directory through
@@ -2043,6 +2087,10 @@ and embedder identity/dimensions.
   Vault neither saves nor publishes afterwards. Disconnect deletes them,
   disabling keeps them, and `snapshot_vault_ids` enumerates them so
   reconciliation can clean up a Vault removed before its first publication.
+  A build given an `IndexYield` stops before its next chunk once it has
+  embedded for its slice and another Vault waits; it publishes nothing,
+  flushes its saved progress, and reports `SnapshotPublication::Paused`
+  without marking the retained generation stale again.
   The table has no foreign key to `vault_snapshots`, whose row each
   publication deletes and re-inserts.
 - A population pass drops every cached note row that will not still hold its
@@ -3095,7 +3143,9 @@ inside `batch` like every management tool, and in
 `is_collection_management_tool` like `sync_vault`, since publishing needs no
 search model. `list_vaults` gains `recovery_branch` and the
 `publish_recovery` capability through the shared `VaultSummary`. Catalogue
-grows to 46, purely additive.
+grows to 46, purely additive. ADR-35 adds `index_turn` to the same summary,
+and the `list_vaults` description says what `running` and `waiting` mean;
+additive.
 
 **Kind:** adapter/security surface.
 
@@ -3434,7 +3484,9 @@ render. The breakpoint keeps the two callers mutually exclusive — every other
 collection-read and Vault-picking call site only reads the selected scope.
 `vaultSlot.tsx`/`vaultSlotLogic.ts` (#139) derive each Vault's trailing
 count-or-condition slot and the shared All-Vaults/collapsed-head aggregate
-from `VaultSummary`'s status fields alone — no new endpoint.
+from `VaultSummary`'s status fields alone — no new endpoint. A Vault whose
+`index_turn` is `waiting` (ADR-35) shows the still `waiting` word wherever it
+would otherwise show indexing, unless it is ready or carries a search error.
 `vaultSlotLogic.ts`'s `noteInSyncConflict` is also imported by Note reading's
 `NotePage.tsx` (ADR-30) to tell whether the open note is on its Vault's
 conflict list; this is a deliberate cross-capability import of one pure

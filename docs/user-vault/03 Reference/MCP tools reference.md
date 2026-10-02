@@ -39,6 +39,8 @@ Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — thes
 
 A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps describing its Git schedule: `last_checked_at`, when Hatchdoor last tried to check the remote — whether that check succeeded or failed, so read it alongside the Vault's Git status rather than as a successful sync — and `next_attempt_at`, when the next scheduled check is due. `last_checked_at` is absent until the first check completes; both are absent for a Vault with no remote and in demo mode. They are described in full under **Git schedule fields on a listed Vault** in [[HTTP API reference]], whose Vault shape `list_vaults` returns verbatim.
 
+A listed Vault's `index_turn` is `running` while it indexes and `waiting` while its indexing is queued behind another Vault's or paused to let one through; it is absent when nothing is queued. A `waiting` Vault is not stuck, and its `search` status still says what it can answer meanwhile. **The `index_turn` field on a listed Vault** in [[HTTP API reference]] describes it.
+
 Each listed Vault also carries its link style: `link_style` (`wikilink` or `markdown`) and `link_path_form` (`relative`, `absolute` or `shortest`). Write new note links and embeds in that form, `[[Note]]` and `![[file.png]]` for `wikilink`, `[Note](path/Note.md)` and `![](path/file.png)` for `markdown`, so the Vault keeps one style; Hatchdoor stores what you send as-is and never converts it. Both fields are absent for a Vault Hatchdoor cannot read and in demo mode. **Link style fields on a listed Vault** in [[HTTP API reference]] describes them, and [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is read.
 
 | Tool | Gating | Purpose |

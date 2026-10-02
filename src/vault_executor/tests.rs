@@ -2398,6 +2398,7 @@ async fn each_index_turn_binds_the_settings_snapshot_at_its_own_start() {
         startup: StartupTracker::scanning(),
         model_setup_started: Arc::new(AtomicBool::new(false)),
         index_retries: IndexRetries::default(),
+        index_slice: INDEX_TURN_SLICE,
     };
 
     let outcome = worker
@@ -2510,6 +2511,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         startup: StartupTracker::scanning(),
         model_setup_started: model_setup_started.clone(),
         index_retries: IndexRetries::default(),
+        index_slice: INDEX_TURN_SLICE,
     };
 
     let drive = async |worker: &mut crate::vault_work::VaultWorkWorker| {
@@ -3074,6 +3076,7 @@ async fn two_vault_executor(
         startup: StartupTracker::scanning(),
         model_setup_started: Arc::new(AtomicBool::new(true)),
         index_retries: IndexRetries::default(),
+        index_slice: INDEX_TURN_SLICE,
     };
     (executor, worker, first, second, second_path)
 }
@@ -3847,6 +3850,7 @@ async fn first_run_progress_through_the_executor_covers_the_queued_vault() {
         startup: StartupTracker::scanning(),
         model_setup_started: Arc::new(AtomicBool::new(true)),
         index_retries: IndexRetries::default(),
+        index_slice: INDEX_TURN_SLICE,
     };
 
     let outcome = worker
@@ -3951,4 +3955,385 @@ fn note_count_honours_exclusions_and_reports_an_unreadable_vault() {
         Some(1)
     );
     assert_eq!(count_markdown_notes(&root.join("missing"), &[]), None);
+}
+
+/// Counts every input it embeds, and sleeps on any input containing
+/// [`SLOW_MARKER`], so a test can make one Vault's turn take wall time
+/// without making the other's.
+struct CountingEmbedder {
+    inner: StubEmbedder,
+    embedded: std::sync::atomic::AtomicUsize,
+}
+
+const SLOW_MARKER: &str = "SLOWNOTE";
+
+impl Embedder for CountingEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        if texts.iter().any(|text| text.contains(SLOW_MARKER)) {
+            std::thread::sleep(Duration::from_millis(1_200));
+        }
+        self.embedded.fetch_add(texts.len(), Ordering::SeqCst);
+        self.inner.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.inner.embedding_dim()
+    }
+
+    fn identity(&self) -> String {
+        self.inner.identity()
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.inner.token_count(text, add_special_tokens)
+    }
+}
+
+const LARGE_NOTES: usize = 4;
+
+/// A large Vault of [`LARGE_NOTES`] one-chunk notes and a small one-note
+/// Vault, with an executor whose Index turns take turns after `slice`. The
+/// coordinator starts empty, so each test queues the Vaults in the order it
+/// needs, and each Vault's status follows the indexing lane as it does in
+/// production.
+async fn large_and_small_executor(
+    directory: &Path,
+    slice: Duration,
+    small_note: &str,
+) -> (
+    VaultWorkExecutor,
+    crate::vault_work::VaultWorkWorker,
+    Arc<CountingEmbedder>,
+    VaultId,
+    VaultId,
+) {
+    let large_path = directory.join("large");
+    let small_path = directory.join("small");
+    std::fs::create_dir_all(&large_path).expect("large Vault directory");
+    std::fs::create_dir_all(&small_path).expect("small Vault directory");
+    for index in 0..LARGE_NOTES {
+        std::fs::write(
+            large_path.join(format!("Large {index}.md")),
+            format!("# Large {index}\n\nA note about sleep, number {index}."),
+        )
+        .expect("write large note");
+    }
+    std::fs::write(small_path.join("Small.md"), small_note).expect("write small note");
+    let registry = VaultRegistryStore::new(directory.join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let with_large = add_local_vault(&registry, &empty, "Large", large_path);
+    let committed = add_local_vault(&registry, &with_large, "Small", small_path);
+    let large = vault_id_named(&committed, "Large");
+    let small = vault_id_named(&committed, "Small");
+    let vaults = VaultCollectionRuntime::new();
+    // Reconstruction queues both Vaults in Vault ID order, which is random.
+    // It queues them on a coordinator this test then throws away.
+    let (reconstruction, _) = VaultWorkCoordinator::new();
+    let (work, worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(work.clone()));
+    vaults
+        .reconcile_and_reconstruct(&registry, &committed, &reconstruction, &managed_git)
+        .await;
+    report_index_lane_on_vault_status(&vaults, &work);
+    let embedder = Arc::new(CountingEmbedder {
+        inner: StubEmbedder::new(384),
+        embedded: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let executor = VaultWorkExecutor {
+        vaults,
+        registry,
+        work,
+        managed_git,
+        commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
+        cache: Arc::new(SqliteCache::in_memory(384).expect("open shared cache")),
+        embedder: embedder.clone(),
+        runtime_config: RuntimeConfig::for_tests(),
+        startup: StartupTracker::scanning(),
+        model_setup_started: Arc::new(AtomicBool::new(true)),
+        index_retries: IndexRetries::default(),
+        index_slice: slice,
+    };
+    (executor, worker, embedder, large, small)
+}
+
+/// Take the next turn, check which Vault it is for, and run it through the
+/// executor the way the dispatch loop does.
+async fn run_index_turn(
+    executor: &VaultWorkExecutor,
+    worker: &mut crate::vault_work::VaultWorkWorker,
+    expected: VaultId,
+) {
+    let turn = worker.next_turn().await.expect("a queued Index turn");
+    assert_eq!(turn.request().vault_id(), expected);
+    assert_eq!(
+        vault_status(executor, expected).index_turn,
+        Some(VaultIndexTurn::Running),
+        "a Vault whose turn holds the indexing slot reports it running"
+    );
+    let outcome = turn.run(|request| executor.run(request)).await;
+    executor.publish_outcome(&outcome);
+    outcome.result.expect("the Index turn does not fail");
+}
+
+fn vault_status(executor: &VaultWorkExecutor, vault_id: VaultId) -> CollectionVaultSnapshot {
+    executor
+        .vaults
+        .runtime(vault_id)
+        .expect("active Vault")
+        .snapshot()
+}
+
+fn saved_vectors(cache: &SqliteCache, vault_id: VaultId) -> usize {
+    let conn = cache.read().expect("read connection");
+    conn.query_row(
+        "SELECT COUNT(*) FROM vault_embedding_progress WHERE vault_id = ?1",
+        [vault_id.to_string()],
+        |row| row.get::<_, i64>(0),
+    )
+    .expect("count saved vectors") as usize
+}
+
+/// ADR-35 decisions 3 and 5: the large Vault pauses after its slice for the
+/// small one queued behind it, says it is waiting, and resumes once the small
+/// one has finished, embedding only what it had not saved.
+#[tokio::test]
+async fn a_long_index_turn_pauses_for_a_waiting_vault_and_resumes_without_reembedding() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, embedder, large, small) =
+        large_and_small_executor(directory.path(), Duration::ZERO, "# Small\n\nsmall note").await;
+    executor.work.request(large, VaultWorkKind::Index);
+    executor.work.request(small, VaultWorkKind::Index);
+    assert_eq!(
+        vault_status(&executor, small).index_turn,
+        Some(VaultIndexTurn::Waiting),
+        "a queued Vault reports it is waiting for its turn"
+    );
+
+    run_index_turn(&executor, &mut worker, large).await;
+    assert_eq!(
+        embedder.embedded.load(Ordering::SeqCst),
+        1,
+        "with a zero slice the large Vault stops at its first chunk boundary"
+    );
+    let paused = vault_status(&executor, large);
+    assert_eq!(paused.index_turn, Some(VaultIndexTurn::Waiting));
+    assert_eq!(
+        paused.search,
+        VaultSearchStatus::Browsable,
+        "a paused first build keeps its published notes browsable"
+    );
+    assert_eq!(paused.search_error, None, "a pause is not a failure");
+    assert_eq!(saved_vectors(&executor.cache, large), 1);
+
+    run_index_turn(&executor, &mut worker, small).await;
+    let small_done = vault_status(&executor, small);
+    assert_eq!(small_done.search, VaultSearchStatus::Ready);
+    assert_eq!(small_done.index_turn, None);
+    assert_eq!(
+        vault_status(&executor, large).index_turn,
+        Some(VaultIndexTurn::Waiting)
+    );
+
+    run_index_turn(&executor, &mut worker, large).await;
+    let large_done = vault_status(&executor, large);
+    assert_eq!(large_done.search, VaultSearchStatus::Ready);
+    assert_eq!(large_done.index_turn, None);
+    assert_eq!(
+        embedder.embedded.load(Ordering::SeqCst),
+        LARGE_NOTES + 1,
+        "every chunk was embedded exactly once across both of the large Vault's turns"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), worker.next_turn())
+            .await
+            .is_err(),
+        "nothing is left queued"
+    );
+}
+
+/// ADR-35 decision 3: with nothing waiting, a turn carries on past every
+/// slice, so a single-Vault instance never pays for taking turns.
+#[tokio::test]
+async fn an_index_turn_with_nothing_waiting_never_pauses() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, embedder, large, _small) =
+        large_and_small_executor(directory.path(), Duration::ZERO, "# Small\n\nsmall note").await;
+    executor.work.request(large, VaultWorkKind::Index);
+
+    run_index_turn(&executor, &mut worker, large).await;
+
+    assert_eq!(embedder.embedded.load(Ordering::SeqCst), LARGE_NOTES);
+    let status = vault_status(&executor, large);
+    assert_eq!(status.search, VaultSearchStatus::Ready);
+    assert_eq!(status.index_turn, None);
+    assert_eq!(executor.work.index_lane_state(large), None, "not requeued");
+}
+
+/// Disabling a paused Vault discards its place in the queue like any other
+/// queued work, and keeps the progress it saved for when it is re-enabled.
+#[tokio::test]
+async fn disabling_a_paused_vault_discards_its_queued_turn_and_keeps_its_progress() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, _embedder, large, small) =
+        large_and_small_executor(directory.path(), Duration::ZERO, "# Small\n\nsmall note").await;
+    executor.work.request(large, VaultWorkKind::Index);
+    executor.work.request(small, VaultWorkKind::Index);
+    run_index_turn(&executor, &mut worker, large).await;
+    assert_eq!(
+        executor.work.index_lane_state(large),
+        Some(crate::vault_work::IndexLaneState::Waiting)
+    );
+
+    let current = match executor.registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let disabled = executor
+        .registry
+        .disable(current.revision(), large)
+        .expect("disable the large Vault");
+    executor
+        .vaults
+        .reconcile_and_reconstruct(
+            &executor.registry,
+            &disabled,
+            &executor.work,
+            &executor.managed_git,
+        )
+        .await;
+
+    assert_eq!(executor.work.index_lane_state(large), None);
+    assert_eq!(saved_vectors(&executor.cache, large), 1);
+    run_index_turn(&executor, &mut worker, small).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), worker.next_turn())
+            .await
+            .is_err(),
+        "the disabled Vault's paused turn is gone"
+    );
+}
+
+/// ADR-35 decision 5: the time a paused Vault spends waiting is not counted
+/// as embedding time, so its estimate does not run while it waits, and
+/// resuming starts from the work it saved rather than below it. The
+/// first-run reading across both Vaults never moves backwards meanwhile.
+#[tokio::test]
+async fn a_paused_vaults_progress_holds_while_it_waits_and_resumes_where_it_stopped() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, _embedder, large, small) = large_and_small_executor(
+        directory.path(),
+        Duration::ZERO,
+        &format!("# Small\n\n{SLOW_MARKER} takes a while to embed"),
+    )
+    .await;
+    // Each report is tagged with the turn it came from, and the first-run
+    // reading is sampled on every report, not only between turns.
+    let reports: Arc<Mutex<Vec<(usize, VaultId, IndexingProgressSnapshot)>>> = Arc::default();
+    let readings: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let report =
+        |turn: usize, vault_id: VaultId| -> Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync> {
+            let reports = reports.clone();
+            let readings = readings.clone();
+            let startup = executor.startup.clone();
+            let vaults = executor.vaults.clone();
+            Arc::new(move |progress| {
+                reports
+                    .lock()
+                    .expect("reports")
+                    .push((turn, vault_id, progress));
+                report_first_run_progress(&startup, &vaults, vault_id, progress);
+                if let Some(percent) = startup.status().percent {
+                    readings.lock().expect("readings").push(percent);
+                }
+            })
+        };
+    let slicing = || {
+        Some(IndexTurnSlicing {
+            work: executor.work.clone(),
+            slice: Duration::ZERO,
+        })
+    };
+    executor.work.request(large, VaultWorkKind::Index);
+    executor.work.request(small, VaultWorkKind::Index);
+    for (turn, expected) in [large, small, large].into_iter().enumerate() {
+        let queued = worker.next_turn().await.expect("queued Index turn");
+        assert_eq!(queued.request().vault_id(), expected);
+        let outcome = queued
+            .run(|request| {
+                dispatch_vault_index_turn_with_progress(
+                    &executor.vaults,
+                    executor.cache.clone(),
+                    executor.embedder.clone(),
+                    true,
+                    Some(report(turn, request.vault_id())),
+                    slicing(),
+                    request,
+                )
+            })
+            .await;
+        outcome.result.as_ref().expect("Index turn");
+        executor.publish_outcome(&outcome);
+        if let Some(percent) = executor.startup.status().percent {
+            readings.lock().expect("readings").push(percent);
+        }
+    }
+
+    let reports = reports.lock().expect("reports");
+    let before_pause = reports
+        .iter()
+        .rev()
+        .find(|(turn, _, _)| *turn == 0)
+        .map(|(_, _, progress)| *progress)
+        .expect("the large Vault's last report before it paused");
+    let on_resume = reports
+        .iter()
+        .find(|(turn, _, _)| *turn == 2)
+        .map(|(_, _, progress)| *progress)
+        .expect("the large Vault's first report after it resumed");
+    assert_eq!(
+        before_pause.chunks_completed, 1,
+        "it paused after one chunk"
+    );
+    assert!(
+        on_resume.tokens_completed >= before_pause.tokens_completed
+            && on_resume.tokens_total == before_pause.tokens_total,
+        "resuming starts from the saved work: {before_pause:?} then {on_resume:?}"
+    );
+    assert!(
+        on_resume.elapsed_seconds <= before_pause.elapsed_seconds,
+        "the 1.2s the large Vault waited for the small one is not embedding time: \
+         {before_pause:?} then {on_resume:?}"
+    );
+    let readings = readings.lock().expect("readings");
+    assert!(
+        readings.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the first-run reading never moves backwards: {readings:?}"
+    );
+    assert_eq!(executor.startup.status().state, "ready");
+}
+
+/// Startup order: reconstruction queues every Vault's first Index turn
+/// before the executor, and with it the status observer, exists. The
+/// Vaults already queued must still say they are waiting.
+#[tokio::test]
+async fn vaults_queued_before_the_executor_starts_report_waiting() {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, _worker, _embedder, large, small) =
+        large_and_small_executor(directory.path(), Duration::ZERO, "# Small\n\nsmall note").await;
+    let (work, _worker) = VaultWorkCoordinator::new();
+    work.request(large, VaultWorkKind::Index);
+    work.request(small, VaultWorkKind::Index);
+    assert_eq!(vault_status(&executor, small).index_turn, None);
+
+    report_index_lane_on_vault_status(&executor.vaults, &work);
+
+    for vault_id in [large, small] {
+        assert_eq!(
+            vault_status(&executor, vault_id).index_turn,
+            Some(VaultIndexTurn::Waiting)
+        );
+    }
 }

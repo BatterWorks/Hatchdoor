@@ -93,6 +93,20 @@ describe("deriveVaultSlot", () => {
     ).toBe("126 notes, search still building");
   });
 
+  it("counts a waiting Vault as participating and announces it as waiting", () => {
+    const vault: VaultSummary = {
+      ...browsableVault("Alpha"),
+      index_turn: "waiting",
+    };
+    expect(deriveVaultAggregate([vault], { [vault.vault_id]: 126 })).toEqual({
+      kind: "count",
+      count: 1,
+    });
+    expect(
+      describeScopeSlot(vault.vault_id, [vault], { [vault.vault_id]: 126 }),
+    ).toBe("waiting");
+  });
+
   it("shows indexing for a Vault mid-index", () => {
     expect(deriveVaultSlot(indexingVault("Alpha"), 40)).toEqual({
       kind: "indexing",
@@ -112,6 +126,43 @@ describe("deriveVaultSlot", () => {
     expect(deriveVaultSlot(neverIndexed, undefined)).toEqual({
       kind: "indexing",
     });
+  });
+
+  it("shows waiting wherever it would show indexing while the Vault's turn is queued (ADR-35)", () => {
+    const waiting = (vault: VaultSummary): VaultSummary => ({
+      ...vault,
+      index_turn: "waiting",
+    });
+    expect(deriveVaultSlot(waiting(indexingVault("Alpha")), 40)).toMatchObject({
+      kind: "waiting",
+    });
+    expect(deriveVaultSlot(waiting(browsableVault("Alpha")), 40)).toMatchObject(
+      {
+        kind: "waiting",
+        sentence:
+          "Browsing is ready. Search for this Vault waits its turn to index behind another Vault.",
+      },
+    );
+    // Stale only because a paused rebuild has not finished: no error rides
+    // along, and search still answers from the previous index.
+    expect(
+      deriveVaultSlot(waiting(healthyVault("Alpha", { search: "stale" })), 40),
+    ).toMatchObject({ kind: "waiting" });
+  });
+
+  it("keeps the count for a ready Vault and the condition for a failed one while their turn is queued", () => {
+    expect(
+      deriveVaultSlot({ ...healthyVault("Alpha"), index_turn: "waiting" }, 12),
+    ).toEqual({ kind: "count", count: 12 });
+    expect(
+      deriveVaultSlot({ ...staleVault("Alpha"), index_turn: "waiting" }, 12),
+    ).toMatchObject({ kind: "condition", word: "stale" });
+  });
+
+  it("shows indexing, not waiting, while the Vault's own turn runs", () => {
+    expect(
+      deriveVaultSlot({ ...indexingVault("Alpha"), index_turn: "running" }, 4),
+    ).toEqual({ kind: "indexing" });
   });
 
   it("shows stale in warn tier when indexing has failed", () => {
@@ -265,6 +316,23 @@ describe("VaultSlot", () => {
     expect(
       screen.getByRole("status", { name: "Indexing" }),
     ).toBeInTheDocument();
+  });
+
+  it("renders waiting as a still word with no tier and no sweep, its sentence in the accessible name", () => {
+    render(
+      <VaultSlot
+        vault={{ ...browsableVault("Alpha"), index_turn: "waiting" }}
+        noteCount={12}
+      />,
+    );
+
+    const slot = screen.getByRole("status", {
+      name: "Browsing is ready. Search for this Vault waits its turn to index behind another Vault.",
+    });
+    expect(slot).toHaveTextContent("waiting");
+    expect(slot).toHaveClass("vault-slot-waiting");
+    expect(slot).not.toHaveClass("vault-tier-warn");
+    expect(slot.querySelector(".slot-shimmer-reading")).toBeNull();
   });
 
   it("distinguishes the red tier by form (a class), not colour alone", () => {

@@ -169,7 +169,8 @@
    amber tier stays plain ink, the red tier takes a bordered ground and
    medium weight. */
 .vault-slot-condition,
-.vault-slot-shortfall {
+.vault-slot-shortfall,
+.vault-slot-waiting {
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 0.62rem;
@@ -249,6 +250,14 @@
     background: none;
     -webkit-text-fill-color: currentColor;
   }
+}
+
+/* Waiting its turn to index behind another Vault (ADR-35): the condition's
+   word form in muted ink, without a tier and without motion. Nothing is
+   wrong, so it takes no warn colour, and nothing is moving until its turn
+   comes round, so it carries no sweep. */
+.vault-slot-waiting {
+  color: var(--muted);
 }
 
 /* Browsable but not yet searchable: the count the Vault already has, carrying

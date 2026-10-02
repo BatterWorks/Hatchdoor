@@ -45,6 +45,20 @@ export function VaultSlot({
       </span>
     );
   }
+  // Still, and in muted ink: the Vault is queued, not failing, and nothing
+  // is moving until its turn comes round (ADR-35).
+  if (state.kind === "waiting") {
+    return (
+      <span
+        className="vault-slot-waiting"
+        role="status"
+        title={state.sentence}
+        aria-label={state.sentence}
+      >
+        waiting
+      </span>
+    );
+  }
   // The count is the whole slot, and the shimmer runs through it rather than
   // beside it: a Vault moving from indexing to browsable to ready reads as
   // one thing settling — a bar, then a moving number, then a still one — not

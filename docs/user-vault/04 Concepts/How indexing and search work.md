@@ -21,6 +21,14 @@ A save made through Hatchdoor itself, from the browser or an agent, doesn't wait
 >
 > An index pass that gets cut short, by a restart, a crash or a shutdown, does not start over either. The chunks it embedded are saved to the cache as it goes, and the next pass embeds only what is left, so its progress percentage picks up where the last one stopped. Saved chunks never answer a search: a Vault becomes searchable only once every chunk has its vector, and until then one that was searchable before keeps answering from its previous index, marked `stale`.
 
+## Vaults take turns indexing
+
+Vaults index one at a time, in the order they asked, because the embedding model runs one job at a time anyway. A large Vault's first index can take hours on a small server, and a Vault added after it used to wait for all of it. Now a Vault that has been embedding for about five minutes checks whether another Vault is waiting. If one is, it stops at the next chunk, keeps everything it has embedded (the saving described above), and goes to the back of the line. The waiting Vault runs, and the large one carries on from where it stopped when its turn comes round again. If nothing is waiting it never stops, so an instance with one Vault pays nothing for this.
+
+Nothing jumps the queue: a paused Vault goes behind every Vault already waiting, and one that asks after the pause goes behind it. The cost is that the large Vault finishes later while others are waiting, mostly because it reads its notes again each time it resumes. The five minutes is fixed, not a setting.
+
+While a Vault waits, its `index_turn` is `waiting` and the sidebar shows **waiting** where it would otherwise show it indexing; see [[Vault lifecycle states]]. Its search keeps answering from whatever it already had, and the time left on the **All Vaults** row counts only embedding, so it does not tick down while the Vault waits.
+
 ## Two search modes, not one fused "hybrid" search
 
 Hatchdoor offers **Semantic** (the default) and **Keyword** as two separate, user-selectable modes — not a combined ranking. This is a deliberate decision, not a missing feature.
