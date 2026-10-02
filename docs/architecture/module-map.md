@@ -3388,10 +3388,10 @@ collection-read and Vault-picking call site only reads the selected scope.
 `vaultSlot.tsx`/`vaultSlotLogic.ts` (#139) derive each Vault's trailing
 count-or-condition slot and the shared All-Vaults/collapsed-head aggregate
 from `VaultSummary`'s status fields alone — no new endpoint.
-`vaultSlotLogic.ts`'s `deriveVaultSlot` is also imported by Note reading's
-`NotePage.tsx` (#141) to detect a write-blocking Git condition on the open
-note's own Vault; this is a deliberate cross-capability import of one pure
-function rather than a duplicated copy of the condition vocabulary.
+`vaultSlotLogic.ts`'s `noteInSyncConflict` is also imported by Note reading's
+`NotePage.tsx` (ADR-30) to tell whether the open note is on its Vault's
+conflict list; this is a deliberate cross-capability import of one pure
+function rather than a duplicated copy of the Git code it checks.
 `lib/storage.ts`'s `isEditableTarget` is imported by `NotePage.tsx` on the
 same terms (#331), so document-level undo recognises editable targets with the
 shell's own keyboard-shortcut test.
@@ -3492,19 +3492,16 @@ who would act on an operator diagnostic, and the red tier's bordered ground
 is reserved for something the app is not already handling. `VaultSlot`/
 `VaultAggregateSlot` (`vaultSlot.tsx`) take the same optional `demoMode` prop
 and thread it straight through, as does `App.tsx`'s own `describeScopeSlot`
-call for the shell's scope live region. The one write-blocking use of
-`deriveVaultSlot` outside a rendered slot — `NotePage.tsx`'s
-`writeBlockReason` escalation (Note reading and rendering, below) — also
-takes `demoMode`: the escalation banner itself still renders in demo mode
-(an honest signal, same as every other Vault condition staying visible), but
-never repeats the Vault's own operator-facing Git diagnostic to a visitor
-who was never going to attempt the save it warns about.
+call for the shell's scope live region. `deriveVaultSlot` reads the
+server's Git codes: `managed_git_conflict` is `conflict` and
+`managed_git_dirty_working_copy` is `sync stopped`, both error tier; any
+other Git failure is `sync failed`, warn tier. No slot word blocks a save
+(#372): both conditions halt only commit and sync, so a note in such a Vault
+stays editable and saves land on disk.
 `noteInSyncConflict` (`vaultSlotLogic.ts`, ADR-30) answers whether an open
 note is on the Vault's current `managed_git_conflict` file list, restoring the
 `.md` extension and the Vault's repository subfolder that note reads drop;
 `NotePage.tsx`'s `SyncConflictNotice` renders a non-blocking notice from it.
-It deliberately does not feed `writeBlockReason`: a conflicted note stays
-editable.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -4029,15 +4026,10 @@ about its own Vault — including when the note carries no frontmatter at all,
 which is the one case the grid renders with zero real properties. A note that
 fails to load renders `StateBlock tone="error"` (#141) — the documented red
 heading, not the plain empty shell "Note Unavailable" used to share with
-"Not Found". `NotePage` also imports `deriveVaultSlot` from the
-shell-owned `app/vaultSlotLogic.ts` (#141) to detect the open note's own
-Vault being git-`unavailable` with a `dirty_working_copy`/`git_content_conflict`
-condition: escalation is triggered by the write attempt, not by the
-condition alone, so a stopped or conflicted Vault shows `SaveState`'s
-`Not saving` and a full-bleed `.write-notice` before a save is ever
-attempted (autosave's own `enabled` flag is gated on the same check), while
-every other non-healthy condition — or trouble in a Vault that is not the
-open note's — raises nothing here. `NotePage`'s `onTagSelect` prop is
+"Not Found". No Vault condition blocks a save before it is attempted (#372,
+which removed #141's slot-driven write block): `SaveState` and the
+`.write-notice` strip show `Not saving` only for a save the server actually
+refused, from autosave's own status. `NotePage`'s `onTagSelect` prop is
 `(tag, vaultId) => void` (#144): it wraps the raw `onTagSelect={tag =>
 onTagSelect(tag, vaultId)}` when calling `<NoteProperties>`, handing Search
 this note's own Vault id so a tag tap pre-selects it in the dialog's filter
@@ -4071,22 +4063,16 @@ where wikilink resolution has not settled and autosave would swallow it); one
 naming an older hash is not replayed, and a notice points at source mode, which
 already knows how to show a stale draft against the current version. A refused
 draft write raises its own `write-notice`. The same issue closes the revision
-effect's blind spot: `inlineDirty` is cleared only by a save landing, so on a
-Vault whose writes are blocked, or once autosave has stopped, the effect's
+effect's blind spot: `inlineDirty` is cleared only by a save landing, so
+once autosave has stopped on a refused save, the effect's
 "probably our own write, wait for quiet" skip never ended and the page ignored
 every later revision for the session. When no write of ours can be in flight
 the bump is someone else's, so it sets `noteChangedOnDisk` — flagged, with its
 own reading-view notice, rather than refetched, because refetching is what
 would replace the unsaved text. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
-— it carries no condition slot, so #152's demo-mode amber clamp on
-`deriveVaultSlot` has nothing to touch there; the one other `deriveVaultSlot`
-call here, `writeBlockReason`'s write-blocking Git escalation, takes an
-optional `demoMode` prop (#152) for the same instruction-free-sentence clamp
-(Application shell and navigation, above) — the escalation banner itself
-still renders, since it stays honest about Vault trouble independent of
-whether editing is offered, but never repeats the Vault's own operator
-diagnostic. `handleSave`'s catch and `handleBodyDrop`'s attachment-upload
+— it carries no condition slot, so #152's demo-mode amber clamp has nothing
+to touch there. `handleSave`'s catch and `handleBodyDrop`'s attachment-upload
 catch both take the optional `onDemoRefusal` prop (#152, Note editing and
 vault actions), checked first — `handleSave` falls back to its existing
 `ConflictError`/generic-error branches on a miss, `handleBodyDrop` to its
@@ -4094,8 +4080,8 @@ existing generic `onWriteNotice` fallback.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, note editing (including its held-draft recovery
-model, #151), `app/vaultSlotLogic.ts`'s `deriveVaultSlot` (Application
-shell and navigation), and `lib/storage.ts`'s `isEditableTarget` (Application
+model, #151), `app/vaultSlotLogic.ts`'s `noteInSyncConflict` (Application
+shell and navigation, ADR-30), and `lib/storage.ts`'s `isEditableTarget` (Application
 shell and navigation, #331), which `NotePage`'s document-level undo listener
 uses to leave Ctrl/Cmd+Z and Y typed into inputs, textareas and
 contenteditables outside the open block to the browser.
@@ -4120,8 +4106,8 @@ page fetches the note and its links at once, drops the skeleton when the note
 lands, and fills the links panel when its read settles, so a failed links read
 hides only the panel.
 
-**Validation:** note-page unit tests, `NotePage.test.tsx` (write/read
-escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
+**Validation:** note-page unit tests, `NotePage.test.tsx` (saving through every
+Vault condition, read escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
 fragment jump), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.

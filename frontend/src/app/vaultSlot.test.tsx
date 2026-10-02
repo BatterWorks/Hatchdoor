@@ -137,7 +137,7 @@ describe("deriveVaultSlot", () => {
     });
   });
 
-  it("shows sync stopped in error tier for dirty_working_copy", () => {
+  it("shows sync stopped in error tier for managed_git_dirty_working_copy", () => {
     const result = deriveVaultSlot(syncStoppedVault("Alpha"), 40);
     expect(result).toMatchObject({
       kind: "condition",
@@ -146,12 +146,28 @@ describe("deriveVaultSlot", () => {
     });
   });
 
-  it("shows conflict in error tier for git_content_conflict", () => {
+  it("shows conflict in error tier for managed_git_conflict", () => {
     const result = deriveVaultSlot(conflictVault("Alpha"), 40);
     expect(result).toMatchObject({
       kind: "condition",
       word: "conflict",
       tier: "error",
+    });
+  });
+
+  it("shows sync failed in warn tier for a Git failure code it does not single out", () => {
+    const vault: VaultSummary = healthyVault("Alpha", {
+      git: "unavailable",
+      git_error: {
+        code: "managed_git_push_rejected",
+        message: "managed checkout push was rejected by the remote: protected",
+        retryable: false,
+      },
+    });
+    expect(deriveVaultSlot(vault, 40)).toMatchObject({
+      kind: "condition",
+      word: "sync failed",
+      tier: "warn",
     });
   });
 
@@ -275,11 +291,11 @@ describe("VaultSlot", () => {
     const slot = screen.getByText("sync stopped");
     expect(slot).toHaveAttribute(
       "title",
-      "Local edits in this Vault halted Git integration.",
+      "managed checkout has unsupported local work: scripts/build.sh",
     );
     expect(slot).toHaveAttribute(
       "aria-label",
-      "Local edits in this Vault halted Git integration.",
+      "managed checkout has unsupported local work: scripts/build.sh",
     );
   });
 

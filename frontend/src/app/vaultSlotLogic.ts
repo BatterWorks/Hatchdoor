@@ -55,6 +55,12 @@ function slotTier(demoMode: boolean, tier: "warn" | "error"): "warn" | "error" {
   return demoMode ? "warn" : tier;
 }
 
+// The Git status codes the server sends for a sync halted on a merge conflict
+// (ADR-30) and for one halted on files changed by hand where the sync cannot
+// reconcile them (`src/git/managed_task.rs`).
+const SYNC_CONFLICT_CODE = "managed_git_conflict";
+const DIRTY_WORKING_COPY_CODE = "managed_git_dirty_working_copy";
+
 /**
  * Each Vault's single trailing slot: its note count when healthy, a
  * shimmering placeholder while indexing, or one condition word otherwise —
@@ -92,7 +98,7 @@ export function deriveVaultSlot(
     };
   }
   if (vault.git === "unavailable") {
-    if (vault.git_error?.code === "git_content_conflict") {
+    if (vault.git_error?.code === SYNC_CONFLICT_CODE) {
       return {
         kind: "condition",
         word: "conflict",
@@ -104,7 +110,7 @@ export function deriveVaultSlot(
         ),
       };
     }
-    if (vault.git_error?.code === "dirty_working_copy") {
+    if (vault.git_error?.code === DIRTY_WORKING_COPY_CODE) {
       return {
         kind: "condition",
         word: "sync stopped",
@@ -112,7 +118,7 @@ export function deriveVaultSlot(
         sentence: slotSentence(
           demoMode,
           vault.git_error.message,
-          "Local edits in this Vault halted Git sync.",
+          "Files changed by hand in this Vault's repository halted Git sync.",
         ),
       };
     }
@@ -257,7 +263,7 @@ export function noteInSyncConflict(
 ): boolean {
   if (!vault || !relativePath) return false;
   const error = vault.git_error;
-  if (error?.code !== "managed_git_conflict") return false;
+  if (error?.code !== SYNC_CONFLICT_CODE) return false;
   if (error.detail?.kind !== "affected_paths") return false;
   const subdirectory =
     vault.source?.type === "local"

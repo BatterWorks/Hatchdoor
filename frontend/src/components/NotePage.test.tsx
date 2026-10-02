@@ -14,7 +14,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
 import { isAppReloadHeld, resetAppReloadHolds } from "../lib/reloadGuard";
 import { loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
-import { staleVault, syncStoppedVault } from "../test/fixtures/vaults";
+import {
+  conflictVault,
+  staleVault,
+  syncStoppedVault,
+} from "../test/fixtures/vaults";
 import { NotePage } from "./NotePage";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -85,137 +89,89 @@ afterEach(() => {
   resetAppReloadHolds();
 });
 
-describe("NotePage write escalation (#141)", () => {
-  it("shows Not saving and the full-bleed notice for a stopped Vault, before any save is attempted", async () => {
+describe("NotePage saves through every Vault condition (#372)", () => {
+  /** Serves the note and records every save, which the server accepts. */
+  function serveWritable(vaultId: string): string[] {
+    const saved: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "PUT") {
+          saved.push(String(init.body));
+          return jsonResponse({
+            vault_id: vaultId,
+            ok: true,
+            slug: "home",
+            relative_path: "Home.md",
+            content_hash: "hash-2",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "Body",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: vaultId, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+    return saved;
+  }
+
+  async function saveFromSourceMode(saved: string[]): Promise<void> {
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "Body, edited." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0]).toContain("Body, edited.");
+  }
+
+  it("saves a note in a Vault whose sync stopped on a conflict, and warns on the note the conflict lists", async () => {
+    const vault = conflictVault("Beta", ["Home.md"]);
+    const saved = serveWritable(vault.vault_id);
+
+    renderNote(vault.vault_id, { vaults: [vault] });
+
+    expect(
+      await screen.findByText(/This note is part of a sync conflict/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Edits aren.t saving/)).not.toBeInTheDocument();
+    await saveFromSourceMode(saved);
+  });
+
+  it("saves a note in a Vault whose sync stopped on files changed by hand, with no notice", async () => {
     const vault = syncStoppedVault("Beta");
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/notes/home")) {
-          return jsonResponse({
-            vault_id: vault.vault_id,
-            note: {
-              title: "Home",
-              slug: "home",
-              relative_path: "Home",
-              content: "Body",
-              content_hash: "hash",
-              layer: null,
-            },
-          });
-        }
-        if (url.includes("/resolve-batch")) {
-          return jsonResponse({ vault_id: vault.vault_id, results: [] });
-        }
-        return jsonResponse({ error: "not found" }, 404);
-      },
-    );
+    const saved = serveWritable(vault.vault_id);
 
     renderNote(vault.vault_id, { vaults: [vault] });
 
-    await waitFor(() => {
-      expect(screen.getByText("Not saving")).toBeInTheDocument();
-    });
+    await screen.findByRole("button", { name: "Edit" });
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Edits aren.t saving/)).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Local edits in this Vault halted Git integration\./),
-    ).toBeInTheDocument();
+      screen.queryByText(/unsupported local work/),
+    ).not.toBeInTheDocument();
+    await saveFromSourceMode(saved);
   });
 
-  it("shows Not saving and the notice for a conflicted Vault, with the Vault's own message", async () => {
-    const vault = {
-      ...staleVault("Ignored"),
-      vault_id: "conflict-vault",
-      git: "unavailable" as const,
-      git_error: {
-        code: "git_content_conflict",
-        message: "A content conflict is blocking Git integration.",
-        retryable: false,
-      },
-    };
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/notes/home")) {
-          return jsonResponse({
-            vault_id: vault.vault_id,
-            note: {
-              title: "Home",
-              slug: "home",
-              relative_path: "Home",
-              content: "Body",
-              content_hash: "hash",
-              layer: null,
-            },
-          });
-        }
-        if (url.includes("/resolve-batch")) {
-          return jsonResponse({ vault_id: vault.vault_id, results: [] });
-        }
-        return jsonResponse({ error: "not found" }, 404);
-      },
-    );
-
-    renderNote(vault.vault_id, { vaults: [vault] });
-
-    await waitFor(() => {
-      expect(screen.getByText("Not saving")).toBeInTheDocument();
-    });
-    expect(
-      screen.getByText(/A content conflict is blocking Git integration\./),
-    ).toBeInTheDocument();
-  });
-
-  it("shows the instruction-free fallback sentence, not the Vault's own operator diagnostic, in demo mode (#152)", async () => {
-    const vault = {
-      ...staleVault("Ignored"),
-      vault_id: "conflict-vault-demo",
-      git: "unavailable" as const,
-      git_error: {
-        code: "git_content_conflict",
-        message: "Run `hatchdoor vault repair` on the operator console.",
-        retryable: false,
-      },
-    };
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/notes/home")) {
-          return jsonResponse({
-            vault_id: vault.vault_id,
-            note: {
-              title: "Home",
-              slug: "home",
-              relative_path: "Home",
-              content: "Body",
-              content_hash: "hash",
-              layer: null,
-            },
-          });
-        }
-        if (url.includes("/resolve-batch")) {
-          return jsonResponse({ vault_id: vault.vault_id, results: [] });
-        }
-        return jsonResponse({ error: "not found" }, 404);
-      },
-    );
-
-    renderNote(vault.vault_id, {
-      vaults: [vault],
-      writeEnabled: false,
-      demoMode: true,
-    });
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          /A content conflict is blocking Git sync for this Vault\./,
-        ),
-      ).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/operator console/)).not.toBeInTheDocument();
-  });
-
-  it("raises nothing beyond the sidebar slot for a non-blocking condition (stale)", async () => {
+  it("raises nothing beyond the sidebar slot for a stale Vault", async () => {
     const vault = staleVault("Gamma");
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
@@ -535,6 +491,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     content: string,
     hash = "hash",
     vaultId = "vault-1",
+    { refuseWrites = false }: { refuseWrites?: boolean } = {},
   ): Sent[] {
     const sent: Sent[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -542,6 +499,12 @@ describe("NotePage crash-safe inline editing (#330)", () => {
         const url = String(input);
         if (init?.method === "PUT") {
           sent.push({ url, init });
+          if (refuseWrites) {
+            return jsonResponse(
+              { code: "vault_unavailable", message: "Vault is unavailable" },
+              503,
+            );
+          }
           return jsonResponse({
             vault_id: vaultId,
             ok: true,
@@ -721,15 +684,17 @@ describe("NotePage crash-safe inline editing (#330)", () => {
   // disk held the pre-undo text, so the page going away restored the edit the
   // user had just taken back.
   it("writes the draft for an undo the Vault will not take", async () => {
-    const vault = syncStoppedVault("Beta");
-    const sent = mockVault("First paragraph.\n", "hash", vault.vault_id);
+    const sent = mockVault("First paragraph.\n", "hash", "vault-1", {
+      refuseWrites: true,
+    });
 
-    renderNote(vault.vault_id, { vaults: [vault] });
+    renderNote("vault-1", { vaults: [] });
 
     fireEvent.click(await screen.findByText("First paragraph."));
     typeInOpenBlock("First paragraph, edited.");
     fireEvent.blur(screen.getByRole("textbox"));
     await screen.findByText("First paragraph, edited.");
+    await screen.findByText(/Hatchdoor could not reach the vault/);
 
     fireEvent.keyDown(window, { key: "z", ctrlKey: true });
     await screen.findByText("First paragraph.");
@@ -738,12 +703,27 @@ describe("NotePage crash-safe inline editing (#330)", () => {
       window.dispatchEvent(new Event("pagehide"));
     });
 
-    // Nothing was ever sent, so the draft is the only copy of what the user is
-    // looking at.
-    expect(sent).toHaveLength(0);
-    const draft = loadNoteDraft(vault.vault_id, "home");
+    // The edit was refused and autosave stopped, so the undo is never sent and
+    // the draft is the only copy of what the user is looking at.
+    expect(sent).toHaveLength(1);
+    const draft = loadNoteDraft("vault-1", "home");
     expect(draft?.content).toContain("First paragraph.");
     expect(draft?.content).not.toContain("edited");
+  });
+
+  it("autosaves an inline edit in a Vault whose sync stopped (#372)", async () => {
+    const vault = syncStoppedVault("Beta");
+    const sent = mockVault("First paragraph.\n", "hash", vault.vault_id);
+
+    renderNote(vault.vault_id, { vaults: [vault] });
+
+    fireEvent.click(await screen.findByText("First paragraph."));
+    typeInOpenBlock("First paragraph, edited.");
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(String(sent[0].init.body)).toContain("First paragraph, edited.");
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
   });
 
   it("does not put the draft back after the save that cleared it", async () => {
@@ -766,15 +746,15 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     expect(loadNoteDraft("vault-1", "home")).toBeNull();
   });
 
-  it("notices the note changed on disk even while a stopped Vault holds the edit", async () => {
-    const vault = syncStoppedVault("Beta");
-    mockVault("First paragraph.\n", "hash", vault.vault_id);
-    const { setRevision } = renderNoteAtRevision(vault.vault_id, [vault], 1);
+  it("notices the note changed on disk even while a refused save holds the edit", async () => {
+    mockVault("First paragraph.\n", "hash", "vault-1", { refuseWrites: true });
+    const { setRevision } = renderNoteAtRevision("vault-1", [], 1);
 
     fireEvent.click(await screen.findByText("First paragraph."));
     typeInOpenBlock("First paragraph, edited.");
     fireEvent.blur(screen.getByRole("textbox"));
     await screen.findByText("First paragraph, edited.");
+    await screen.findByText(/Hatchdoor could not reach the vault/);
 
     // `inlineDirty` never clears on a Vault that refuses the write, so without
     // this the page would ignore every later revision for the rest of the

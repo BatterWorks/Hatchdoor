@@ -15,7 +15,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { deriveVaultSlot, noteInSyncConflict } from "../app/vaultSlotLogic";
+import { noteInSyncConflict } from "../app/vaultSlotLogic";
 import {
   parseFrontmatter,
   stripBlockIds,
@@ -176,12 +176,8 @@ export function NotePage({
    * error, and editing closes rather than inviting a retry. Returns whether
    * the error was a demo refusal. */
   onDemoRefusal?: (error: unknown) => boolean;
-  /** #152: clamps the write-block escalation's sentence to the
-   * instruction-free fallback (the banner itself still renders — an honest
-   * signal that survives read-only-ness, same as every other Vault
-   * condition — but never repeats the Vault's own operator-facing
-   * diagnostic to a demo visitor), and suppresses the held-drafts banner
-   * entirely, since it names and links to the withheld Settings surface. */
+  /** #152: suppresses the held-drafts banner entirely, since it names and
+   * links to the Settings surface withheld from a demo visitor. */
   demoMode?: boolean;
   noteCandidates?: NoteCandidate[];
   vaults: VaultSummary[];
@@ -198,26 +194,10 @@ export function NotePage({
   const activeVault = vaults.find((vault) => vault.vault_id === vaultId);
   const vaultName =
     vaults.length > 1 ? (activeVault?.name ?? vaultId) : undefined;
-  // Escalation is triggered by the action (writing here), not by the
-  // condition alone (#141): a stopped or conflicted Vault blocks a save
-  // before it is ever attempted, rather than waiting for a doomed round
-  // trip to fail first. Every other non-healthy condition (stale, sync
-  // failed, or trouble in a Vault that is not this one) raises nothing here
-  // — it stays quiet in the sidebar slot until it blocks something actually
-  // attempted.
-  const writeBlockReason = (() => {
-    if (!activeVault) {
-      return null;
-    }
-    const slot = deriveVaultSlot(activeVault, undefined, demoMode);
-    if (
-      slot.kind === "condition" &&
-      (slot.word === "sync stopped" || slot.word === "conflict")
-    ) {
-      return slot.sentence;
-    }
-    return null;
-  })();
+  // No Vault condition blocks a save before it is attempted (#372). A sync
+  // conflict (ADR-30) or a sync stopped on files changed by hand halts only
+  // commit and sync; the note's own writes still land on disk. Saves the
+  // server refuses surface through autosave's own status below.
   const [note, setNote] = useState<Note | null>(null);
   const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
   const [loading, setLoading] = useState(true);
@@ -566,14 +546,13 @@ export function NotePage({
       autosaveStatusRef.current === "saving"
     ) {
       // Unless no write of ours can be in flight at all. `inlineDirty` is only
-      // ever cleared by a save landing, so on a Vault whose writes are blocked,
-      // or once autosave has stopped, "quiet again" never arrives and the page
-      // would ignore every later revision for the rest of the session (#330).
+      // ever cleared by a save landing, so once autosave has stopped, "quiet
+      // again" never arrives and the page would ignore every later revision
+      // for the rest of the session (#330).
       // The bump is therefore someone else's. It is flagged rather than
       // followed: refetching here would replace unsaved inline text with the
       // version on disk, which is the loss this issue exists to prevent.
       if (
-        writeBlockReason !== null ||
         autosaveStatusRef.current === "error" ||
         autosaveStatusRef.current === "conflict"
       ) {
@@ -584,14 +563,7 @@ export function NotePage({
 
     void loadNote(false);
     void loadNoteLinks();
-  }, [
-    loadNote,
-    loadNoteLinks,
-    vaultRevision,
-    isEditing,
-    inlineDirty,
-    writeBlockReason,
-  ]);
+  }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
   useEffect(() => {
     safeSetItem(propertiesCollapsedStorageKey, propertiesCollapsed ? "1" : "0");
@@ -835,7 +807,7 @@ export function NotePage({
     setDraftContent(nextContent);
     setNote((prev) => (prev ? { ...prev, content: nextContent } : prev));
     // Before the write, not after it: the draft is what covers the write
-    // failing, being refused by a stopped Vault, or never being attempted.
+    // failing, being refused, or never being attempted.
     scheduleDraftWrite(nextContent);
     autosaveRef.current?.commit(nextContent);
   };
@@ -872,11 +844,7 @@ export function NotePage({
 
   const autosave = useNoteAutosave({
     baseHash: note?.content_hash ?? "",
-    // A stopped or conflicted Vault already tells us the write would fail,
-    // so autosave never attempts it — the drafts safety net still keeps the
-    // edit (#141). Editing itself stays on: escalation blocks the save, not
-    // the attempt.
-    enabled: inlineEditingEnabled && !writeBlockReason,
+    enabled: inlineEditingEnabled,
     save: async (nextContent, expectedHash) => {
       try {
         const outcome = await updateNote(
@@ -1026,12 +994,12 @@ export function NotePage({
   // restored edit that never gets this far is not lost: the draft it came from
   // is still on disk, and the notice above says the vault does not have it.
   useEffect(() => {
-    if (restoredCommit === null || !inlineEditingEnabled || writeBlockReason) {
+    if (restoredCommit === null || !inlineEditingEnabled) {
       return;
     }
     setRestoredCommit(null);
     autosaveRef.current?.commit(restoredCommit);
-  }, [restoredCommit, inlineEditingEnabled, writeBlockReason]);
+  }, [restoredCommit, inlineEditingEnabled]);
 
   const [externalChange, setExternalChange] = useState(0);
 
@@ -1598,14 +1566,8 @@ export function NotePage({
           <h2 className="note-page-title">{note.title}</h2>
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
-        {writeBlockReason ? (
-          <div className="write-notice" role="status">
-            <div className="write-notice-messages">
-              Edits aren&rsquo;t saving. {writeBlockReason}
-            </div>
-          </div>
-        ) : autosave.status === "conflict" ||
-          (autosave.status === "error" && !autosaveDemoRefusal) ? (
+        {autosave.status === "conflict" ||
+        (autosave.status === "error" && !autosaveDemoRefusal) ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               {autosave.status === "conflict"
@@ -1698,7 +1660,7 @@ export function NotePage({
             writeEnabled && !isEditing ? (
               <div className="note-inline-actions">
                 <SaveState
-                  status={writeBlockReason ? "error" : autosave.status}
+                  status={autosave.status}
                   savedAt={autosave.savedAt}
                 />
                 <UiButton
