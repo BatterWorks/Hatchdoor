@@ -138,6 +138,15 @@ that production inventory are still checked for stale paths and duplicates.
   collection that does not watch, never keeps a graph and builds one per
   links read; replacing a watcher moves an epoch that retires any graph kept
   under the old one.
+  It also keeps the `IndexedAssets` (catalogued asset paths and `LayerMap`)
+  its latest Index turn scanned (#377), set by the Vault work executor through
+  `retain_indexed_assets` and read by `VaultReadCore::asset_on_surface` through
+  `indexed_assets`, so a demo's asset check does not walk the Vault per
+  request. It does not move on rotation, so it never answers for a different
+  path or exclude patterns, and a fresh block has none until its first Index
+  turn scans. Unlike the graph it ignores the watcher epoch: a checkout
+  cloned again under the same block is answered from the old scan until the
+  next Index turn, and a file gone from disk is refused before the check.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
@@ -455,7 +464,8 @@ whichever lane the turn ran in.
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one
   active Vault. It acquires that Vault's foreground mutation and refresh
   boundaries, builds an authoritative Markdown index and isolated candidate
-  cache off the async runtime, publishes a structure-only participating
+  cache off the async runtime, hands that scan's asset catalog and layer map
+  to the control block for the demo asset check (#377), publishes a structure-only participating
   snapshot before vector embedding on a first build so browsing does not wait
   for semantic search, atomically publishes only that Vault's complete shared
   snapshot, and publishes Ready, Stale, or Unavailable search state without
@@ -1416,9 +1426,15 @@ has materialized, and reports that as the same retryable
 `vault_read_unavailable` code an exact-note read's index build would rather
 than a caller discovering an unrelated raw filesystem error later.
 `asset_on_surface` applies the complete demo-readable policy to a contained
-asset's Vault-relative path: it must occur in the authoritative index's asset
-catalog (which has already applied configured and built-in noise exclusions)
-and survive `BrowseSurface` layer selection. A demo therefore cannot bypass
+asset's Vault-relative path: it must occur in the Vault's asset catalog
+(which has already applied configured and built-in noise exclusions) and
+survive `BrowseSurface` layer selection. The catalog is the `IndexedAssets`
+the Vault's latest Index turn kept on its control block (#377), so a demo
+answers a page of embeds without walking the Vault per image, and a file
+added, removed or moved under a layer marker changes the answer when the
+turn after it lands; before a Vault's first turn has scanned, a one-off
+`authoritative_catalog` build answers instead. A file gone from disk is still
+refused by `contained_asset`'s own containment and regular-file checks. A demo therefore cannot bypass
 its default-only Note surface by requesting a demoted, noise, or excluded asset
 directly; ordinary `Everything` reads retain the legacy contained-asset
 behavior. `AssetSurface` is that same decision captured from one index, for a
@@ -1558,7 +1574,8 @@ Every exact read except `exact_note_links` builds only the Vault's catalog
 (`VaultControlBlock::authoritative_catalog`), which walks paths and reads no
 note's content (#361): a note read, a frontmatter read, wikilink resolution
 (single and batch), attachment listing, download and the demo asset check
-cost one directory walk plus the requested Note's own file. The Note's
+cost one directory walk plus the requested Note's own file (the demo asset
+check costs none once the Vault has been indexed, #377). The Note's
 content and `content_hash` are read from disk on every call and never
 cached. `exact_note_links` alone needs the link graph and takes it from
 `VaultControlBlock::linked_index`, which reuses the graph until the Vault
@@ -1584,8 +1601,8 @@ no read domain logic of their own. The core has no adapter or route ownership.
 
 **Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
 Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
-`src/vault_runtime.rs` for the authoritative exact-read catalog and the kept
-link graph.
+`src/vault_runtime.rs` for the authoritative exact-read catalog, the kept
+link graph, and the Index turn's retained `IndexedAssets`.
 
 **Invariants:**
 

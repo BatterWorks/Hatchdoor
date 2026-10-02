@@ -632,6 +632,10 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
             let index = indexing_control
                 .authoritative_index()
                 .map_err(|error| (vault_index_error(error), true))?;
+            // The scan is what a demo's asset check answers from until the
+            // next turn, kept here rather than at publication so it does not
+            // wait on the embedding pass (#377).
+            indexing_control.retain_indexed_assets(&index);
             // Publish this Vault's structural rows before its vectors, so a
             // first index makes it browsable in seconds instead of holding
             // every read behind the embedding pass. A no-op for a Vault that

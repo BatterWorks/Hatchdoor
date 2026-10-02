@@ -3708,3 +3708,161 @@ async fn a_kept_graph_still_hides_demoted_notes_on_the_demo_surface() {
         "the reads shared a kept graph, got {builds} builds"
     );
 }
+
+/// A Vault as a demo serves it: one asset in the default layer, one under a
+/// demoted layer, and no Index turn run yet.
+struct DemoAssetVault {
+    _directory: tempfile::TempDir,
+    registry: VaultRegistryStore,
+    committed: VaultRegistrySnapshot,
+    cache: Arc<SqliteCache>,
+    collection: VaultCollectionRuntime,
+    vault_id: VaultId,
+    vault_path: PathBuf,
+}
+
+fn demo_asset_vault() -> DemoAssetVault {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(vault_path.join("sources")).expect("layer directory");
+    std::fs::create_dir_all(vault_path.join("images")).expect("image directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n").expect("home note");
+    std::fs::write(vault_path.join("images/visible.png"), b"visible").expect("visible asset");
+    std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources").expect("layer marker");
+    std::fs::write(vault_path.join("sources/hidden.png"), b"hidden").expect("hidden asset");
+    let committed = add_local_vault(&registry, &empty, "Demo", vault_path.clone());
+    let vault_id = vault_id_named(&committed, "Demo");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    DemoAssetVault {
+        _directory: directory,
+        registry,
+        committed,
+        cache,
+        collection,
+        vault_id,
+        vault_path,
+    }
+}
+
+impl DemoAssetVault {
+    fn on_demo(&self, relative_path: &str) -> bool {
+        crate::vault_read::VaultReadCore::new(&self.cache, &self.collection)
+            .on_surface(crate::vault_read::BrowseSurface::DefaultOnly)
+            .asset_on_surface(self.vault_id, relative_path)
+            .expect("asset check")
+    }
+
+    async fn index_turn(&self) {
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        dispatch_vault_index_turn(
+            &self.collection,
+            self.cache.clone(),
+            embedder,
+            crate::vault_work::VaultWorkRequest::for_tests(self.vault_id, VaultWorkKind::Index),
+        )
+        .await
+        .expect("Index turn");
+    }
+
+    fn runtime(&self) -> VaultControlBlock {
+        self.collection
+            .runtime(self.vault_id)
+            .expect("active runtime")
+    }
+}
+
+#[test]
+fn before_any_index_turn_a_demo_asset_check_walks_the_catalog_only() {
+    let vault = demo_asset_vault();
+
+    assert!(vault.on_demo("images/visible.png"));
+    assert!(!vault.on_demo("sources/hidden.png"));
+    assert!(!vault.on_demo("images/missing.png"));
+
+    let runtime = vault.runtime();
+    assert_eq!(runtime.full_index_builds(), 0, "no check may read notes");
+    assert_eq!(runtime.catalog_builds(), 3, "each check walks the catalog");
+}
+
+#[tokio::test]
+async fn an_indexed_vault_answers_demo_asset_checks_without_building_an_index() {
+    let vault = demo_asset_vault();
+    vault.index_turn().await;
+    let runtime = vault.runtime();
+    let (full, catalogs) = (runtime.full_index_builds(), runtime.catalog_builds());
+
+    for _ in 0..10 {
+        assert!(vault.on_demo("images/visible.png"));
+        assert!(!vault.on_demo("sources/hidden.png"));
+    }
+
+    assert_eq!(runtime.full_index_builds(), full);
+    assert_eq!(runtime.catalog_builds(), catalogs);
+}
+
+#[tokio::test]
+async fn a_layer_marker_moves_a_demo_asset_off_the_surface_at_the_next_index_turn() {
+    let vault = demo_asset_vault();
+    vault.index_turn().await;
+    assert!(vault.on_demo("images/visible.png"));
+
+    let marker = vault.vault_path.join("images/.hatchdoor-layer");
+    std::fs::write(&marker, "sources").expect("demote the image folder");
+    vault.index_turn().await;
+    assert!(!vault.on_demo("images/visible.png"));
+
+    std::fs::remove_file(&marker).expect("restore the image folder");
+    vault.index_turn().await;
+    assert!(vault.on_demo("images/visible.png"));
+}
+
+#[tokio::test]
+async fn a_new_asset_is_on_the_demo_surface_after_the_index_turn_that_follows_it() {
+    let vault = demo_asset_vault();
+    vault.index_turn().await;
+    assert!(!vault.on_demo("images/new.png"));
+
+    std::fs::write(vault.vault_path.join("images/new.png"), b"new").expect("add an asset");
+    vault.index_turn().await;
+
+    assert!(vault.on_demo("images/new.png"));
+}
+
+/// A definition edit builds a replacement control block, and a catalogue
+/// scanned under the old exclusions must not answer for it.
+#[tokio::test]
+async fn a_definition_edit_drops_the_retained_asset_catalogue() {
+    let vault = demo_asset_vault();
+    vault.index_turn().await;
+    assert!(vault.on_demo("images/visible.png"));
+
+    let edited = vault
+        .registry
+        .edit(
+            vault.committed.revision(),
+            vault.vault_id,
+            VaultDefinitionEdit {
+                name: "Demo".to_string(),
+                source: RegistryVaultSource::Local {
+                    path: vault.vault_path.clone(),
+                },
+                exclude_patterns: vec!["images/".to_string()],
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("exclude the image folder");
+    vault.collection.reconcile(&vault.registry, &edited);
+
+    assert!(vault.runtime().indexed_assets().is_none());
+    assert!(!vault.on_demo("images/visible.png"));
+}
