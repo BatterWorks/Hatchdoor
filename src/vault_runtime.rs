@@ -2,10 +2,8 @@ use schemars::JsonSchema;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
@@ -614,6 +612,67 @@ pub struct VaultControlBlock {
     /// branch moves (#300). A fresh block starts empty, which is right: a
     /// definition edit may point the Vault at another repository.
     note_history: Arc<crate::git::NoteHistory>,
+    /// This Vault's link graph, kept between links reads (#361). A fresh
+    /// block starts empty, and a definition edit always builds a fresh
+    /// block, so no graph outlives the settings it was scanned under.
+    link_graph: Arc<Mutex<LinkGraphCache>>,
+    /// Moves whenever this block's watcher is replaced, so a graph cached
+    /// under one watcher is never trusted under the next: the directory it
+    /// watches may have been lost and cloned again in between.
+    watcher_epoch: Arc<AtomicU64>,
+    #[cfg(test)]
+    full_index_builds: Arc<AtomicU64>,
+}
+
+/// One Vault's built link graph and what can still vouch for it.
+///
+/// The graph is the expensive half of an authoritative index: building it
+/// reads every note in the Vault. It is reused until something reports a
+/// change to the Vault on the collection's change channel, which carries both
+/// the watcher's report of an outside edit and the mutation core's report of
+/// its own write (`report_write`), sent before that write's response. An
+/// outside edit therefore shows in links and backlinks once the watcher's
+/// debounce has passed, and a Hatchdoor write shows on the very next read.
+struct LinkGraphCache {
+    /// This block's subscription to the collection's change channel. `None`
+    /// for a collection that does not watch, whose graphs are never kept.
+    changes: Option<tokio::sync::broadcast::Receiver<VaultId>>,
+    /// The graph, with the watcher epoch it was built under.
+    built: Option<(u64, Arc<crate::vault::VaultIndex>)>,
+}
+
+impl LinkGraphCache {
+    fn new(changes: Option<tokio::sync::broadcast::Receiver<VaultId>>) -> Self {
+        Self {
+            changes,
+            built: None,
+        }
+    }
+
+    /// Drop the graph if any change to `vault_id` was reported since it was
+    /// built, and say whether a graph built now could be kept. A lagged
+    /// receiver lost reports, so it drops the graph too; a closed channel can
+    /// report nothing more, so nothing is kept after it.
+    fn take_changes(&mut self, vault_id: VaultId) -> bool {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let Some(changes) = self.changes.as_mut() else {
+            self.built = None;
+            return false;
+        };
+        loop {
+            match changes.try_recv() {
+                Ok(changed) if changed == vault_id => self.built = None,
+                Ok(_) => {}
+                Err(TryRecvError::Lagged(_)) => self.built = None,
+                Err(TryRecvError::Empty) => return true,
+                Err(TryRecvError::Closed) => {
+                    self.built = None;
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 /// Say once, when a Vault's runtime is established, that its filesystem cannot
@@ -739,6 +798,12 @@ impl VaultControlBlock {
             snapshot_cache: snapshot_cache.cloned(),
             write_ledger: prior_writes.unwrap_or_else(|| Arc::new(crate::git::WriteLedger::new())),
             note_history: Arc::new(crate::git::NoteHistory::default()),
+            link_graph: Arc::new(Mutex::new(LinkGraphCache::new(
+                watching.map(|watching| watching.changes.subscribe()),
+            ))),
+            watcher_epoch: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            full_index_builds: Arc::new(AtomicU64::new(0)),
         };
         if active {
             block.start_note_history();
@@ -822,9 +887,11 @@ impl VaultControlBlock {
         Arc::clone(&self.note_history)
     }
 
-    /// Build an authoritative index for an exact read. Collection projections
-    /// use the shared disposable cache, but exact note, link, and resolve
-    /// operations must always inspect this Vault's own Markdown directory.
+    /// Build an authoritative index, link graph included, by reading every
+    /// note in this Vault's own Markdown directory. Collection projections use
+    /// the shared disposable cache instead. A links read reaches this through
+    /// [`Self::linked_index`], which keeps the result; a write that needs the
+    /// graph calls it directly.
     pub fn authoritative_index(&self) -> Result<crate::vault::VaultIndex, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
         let exclude = crate::vault::ExcludeMatcher::new(self.definition.exclude_patterns())
@@ -834,6 +901,8 @@ impl VaultControlBlock {
                 retryable: false,
                 detail: None,
             })?;
+        #[cfg(test)]
+        self.full_index_builds.fetch_add(1, Ordering::SeqCst);
         crate::vault::VaultIndex::build_with_config(
             self.vault_path(),
             &crate::vault::VaultScanConfig { exclude },
@@ -850,11 +919,79 @@ impl VaultControlBlock {
         })
     }
 
+    /// This Vault's authoritative index with its link graph, for a links read.
+    ///
+    /// Reuses the last graph built while nothing has reported a change to the
+    /// Vault since (#361). That trust rests on the watcher: a Vault whose
+    /// watcher is not running has nothing to report an outside edit, so its
+    /// graph is built for every read, exactly as before. A Hatchdoor write is
+    /// reported whether or not a watcher runs, but an outside edit is not.
+    ///
+    /// While a graph can be kept, concurrent links reads of one Vault wait for
+    /// one build rather than each starting their own. Otherwise each read
+    /// builds on its own, in parallel, as before. Every other exact read
+    /// wants [`Self::authoritative_catalog`], which reads no note's content.
+    pub fn linked_index(&self) -> Result<Arc<crate::vault::VaultIndex>, VaultRuntimeError> {
+        self.ensure_accepting_operations()?;
+        // Taken before the graph's lock so a build holding that lock for
+        // seconds never also holds the status or watcher lock, which every
+        // status read and publish needs.
+        let watched = self.watcher_running();
+        if !watched {
+            return self.authoritative_index().map(Arc::new);
+        }
+        let epoch = self.watcher_epoch.load(Ordering::SeqCst);
+        // A panic mid-build leaves `built` empty, since it is cleared before
+        // every build, so the value behind a poisoned lock is still sound.
+        let mut cache = self
+            .link_graph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let keep = cache.take_changes(self.definition.vault_id());
+        if keep
+            && let Some((built_epoch, index)) = cache.built.as_ref()
+            && *built_epoch == epoch
+        {
+            return Ok(Arc::clone(index));
+        }
+        cache.built = None;
+        let index = Arc::new(self.authoritative_index()?);
+        if keep {
+            cache.built = Some((epoch, Arc::clone(&index)));
+        }
+        Ok(index)
+    }
+
+    /// Whether an outside edit to this Vault would be reported: it is Active
+    /// and its watcher started and has not been stopped.
+    fn watcher_running(&self) -> bool {
+        let status = self.snapshot.read().unwrap_or_else(PoisonError::into_inner);
+        if status.activation != VaultActivationStatus::Active
+            || status.watcher != VaultWatcherStatus::Running
+        {
+            return false;
+        }
+        drop(status);
+        self.watcher
+            .read()
+            .expect("Vault watcher handle poisoned")
+            .as_ref()
+            .is_some_and(|watcher| !watcher.is_cancelled())
+    }
+
+    /// How many times this block has read every note in its Vault to build
+    /// an index with its link graph.
+    #[cfg(test)]
+    pub(crate) fn full_index_builds(&self) -> u64 {
+        self.full_index_builds.load(Ordering::SeqCst)
+    }
+
     /// Build this Vault's metadata-only catalog (slug/title/layer
-    /// bookkeeping, no wikilink graph) for a write response that only needs
-    /// to report a note's slug/layer after a commit already on disk. Cheaper
-    /// than `authoritative_index`: it never reads a note's content, only its
-    /// path.
+    /// bookkeeping, no wikilink graph) from its own Markdown directory. It
+    /// answers every exact read except links (#361) and every write response
+    /// that only reports a note's slug or layer. Cheaper than
+    /// `authoritative_index`: it walks paths and never reads a note's
+    /// content.
     pub fn authoritative_catalog(&self) -> Result<crate::vault::VaultIndex, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
         let exclude = crate::vault::ExcludeMatcher::new(self.definition.exclude_patterns())
@@ -1132,6 +1269,7 @@ impl VaultControlBlock {
         if let Some(previous) = slot.take() {
             previous.cancel();
         }
+        self.watcher_epoch.fetch_add(1, Ordering::SeqCst);
         let (watcher, status, error) = start_watcher(&self.definition, &self.vault_path, watching);
         *slot = watcher;
         snapshot.watcher = status;

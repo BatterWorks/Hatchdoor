@@ -487,10 +487,14 @@ export function NotePage({
   useEffect(() => {
     let cancelled = false;
 
+    // The links read can take far longer than the note read in a large
+    // Vault, so the body never waits for it (#361): the panel starts empty
+    // and fills in when its read lands.
+    setNoteLinks(null);
+    void loadNoteLinks();
     void (async () => {
       setLoading(true);
       await loadNote(true);
-      await loadNoteLinks();
       if (!cancelled) {
         setLoading(false);
       }
@@ -1377,9 +1381,9 @@ export function NotePage({
     if (noteChangedOnDisk) {
       setNoteChangedOnDisk(false);
       setLoading(true);
+      void loadNoteLinks();
       void (async () => {
         await loadNote(true);
-        await loadNoteLinks();
         setLoading(false);
       })();
     }

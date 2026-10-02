@@ -3342,3 +3342,369 @@ async fn a_refused_write_neither_stales_the_snapshot_nor_asks_for_turns() {
     );
     assert!(changes.try_recv().is_err());
 }
+
+/// A watched local Vault holding `Home.md` (linking to `Target`) and
+/// `Target.md`, for the link-graph cache tests (#361).
+struct LinkedVault {
+    _directory: tempfile::TempDir,
+    registry: VaultRegistryStore,
+    committed: VaultRegistrySnapshot,
+    cache: Arc<SqliteCache>,
+    collection: VaultCollectionRuntime,
+    vault_id: VaultId,
+    vault_path: PathBuf,
+}
+
+fn watched_linked_vault() -> LinkedVault {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\n[[Target]]").expect("home note");
+    std::fs::write(vault_path.join("Target.md"), "# Target\n").expect("target note");
+    let committed = add_local_vault(&registry, &empty, "Linked", vault_path.clone());
+    let vault_id = vault_id_named(&committed, "Linked");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    collection.reconcile(&registry, &committed);
+    assert_eq!(
+        collection
+            .runtime(vault_id)
+            .expect("active runtime")
+            .snapshot()
+            .watcher,
+        VaultWatcherStatus::Running
+    );
+    LinkedVault {
+        _directory: directory,
+        registry,
+        committed,
+        cache,
+        collection,
+        vault_id,
+        vault_path,
+    }
+}
+
+fn outgoing_slugs(runtime: &VaultControlBlock, slug: &str) -> Vec<String> {
+    runtime
+        .linked_index()
+        .expect("links index")
+        .note_links(slug)
+        .map(|links| links.outgoing.into_iter().map(|link| link.slug).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_second_links_read_of_an_unchanged_vault_reuses_its_link_graph() {
+    let LinkedVault {
+        _directory,
+        collection,
+        vault_id,
+        ..
+    } = watched_linked_vault();
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+
+    assert_eq!(outgoing_slugs(&runtime, "home"), ["target"]);
+    assert_eq!(outgoing_slugs(&runtime, "home"), ["target"]);
+    assert_eq!(outgoing_slugs(&runtime, "target"), Vec::<String>::new());
+    assert_eq!(runtime.full_index_builds(), 1);
+}
+
+#[tokio::test]
+async fn a_vault_without_a_running_watcher_builds_its_link_graph_per_read() {
+    let LinkedVault {
+        _directory,
+        collection,
+        vault_id,
+        ..
+    } = watched_linked_vault();
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    if let Some(watcher) = runtime
+        .watcher
+        .write()
+        .expect("Vault watcher handle poisoned")
+        .take()
+    {
+        watcher.cancel();
+    }
+
+    outgoing_slugs(&runtime, "home");
+    outgoing_slugs(&runtime, "home");
+    assert_eq!(
+        runtime.full_index_builds(),
+        2,
+        "nothing would report an outside edit, so no graph may be kept"
+    );
+}
+
+#[test]
+fn an_unwatched_collection_never_keeps_a_link_graph() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n").expect("home note");
+    let committed = add_local_vault(&registry, &empty, "Plain", vault_path);
+    let vault_id = vault_id_named(&committed, "Plain");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+
+    outgoing_slugs(&runtime, "home");
+    outgoing_slugs(&runtime, "home");
+    assert_eq!(runtime.full_index_builds(), 2);
+}
+
+#[tokio::test]
+async fn every_hatchdoor_write_shows_on_the_next_links_read() {
+    let LinkedVault {
+        _directory,
+        cache,
+        collection,
+        vault_id,
+        ..
+    } = watched_linked_vault();
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    let writes = crate::vault_mutation::VaultMutationCore::new(
+        &cache,
+        &collection,
+        crate::runtime_config::RuntimeConfig::for_tests().snapshot(),
+    );
+    let hash_of = |slug: &str| {
+        crate::vault_read::VaultReadCore::new(&cache, &collection)
+            .exact_note(vault_id, slug)
+            .expect("note read")
+            .expect("note")
+            .note
+            .content_hash
+    };
+    let backlinks = |slug: &str| -> Vec<String> {
+        runtime
+            .linked_index()
+            .expect("links index")
+            .note_links(slug)
+            .map(|links| links.backlinks.into_iter().map(|link| link.slug).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(outgoing_slugs(&runtime, "home"), ["target"]);
+
+    writes
+        .create_note(vault_id, "Other.md", "# Other\n\n[[Target]]", false)
+        .await
+        .expect("create");
+    assert_eq!(backlinks("target"), ["home", "other"]);
+
+    writes
+        .update_note(vault_id, "home", "# Home\n\nno links", &hash_of("home"))
+        .await
+        .expect("edit");
+    assert_eq!(outgoing_slugs(&runtime, "home"), Vec::<String>::new());
+
+    writes
+        .rename_note(vault_id, "other", "Renamed", &hash_of("other"))
+        .await
+        .expect("rename");
+    assert_eq!(backlinks("target"), ["renamed"]);
+
+    writes
+        .move_note(vault_id, "renamed", "Archive", &hash_of("renamed"))
+        .await
+        .expect("move");
+    let moved = runtime
+        .linked_index()
+        .expect("links index")
+        .note_links("target")
+        .expect("target links");
+    assert_eq!(
+        moved
+            .backlinks
+            .iter()
+            .map(|link| link.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        ["Archive/Renamed"]
+    );
+
+    writes
+        .delete_note(vault_id, "renamed", &hash_of("renamed"))
+        .await
+        .expect("delete");
+    assert_eq!(backlinks("target"), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_outside_edit_shows_in_links_once_the_watcher_reports_it() {
+    let LinkedVault {
+        _directory,
+        collection,
+        vault_id,
+        vault_path,
+        ..
+    } = watched_linked_vault();
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    assert_eq!(outgoing_slugs(&runtime, "target"), Vec::<String>::new());
+    assert_eq!(runtime.full_index_builds(), 1);
+
+    std::fs::write(vault_path.join("Target.md"), "# Target\n\n[[Home]]").expect("outside edit");
+
+    let deadline = std::time::Instant::now() + crate::vault_watcher::WATCH_MAX_DEBOUNCE * 3;
+    while outgoing_slugs(&runtime, "target").is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher's report never reached the link graph"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(runtime.full_index_builds(), 2);
+}
+
+#[tokio::test]
+async fn changing_exclude_patterns_or_reenabling_never_serves_the_old_graph() {
+    let LinkedVault {
+        _directory,
+        registry,
+        committed,
+        collection,
+        vault_id,
+        vault_path,
+        ..
+    } = watched_linked_vault();
+    let original = collection.runtime(vault_id).expect("active runtime");
+    assert_eq!(outgoing_slugs(&original, "home"), ["target"]);
+
+    // Excluding the target takes it out of the graph at once, with no
+    // filesystem event to report it.
+    let edited = registry
+        .edit(
+            committed.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Linked".to_string(),
+                source: RegistryVaultSource::Local {
+                    path: vault_path.clone(),
+                },
+                exclude_patterns: vec!["Target.md".to_string()],
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("edit exclude patterns");
+    collection.reconcile(&registry, &edited);
+    let replaced = collection.runtime(vault_id).expect("replaced runtime");
+    assert_eq!(outgoing_slugs(&replaced, "home"), Vec::<String>::new());
+    assert!(
+        original.linked_index().is_err(),
+        "the retired block must refuse rather than serve its graph"
+    );
+
+    // A link added while the Vault is disabled has no watcher to report it.
+    let disabled = registry
+        .disable(edited.revision(), vault_id)
+        .expect("disable");
+    collection.reconcile(&registry, &disabled);
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\n[[Fresh]]").expect("edit while off");
+    std::fs::write(vault_path.join("Fresh.md"), "# Fresh\n").expect("add while off");
+    let enabled = registry
+        .enable(disabled.revision(), vault_id)
+        .expect("enable");
+    collection.reconcile(&registry, &enabled);
+    let reenabled = collection.runtime(vault_id).expect("re-enabled runtime");
+    assert_eq!(outgoing_slugs(&reenabled, "home"), ["fresh"]);
+}
+
+#[test]
+fn a_lagged_change_channel_drops_the_kept_graph() {
+    let other = || VaultId::generate().expect("Vault ID");
+    let vault_id = other();
+    let directory = tempdir().expect("empty Vault directory");
+    let (sender, receiver) = tokio::sync::broadcast::channel(1);
+    let mut cache = LinkGraphCache::new(Some(receiver));
+    let index = Arc::new(crate::vault::VaultIndex::build(directory.path()).expect("empty index"));
+    cache.built = Some((0, Arc::clone(&index)));
+
+    let _ = sender.send(other());
+    assert!(cache.take_changes(vault_id));
+    assert!(cache.built.is_some(), "another Vault's change is not ours");
+
+    let _ = sender.send(other());
+    let _ = sender.send(other());
+    assert!(cache.take_changes(vault_id));
+    assert!(cache.built.is_none(), "lost reports may have been ours");
+
+    cache.built = Some((0, index));
+    drop(sender);
+    assert!(!cache.take_changes(vault_id));
+    assert!(cache.built.is_none());
+}
+
+/// One kept graph serves both surfaces, so the demo surface must still filter
+/// what an operator's read left in it (#361).
+#[tokio::test]
+async fn a_kept_graph_still_hides_demoted_notes_on_the_demo_surface() {
+    use crate::vault_read::{BrowseSurface, VaultReadCore};
+
+    let LinkedVault {
+        _directory,
+        cache,
+        collection,
+        vault_id,
+        vault_path,
+        ..
+    } = watched_linked_vault();
+    std::fs::create_dir_all(vault_path.join("private")).expect("demoted folder");
+    std::fs::write(vault_path.join("private/.hatchdoor-layer"), "private").expect("marker");
+    std::fs::write(
+        vault_path.join("private/Secret.md"),
+        "# Secret\n\n[[Target]]",
+    )
+    .expect("demoted note");
+    // The watcher reports these files; drop whatever graph that report would
+    // retire before the reads under test, so they share one build.
+    collection
+        .runtime(vault_id)
+        .expect("active runtime")
+        .report_write();
+    let operator = VaultReadCore::new(&cache, &collection);
+    let demo = VaultReadCore::new(&cache, &collection).on_surface(BrowseSurface::DefaultOnly);
+    let backlinks = |reads: &VaultReadCore<'_>| -> Vec<String> {
+        reads
+            .exact_note_links(vault_id, "target")
+            .expect("links read")
+            .expect("target links")
+            .backlinks
+            .into_iter()
+            .map(|link| link.link.slug)
+            .collect()
+    };
+
+    assert_eq!(backlinks(&operator), ["home", "secret"]);
+    assert_eq!(backlinks(&demo), ["home"]);
+    assert!(
+        demo.exact_note_links(vault_id, "secret")
+            .expect("links read")
+            .is_none(),
+        "a demoted note reads as absent on the demo surface"
+    );
+    assert_eq!(backlinks(&operator), ["home", "secret"]);
+    let builds = collection
+        .runtime(vault_id)
+        .expect("active runtime")
+        .full_index_builds();
+    assert!(
+        builds <= 2,
+        "the reads shared a kept graph, got {builds} builds"
+    );
+}
