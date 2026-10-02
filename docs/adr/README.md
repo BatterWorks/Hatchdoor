@@ -73,7 +73,7 @@ Copy this for a new record:
 | 33 | [A vault's link style is read from the vault, not set in Hatchdoor](#adr-33--a-vaults-link-style-is-read-from-the-vault-not-set-in-hatchdoor) | Accepted | Don't add a per-Vault link-style setting without a superseding record; Obsidian's recorded setting beats any count of existing links; never rewrite an agent's text into the vault's style |
 | 34 | [A transfer link's address follows the proxy's forwarded headers](#adr-34--a-transfer-links-address-follows-the-proxys-forwarded-headers) | Accepted | Don't let forwarded headers override a configured public address; don't read them for anything but a transfer link's address |
 | 35 | [A long Index turn keeps its embedding progress and takes turns with other Vaults](#adr-35--a-long-index-turn-keeps-its-embedding-progress-and-takes-turns-with-other-vaults) | Accepted; decisions 1 and 2 implemented in #382, 3 to 5 in #383 | Don't let a partly embedded Vault answer search; don't embed two Vaults at once; don't let a paused Index turn jump the queue; never make saved progress authoritative |
-| 36 | [A release is cut by two commands, and only the maintainer approves its notes](#adr-36--a-release-is-cut-by-two-commands-and-only-the-maintainer-approves-its-notes) | Proposed | Don't overwrite a published version, don't publish without the maintainer's approval of the notes, and don't put private infrastructure in the public release commands |
+| 36 | [A release is cut by two commands, and only the maintainer approves its notes](#adr-36--a-release-is-cut-by-two-commands-and-only-the-maintainer-approves-its-notes) | Accepted; implemented in #402, #403 and #404 | Don't overwrite a published version, don't publish without the maintainer's approval of the notes, and don't put private infrastructure in the public release commands |
 
 > Records 01–13 were reconstructed and adopted on 2026-07-19 from the codebase,
 > the CHANGELOG audit fixes (`F-01`…`F-17`), and the semantic-search evaluation.
@@ -90,7 +90,7 @@ Copy this for a new record:
 > Record 32 was added on 2026-10-01 from the triage of #303.
 > Record 33 was added on 2026-10-01 from the triage of #357.
 > Record 35 was added on 2026-10-01 from the triage of #375.
-> Record 36 was added on 2026-10-02 from the release pipeline design session.
+> Record 36 was added on 2026-10-02 for #402, #403 and #404.
 
 ---
 
@@ -452,7 +452,7 @@ Copy this for a new record:
 
 ## ADR-36 — A release is cut by two commands, and only the maintainer approves its notes
 
-- **Status:** Proposed. Not yet implemented; v2.7.0 is to be the first release cut this way.
+- **Status:** Accepted. `just release-prepare` is implemented in #402, `just release-publish` in #403, and the runbook and the `AGENTS.md` approval rule in #404. v2.7.0 is to be the first release cut this way.
 - **Context:** Every release so far was assembled by hand from `docs/maintenance/release-runbook.md`, and the hand steps drifted. Docker Hub carries `v2.3.0` beside `2.4.0` and `podman-v2.4.0` beside `podman-2.5.0`. The v2.6.1 Podman tags on Docker Hub were copied from the moving `podman-latest` instead of the fixed version. The README's publishing section still describes a single-architecture `docker build`. Nothing updates the servers that run release images, so they keep the previous version until someone pulls by hand. A release publishes four images: a Docker BuildKit build and a Podman build, each for amd64 and arm64, as a multi-arch `X.Y.Z` / `latest` pair and a `podman-X.Y.Z` / `podman-latest` pair. The two pairs are separate builds, not copies: the BuildKit pair carries attestation manifests the Podman pair does not, and Podman users are told to pull the `podman-` tags. Some steps are generic (version files, changelog, checks, the release pull request, the git tag, the GitHub Release). Others depend on the maintainer's own infrastructure: the build machines, an internal registry, and the deployment configuration of the servers that run releases. This repository is public, and that infrastructure is not documented in it. Releases are carried out by an agent; the maintainer's only release task is approving the release notes. The agent works through the maintainer's GitHub account, so no GitHub permission can tell the two apart. Three homes for the pipeline were weighed: a command run on the maintainer's build machine, GitHub Actions, and a self-hosted Actions runner.
 - **Decision:**
   1. **Two commands, run on the maintainer's build machine.** `just release-prepare <version>` opens a pull request into `development` that sets the version in `Cargo.toml`, `Cargo.lock`, `frontend/package.json` and `frontend/package-lock.json` and renames the changelog's `## Unreleased` heading to `## v<version> - <date>`. Once that merges, it opens the `development` to `main` release pull request and creates a draft GitHub Release from the changelog section. `just release-publish <version>` does everything from the merge on, including the merge itself. Hosted CI plays no part.
