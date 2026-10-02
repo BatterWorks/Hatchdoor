@@ -121,7 +121,7 @@ the swap, saying so in these terms. If the Vault's write settings are shown in
 the Web UI, it says so there too.
 
 > [!note]
-> Before version 2.6.2 there was no fallback, so a Vault on one of those
+> Before version 2.7.0 there was no fallback, so a Vault on one of those
 > filesystems could create notes but not edit, move or delete them, and the
 > failure reached you only as `Invalid argument (os error 22)` in your agent's
 > log. If you saw that, upgrading fixes it. Nothing was damaged: those writes
