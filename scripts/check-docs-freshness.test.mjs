@@ -75,6 +75,7 @@ async function fixture() {
   await write(root, "src/mcp/tools/read.rs");
   await write(root, "src/lib.rs");
   await write(root, "frontend/src/App.tsx");
+  await write(root, "CHANGELOG.md", "# Changelog\n\n## Unreleased\n");
   for (const note of FIXTURE_NOTES) {
     await write(root, note, `# ${path.basename(note, ".md")}\n`);
   }
@@ -95,9 +96,23 @@ async function fixture() {
   return root;
 }
 
-async function commit(root, message) {
+async function commit(root, message, ...paragraphs) {
   git(root, ["add", "."]);
-  git(root, ["commit", "--quiet", "-m", message]);
+  git(root, [
+    "commit",
+    "--quiet",
+    "-m",
+    message,
+    ...paragraphs.flatMap((paragraph) => ["-m", paragraph]),
+  ]);
+}
+
+async function addChangelogEntry(root) {
+  await write(
+    root,
+    "CHANGELOG.md",
+    "# Changelog\n\n## Unreleased\n\n### Fixed\n- Something. [#1]\n",
+  );
 }
 
 afterEach(async () => {
@@ -111,7 +126,7 @@ afterEach(async () => {
 test("passes when no user-facing surface changed", async () => {
   const root = await fixture();
   await write(root, "src/lib.rs", "// internal refactor\n");
-  await commit(root, "refactor");
+  await commit(root, "refactor", "Changelog: none, internal refactor");
 
   const result = run(root);
   assert.equal(result.status, 0);
@@ -160,6 +175,7 @@ test("counts uncommitted working-tree changes", async () => {
 test("--acknowledge records the review and exits zero", async () => {
   const root = await fixture();
   await write(root, "src/mcp/tools/read.rs", "// a new tool\n");
+  await addChangelogEntry(root);
   await commit(root, "add a tool");
 
   const result = run(root, ["--acknowledge"]);
@@ -282,7 +298,7 @@ test("--base selects the ref it was given", async () => {
   await commit(root, "add a tool");
   git(root, ["tag", "after-tool"]);
   await write(root, "src/lib.rs", "// internal only\n");
-  await commit(root, "internal");
+  await commit(root, "internal", "Changelog: none, internal only");
 
   const result = run(root, ["--base", "after-tool"]);
   assert.equal(result.status, 0, "only internal changes since the tag");
@@ -352,4 +368,92 @@ test("exits 2 when the base ref does not exist", async () => {
   const result = run(root, ["--base", "no-such-branch"]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /no ref named no-such-branch/);
+});
+
+// The changelog half of the gate. About forty merges after v2.6.1 shipped
+// without an entry because nothing asked for one.
+test("refuses shipped code with no changelog entry, even with no surface", async () => {
+  const root = await fixture();
+  await write(root, "src/lib.rs", "// a behaviour change\n");
+  await commit(root, "change");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /CHANGELOG ENTRY MISSING/);
+  assert.match(result.stderr, /src\/lib\.rs/);
+  assert.match(result.stderr, /Changelog: none, <reason>/);
+});
+
+test("--acknowledge does not waive a missing changelog entry", async () => {
+  const root = await fixture();
+  await write(root, "src/mcp/tools/read.rs", "// a new tool\n");
+  await commit(root, "add a tool");
+
+  const result = run(root, ["--acknowledge"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /CHANGELOG ENTRY MISSING/);
+  assert.match(result.stderr, /does not waive it/);
+});
+
+test("counts an uncommitted changelog edit", async () => {
+  const root = await fixture();
+  await write(root, "src/mcp/tools/read.rs", "// a new tool\n");
+  await commit(root, "add a tool");
+  await addChangelogEntry(root);
+
+  const result = run(root, ["--acknowledge"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /CHANGELOG\.md is edited on this branch/);
+});
+
+test("a Changelog trailer on a branch commit waives the entry and is reported", async () => {
+  const root = await fixture();
+  await write(root, "src/mcp/tools/read.rs", "// reword a doc comment\n");
+  await commit(
+    root,
+    "reword",
+    "Changelog: none, doc comment only\nCo-Authored-By: Someone <a@example.com>",
+  );
+
+  const result = run(root, ["--acknowledge"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /No entry, by trailer: none, doc comment only/);
+});
+
+test("a trailer committed before the branch point does not count", async () => {
+  const root = await fixture();
+  git(root, ["switch", "--quiet", "development"]);
+  await write(root, "README.md", "readme\n");
+  await commit(root, "old", "Changelog: none, an older change");
+  git(root, ["switch", "--quiet", "-c", "later"]);
+  await write(root, "src/lib.rs", "// a behaviour change\n");
+  await commit(root, "change");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /CHANGELOG ENTRY MISSING/);
+});
+
+test("test-only changes need no changelog entry", async () => {
+  const root = await fixture();
+  await write(root, "src/vault/tests.rs", "// a test\n");
+  await write(root, "src/vault_runtime/tests/fixtures.rs", "// a fixture\n");
+  await write(root, "frontend/src/App.test.tsx", "// a test\n");
+  await write(root, "frontend/src/test/setup.ts", "// test setup\n");
+  await commit(root, "tests");
+
+  const result = run(root, ["--acknowledge"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /CHANGELOG/);
+});
+
+test("a dependency change needs a changelog entry", async () => {
+  const root = await fixture();
+  await write(root, "Cargo.toml", "[package]\n");
+  await commit(root, "bump");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Cargo\.toml/);
+  assert.match(result.stderr, /CHANGELOG ENTRY MISSING/);
 });

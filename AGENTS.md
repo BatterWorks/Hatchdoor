@@ -184,11 +184,15 @@ changed. Update the notes that drifted (wording, examples, tool and setting
 names, described behavior) as part of this branch, not later. A note reported
 as "edited on this branch" only means the file moved; check it like the rest.
 
+The same run checks the changelog. A branch that changes code Hatchdoor ships (`src/`, `frontend/src/`, `Cargo.toml`, the frontend's `package.json`, `index.html` and `public/`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `docs/starter-vault/`) must edit `CHANGELOG.md`, test files excepted. Write the entry under `## Unreleased` as part of the work, not when the check fails: one single-line paragraph under Added, Changed or Fixed, ending in `[#N]`, with the matching `[#N]:` link above the first release heading. Missing entries in recent commits are not a precedent. Only when nothing a user, operator or agent can notice changed (a test-only change, an internal refactor) put a `Changelog: none, <reason>` trailer on one of the branch's commits instead.
+
 Then record the review:
 
 ```bash
 just docs-freshness-ack
 ```
+
+Acknowledging covers the note review only. It never waives a missing changelog entry.
 
 Do not acknowledge a review you did not perform, and do not treat a clean
 `docs-freshness` run as permission to skip reading when you know a note is
