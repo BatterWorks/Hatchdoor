@@ -9,6 +9,13 @@
 # lets the repo stay clonable on any platform.
 #
 # Usage: scripts/dev-vaults.sh <clean|messy|broken|demo>
+#
+# HATCHDOOR_DEV_GIT_BASE, when set, is the base URL of a real Git host holding
+# the two Git fixture repositories (hatchdoor-dev-vault-ok, public, and
+# hatchdoor-dev-vault-private, which refuses anonymous clones). It is read from
+# the environment, so set it in local, untracked configuration such as a shell
+# profile. Without it the messy and broken profiles keep only the
+# unreachable-remote Git fixture.
 
 set -euo pipefail
 
@@ -737,10 +744,24 @@ ID_DEMO_LLM_WIKI="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 ID_DEMO_ZETTELKASTEN="cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 ID_DEMO_FLAT="dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
-# Real repositories on the lab Forgejo. The three Git fixtures fail (or not) in
-# genuinely different code paths: a bad hostname never resolves, a private repo
-# resolves and is refused, and the public one must actually clone and index.
-FORGEJO_BASE="https://forgejo.batterlan.cc/battermanz"
+# The three Git fixtures fail (or not) in genuinely different code paths: a bad
+# hostname never resolves, a private repo resolves and is refused, and the
+# public one must actually clone and index.
+GIT_BASE="${HATCHDOOR_DEV_GIT_BASE:-}"
+GIT_BASE="${GIT_BASE%/}"
+
+git_entries=()
+add_git_entries() {
+    git_entries=("$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://git.invalid/hatchdoor-dev/nope.git" true)")
+    if [ -n "$GIT_BASE" ]; then
+        git_entries+=(
+            "$(git_vault_entry "$ID_GIT_OK" '"Git — clones cleanly"' "$GIT_BASE/hatchdoor-dev-vault-ok.git" true)"
+            "$(git_vault_entry "$ID_GIT_AUTH" '"Git — auth refused"' "$GIT_BASE/hatchdoor-dev-vault-private.git" true)"
+        )
+    else
+        echo "HATCHDOOR_DEV_GIT_BASE unset: skipping the 'clones cleanly' and 'auth refused' Git fixtures" >&2
+    fi
+}
 
 reset_tree
 
@@ -756,6 +777,7 @@ case "$profile" in
         build_readonly
         build_empty
         build_disabled
+        add_git_entries
         write_registry \
             "$(vault_entry "$ID_HEALTHY" '"Healthy"' "$vaults_dir/healthy" true)" \
             "$(vault_entry "$ID_PATHOLOGICAL" '"Pathological — 病理的 — مرضي"' "$vaults_dir/pathological" true)" \
@@ -763,22 +785,19 @@ case "$profile" in
             "$(vault_entry "$ID_EMPTY" '"Empty"' "$vaults_dir/empty" true)" \
             "$(vault_entry "$ID_MISSING" '"Missing path"' "$vaults_dir/does-not-exist" true)" \
             "$(vault_entry "$ID_DISABLED" '"Disabled"' "$vaults_dir/disabled" false)" \
-            "$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://forgejo.invalid/hatchdoor-dev/nope.git" true)" \
-            "$(git_vault_entry "$ID_GIT_OK" '"Git — clones cleanly"' "$FORGEJO_BASE/hatchdoor-dev-vault-ok.git" true)" \
-            "$(git_vault_entry "$ID_GIT_AUTH" '"Git — auth refused"' "$FORGEJO_BASE/hatchdoor-dev-vault-private.git" true)"
+            "${git_entries[@]}"
         ;;
     broken)
         build_readonly
         build_empty
         build_disabled
+        add_git_entries
         write_registry \
             "$(vault_entry "$ID_READONLY" '"Read-only"' "$vaults_dir/readonly" true)" \
             "$(vault_entry "$ID_EMPTY" '"Empty"' "$vaults_dir/empty" true)" \
             "$(vault_entry "$ID_MISSING" '"Missing path"' "$vaults_dir/does-not-exist" true)" \
             "$(vault_entry "$ID_DISABLED" '"Disabled"' "$vaults_dir/disabled" false)" \
-            "$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://forgejo.invalid/hatchdoor-dev/nope.git" true)" \
-            "$(git_vault_entry "$ID_GIT_OK" '"Git — clones cleanly"' "$FORGEJO_BASE/hatchdoor-dev-vault-ok.git" true)" \
-            "$(git_vault_entry "$ID_GIT_AUTH" '"Git — auth refused"' "$FORGEJO_BASE/hatchdoor-dev-vault-private.git" true)"
+            "${git_entries[@]}"
         ;;
     demo)
         build_demo_vault "para"
