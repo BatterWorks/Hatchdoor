@@ -74,7 +74,7 @@ Two related, more specific errors:
 | `git` | `disabled`, `pending`, `ready`, `unavailable` | Only meaningful for a Git-backed Vault |
 | `watcher` | `running`, `disabled`, `unavailable` | Whether file-change detection is active |
 
-`browsable` (not `ready`) right after connecting a Vault isn't broken — it means structural indexing finished but the semantic embedding pass hasn't yet, which happens once per Vault's first successful index. `stale` means content changed and a reindex hasn't completed yet; give it a moment. Anything reporting `unavailable` carries a matching `*_error` field (`activation_error`, `search_error`, `git_error`, `watcher_error`) with a real error code and message — read that field before guessing at a cause.
+`browsable` (not `ready`) right after connecting a Vault isn't broken — it means structural indexing finished but the semantic embedding pass hasn't yet, which happens once per Vault's first successful index. Restarting Hatchdoor during that pass does not lose its work: the next pass picks up from the chunks already embedded. `stale` means content changed and a reindex hasn't completed yet; give it a moment. Anything reporting `unavailable` carries a matching `*_error` field (`activation_error`, `search_error`, `git_error`, `watcher_error`) with a real error code and message — read that field before guessing at a cause.
 
 ## Permission denied reading or writing the Vault
 

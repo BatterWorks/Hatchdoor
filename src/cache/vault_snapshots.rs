@@ -1,8 +1,9 @@
 //! Vault-qualified snapshot storage for the shared disposable SQLite cache.
 #![allow(dead_code)] // #92 is the first shared-core consumer of this internal cache seam.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -145,6 +146,233 @@ pub(crate) struct VaultSnapshotLink {
     pub(crate) target_slug: String,
 }
 
+/// How long an Index turn may embed before the vectors it has computed are
+/// written to disk. A process killed outright loses at most this much work;
+/// an error or a panic that ends the build flushes the rest on the way out.
+const SAVE_EMBEDDINGS_EVERY: Duration = Duration::from_secs(10);
+
+/// One Vault's saved embedding progress (ADR-35): the vectors an Index turn
+/// computed and has not yet published, kept in the shared on-disk cache so an
+/// interrupted turn resumes instead of starting over.
+///
+/// Saved vectors are never searchable. They sit in their own table, which no
+/// search reads, until the turn that needs them publishes a complete
+/// generation and the table's rows for this Vault are deleted in the same
+/// transaction. Losing them costs time, never data (ADR-01).
+///
+/// A row is reused only under the search model and the embed-layers policy it
+/// was saved with; opening the store discards the Vault's rows saved under
+/// anything else. Saving is an optimisation, so a failure to save or to look
+/// up is logged and the build carries on.
+///
+/// Saves belong to one snapshot attempt and stop once a newer attempt
+/// supersedes it. Removing a Vault begins one, so a turn still embedding a
+/// removed Vault cannot write its progress back after the removal deleted it.
+pub(crate) struct SavedEmbeddings<'a> {
+    cache: &'a SqliteCache,
+    vault: VaultId,
+    attempt: u64,
+    vault_id: String,
+    embedder_id: String,
+    embed_layers: bool,
+    pending: Vec<SavedEmbedding>,
+    last_saved: Instant,
+}
+
+struct SavedEmbedding {
+    content_hash: String,
+    embedding: Vec<u8>,
+    millis: i64,
+}
+
+/// A vector found in saved progress, with the embedding time it cost, so a
+/// resumed turn's time estimate keeps the throughput the saved work ran at.
+pub(crate) struct SavedVector {
+    pub(crate) vector: Vec<f32>,
+    pub(crate) took: Duration,
+}
+
+impl<'a> SavedEmbeddings<'a> {
+    fn open(
+        cache: &'a SqliteCache,
+        vault: VaultId,
+        attempt: u64,
+        embedder_id: String,
+        embed_layers: bool,
+    ) -> Result<Self, String> {
+        let vault_id = vault.to_string();
+        // Vectors from another model are no use to any Vault, so they go
+        // wherever they are; another embed-layers policy is this turn's own
+        // setting, so only this Vault's rows are judged by it.
+        cache
+            .connection()?
+            .execute(
+                "DELETE FROM vault_embedding_progress \
+                 WHERE embedder_id <> ?2 OR (vault_id = ?1 AND embed_layers <> ?3)",
+                params![vault_id, embedder_id, i64::from(embed_layers)],
+            )
+            .map_err(|error| format!("discard unusable saved embedding progress: {error}"))?;
+        Ok(Self {
+            cache,
+            vault,
+            attempt,
+            vault_id,
+            embedder_id,
+            embed_layers,
+            pending: Vec::new(),
+            last_saved: Instant::now(),
+        })
+    }
+
+    /// The saved vector for this embedding input, if an earlier turn computed
+    /// one.
+    pub(crate) fn find(&self, content_hash: &str) -> Option<SavedVector> {
+        let found = self.cache.read().and_then(|conn| {
+            conn.query_row(
+                "SELECT embedding, embedding_millis FROM vault_embedding_progress \
+                 WHERE vault_id = ?1 AND content_hash = ?2",
+                params![self.vault_id, content_hash],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read saved embedding: {error}"))
+        });
+        match found {
+            Ok(found) => found.map(|(bytes, millis)| SavedVector {
+                vector: bytemuck::pod_collect_to_vec(&bytes),
+                took: Duration::from_millis(u64::try_from(millis).unwrap_or_default()),
+            }),
+            Err(error) => {
+                tracing::warn!(%error, "could not read saved embedding progress; embedding again");
+                None
+            }
+        }
+    }
+
+    /// Keep only the saved vectors this turn can still use. Anything else
+    /// belongs to content that has left the Vault or changed since, and
+    /// would otherwise sit in the cache until the Vault next publishes.
+    pub(crate) fn retain(&mut self, wanted: &HashSet<&str>) {
+        let pruned = (|| -> Result<usize, String> {
+            let mut conn = self.cache.connection()?;
+            let tx = conn
+                .transaction()
+                .map_err(|error| format!("start pruning saved embeddings: {error}"))?;
+            let saved = {
+                let mut statement = tx
+                    .prepare(
+                        "SELECT content_hash FROM vault_embedding_progress WHERE vault_id = ?1",
+                    )
+                    .map_err(|error| format!("prepare saved embedding hashes: {error}"))?;
+                statement
+                    .query_map(params![self.vault_id], |row| row.get::<_, String>(0))
+                    .map_err(|error| format!("query saved embedding hashes: {error}"))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|error| format!("read saved embedding hash: {error}"))?
+            };
+            let mut pruned = 0;
+            for hash in saved.iter().filter(|hash| !wanted.contains(hash.as_str())) {
+                pruned += tx
+                    .execute(
+                        "DELETE FROM vault_embedding_progress \
+                         WHERE vault_id = ?1 AND content_hash = ?2",
+                        params![self.vault_id, hash],
+                    )
+                    .map_err(|error| format!("prune saved embedding: {error}"))?;
+            }
+            tx.commit()
+                .map_err(|error| format!("commit pruning saved embeddings: {error}"))?;
+            Ok(pruned)
+        })();
+        match pruned {
+            Ok(0) => {}
+            Ok(pruned) => tracing::debug!(
+                pruned,
+                "Dropped saved embeddings this Vault no longer needs"
+            ),
+            Err(error) => tracing::warn!(%error, "could not prune saved embedding progress"),
+        }
+    }
+
+    /// Remember a vector this turn just computed, and write everything
+    /// remembered so far once the save interval has passed.
+    pub(crate) fn record(&mut self, content_hash: &str, vector: &[f32], took: Duration) {
+        self.pending.push(SavedEmbedding {
+            content_hash: content_hash.to_string(),
+            embedding: bytemuck::cast_slice(vector).to_vec(),
+            millis: i64::try_from(took.as_millis()).unwrap_or(i64::MAX),
+        });
+        if self.last_saved.elapsed() >= SAVE_EMBEDDINGS_EVERY {
+            self.save();
+        }
+    }
+
+    /// Write every remembered vector to disk in one transaction.
+    fn save(&mut self) {
+        self.last_saved = Instant::now();
+        if self.pending.is_empty() {
+            return;
+        }
+        // Held across the write, in the order publication takes the same
+        // two locks, so a removal either lands before this check or deletes
+        // what this save wrote.
+        let attempts = self
+            .cache
+            .vault_snapshot_attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if attempts.get(&self.vault).copied() != Some(self.attempt) {
+            tracing::debug!(
+                "a newer snapshot attempt superseded this turn; not saving its progress"
+            );
+            self.pending.clear();
+            return;
+        }
+        let saved = (|| -> Result<(), String> {
+            let mut conn = self.cache.connection()?;
+            let tx = conn
+                .transaction()
+                .map_err(|error| format!("start saving embeddings: {error}"))?;
+            for saved in &self.pending {
+                tx.execute(
+                    "INSERT INTO vault_embedding_progress(vault_id, content_hash, embedder_id, \
+                     embed_layers, embedding, embedding_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                     ON CONFLICT(vault_id, content_hash) DO UPDATE SET \
+                     embedder_id = excluded.embedder_id, embed_layers = excluded.embed_layers, \
+                     embedding = excluded.embedding, embedding_millis = excluded.embedding_millis",
+                    params![
+                        self.vault_id,
+                        saved.content_hash,
+                        self.embedder_id,
+                        i64::from(self.embed_layers),
+                        saved.embedding,
+                        saved.millis,
+                    ],
+                )
+                .map_err(|error| format!("save embedding: {error}"))?;
+            }
+            tx.commit()
+                .map_err(|error| format!("commit saved embeddings: {error}"))
+        })();
+        drop(attempts);
+        match saved {
+            Ok(()) => self.pending.clear(),
+            Err(error) => {
+                tracing::warn!(%error, "could not save embedding progress; it will be retried")
+            }
+        }
+    }
+}
+
+/// However the build ends, whatever it computed since the last save reaches
+/// disk: a finished build's publication then deletes it, and an interrupted
+/// one's next turn reuses it.
+impl Drop for SavedEmbeddings<'_> {
+    fn drop(&mut self) {
+        self.save();
+    }
+}
+
 enum SnapshotRelation {
     Notes,
     Links,
@@ -225,6 +453,21 @@ impl SqliteCache {
             ),
             None => (None, None),
         };
+        // Opened after the model check above, so a model change has already
+        // wiped every saved vector along with the rest of the cache.
+        let saved_embeddings =
+            match SavedEmbeddings::open(self, vault_id, attempt, embedder.identity(), embed_layers)
+            {
+                Ok(saved) => Some(saved),
+                Err(error) => {
+                    tracing::warn!(
+                        %vault_id,
+                        %error,
+                        "could not open saved embedding progress; this turn embeds without it"
+                    );
+                    None
+                }
+            };
         let result = (|| {
             let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
             // Seed the empty candidate with this Vault's published rows so the
@@ -247,6 +490,7 @@ impl SqliteCache {
                     vault_id: Some(vault_id),
                     on_progress,
                     vault_read_guard,
+                    saved_embeddings,
                 },
                 embed_layers,
                 &BuildOptions::default(),
@@ -405,13 +649,19 @@ impl SqliteCache {
         Ok(())
     }
 
-    /// Forget exactly one Vault's disposable shared-cache rows.
+    /// Forget exactly one Vault's disposable shared-cache rows, its saved
+    /// embedding progress included.
+    ///
+    /// Begins a snapshot attempt first, so an Index turn still building this
+    /// Vault can neither publish nor save progress after the rows are gone.
     pub(crate) fn disconnect_vault_snapshot(&self, vault_id: VaultId) -> Result<(), String> {
+        self.begin_vault_snapshot_attempt(vault_id)?;
         let mut conn = self.connection()?;
         let tx = conn
             .transaction()
             .map_err(|error| format!("start Vault snapshot disconnect: {error}"))?;
         delete_vault_snapshot(&tx, &vault_id.to_string())?;
+        delete_saved_embeddings(&tx, &vault_id.to_string())?;
         tx.commit()
             .map_err(|error| format!("commit Vault snapshot disconnect: {error}"))
     }
@@ -452,11 +702,16 @@ impl SqliteCache {
     }
 
     /// Enumerate every Vault with disposable snapshot state so current
-    /// registry reconciliation can remove disconnected orphans.
+    /// registry reconciliation can remove disconnected orphans. Saved
+    /// embedding progress counts: a Vault removed before its first
+    /// publication can leave nothing else behind.
     pub(crate) fn snapshot_vault_ids(&self) -> Result<Vec<VaultId>, String> {
         let conn = self.read()?;
         let mut statement = conn
-            .prepare("SELECT vault_id FROM vault_snapshots ORDER BY vault_id")
+            .prepare(
+                "SELECT vault_id FROM vault_snapshots \
+                 UNION SELECT vault_id FROM vault_embedding_progress ORDER BY vault_id",
+            )
             .map_err(|error| format!("prepare snapshot Vault IDs: {error}"))?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -889,6 +1144,13 @@ impl SqliteCache {
         copy_headings(&tx, &source, &vault_id)?;
         copy_tags(&tx, &source, &vault_id)?;
         copy_chunks_and_vectors(&tx, &source, &vault_id)?;
+        // A searchable generation carries a vector for every chunk, so the
+        // progress saved on the way to it has nothing left to resume. A
+        // structure-only one does not, and the embedding pass that follows
+        // it still needs that progress.
+        if searchable {
+            delete_saved_embeddings(&tx, &vault_id)?;
+        }
         tx.execute(
             "INSERT INTO metadata(key, value) VALUES ('embedder_id', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -928,6 +1190,15 @@ fn delete_vault_snapshot(tx: &Transaction<'_>, vault_id: &str) -> Result<(), Str
         params![vault_id],
     )
     .map_err(|error| format!("clear Vault snapshot rows: {error}"))?;
+    Ok(())
+}
+
+fn delete_saved_embeddings(tx: &Transaction<'_>, vault_id: &str) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM vault_embedding_progress WHERE vault_id = ?1",
+        params![vault_id],
+    )
+    .map_err(|error| format!("clear Vault saved embedding progress: {error}"))?;
     Ok(())
 }
 
@@ -2517,5 +2788,569 @@ mod tests {
             cache.get_metadata("embedder_id").expect("global"),
             Some("stub-384".to_string())
         );
+    }
+
+    /// Embeds like [`CountingEmbedder`] under a chosen identity until `limit`
+    /// texts are done, then panics on the next call: the way a crash or a
+    /// restart cuts an Index turn short partway through its embedding.
+    struct InterruptingEmbedder {
+        inner: StubEmbedder,
+        identity: &'static str,
+        limit: usize,
+        embedded: std::sync::atomic::AtomicUsize,
+    }
+    impl Embedder for InterruptingEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            let done = self.embedded.load(std::sync::atomic::Ordering::Relaxed);
+            if done + texts.len() > self.limit {
+                panic!("the Index turn was interrupted after {done} chunks");
+            }
+            self.embedded
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::Relaxed);
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+        fn identity(&self) -> String {
+            self.identity.to_string()
+        }
+        fn token_count(&self, text: &str, add: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add)
+        }
+    }
+
+    /// Run one embedding build that stops after `limit` chunks.
+    fn interrupted_build(
+        cache: &SqliteCache,
+        vault_id: VaultId,
+        index: &VaultIndex,
+        identity: &'static str,
+        limit: usize,
+    ) {
+        interrupted_build_with_layers(cache, vault_id, index, identity, limit, true);
+    }
+
+    fn interrupted_build_with_layers(
+        cache: &SqliteCache,
+        vault_id: VaultId,
+        index: &VaultIndex,
+        identity: &'static str,
+        limit: usize,
+        embed_layers: bool,
+    ) {
+        let embedder = InterruptingEmbedder {
+            inner: StubEmbedder::new(384),
+            identity,
+            limit,
+            embedded: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.replace_vault_snapshot_with_embed_layers(vault_id, index, &embedder, embed_layers)
+        }));
+        assert!(outcome.is_err(), "the build must have been interrupted");
+        assert_eq!(
+            embedder.embedded.load(std::sync::atomic::Ordering::Relaxed),
+            limit,
+            "the interrupted build embedded exactly {limit} chunks first"
+        );
+    }
+
+    /// How many vectors this Vault has saved but not yet published.
+    fn saved_vectors(cache: &SqliteCache, vault_id: VaultId) -> usize {
+        let conn = cache.read().expect("read connection");
+        conn.query_row(
+            "SELECT COUNT(*) FROM vault_embedding_progress WHERE vault_id = ?1",
+            params![vault_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("count saved vectors") as usize
+    }
+
+    const THREE_NOTES: &[(&str, &str)] = &[
+        ("A.md", "# A\n\nalpha body"),
+        ("B.md", "# B\n\nbravo body"),
+        ("C.md", "# C\n\ncharlie body"),
+    ];
+
+    /// ADR-35 decisions 1 and 2: an interrupted first build keeps the vectors
+    /// it computed, the Vault is not searchable from them, and the next build
+    /// embeds only what the first did not save.
+    #[test]
+    fn an_interrupted_build_resumes_from_the_vectors_it_saved() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        let same_model = NamedEmbedder {
+            inner: StubEmbedder::new(384),
+            identity: "counting-384",
+        };
+        cache
+            .publish_vault_structure_snapshot(id, &index, &same_model, true)
+            .expect("publish structure-only snapshot");
+
+        interrupted_build(&cache, id, &index, "counting-384", 2);
+
+        assert_eq!(
+            saved_vectors(&cache, id),
+            2,
+            "both finished chunks are saved"
+        );
+        let status = cache
+            .snapshot_status(id)
+            .expect("read status")
+            .expect("snapshot");
+        assert!(
+            !status.searchable,
+            "saved progress must never make a partly embedded Vault searchable"
+        );
+        assert_eq!(
+            vectored_chunks(&cache, id),
+            0,
+            "no partial vector reaches the searchable tables"
+        );
+        let query = StubEmbedder::new(384)
+            .embed(&["alpha body".to_string()])
+            .expect("embed query")
+            .remove(0);
+        let hits = cache
+            .vault_semantic_search_layered_with_vector(
+                &cache.read().expect("read"),
+                &[id],
+                &query,
+                10,
+                &crate::search::LayerSelection::All,
+            )
+            .expect("semantic search");
+        assert!(
+            hits.is_empty(),
+            "search finds nothing from the partial work: {hits:?}"
+        );
+
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("the resumed build publishes");
+        assert_eq!(
+            embedder.embedded(),
+            1,
+            "the resumed build embeds only the chunk the interrupted one did not save"
+        );
+        assert_eq!(vectored_chunks(&cache, id), 3);
+        assert!(
+            cache
+                .snapshot_status(id)
+                .expect("read status")
+                .expect("snapshot")
+                .searchable
+        );
+        assert_eq!(
+            saved_vectors(&cache, id),
+            0,
+            "publication takes over the saved vectors, so they do not pile up"
+        );
+    }
+
+    /// A Vault that already answers search keeps answering from its prior
+    /// generation, marked stale, while an interrupted rebuild's vectors sit
+    /// unpublished.
+    #[test]
+    fn an_interrupted_rebuild_keeps_serving_the_prior_generation() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, first_index) = index(THREE_NOTES);
+        cache
+            .replace_vault_snapshot(id, &first_index, &StubEmbedder::new(384))
+            .expect("publish the first generation");
+        for (path, body) in [
+            ("A.md", "# A\n\nalpha, edited"),
+            ("B.md", "# B\n\nbravo, edited"),
+        ] {
+            std::fs::write(directory.path().join(path), body).expect("edit note");
+        }
+        let edited = VaultIndex::build(directory.path()).expect("rebuild index");
+
+        // The executor marks the snapshot stale for the length of the turn.
+        cache.mark_vault_snapshot_stale(id).expect("mark stale");
+        interrupted_build(&cache, id, &edited, "stub-384", 1);
+
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Stale,
+                searchable: true,
+            })
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "a")
+                .expect("content")
+                .as_deref(),
+            Some("# A\n\nalpha body"),
+            "search still reads the prior generation, not the partial rebuild"
+        );
+        assert_eq!(saved_vectors(&cache, id), 1);
+
+        let embedder = NamedCountingEmbedder::new("stub-384");
+        cache
+            .replace_vault_snapshot(id, &edited, &embedder)
+            .expect("the resumed rebuild publishes");
+        assert_eq!(embedder.embedded(), 1, "one edited chunk was saved already");
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "b")
+                .expect("content")
+                .as_deref(),
+            Some("# B\n\nbravo, edited")
+        );
+        assert_eq!(vectored_chunks(&cache, id), 3);
+    }
+
+    /// A different search model means a different vector space, so nothing
+    /// saved under the old one may be reused, and it is thrown away.
+    #[test]
+    fn a_changed_embedder_discards_saved_progress() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        let old_model = NamedEmbedder {
+            inner: StubEmbedder::new(384),
+            identity: "old-model-384",
+        };
+        cache
+            .publish_vault_structure_snapshot(id, &index, &old_model, true)
+            .expect("structure under the old model");
+
+        interrupted_build(&cache, id, &index, "old-model-384", 2);
+        assert_eq!(saved_vectors(&cache, id), 2);
+
+        // The new model's first build is itself interrupted after one chunk,
+        // so nothing has been published to hide what happened to the rest.
+        interrupted_build(&cache, id, &index, "counting-384", 1);
+        assert_eq!(
+            saved_vectors(&cache, id),
+            1,
+            "only the new model's own chunk is saved; the old model's are discarded"
+        );
+
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("the new model's build publishes");
+        assert_eq!(
+            embedder.embedded(),
+            2,
+            "nothing the old model saved is reused"
+        );
+    }
+
+    /// Even when no published generation carries the old model's identity
+    /// (so the cache-wide reset has nothing to compare against), saved
+    /// progress still records its own model and is discarded on a mismatch.
+    #[test]
+    fn saved_progress_carries_its_own_model_identity() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let other = vault_id("22345678-1234-4567-89ab-1234567890ab");
+        let (_other_directory, other_index) = index(THREE_NOTES);
+        let (_directory, index) = index(THREE_NOTES);
+
+        interrupted_build(&cache, id, &index, "old-model-384", 2);
+        interrupted_build(&cache, other, &other_index, "old-model-384", 1);
+        assert_eq!(cache.get_metadata("embedder_id").expect("identity"), None);
+
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("publish");
+        assert_eq!(embedder.embedded(), 3);
+        assert_eq!(
+            saved_vectors(&cache, other),
+            0,
+            "another Vault's old-model vectors are discarded too, not left to linger"
+        );
+    }
+
+    /// Reuse is by content: a note edited between the two builds is
+    /// re-embedded, and the unchanged notes' saved vectors are reused.
+    #[test]
+    fn a_note_edited_between_builds_is_re_embedded() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, index_before) = index(THREE_NOTES);
+
+        // Notes embed in path order, so A and B are saved and C is not.
+        interrupted_build(&cache, id, &index_before, "counting-384", 2);
+        std::fs::write(directory.path().join("A.md"), "# A\n\nalpha, edited").expect("edit A");
+        let index_after = VaultIndex::build(directory.path()).expect("rebuild index");
+
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &index_after, &embedder)
+            .expect("publish");
+        assert_eq!(
+            embedder.embedded(),
+            2,
+            "the edited A and the never-saved C are embedded; B is reused"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "a")
+                .expect("content")
+                .as_deref(),
+            Some("# A\n\nalpha, edited")
+        );
+    }
+
+    /// Saved progress for content that has left the Vault is dropped by the
+    /// next build rather than kept forever.
+    #[test]
+    fn saved_vectors_for_content_no_longer_in_the_vault_are_dropped() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, index_before) = index(&[
+            ("A.md", "# A\n\nalpha body"),
+            ("B.md", "# B\n\nbravo body"),
+            ("C.md", "# C\n\ncharlie body"),
+            ("D.md", "# D\n\ndelta body"),
+        ]);
+
+        interrupted_build(&cache, id, &index_before, "stub-384", 2);
+        assert_eq!(saved_vectors(&cache, id), 2);
+        std::fs::remove_file(directory.path().join("A.md")).expect("delete A");
+        let index_after = VaultIndex::build(directory.path()).expect("rebuild index");
+
+        // B is saved and reused, so this build embeds C, then stops at D.
+        interrupted_build(&cache, id, &index_after, "stub-384", 1);
+        assert_eq!(
+            saved_vectors(&cache, id),
+            2,
+            "B and C are kept; the deleted A's vector is not"
+        );
+    }
+
+    /// A note a build cannot read is missing from its workload, not gone from
+    /// the Vault, so its saved vectors survive the prune.
+    #[test]
+    fn an_unreadable_note_keeps_its_saved_vectors() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, index_before) = index(THREE_NOTES);
+
+        interrupted_build(&cache, id, &index_before, "stub-384", 2);
+        std::fs::write(directory.path().join("A.md"), b"# A\n\n\xff\xfe not text")
+            .expect("make A unreadable");
+        let index_after = VaultIndex::build(directory.path()).expect("rebuild index");
+
+        // B is reused and C is the first thing embedded, which stops it.
+        interrupted_build(&cache, id, &index_after, "stub-384", 0);
+        assert_eq!(
+            saved_vectors(&cache, id),
+            2,
+            "A's saved vector outlives a pass that could not read A"
+        );
+    }
+
+    /// Removing a Vault deletes its saved progress; disabling keeps it, the
+    /// way disabling keeps the rest of its disposable rows.
+    #[test]
+    fn removing_a_vault_deletes_its_saved_progress_and_disabling_keeps_it() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let kept = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let removed = vault_id("22345678-1234-4567-89ab-1234567890ab");
+        let (_a, kept_index) = index(THREE_NOTES);
+        let (_b, removed_index) = index(THREE_NOTES);
+        cache
+            .publish_vault_structure_snapshot(kept, &kept_index, &StubEmbedder::new(384), true)
+            .expect("structure");
+        interrupted_build(&cache, kept, &kept_index, "stub-384", 2);
+        interrupted_build(&cache, removed, &removed_index, "stub-384", 1);
+
+        cache.disable_vault_snapshot(kept).expect("disable");
+        cache
+            .disconnect_vault_snapshot(removed)
+            .expect("disconnect");
+
+        assert_eq!(
+            saved_vectors(&cache, kept),
+            2,
+            "disabling keeps saved progress"
+        );
+        assert_eq!(saved_vectors(&cache, removed), 0, "removal deletes it");
+    }
+
+    /// Removing a Vault while its Index turn is still embedding: the turn runs
+    /// on, but nothing it computes afterwards is saved, and it publishes
+    /// nothing, so the removal stays the last word on the Vault's rows.
+    #[test]
+    fn a_vault_removed_mid_build_gets_no_progress_written_back() {
+        struct RemovingEmbedder<'a> {
+            inner: StubEmbedder,
+            cache: &'a SqliteCache,
+            vault_id: VaultId,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl Embedder for RemovingEmbedder<'_> {
+            fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+                if self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    == 1
+                {
+                    self.cache
+                        .disconnect_vault_snapshot(self.vault_id)
+                        .expect("remove the Vault mid-build");
+                }
+                self.inner.embed(texts)
+            }
+            fn embedding_dim(&self) -> usize {
+                384
+            }
+            fn identity(&self) -> String {
+                "stub-384".to_string()
+            }
+            fn token_count(&self, text: &str, add: bool) -> Result<usize, String> {
+                self.inner.token_count(text, add)
+            }
+        }
+
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        let embedder = RemovingEmbedder {
+            inner: StubEmbedder::new(384),
+            cache: &cache,
+            vault_id: id,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let publication = cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("the build itself completes");
+
+        assert_eq!(publication, SnapshotPublication::Superseded);
+        assert_eq!(saved_vectors(&cache, id), 0);
+        assert_eq!(cache.snapshot_status(id).expect("status"), None);
+        assert!(cache.snapshot_vault_ids().expect("ids").is_empty());
+    }
+
+    /// A Vault whose only disposable state is saved progress (its structure
+    /// pass never published) is still found and removed by reconciliation.
+    #[test]
+    fn a_vault_with_only_saved_progress_is_still_enumerated_for_cleanup() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        interrupted_build(&cache, id, &index, "stub-384", 1);
+        assert_eq!(cache.snapshot_status(id).expect("status"), None);
+
+        assert_eq!(cache.snapshot_vault_ids().expect("ids"), vec![id]);
+    }
+
+    /// The percentage carries across an interruption: the resumed build's
+    /// first report counts the saved work as done.
+    #[test]
+    fn a_resumed_builds_first_progress_report_counts_saved_work() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        interrupted_build(&cache, id, &index, "stub-384", 2);
+
+        let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = reports.clone();
+        cache
+            .replace_vault_snapshot_with_embed_layers_and_progress(
+                id,
+                &index,
+                &StubEmbedder::new(384),
+                true,
+                Some(Arc::new(move |progress| {
+                    sink.lock().expect("reports").push(progress)
+                })),
+                None,
+            )
+            .expect("publish");
+
+        let reports = reports.lock().expect("reports");
+        let first = reports.first().expect("a progress report");
+        assert_eq!(first.chunks_total, 3);
+        assert_eq!(first.chunks_completed, 2, "the saved chunks count as done");
+        assert!(first.tokens_completed > 0);
+        assert!(first.tokens_completed < first.tokens_total);
+        let last = reports.last().expect("a final report");
+        assert_eq!(last.chunks_completed, 3);
+        assert_eq!(last.tokens_completed, last.tokens_total);
+    }
+
+    /// Saved progress respects the embed-layers policy it was saved under.
+    #[test]
+    fn saved_progress_is_not_reused_under_the_other_embed_layers_policy() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        interrupted_build_with_layers(&cache, id, &index, "counting-384", 2, true);
+
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot_with_embed_layers(id, &index, &embedder, false)
+            .expect("publish");
+        assert_eq!(embedder.embedded(), 3);
+    }
+
+    /// Saved progress is disposable: deleting the whole cache file still
+    /// rebuilds the Vault correctly from Markdown.
+    #[test]
+    fn deleting_the_cache_with_saved_progress_still_rebuilds_from_markdown() {
+        let state = tempdir().expect("state dir");
+        let path = state.path().join("cache.sqlite");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(THREE_NOTES);
+        {
+            let cache = SqliteCache::open(&path, 384).expect("open cache");
+            interrupted_build(&cache, id, &index, "counting-384", 2);
+            assert_eq!(saved_vectors(&cache, id), 2);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+
+        let cache = SqliteCache::open(&path, 384).expect("reopen cache");
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("rebuild");
+        assert_eq!(embedder.embedded(), 3);
+        assert_eq!(vectored_chunks(&cache, id), 3);
+    }
+
+    struct NamedCountingEmbedder {
+        inner: CountingEmbedder,
+        identity: &'static str,
+    }
+    impl NamedCountingEmbedder {
+        fn new(identity: &'static str) -> Self {
+            Self {
+                inner: CountingEmbedder::new(),
+                identity,
+            }
+        }
+        fn embedded(&self) -> usize {
+            self.inner.embedded()
+        }
+    }
+    impl Embedder for NamedCountingEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+        fn identity(&self) -> String {
+            self.identity.to_string()
+        }
+        fn token_count(&self, text: &str, add: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add)
+        }
     }
 }
