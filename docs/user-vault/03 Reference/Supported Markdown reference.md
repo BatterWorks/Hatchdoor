@@ -85,6 +85,21 @@ views:
 ```
 ````
 
+The block below is a live one rather than an example. It lists every reference note in this documentation, so in Hatchdoor you see the table it draws, and anywhere else you see the definition:
+
+<!-- hatchdoor-query: reference-notes -->
+```base
+filters:
+  and:
+    - file.hasTag("type/reference")
+views:
+  - type: table
+    name: Reference notes
+    order:
+      - file.name
+      - file.tags
+```
+
 The table is worked out each time the note is read, from the Vault the note lives in and no other. It is never written into the file, so search, backlinks, the graph and statistics see the block's text and not the rows, and another Markdown app shows the block itself. A filter comparing against `now()` therefore changes its answer as time passes, with no edit to any file. Rows come back sorted by note title; the definition cannot change that order.
 
 What a saved query can contain:
