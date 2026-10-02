@@ -2027,6 +2027,24 @@ and embedder identity/dimensions.
 - Every shared snapshot row and relationship is Vault-ID-qualified; failed
   replacement retains the prior snapshot as stale, disabling removes only
   participation, and disconnect deletes only that Vault's disposable rows.
+- Saved embedding progress (`vault_embedding_progress`, ADR-35) is disposable
+  and never searchable. An Index turn saves the vectors it computes there as it
+  goes, at least every `SAVE_EMBEDDINGS_EVERY` of embedding and whenever the
+  build ends, without holding the Vault's mutation guard. A later turn reuses
+  a saved vector only for an identical embedding input under the same
+  embedder identity and embed-layers policy, and prunes rows its workload no
+  longer needs, unless a note failed to read or prepare (then rows wait for
+  the next clean pass or the next searchable publication). Each build
+  discards every Vault's rows saved under another embedder identity. A
+  searchable publication deletes the Vault's rows in its own
+  transaction; a structure-only one keeps them. Saves belong to their
+  turn's snapshot attempt and stop once it is superseded. Disconnect begins
+  an attempt before it deletes them, so a turn still embedding a removed
+  Vault neither saves nor publishes afterwards. Disconnect deletes them,
+  disabling keeps them, and `snapshot_vault_ids` enumerates them so
+  reconciliation can clean up a Vault removed before its first publication.
+  The table has no foreign key to `vault_snapshots`, whose row each
+  publication deletes and re-inserts.
 - A population pass drops every cached note row that will not still hold its
   slug when the pass ends - the notes that left the Vault and the notes whose
   slug moved to another path - before it writes any row. A slug is unique and

@@ -22,6 +22,7 @@ use super::parse::{
     FileSnapshot, content_hash, current_unix_timestamp, extract_headings, extract_tags,
     file_snapshot, parse_frontmatter_metadata,
 };
+use super::vault_snapshots::SavedEmbeddings;
 
 /// Build-time variables the benchmark can sweep. Production uses `Default`
 /// (800/50 chunks, contextual documents); the eval harness overrides them per
@@ -58,10 +59,11 @@ impl Default for BuildOptions {
 }
 
 /// What one *running* build's caller hands it beyond the index and options:
-/// which Vault it builds, where to report progress, and the Vault lock it
-/// holds only while the build is still reading Markdown from disk.
+/// which Vault it builds, where to report progress, the Vault lock it holds
+/// only while the build is still reading Markdown from disk, and where it
+/// saves and finds embedding progress.
 #[derive(Default)]
-pub(crate) struct BuildHandles {
+pub(crate) struct BuildHandles<'a> {
     /// The Vault this build indexes. Every line the build logs, the progress
     /// heartbeat's included, carries it as a `vault_id` field so a
     /// multi-Vault instance's logs say whose index is running (issue #155).
@@ -75,6 +77,12 @@ pub(crate) struct BuildHandles {
     /// is in-memory work and SQLite writes to this cache; nothing downstream
     /// opens a Vault path. `None` for a caller holding no such lock.
     pub(crate) vault_read_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    /// The Vault's saved embedding progress in the shared on-disk cache
+    /// (ADR-35). The build reuses a saved vector for any chunk whose
+    /// embedding input it matches, and saves each vector it computes as it
+    /// goes. `None` for a build with no Vault behind it, which embeds
+    /// everything it cannot reuse from its own tables.
+    pub(crate) saved_embeddings: Option<SavedEmbeddings<'a>>,
 }
 
 pub enum UpsertOutcome {
@@ -154,7 +162,7 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        handles: BuildHandles,
+        handles: BuildHandles<'_>,
         embed_layers: bool,
         opts: &BuildOptions,
     ) -> Result<(), String> {
@@ -172,7 +180,7 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        handles: BuildHandles,
+        handles: BuildHandles<'_>,
         embed_layers: bool,
         opts: &BuildOptions,
         build_stamp: Option<BuildStamp>,
@@ -181,6 +189,7 @@ impl SqliteCache {
             vault_id,
             on_progress,
             vault_read_guard,
+            mut saved_embeddings,
         } = handles;
         // Entered here, on the thread that runs the build, rather than relied
         // on to cross `spawn_blocking` from the Index turn: an ambient span
@@ -356,6 +365,7 @@ impl SqliteCache {
                         embed_this_note,
                         embedder,
                         opts,
+                        saved_embeddings.as_ref(),
                     ) {
                         Ok(prepared) => prepared_notes.push(prepared),
                         Err(error) => {
@@ -401,14 +411,49 @@ impl SqliteCache {
             ));
         }
 
-        let total_chunks_to_embed: usize = prepared_notes
-            .iter()
-            .map(|note| note.texts_to_embed.len())
-            .sum();
-        let total_tokens_to_embed: usize = prepared_notes
-            .iter()
-            .flat_map(|note| note.embedding_input_token_lengths.iter())
-            .sum();
+        // Work an earlier, interrupted turn saved counts towards this turn's
+        // total and is already complete, so the percentage resumes where it
+        // stopped instead of starting over from zero (ADR-35).
+        let resumed_chunks: usize = prepared_notes.iter().map(|note| note.resumed.chunks).sum();
+        let resumed_tokens: usize = prepared_notes.iter().map(|note| note.resumed.tokens).sum();
+        let resumed_embedding_time: Duration =
+            prepared_notes.iter().map(|note| note.resumed.took).sum();
+        // Saved progress for anything this build will not embed belongs to
+        // content that has since changed or left the Vault. Pruned once the
+        // workload is known, so it cannot accumulate across interrupted
+        // turns, and only when every note was read and prepared: a note this
+        // pass could not read is missing from the workload, not gone from
+        // the Vault, and its saved vectors are still worth keeping.
+        if per_note_failures == 0
+            && let Some(saved) = saved_embeddings.as_mut()
+        {
+            let wanted: HashSet<&str> = prepared_notes
+                .iter()
+                .filter(|note| note.embed)
+                .flat_map(|note| note.chunking.chunks.iter())
+                .map(|chunk| chunk.content_hash.as_str())
+                .collect();
+            saved.retain(&wanted);
+        }
+
+        let total_chunks_to_embed: usize = resumed_chunks
+            + prepared_notes
+                .iter()
+                .map(|note| note.texts_to_embed.len())
+                .sum::<usize>();
+        let total_tokens_to_embed: usize = resumed_tokens
+            + prepared_notes
+                .iter()
+                .flat_map(|note| note.embedding_input_token_lengths.iter())
+                .sum::<usize>();
+        if resumed_chunks > 0 {
+            tracing::info!(
+                resumed_chunks,
+                "Resuming embedding: {} {} already saved by an earlier, interrupted turn",
+                format_count(resumed_chunks),
+                pluralize(resumed_chunks as u64, "chunk")
+            );
+        }
         tracing::debug!(
             changed_notes = prepared_notes.len(),
             total_chunks_to_embed,
@@ -422,9 +467,16 @@ impl SqliteCache {
             total_chunks_to_embed,
             total_tokens_to_embed,
             embedding_started_at,
+            resumed_embedding_time,
             build_span.clone(),
             progress_log_delay,
         );
+        progress
+            .chunks_processed
+            .store(resumed_chunks, Ordering::Relaxed);
+        progress
+            .tokens_processed
+            .store(resumed_tokens, Ordering::Relaxed);
         progress
             .notes_processed
             .store(notes_unchanged + per_note_failures, Ordering::Relaxed);
@@ -438,13 +490,20 @@ impl SqliteCache {
             chunks_total: total_chunks_to_embed,
             tokens_total: total_tokens_to_embed,
             started_at: embedding_started_at,
+            resumed_embedding_time,
         };
         progress_reporter.notify();
 
         let indexing_result = (|| -> Result<(), String> {
             for prepared in prepared_notes {
                 let slug = prepared.slug.clone();
-                match embed_prepared_note(&tx, prepared, embedder, &progress_reporter) {
+                match embed_prepared_note(
+                    &tx,
+                    prepared,
+                    embedder,
+                    &progress_reporter,
+                    saved_embeddings.as_mut(),
+                ) {
                     Ok(stats) => {
                         notes_changed += 1;
                         chunks_embedded += stats.embedded;
@@ -836,6 +895,11 @@ struct ProgressReporter<'a> {
     chunks_total: usize,
     tokens_total: usize,
     started_at: Instant,
+    /// The embedding time an interrupted earlier turn spent on the work this
+    /// one resumed. Reported elapsed time includes it, so the time-left
+    /// estimate, which divides elapsed time by completed work, keeps the
+    /// real throughput instead of crediting resumed work as instantaneous.
+    resumed_embedding_time: Duration,
 }
 
 impl ProgressReporter<'_> {
@@ -850,7 +914,7 @@ impl ProgressReporter<'_> {
             chunks_total: self.chunks_total,
             tokens_completed: self.progress.tokens_processed.load(Ordering::Relaxed),
             tokens_total: self.tokens_total,
-            elapsed_seconds: self.started_at.elapsed().as_secs(),
+            elapsed_seconds: (self.resumed_embedding_time + self.started_at.elapsed()).as_secs(),
         });
     }
 }
@@ -864,6 +928,7 @@ fn start_indexing_heartbeat(
     total_chunks: usize,
     total_tokens: usize,
     started_at: Instant,
+    resumed_embedding_time: Duration,
     span: tracing::Span,
     log_delay: fn(bool) -> Duration,
 ) -> (
@@ -888,7 +953,7 @@ fn start_indexing_heartbeat(
                 total_chunks,
                 heartbeat_progress.tokens_processed.load(Ordering::Relaxed),
                 total_tokens,
-                started_at.elapsed(),
+                resumed_embedding_time + started_at.elapsed(),
                 heartbeat_progress.failures.load(Ordering::Relaxed),
             );
             has_logged = true;
@@ -1564,6 +1629,17 @@ struct PreparedNote {
     chunk_measurements: Vec<ChunkMeasurement>,
     chunking_elapsed: Duration,
     vector_reuse_elapsed: Duration,
+    /// The part of this note's embedding an interrupted earlier turn saved.
+    /// Those vectors are already in `preserved`.
+    resumed: ResumedWork,
+}
+
+/// Embedding work found in saved progress rather than done again.
+#[derive(Default)]
+struct ResumedWork {
+    chunks: usize,
+    tokens: usize,
+    took: Duration,
 }
 
 /// Reuse/change-detection hash for Hatchdoor's canonical contextual document.
@@ -1617,6 +1693,7 @@ fn prepare_note_for_embedding(
     embed: bool,
     embedder: &dyn Embedder,
     opts: &BuildOptions,
+    saved_embeddings: Option<&SavedEmbeddings<'_>>,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
     let mut chunking = chunk_note(&content, embedder, opts.chunk);
@@ -1653,13 +1730,28 @@ fn prepare_note_for_embedding(
             chunk_measurements: Vec::new(),
             chunking_elapsed,
             vector_reuse_elapsed: Duration::ZERO,
+            resumed: ResumedWork::default(),
         });
     }
 
     let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, &slug)?;
-    let preserved =
+    let mut preserved =
         preserve_existing_vectors(tx, &slug, layer.as_deref(), &chunking.chunks, &existing)?;
+    // What the build's own tables could not supply, an interrupted earlier
+    // turn may have saved. Its cost is counted below, once measured.
+    let mut resumed_took_by_hash: HashMap<String, Duration> = HashMap::new();
+    if let Some(saved_embeddings) = saved_embeddings {
+        for chunk in &chunking.chunks {
+            if preserved.contains_key(&chunk.content_hash) {
+                continue;
+            }
+            if let Some(saved) = saved_embeddings.find(&chunk.content_hash) {
+                resumed_took_by_hash.insert(chunk.content_hash.clone(), saved.took);
+                preserved.insert(chunk.content_hash.clone(), saved.vector);
+            }
+        }
+    }
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let chunk_measurements = chunking
@@ -1707,6 +1799,19 @@ fn prepare_note_for_embedding(
         );
     }
 
+    // Counted per chunk, not per saved vector: chunks that repeat one input
+    // were each embedded, and each paid for, by the turn that saved it, so
+    // crediting the time once would make the resumed throughput look faster
+    // than it was and the time-left estimate too short.
+    let mut resumed = ResumedWork::default();
+    for measurement in &chunk_measurements {
+        if let Some(took) = resumed_took_by_hash.get(&measurement.content_hash) {
+            resumed.chunks += 1;
+            resumed.tokens += measurement.input_tokens;
+            resumed.took += *took;
+        }
+    }
+
     let embedding_input_bytes = texts_to_embed.iter().map(String::len).sum();
     let embedding_input_token_lengths: Vec<usize> = indices_needing_embed
         .iter()
@@ -1731,6 +1836,7 @@ fn prepare_note_for_embedding(
         chunk_measurements: embedded_chunk_measurements,
         chunking_elapsed,
         vector_reuse_elapsed,
+        resumed,
     })
 }
 
@@ -1739,6 +1845,7 @@ fn embed_prepared_note(
     prepared: PreparedNote,
     embedder: &dyn Embedder,
     progress_reporter: &ProgressReporter<'_>,
+    mut saved_embeddings: Option<&mut SavedEmbeddings<'_>>,
 ) -> Result<ChunkStats, String> {
     let progress = progress_reporter.progress;
     let pipeline_started = Instant::now();
@@ -1756,6 +1863,7 @@ fn embed_prepared_note(
         chunk_measurements,
         chunking_elapsed,
         vector_reuse_elapsed,
+        resumed: _,
     } = prepared;
     if chunking.chunks.is_empty() {
         let sqlite_started = Instant::now();
@@ -1837,21 +1945,31 @@ fn embed_prepared_note(
     let mut embedding_call_input_counts = Vec::with_capacity(calls);
     let mut embedding_call_token_counts = Vec::with_capacity(calls);
     let mut embedding_call_padded_token_counts = Vec::with_capacity(calls);
-    for (texts, token_lengths) in texts_to_embed
+    for ((texts, token_lengths), chunk_indices) in texts_to_embed
         .chunks(batch_size)
         .zip(embedding_input_token_lengths.chunks(batch_size))
+        .zip(indices_needing_embed.chunks(batch_size))
     {
         let input_tokens: usize = token_lengths.iter().sum();
         let padded_tokens = token_lengths.iter().copied().max().unwrap_or(0) * texts.len();
         let call_started = Instant::now();
         let vectors = embedder.embed(texts)?;
-        embedding_call_durations.push(call_started.elapsed());
+        let call_took = call_started.elapsed();
+        embedding_call_durations.push(call_took);
         if vectors.len() != texts.len() {
             return Err(format!(
                 "embedder returned {} vectors for {} inputs",
                 vectors.len(),
                 texts.len()
             ));
+        }
+        if let Some(saved) = saved_embeddings.as_deref_mut() {
+            // A batch's time is split evenly across its inputs; production
+            // embeds one input per call, so this is exact there.
+            let took_each = call_took / u32::try_from(texts.len()).unwrap_or(u32::MAX).max(1);
+            for (index, vector) in chunk_indices.iter().zip(&vectors) {
+                saved.record(&chunking.chunks[*index].content_hash, vector, took_each);
+            }
         }
         embedding_padded_tokens += padded_tokens;
         embedding_call_input_counts.push(texts.len());
@@ -3368,6 +3486,7 @@ mod chunk_integration_tests {
                         10,
                         100,
                         Instant::now(),
+                        Duration::ZERO,
                         span,
                         |_| Duration::from_millis(5),
                     );
