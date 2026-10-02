@@ -6,12 +6,12 @@
  * sync stopped, conflict, and unavailable. #137 builds no chrome that renders
  * these; this module exists so #114-#126's own tests have realistic,
  * consistently-shaped wire data to assert against without each re-deriving
- * it. `git_error`/`search_error`/`activation_error` codes below are
- * plausible placeholders for conditions not yet exercised by any shipped
- * route (Git sync/conflict reporting is #121's own ticket) — confirm the
- * exact backend `code` string against `src/git/**` when a ticket first
- * renders that specific condition; the shape (`VaultRuntimeError`) is what
- * matters here, not the string literal.
+ * it. The `sync stopped` and `conflict` builders carry the exact codes, messages
+ * and `affected_paths` detail the Git task sends (#372). The other
+ * `git_error`/`search_error`/`activation_error` codes below are plausible
+ * placeholders — confirm the exact backend `code` string against the server
+ * when a ticket first renders that specific condition; the shape
+ * (`VaultRuntimeError`) is what matters there, not the string literal.
  */
 import type {
   VaultCapabilities,
@@ -108,27 +108,36 @@ export function syncFailedVault(name = "Sync Failed Vault"): VaultSummary {
   });
 }
 
-/** `sync stopped`: `dirty_working_copy` — local edits halted integration. */
-export function syncStoppedVault(name = "Sync Stopped Vault"): VaultSummary {
+/** `sync stopped`: files in the repository changed by hand where the sync
+ * cannot reconcile them, so commit and sync are held. */
+export function syncStoppedVault(
+  name = "Sync Stopped Vault",
+  paths: string[] = ["scripts/build.sh"],
+): VaultSummary {
   return healthyVault(name, {
     git: "unavailable",
     git_error: {
-      code: "dirty_working_copy",
-      message: "Local edits in this Vault halted Git integration.",
+      code: "managed_git_dirty_working_copy",
+      message: `managed checkout has unsupported local work: ${paths.join(", ")}`,
       retryable: false,
+      detail: { kind: "affected_paths", paths, total: paths.length },
     },
   });
 }
 
-/** `conflict`: a content conflict; every local commit retained, remote
- * untouched. */
-export function conflictVault(name = "Conflict Vault"): VaultSummary {
+/** `conflict`: a sync stopped on a merge conflict (ADR-30); every local
+ * commit retained, remote untouched. */
+export function conflictVault(
+  name = "Conflict Vault",
+  paths: string[] = ["Groceries.md"],
+): VaultSummary {
   return healthyVault(name, {
     git: "unavailable",
     git_error: {
-      code: "git_content_conflict",
-      message: "A content conflict is blocking Git integration.",
+      code: "managed_git_conflict",
+      message: `managed checkout merge conflict: ${paths.join(", ")}`,
       retryable: false,
+      detail: { kind: "affected_paths", paths, total: paths.length },
     },
   });
 }
