@@ -1457,7 +1457,8 @@
   @media (prefers-reduced-motion: reduce) {
     .slot-shimmer-reading { animation: none; background: none; -webkit-text-fill-color: currentColor; }
   }
-  .vault-slot-condition, .vault-slot-shortfall { font-family: var(--font-mono); font-size: 0.62rem; white-space: nowrap; }
+  .vault-slot-condition, .vault-slot-shortfall, .vault-slot-waiting { font-family: var(--font-mono); font-size: 0.62rem; white-space: nowrap; }
+  .vault-slot-waiting { color: var(--muted); }
   .vault-tier-warn { color: var(--warn-fg); }
   .vault-tier-error { color: var(--err-fg); }
   .vault-slot-condition.vault-tier-error, .vault-slot-shortfall.vault-tier-error { background: var(--err-bg); border: 1px solid var(--err-border); font-weight: 600; padding: 0.05rem 0.4rem; border-radius: var(--radius-pill); }
@@ -2857,6 +2858,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <div class="vslot-row"><span class="vslot-name">Alpine</span><span class="side-count" aria-label="Note count not known">&ndash;</span></div>
         <div class="vslot-row"><span class="vslot-name">Beta</span><span class="vault-slot-indexing" role="status" aria-label="Indexing"><span class="vault-slot-indexing-bar"></span></span></div>
         <div class="vslot-row"><span class="vslot-name">Bravo</span><span class="vault-slot-pending-search" role="status" aria-label="445 notes. Browsing is ready. Search for this Vault is still building."><span class="side-count slot-shimmer-reading">445</span></span></div>
+        <div class="vslot-row"><span class="vslot-name">Bravura</span><span class="vault-slot-waiting" role="status" aria-label="Browsing is ready. Search for this Vault waits its turn to index behind another Vault.">waiting</span></div>
         <div class="vslot-row"><span class="vslot-name">All Vaults</span><span class="vault-slot-indexing" role="status" aria-label="Indexing 42%, 27m left"><span class="side-count slot-shimmer-reading">42%</span></span></div>
         <div class="vslot-row"><span class="vslot-name">Gamma</span><span class="vault-slot-condition vault-tier-warn">stale</span></div>
         <div class="vslot-row"><span class="vslot-name">Delta</span><span class="vault-slot-condition vault-tier-warn">sync failed</span></div>
@@ -2872,6 +2874,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">&ndash;</td><td class="val">muted, mono</td><td class="val">count not known &mdash; the stats read has not answered yet, failed, or left this Vault out of a partial answer (#333). Labelled &ldquo;Note count not known&rdquo;, and never announced. An unknown count is never shown as <code>0</code>, which would read as an empty Vault; a browsable Vault's sweep runs through the dash the same way</td></tr>
           <tr><td class="name">shimmer</td><td class="val">muted, moving</td><td class="val">indexing &mdash; search still answers from the previous snapshot. Also covers a first index that has never published one: <code>activation</code> stays <code>active</code> the moment a Vault's directory stats fine, so a never-indexed Vault is distinguishable from one whose directory vanished (only the latter turns <code>activation</code> <code>unavailable</code> too)</td></tr>
           <tr><td class="name">445, sweeping</td><td class="val">muted, the number itself moving</td><td class="val">browsable but not yet searchable &mdash; the Vault has published its Notes and can be read now, while the embedding pass behind it is still running. Reached only on a first index; a rebuild keeps serving the prior generation instead</td></tr>
+          <tr><td class="name">waiting</td><td class="val">muted, mono, still</td><td class="val">waiting its turn to index &mdash; the Vault's Index turn is queued behind another Vault's, or paused part-way to let one through (ADR-35). Takes the place of the bar, the sweeping count, or an error-free <code>stale</code>, never of a ready Vault's count or a failure's condition. No tier, because nothing is wrong, and no sweep, because nothing moves until its turn comes round. Counts as participating in the aggregate</td></tr>
           <tr><td class="name">42% / 27m left, sweeping</td><td class="val">muted, the number itself moving</td><td class="val">first-run indexing, on the <code>All Vaults</code> row and the collapsed head &mdash; the shrunk startup gate&rsquo;s progress (#150), alternating the two readings every 3s. Falls back to the bar while scanning, where no number exists yet</td></tr>
           <tr><td class="name">stale</td><td class="val">warn, plain ink</td><td class="val">indexing failed &mdash; the snapshot is frozen behind the Markdown</td></tr>
           <tr><td class="name">sync failed</td><td class="val">warn, plain ink</td><td class="val">the last Git sync did not succeed &mdash; backoff retry is running</td></tr>
@@ -2922,7 +2925,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">app/vaultSlot.tsx</span><span class="key">app/vaultSlotLogic.ts</span><span class="key">.vault-slot-condition</span><span class="key">.vault-slot-shortfall</span>
         <span class="key">.vault-tier-warn</span><span class="key">.vault-tier-error</span>
         <span class="key">.vault-slot-indexing</span><span class="key">.vault-slot-indexing-bar</span><span class="key">.side-count</span>
-        <span class="key">.vault-slot-pending-search</span><span class="key">.slot-shimmer-reading</span>
+        <span class="key">.vault-slot-pending-search</span><span class="key">.slot-shimmer-reading</span><span class="key">.vault-slot-waiting</span>
       </div>
     </section>
 

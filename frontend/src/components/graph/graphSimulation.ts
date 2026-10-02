@@ -787,7 +787,8 @@ export interface IslandCountLine {
  * An island caption's second line (#143, #337): `49 notes` for a Vault that
  * is answering normally, the condition word for one that is not, and
  * `indexing` in warn ink for a Vault whose index is building or has never been
- * built. The last case used to fall through to the count, so a Vault mid-build
+ * built, and `waiting` in muted ink for one queued behind another Vault's
+ * indexing (ADR-35). The `indexing` case used to fall through to the count, so a Vault mid-build
  * read `0 notes` — the same caption a genuinely empty Vault gets.
  */
 export function islandCountLine(
@@ -799,6 +800,9 @@ export function islandCountLine(
   }
   if (slot.kind === "indexing") {
     return { text: "indexing", tone: "warn" };
+  }
+  if (slot.kind === "waiting") {
+    return { text: "waiting", tone: "muted" };
   }
   return {
     text: `${nodeCount} ${nodeCount === 1 ? "note" : "notes"}`,

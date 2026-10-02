@@ -137,6 +137,11 @@ export type VaultSummary = {
   activation: "active" | "disabled" | "unavailable";
   local_content: "read_write" | "read_only" | "unavailable";
   search: "unavailable" | "indexing" | "browsable" | "ready" | "stale";
+  /** Where this Vault's indexing stands in the instance-wide queue (ADR-35):
+   * `running`, or `waiting` while it is queued behind another Vault's or
+   * paused part-way to let one through. Independent of `search`, which says
+   * what the Vault answers meanwhile. Absent when nothing is queued. */
+  index_turn?: "running" | "waiting";
   git: "disabled" | "pending" | "ready" | "unavailable";
   /** When this Vault's last scheduled or manual Git turn finished, RFC 3339
    * UTC — whether it succeeded or failed, so read it with `git` rather than

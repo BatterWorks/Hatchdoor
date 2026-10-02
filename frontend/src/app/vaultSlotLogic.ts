@@ -10,6 +10,10 @@ export type VaultSlotState =
    * search is still building. Its own kind rather than a `condition` because
    * nothing is wrong — the Vault is usable, just not by search yet. */
   | { kind: "count-pending-search"; count: number | null; sentence: string }
+  /** Indexing is queued behind another Vault's, or paused to let one
+   * through (ADR-35). Nothing is wrong and nothing is moving, so it is a
+   * still word, not a condition and not a shimmer. */
+  | { kind: "waiting"; sentence: string }
   | {
       kind: "condition";
       word: string;
@@ -67,7 +71,9 @@ const DIRTY_WORKING_COPY_CODE = "managed_git_dirty_working_copy";
  * never a count and a condition together (#116, amended by #117).
  *
  * Priority (worst first): `unavailable` outranks every Git condition, which
- * outranks `stale`, which outranks indexing. A Vault that has never
+ * outranks `stale`, which outranks indexing. A Vault waiting its turn to
+ * index behind another Vault (ADR-35) shows `waiting` in place of anything
+ * below the Git conditions, unless it is ready or a failure rides along. A Vault that has never
  * published a snapshot reports the same `search: "unavailable"` the API uses
  * for a vanished directory, but only the latter also turns `activation`
  * `"unavailable"` (`activation_snapshot` in `src/vault_runtime.rs`: a Vault
@@ -133,6 +139,18 @@ export function deriveVaultSlot(
       ),
     };
   }
+  // Waiting stands in wherever the Vault would otherwise show indexing:
+  // building, browsable while search builds, or stale only because a rebuild
+  // has not finished. A Vault that is ready already shows its count, and a
+  // failure keeps its condition, so a routine reindex queued behind another
+  // Vault changes nothing on screen.
+  if (
+    vault.index_turn === "waiting" &&
+    vault.search !== "ready" &&
+    !vault.search_error
+  ) {
+    return { kind: "waiting", sentence: waitingSentence(vault) };
+  }
   if (vault.search === "stale") {
     return {
       kind: "condition",
@@ -177,6 +195,16 @@ export function deriveVaultSlot(
   return { kind: "count", count: noteCount ?? null };
 }
 
+function waitingSentence(vault: VaultSummary): string {
+  if (vault.search === "browsable") {
+    return "Browsing is ready. Search for this Vault waits its turn to index behind another Vault.";
+  }
+  if (vault.search === "stale") {
+    return "Search answers from this Vault's previous index while it waits its turn to index behind another Vault.";
+  }
+  return "This Vault waits its turn to index behind another Vault.";
+}
+
 /**
  * The current scope's count-or-condition, in the same words §27's slot
  * renders, for the shell's polite live region (#146). `null` means not yet
@@ -206,6 +234,9 @@ export function describeScopeSlot(
   }
   if (slot.kind === "condition") {
     return slot.word;
+  }
+  if (slot.kind === "waiting") {
+    return "waiting";
   }
   if (slot.count === null) {
     return slot.kind === "count-pending-search"

@@ -24,10 +24,10 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::app_state::AppState;
-use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::{
     MutationGuardHandoff, SnapshotPublication, VaultSnapshotFreshness,
 };
+use crate::cache::{IndexYield, SqliteCache};
 use crate::embed::Embedder;
 use crate::git::{
     CommitCooldown, ManagedCheckoutLease, ManagedGitOutcome, ManagedGitScheduler,
@@ -42,13 +42,13 @@ use crate::vault_registry::{
 };
 use crate::vault_runtime::{
     CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
-    VaultCollectionRuntime, VaultControlBlock, VaultGitStatus, VaultRuntimeError,
+    VaultCollectionRuntime, VaultControlBlock, VaultGitStatus, VaultIndexTurn, VaultRuntimeError,
     VaultRuntimeErrorDetail, VaultSearchStatus, stat_local_content,
 };
 use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{
-    TURN_PANICKED, VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkOutcome,
-    VaultWorkRequest,
+    IndexLaneState, TURN_PANICKED, VaultWorkCoordinator, VaultWorkError, VaultWorkKind,
+    VaultWorkOutcome, VaultWorkRequest,
 };
 
 #[cfg(test)]
@@ -127,7 +127,16 @@ pub(crate) struct VaultWorkExecutor {
     startup: StartupTracker,
     model_setup_started: Arc<AtomicBool>,
     index_retries: IndexRetries,
+    /// How long an Index turn embeds before it offers its slot to another
+    /// Vault's queued indexing. [`INDEX_TURN_SLICE`] in production; tests
+    /// shorten it.
+    index_slice: Duration,
 }
+
+/// How long an Index turn embeds before it checks whether another Vault is
+/// waiting to index, and pauses for it if one is (ADR-35 decision 3). A
+/// fixed constant, not a setting (ADR-14).
+const INDEX_TURN_SLICE: Duration = Duration::from_secs(5 * 60);
 
 /// How long the first automatic retry of a failed Index turn waits. Each
 /// further consecutive failure of the same Vault doubles it.
@@ -174,7 +183,11 @@ impl VaultWorkExecutor {
     /// Every field is one of `AppState`'s own, so the composition root has
     /// nothing to assemble: the executor is exactly the slice of shared
     /// runtime state a background turn is allowed to touch.
+    ///
+    /// Built once, for the one dispatch loop, which is why it is also where
+    /// each Vault's status starts following the indexing lane.
     pub(crate) fn from_state(state: &AppState) -> Self {
+        report_index_lane_on_vault_status(&state.vaults, &state.vault_work);
         Self {
             vaults: state.vaults.clone(),
             registry: state.vault_registry.clone(),
@@ -187,6 +200,7 @@ impl VaultWorkExecutor {
             startup: state.startup.clone(),
             model_setup_started: state.model_setup_started.clone(),
             index_retries: IndexRetries::default(),
+            index_slice: INDEX_TURN_SLICE,
         }
     }
 
@@ -261,6 +275,10 @@ impl VaultWorkExecutor {
                             progress,
                         );
                     })),
+                    Some(IndexTurnSlicing {
+                        work: self.work.clone(),
+                        slice: self.index_slice,
+                    }),
                     request,
                 )
                 .await
@@ -518,6 +536,35 @@ fn git_author_defaults(snapshot: &ConfigSnapshot) -> (String, String) {
     )
 }
 
+/// Publish each Vault's place in the indexing lane on its own status, so the
+/// web UI and MCP can tell a Vault that is indexing from one waiting for its
+/// turn (ADR-35 decision 5). Every change the lane makes reaches the Vault,
+/// whichever producer queued the work.
+pub(crate) fn report_index_lane_on_vault_status(
+    vaults: &VaultCollectionRuntime,
+    work: &VaultWorkCoordinator,
+) {
+    let vaults = vaults.clone();
+    work.observe_index_lane(move |work, vault_id| {
+        if let Some(control_block) = vaults.runtime(vault_id) {
+            control_block.refresh_index_turn(|| {
+                work.index_lane_state(vault_id).map(|state| match state {
+                    IndexLaneState::Running => VaultIndexTurn::Running,
+                    IndexLaneState::Waiting => VaultIndexTurn::Waiting,
+                })
+            });
+        }
+    });
+}
+
+/// What an Index turn needs to take turns with other Vaults (ADR-35
+/// decision 3): where to ask whether another Vault is waiting, and how long
+/// to embed before asking.
+pub(crate) struct IndexTurnSlicing {
+    pub(crate) work: VaultWorkCoordinator,
+    pub(crate) slice: Duration,
+}
+
 /// Execute one `VaultWorkKind::Index` turn for exactly one active Vault.
 ///
 /// The authoritative Markdown scan and disposable candidate-cache build run
@@ -557,17 +604,23 @@ pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
         embedder,
         embed_layers,
         None,
+        None,
         request,
     )
     .await
 }
 
+/// The Index turn itself. With `slicing`, a turn that has embedded for the
+/// slice while another Vault waits stops at the next chunk boundary, puts its
+/// Vault at the back of the indexing lane, and returns `Ok`: a pause is not a
+/// failure, and the next turn resumes from the progress it saved.
 pub(crate) async fn dispatch_vault_index_turn_with_progress(
     collection: &VaultCollectionRuntime,
     cache: Arc<SqliteCache>,
     embedder: Arc<dyn Embedder>,
     embed_layers: bool,
     on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
+    slicing: Option<IndexTurnSlicing>,
     request: VaultWorkRequest,
 ) -> Result<(), VaultWorkError> {
     let vault_id = request.vault_id();
@@ -610,6 +663,7 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
     // published. The verdict itself is decided under the guard that publishes
     // it, never from this flag.
     let published_stale = Arc::new(AtomicBool::new(false));
+    let requeue_on = slicing.as_ref().map(|slicing| slicing.work.clone());
     control_block
         .set_search_status(VaultSearchStatus::Indexing, None)
         .map_err(vault_index_error)?;
@@ -628,6 +682,12 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         let indexing_control = control_block.clone();
         let indexing_cache = cache.clone();
         let publication_stale = published_stale.clone();
+        let index_yield = slicing.map(|IndexTurnSlicing { work, slice }| {
+            IndexYield::new(
+                slice,
+                Box::new(move || work.another_vault_waits_to_index(vault_id)),
+            )
+        });
         match tokio::task::spawn_blocking(move || {
             let index = indexing_control
                 .authoritative_index()
@@ -687,6 +747,7 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                             (freshness, guard)
                         }),
                     }),
+                    index_yield.as_ref(),
                 )
                 .map_err(|message| {
                     (
@@ -695,7 +756,8 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                     )
                 })
                 .and_then(|publication| match publication {
-                    SnapshotPublication::Published => Ok(()),
+                    SnapshotPublication::Published => Ok(IndexTurnEnd::Published),
+                    SnapshotPublication::Paused => Ok(IndexTurnEnd::Paused),
                     // A newer snapshot attempt owns this Vault's row now, so
                     // this turn wrote nothing and must not report the Vault
                     // current. That attempt decides the row's freshness,
@@ -713,7 +775,7 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         })
         .await
         {
-            Ok(Ok(())) => (Ok(()), false),
+            Ok(Ok(end)) => (Ok(end), false),
             Ok(Err((error, stale_mark_required))) => (Err(error), stale_mark_required),
             Err(error) => (
                 Err(VaultWorkError::new(
@@ -727,7 +789,19 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
     };
 
     match &result {
-        Ok(()) => {
+        Ok(IndexTurnEnd::Paused) => {
+            // Behind every Vault already waiting, so the one this turn paused
+            // for goes first. A drained Vault is not put back: disabling or
+            // removing it discards its paused work with the rest.
+            if let Some(work) = requeue_on {
+                work.requeue_paused_index_turn(vault_id);
+            }
+            info!(%vault_id, "Vault indexing paused so another Vault can index; it resumes when its turn comes round");
+            // Nothing failed, so no error rides along: the Vault shows what
+            // its retained generation supports, as an unfinished rebuild does.
+            let _ = control_block.set_search_status(retained_search_status(&cache, vault_id), None);
+        }
+        Ok(IndexTurnEnd::Published) => {
             // A generation published stale reports itself stale here too, which
             // is exactly what `retained_snapshot_search_status` would derive
             // from the same row after a restart. `Stale` still grants the
@@ -742,7 +816,31 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         }
         Err(error) => publish_index_failure(&control_block, &cache, error, stale_mark_required),
     }
-    result
+    result.map(|_| ())
+}
+
+/// How an Index turn that did not fail ended.
+enum IndexTurnEnd {
+    Published,
+    Paused,
+}
+
+/// The search status a Vault's retained generation supports on its own,
+/// with no Index turn running: searchable, browsable, or nothing.
+///
+/// A structure pass that succeeded before the embedding pass stopped leaves a
+/// participating generation with no vectors. Reporting it `Stale` would grant
+/// the search capability to a Vault that can only ever answer with nothing,
+/// so the vectorless axis wins here exactly as it does in
+/// `retained_snapshot_search_status`.
+fn retained_search_status(cache: &SqliteCache, vault_id: VaultId) -> VaultSearchStatus {
+    match cache.snapshot_status(vault_id) {
+        Ok(Some(snapshot)) if snapshot.participating && snapshot.searchable => {
+            VaultSearchStatus::Stale
+        }
+        Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
+        Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
+    }
 }
 
 /// Publish a failed Index turn's search status on its Vault: whatever the
@@ -758,19 +856,8 @@ fn publish_index_failure(
         .then(|| cache.mark_vault_snapshot_stale(vault_id))
         .transpose()
         .err();
-    // A structure pass that succeeded before the embedding pass failed
-    // leaves a participating generation with no vectors. Reporting it
-    // `Stale` would grant the search capability to a Vault that can
-    // only ever answer with nothing, so the vectorless axis wins here
-    // exactly as it does in `retained_snapshot_search_status`. The
-    // failure is not lost: it rides along as this status's error.
-    let status = match cache.snapshot_status(vault_id) {
-        Ok(Some(snapshot)) if snapshot.participating && snapshot.searchable => {
-            VaultSearchStatus::Stale
-        }
-        Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
-        Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
-    };
+    // The failure is not lost: it rides along as this status's error.
+    let status = retained_search_status(cache, vault_id);
     let message = match stale_mark_error {
         Some(mark_error) => format!(
             "{} (also could not mark the retained snapshot stale: {mark_error})",

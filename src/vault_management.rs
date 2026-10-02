@@ -44,7 +44,7 @@ use crate::vault_registry::{
 use crate::vault_runtime::{
     CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
     VaultCapabilities, VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus,
-    VaultRuntimeError, VaultSearchStatus, VaultWatcherStatus,
+    VaultIndexTurn, VaultRuntimeError, VaultSearchStatus, VaultWatcherStatus,
 };
 use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{ScheduleResult, VaultWorkKind};
@@ -73,6 +73,13 @@ pub struct VaultSummary {
     pub activation: VaultActivationStatus,
     pub local_content: LocalContentStatus,
     pub search: VaultSearchStatus,
+    /// Where this Vault's indexing stands in the instance-wide indexing
+    /// queue: `running`, or `waiting` while it is queued behind another
+    /// Vault's or paused part-way to let another Vault index. Independent of
+    /// `search`, which says what the Vault can answer meanwhile. Absent when
+    /// no indexing is queued or running for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_turn: Option<VaultIndexTurn>,
     pub git: VaultGitStatus,
     /// When this Vault's last interval-arming Git turn finished, RFC 3339
     /// UTC — whether it succeeded or failed. A failed check is still a check,
@@ -447,6 +454,7 @@ fn unreconciled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapsho
         activation: VaultActivationStatus::Unavailable,
         local_content: LocalContentStatus::Unavailable,
         search: VaultSearchStatus::Unavailable,
+        index_turn: None,
         git: VaultGitStatus::Disabled,
         watcher: VaultWatcherStatus::Disabled,
         capabilities: VaultCapabilities::default(),
@@ -482,6 +490,7 @@ fn vault_summary(
         activation: snapshot.activation,
         local_content: snapshot.local_content,
         search: snapshot.search,
+        index_turn: snapshot.index_turn,
         git: snapshot.git,
         last_checked_at: clock
             .and_then(|clock| clock.last_checked_at)
@@ -538,6 +547,7 @@ fn public_vault_summary(
         activation: snapshot.activation,
         local_content: snapshot.local_content,
         search: snapshot.search,
+        index_turn: snapshot.index_turn,
         git: snapshot.git,
         last_checked_at: None,
         next_attempt_at: None,
@@ -1468,6 +1478,8 @@ mod tests {
         indexing_runtime
             .set_search_status(VaultSearchStatus::Indexing, None)
             .expect("publish search status");
+        // Queued behind another Vault's indexing (ADR-35 decision 5).
+        indexing_runtime.refresh_index_turn(|| Some(VaultIndexTurn::Waiting));
 
         let authenticated = VaultCollectionManagement::new(&state)
             .list()
@@ -1533,6 +1545,15 @@ mod tests {
                 publish_recovery: false,
             },
             "a Vault mid-index browses but does not search"
+        );
+        let waiting = serde_json::to_value(named(&authenticated.vaults, "Indexing"))
+            .expect("serialize the waiting Vault");
+        assert_eq!(waiting["index_turn"], "waiting");
+        let idle = serde_json::to_value(named(&authenticated.vaults, "Published"))
+            .expect("serialize the idle Vault");
+        assert!(
+            idle.get("index_turn").is_none(),
+            "a Vault with no indexing queued or running omits index_turn"
         );
 
         state.demo_mode = true;
@@ -1600,6 +1621,11 @@ mod tests {
                 publish_recovery: false,
             },
             "a demo passes browse and search through untouched"
+        );
+        assert_eq!(
+            named(&demo.vaults, "Indexing").index_turn,
+            Some(VaultIndexTurn::Waiting),
+            "waiting is status, not deployment detail, so a demo keeps it"
         );
         // Its derived `retry: true` names the one Vault-control route a demo
         // also refuses, so the demo form drops it with the rest.

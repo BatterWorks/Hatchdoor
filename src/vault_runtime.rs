@@ -394,6 +394,20 @@ pub enum VaultSearchStatus {
     Stale,
 }
 
+/// Where a Vault's indexing stands in the instance-wide indexing queue,
+/// independent of what its search can answer (ADR-35 decision 5). Absent
+/// when the Vault has no indexing queued or running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultIndexTurn {
+    /// Its Index turn is running.
+    Running,
+    /// Its Index turn is queued behind another Vault's, or paused part-way
+    /// to let another Vault index, and resumes when its turn comes round.
+    /// Search keeps answering from whatever generation it already has.
+    Waiting,
+}
+
 /// Git status is kept separate so a Git failure cannot hide local Markdown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -445,6 +459,8 @@ pub struct CollectionVaultSnapshot {
     pub activation: VaultActivationStatus,
     pub local_content: LocalContentStatus,
     pub search: VaultSearchStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_turn: Option<VaultIndexTurn>,
     pub git: VaultGitStatus,
     pub watcher: VaultWatcherStatus,
     pub capabilities: VaultCapabilities,
@@ -1253,6 +1269,22 @@ impl VaultControlBlock {
                 .bump(self.definition.vault_id(), VaultChangeCategory::Status);
         }
         Ok(())
+    }
+
+    /// Publish this Vault's place in the indexing queue, read by `current`
+    /// under this Vault's status lock. Reading it there rather than taking it
+    /// as a value means two refreshes racing each other publish the queue as
+    /// it is, never as one of them found it a moment earlier.
+    pub(crate) fn refresh_index_turn(&self, current: impl FnOnce() -> Option<VaultIndexTurn>) {
+        let mut snapshot = self.write_snapshot();
+        let index_turn = current();
+        if snapshot.index_turn == index_turn {
+            return;
+        }
+        snapshot.index_turn = index_turn;
+        drop(snapshot);
+        self.revisions
+            .bump(self.definition.vault_id(), VaultChangeCategory::Status);
     }
 
     /// Publish authoritative local-Markdown availability, without changing
@@ -2302,6 +2334,7 @@ fn activation_snapshot(
         activation,
         local_content,
         search: retained_snapshot_search_status(snapshot_cache, definition.vault_id()),
+        index_turn: None,
         git,
         watcher: VaultWatcherStatus::Disabled,
         capabilities: VaultCapabilities::default(),
@@ -2490,6 +2523,7 @@ fn disabled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapshot {
         activation: VaultActivationStatus::Disabled,
         local_content: LocalContentStatus::Unavailable,
         search: VaultSearchStatus::Unavailable,
+        index_turn: None,
         git: VaultGitStatus::Disabled,
         watcher: VaultWatcherStatus::Disabled,
         capabilities: VaultCapabilities::default(),

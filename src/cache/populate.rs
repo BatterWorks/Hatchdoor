@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::mem::MaybeUninit;
@@ -83,6 +84,72 @@ pub(crate) struct BuildHandles<'a> {
     /// goes. `None` for a build with no Vault behind it, which embeds
     /// everything it cannot reuse from its own tables.
     pub(crate) saved_embeddings: Option<SavedEmbeddings<'a>>,
+    /// When the build stops early so another Vault can index (ADR-35
+    /// decision 3). `None` for a build that always runs to the end.
+    pub(crate) index_yield: Option<&'a IndexYield>,
+}
+
+/// The error a build returns when it stopped early for [`IndexYield`]. The
+/// caller tells it from a failure by asking [`IndexYield::yielded`], never
+/// by this text.
+const YIELDED: &str = "the build stopped early so another Vault could index";
+
+/// How a long Index turn takes turns with other Vaults (ADR-35 decision 3).
+///
+/// Once the build has embedded for `every`, it asks whether another Vault is
+/// waiting to index, before it embeds its next chunk. If one is, the build
+/// stops there: the vectors it computed are already in its saved progress,
+/// and the caller requeues the Vault behind the one waiting. If none is, it
+/// carries on and asks again after each further `every`. The clock is
+/// embedding time in this build, not chunks, so the bound on a waiting Vault
+/// holds on any hardware.
+///
+/// Asking before a chunk rather than after one means a build that has just
+/// embedded its last chunk finishes instead of pausing with nothing left to
+/// do. A build that has embedded nothing yet never stops either, so two
+/// Vaults can never hand the slot back and forth without either of them
+/// getting anywhere.
+pub(crate) struct IndexYield {
+    every: Duration,
+    another_vault_waits: Box<dyn Fn() -> bool + Send>,
+    next_check: Cell<Duration>,
+    embedded_any: Cell<bool>,
+    yielded: Cell<bool>,
+}
+
+impl IndexYield {
+    pub(crate) fn new(every: Duration, another_vault_waits: Box<dyn Fn() -> bool + Send>) -> Self {
+        Self {
+            every,
+            another_vault_waits,
+            next_check: Cell::new(every),
+            embedded_any: Cell::new(false),
+            yielded: Cell::new(false),
+        }
+    }
+
+    fn chunk_embedded(&self) {
+        self.embedded_any.set(true);
+    }
+
+    /// Whether the build stopped early for another Vault.
+    pub(crate) fn yielded(&self) -> bool {
+        self.yielded.get()
+    }
+
+    /// Asked before each chunk with the time this build has spent embedding
+    /// so far.
+    fn should_stop(&self, embedding: Duration) -> bool {
+        if !self.embedded_any.get() || embedding < self.next_check.get() {
+            return false;
+        }
+        if (self.another_vault_waits)() {
+            self.yielded.set(true);
+            return true;
+        }
+        self.next_check.set(embedding + self.every);
+        false
+    }
 }
 
 pub enum UpsertOutcome {
@@ -190,6 +257,7 @@ impl SqliteCache {
             on_progress,
             vault_read_guard,
             mut saved_embeddings,
+            index_yield,
         } = handles;
         // Entered here, on the thread that runs the build, rather than relied
         // on to cross `spawn_blocking` from the Index turn: an ambient span
@@ -503,12 +571,21 @@ impl SqliteCache {
                     embedder,
                     &progress_reporter,
                     saved_embeddings.as_mut(),
+                    index_yield,
                 ) {
                     Ok(stats) => {
                         notes_changed += 1;
                         chunks_embedded += stats.embedded;
                         chunks_reused += stats.reused;
                         metrics.record_chunk_stats(&stats);
+                    }
+                    // Not this note's failure: the whole build is stopping,
+                    // and the candidate it was filling is never published.
+                    Err(error) if index_yield.is_some_and(IndexYield::yielded) => {
+                        tracing::info!(
+                            "Pausing embedding so another Vault can index; progress is saved"
+                        );
+                        return Err(error);
                     }
                     Err(error) => {
                         per_note_failures += 1;
@@ -1846,6 +1923,7 @@ fn embed_prepared_note(
     embedder: &dyn Embedder,
     progress_reporter: &ProgressReporter<'_>,
     mut saved_embeddings: Option<&mut SavedEmbeddings<'_>>,
+    index_yield: Option<&IndexYield>,
 ) -> Result<ChunkStats, String> {
     let progress = progress_reporter.progress;
     let pipeline_started = Instant::now();
@@ -1950,6 +2028,12 @@ fn embed_prepared_note(
         .zip(embedding_input_token_lengths.chunks(batch_size))
         .zip(indices_needing_embed.chunks(batch_size))
     {
+        // A chunk boundary: everything embedded before it is recorded.
+        if index_yield.is_some_and(|index_yield| {
+            index_yield.should_stop(progress_reporter.started_at.elapsed())
+        }) {
+            return Err(YIELDED.to_string());
+        }
         let input_tokens: usize = token_lengths.iter().sum();
         let padded_tokens = token_lengths.iter().copied().max().unwrap_or(0) * texts.len();
         let call_started = Instant::now();
@@ -1983,6 +2067,9 @@ fn embed_prepared_note(
             .tokens_processed
             .fetch_add(input_tokens, Ordering::Relaxed);
         progress_reporter.notify();
+        if let Some(index_yield) = index_yield {
+            index_yield.chunk_embedded();
+        }
     }
     let embedding_elapsed = embedding_started.elapsed();
     if !texts_to_embed.is_empty() {
@@ -3802,5 +3889,73 @@ mod chunk_integration_tests {
             "stored chunk hash must be over the contextual document, so a heading \
              edit invalidates the cached vector instead of reusing a stale one"
         );
+    }
+}
+
+#[cfg(test)]
+mod index_yield_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::IndexYield;
+
+    fn yield_point(every: Duration) -> (IndexYield, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let waiting = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let index_yield = IndexYield::new(
+            every,
+            Box::new({
+                let waiting = waiting.clone();
+                let asked = asked.clone();
+                move || {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    waiting.load(Ordering::SeqCst)
+                }
+            }),
+        );
+        (index_yield, waiting, asked)
+    }
+
+    /// The queue is asked once per slice of embedding time, not at every
+    /// chunk, and only a waiting Vault stops the build.
+    #[test]
+    fn the_queue_is_asked_once_per_slice_of_embedding_time() {
+        let minute = Duration::from_secs(60);
+        let (index_yield, waiting, asked) = yield_point(minute);
+        index_yield.chunk_embedded();
+
+        assert!(!index_yield.should_stop(Duration::from_secs(59)));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "not asked inside the slice"
+        );
+        assert!(!index_yield.should_stop(Duration::from_secs(61)));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "asked once the slice is up"
+        );
+        assert!(!index_yield.should_stop(Duration::from_secs(90)));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "nobody was waiting, so the next question waits a further slice"
+        );
+
+        waiting.store(true, Ordering::SeqCst);
+        assert!(index_yield.should_stop(Duration::from_secs(122)));
+        assert!(index_yield.yielded());
+    }
+
+    #[test]
+    fn a_build_that_has_embedded_nothing_does_not_stop() {
+        let (index_yield, waiting, _) = yield_point(Duration::ZERO);
+        waiting.store(true, Ordering::SeqCst);
+        assert!(!index_yield.should_stop(Duration::from_secs(600)));
+        assert!(!index_yield.yielded());
+        index_yield.chunk_embedded();
+        assert!(index_yield.should_stop(Duration::from_secs(600)));
     }
 }

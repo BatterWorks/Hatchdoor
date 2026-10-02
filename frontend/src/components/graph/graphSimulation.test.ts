@@ -706,6 +706,13 @@ describe("island captions (#337)", () => {
     });
   });
 
+  it("say waiting, in muted ink, for a Vault queued behind another's indexing", () => {
+    expect(islandCountLine({ kind: "waiting", sentence: "" }, 0)).toEqual({
+      text: "waiting",
+      tone: "muted",
+    });
+  });
+
   it("carry the condition word and tier, or the note count", () => {
     expect(
       islandCountLine(

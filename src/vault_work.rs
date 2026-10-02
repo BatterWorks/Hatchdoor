@@ -138,6 +138,24 @@ pub enum ScheduleResult {
     Rejected,
 }
 
+/// Where one Vault's indexing stands in the indexing lane (ADR-35 decision
+/// 5), so its status can tell an Index turn that is embedding from one that
+/// is waiting for its turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexLaneState {
+    /// The Vault's Index or Repair turn holds the indexing slot.
+    Running,
+    /// The Vault has Index or Repair work queued, a paused Index turn
+    /// waiting to resume included, and none running.
+    Waiting,
+}
+
+/// Called with a Vault whose [`IndexLaneState`] may have just changed. It
+/// re-reads the state through the coordinator it is handed rather than being
+/// told it, so two notifications that race each other cannot leave the older
+/// answer published.
+type IndexLaneObserver = Arc<dyn Fn(&VaultWorkCoordinator, VaultId) + Send + Sync>;
+
 /// The Vault-qualified result of exactly one worker turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultWorkOutcome {
@@ -203,6 +221,36 @@ impl Lane {
 struct SharedQueue {
     state: Mutex<QueueState>,
     ready: Notify,
+    index_lane_observer: Mutex<Option<IndexLaneObserver>>,
+}
+
+impl SharedQueue {
+    /// Tell the observer, if any, that these Vaults' indexing may have moved.
+    /// Never called with the queue lock held: the observer reads the queue
+    /// back, and publishes to a Vault's status under that status's own lock.
+    fn index_lane_changed(self: &Arc<Self>, vaults: impl IntoIterator<Item = VaultId>) {
+        let observer = self
+            .index_lane_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(observer) = observer else {
+            return;
+        };
+        let coordinator = VaultWorkCoordinator {
+            shared: self.clone(),
+        };
+        for vault_id in vaults {
+            observer(&coordinator, vault_id);
+        }
+    }
+
+    /// [`Self::index_lane_changed`] for one request, if it is indexing work.
+    fn lane_changed_for(self: &Arc<Self>, vault_id: VaultId, kind: VaultWorkKind) {
+        if Lane::of(kind) == Lane::Index {
+            self.index_lane_changed([vault_id]);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -275,6 +323,7 @@ impl VaultWorkCoordinator {
                 ..QueueState::default()
             }),
             ready: Notify::new(),
+            index_lane_observer: Mutex::new(None),
         });
         (
             Self {
@@ -305,6 +354,7 @@ impl VaultWorkCoordinator {
         state.enqueue(vault_id, kind);
         drop(state);
         self.shared.ready.notify_waiters();
+        self.shared.lane_changed_for(vault_id, kind);
         ScheduleResult::Queued
     }
 
@@ -336,7 +386,97 @@ impl VaultWorkCoordinator {
         state.enqueue(vault_id, kind);
         drop(state);
         self.shared.ready.notify_waiters();
+        self.shared.lane_changed_for(vault_id, kind);
         ScheduleResult::Queued
+    }
+
+    /// Put a Vault whose Index turn is pausing at the back of the indexing
+    /// lane, behind everything already queued, so it resumes when its turn
+    /// comes round again (ADR-35 decisions 3 and 4). Called by the pausing
+    /// turn itself, before it returns.
+    ///
+    /// Index work requested for the Vault while the turn ran is not a second
+    /// position: it joins this one, as a request made while the Vault waits
+    /// does. A drained or shut-down Vault is not requeued, which is how
+    /// disabling, removing or shutting down discards paused work along with
+    /// the rest of its queue.
+    pub fn requeue_paused_index_turn(&self, vault_id: VaultId) -> ScheduleResult {
+        let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        if !state.accepting_work || state.drained_vaults.contains(&vault_id) {
+            return ScheduleResult::Rejected;
+        }
+        state
+            .fifo
+            .retain(|position| *position != (vault_id, Lane::Index));
+        let queue = state
+            .vaults
+            .entry(vault_id)
+            .or_default()
+            .lane_mut(Lane::Index);
+        if queue.pending_kinds.insert(VaultWorkKind::Index) {
+            queue.pending.push_back(VaultWorkKind::Index);
+        }
+        queue.queued = true;
+        state.fifo.push_back((vault_id, Lane::Index));
+        drop(state);
+        self.shared.ready.notify_waiters();
+        self.shared.index_lane_changed([vault_id]);
+        ScheduleResult::Queued
+    }
+
+    /// Whether a Vault other than `vault_id` has Index or Repair work queued
+    /// in the indexing lane: the question a long Index turn asks before it
+    /// pauses (ADR-35 decision 3). A single-Vault instance always answers
+    /// no, so its Index turns never pause.
+    pub fn another_vault_waits_to_index(&self, vault_id: VaultId) -> bool {
+        let state = self.shared.state.lock().expect("Vault work queue poisoned");
+        state
+            .fifo
+            .iter()
+            .any(|(queued, lane)| *lane == Lane::Index && *queued != vault_id)
+    }
+
+    /// Where `vault_id`'s indexing stands: running, waiting for its turn, or
+    /// `None` when it has no Index or Repair work at all.
+    pub fn index_lane_state(&self, vault_id: VaultId) -> Option<IndexLaneState> {
+        let state = self.shared.state.lock().expect("Vault work queue poisoned");
+        let lane = state.vaults.get(&vault_id)?.lane(Lane::Index);
+        if lane.active.is_some() {
+            Some(IndexLaneState::Running)
+        } else if lane.queued {
+            Some(IndexLaneState::Waiting)
+        } else {
+            None
+        }
+    }
+
+    /// Have `observer` called with each Vault whose [`IndexLaneState`] may
+    /// have changed, replacing any observer set before. The composition root
+    /// sets the one that publishes it on the Vault's status.
+    ///
+    /// Every Vault already in the queue is reported straight away. Startup
+    /// reconstruction queues each Vault's first Index turn before the
+    /// observer exists, and those Vaults would otherwise not say they are
+    /// waiting until their own turn moved them.
+    pub fn observe_index_lane(
+        &self,
+        observer: impl Fn(&VaultWorkCoordinator, VaultId) + Send + Sync + 'static,
+    ) {
+        *self
+            .shared
+            .index_lane_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(observer));
+        let queued: Vec<VaultId> = self
+            .shared
+            .state
+            .lock()
+            .expect("Vault work queue poisoned")
+            .vaults
+            .keys()
+            .copied()
+            .collect();
+        self.shared.index_lane_changed(queued);
     }
 
     /// Whether `kind` is currently active or already pending for `vault_id`.
@@ -370,6 +510,7 @@ impl VaultWorkCoordinator {
         state.discard_pending(vault_id);
         drop(state);
         self.shared.ready.notify_waiters();
+        self.shared.index_lane_changed([vault_id]);
     }
 
     /// Stop scheduling globally and discard all queued turns.
@@ -379,9 +520,11 @@ impl VaultWorkCoordinator {
     pub fn shutdown(&self) {
         let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
         state.accepting_work = false;
+        let affected: Vec<VaultId> = state.vaults.keys().copied().collect();
         state.discard_all_pending();
         drop(state);
         self.shared.ready.notify_waiters();
+        self.shared.index_lane_changed(affected);
     }
 
     /// Wait only for the already-active turns, in either lane, of one
@@ -435,6 +578,8 @@ impl VaultWorkWorker {
             {
                 let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
                 if let Some(request) = state.take_next() {
+                    drop(state);
+                    self.shared.lane_changed_for(request.vault_id, request.kind);
                     return Some(VaultWorkTurn {
                         shared: self.shared.clone(),
                         request,
@@ -507,6 +652,8 @@ impl Drop for VaultWorkTurn {
             .expect("Vault work queue poisoned")
             .complete(self.request);
         self.shared.ready.notify_waiters();
+        self.shared
+            .lane_changed_for(self.request.vault_id, self.request.kind);
     }
 }
 
@@ -1541,6 +1688,256 @@ mod tests {
         assert_eq!(
             coordinator.request(first, VaultWorkKind::Repair),
             ScheduleResult::Rejected
+        );
+    }
+
+    /// Run every queued turn to completion, one at a time, and return the
+    /// order they ran in.
+    async fn drain_in_order(worker: &mut VaultWorkWorker) -> Vec<VaultWorkRequest> {
+        let mut observed = Vec::new();
+        while let Ok(Some(outcome)) = timeout(
+            Duration::from_millis(25),
+            worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) }),
+        )
+        .await
+        {
+            observed.push(outcome.request);
+        }
+        observed
+    }
+
+    /// ADR-35 decision 4: a paused Vault goes behind everything already
+    /// queued, and a Vault requested after the pause goes behind it.
+    #[tokio::test]
+    async fn a_paused_index_turn_rejoins_the_back_of_the_indexing_lane() {
+        let large = vault_id("00000000-0000-4000-8000-000000000001");
+        let small_one = vault_id("00000000-0000-4000-8000-000000000002");
+        let small_two = vault_id("00000000-0000-4000-8000-000000000003");
+        let later = vault_id("00000000-0000-4000-8000-000000000004");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(large, VaultWorkKind::Index);
+        let release = Arc::new(Notify::new());
+        let (running, paused) = park_next_turn(&mut worker, release.clone()).await;
+        assert_eq!(running.vault_id(), large);
+        coordinator.request(small_one, VaultWorkKind::Index);
+        coordinator.request(small_two, VaultWorkKind::Index);
+
+        assert_eq!(
+            coordinator.requeue_paused_index_turn(large),
+            ScheduleResult::Queued
+        );
+        release.notify_one();
+        paused.await.expect("paused turn task");
+
+        let first = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("first waiting Vault");
+        assert_eq!(first.request.vault_id(), small_one);
+        coordinator.request(later, VaultWorkKind::Index);
+
+        let rest: Vec<VaultId> = drain_in_order(&mut worker)
+            .await
+            .into_iter()
+            .map(VaultWorkRequest::vault_id)
+            .collect();
+        assert_eq!(rest, vec![small_two, large, later]);
+    }
+
+    /// A rerun requested while the turn ran already holds a position, ahead
+    /// of a Vault queued after it. Pausing moves that position to the back
+    /// rather than adding a second one, so the waiting Vault still goes next
+    /// and the paused Vault resumes exactly once.
+    #[tokio::test]
+    async fn pausing_moves_an_earlier_rerun_behind_the_waiting_vault() {
+        let large = vault_id("00000000-0000-4000-8000-000000000001");
+        let small = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(large, VaultWorkKind::Index);
+        let release = Arc::new(Notify::new());
+        let (_, paused) = park_next_turn(&mut worker, release.clone()).await;
+        assert_eq!(
+            coordinator.request(large, VaultWorkKind::Index),
+            ScheduleResult::Queued,
+            "a change during the turn queues one rerun"
+        );
+        coordinator.request(small, VaultWorkKind::Index);
+
+        coordinator.requeue_paused_index_turn(large);
+        assert_eq!(
+            coordinator.request(large, VaultWorkKind::Index),
+            ScheduleResult::Coalesced,
+            "a request while paused joins the paused Vault's one position"
+        );
+        release.notify_one();
+        paused.await.expect("paused turn task");
+
+        let order: Vec<VaultId> = drain_in_order(&mut worker)
+            .await
+            .into_iter()
+            .map(VaultWorkRequest::vault_id)
+            .collect();
+        assert_eq!(order, vec![small, large]);
+    }
+
+    #[tokio::test]
+    async fn only_another_vaults_queued_indexing_counts_as_waiting() {
+        let large = vault_id("00000000-0000-4000-8000-000000000001");
+        let other = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(large, VaultWorkKind::Index);
+        let release = Arc::new(Notify::new());
+        let (_, running) = park_next_turn(&mut worker, release.clone()).await;
+
+        assert!(
+            !coordinator.another_vault_waits_to_index(large),
+            "alone, nothing is waiting"
+        );
+        coordinator.request(large, VaultWorkKind::Index);
+        assert!(
+            !coordinator.another_vault_waits_to_index(large),
+            "the Vault's own rerun is not another Vault"
+        );
+        coordinator.request(other, VaultWorkKind::Commit);
+        coordinator.request(other, VaultWorkKind::Git);
+        assert!(
+            !coordinator.another_vault_waits_to_index(large),
+            "Git work runs in its own lane and never waits for indexing"
+        );
+        coordinator.request(other, VaultWorkKind::Repair);
+        assert!(coordinator.another_vault_waits_to_index(large));
+
+        release.notify_one();
+        running.await.expect("running turn task");
+    }
+
+    /// Disabling, removing or shutting down discards a paused Vault's
+    /// position, and a turn pausing after that is not put back.
+    #[tokio::test]
+    async fn a_drained_vault_loses_its_paused_position_and_is_not_requeued() {
+        let large = vault_id("00000000-0000-4000-8000-000000000001");
+        let small = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(large, VaultWorkKind::Index);
+        let release = Arc::new(Notify::new());
+        let (_, paused) = park_next_turn(&mut worker, release.clone()).await;
+        coordinator.request(small, VaultWorkKind::Index);
+        coordinator.requeue_paused_index_turn(large);
+
+        coordinator.drain_vault(large);
+        assert_eq!(
+            coordinator.index_lane_state(large),
+            Some(super::IndexLaneState::Running),
+            "only the turn still running is left, not its paused position"
+        );
+        assert_eq!(
+            coordinator.requeue_paused_index_turn(large),
+            ScheduleResult::Rejected
+        );
+        release.notify_one();
+        paused.await.expect("paused turn task");
+        assert_eq!(coordinator.index_lane_state(large), None);
+
+        let order: Vec<VaultId> = drain_in_order(&mut worker)
+            .await
+            .into_iter()
+            .map(VaultWorkRequest::vault_id)
+            .collect();
+        assert_eq!(order, vec![small]);
+
+        coordinator.request(large, VaultWorkKind::Index);
+        coordinator.shutdown();
+        assert_eq!(
+            coordinator.requeue_paused_index_turn(small),
+            ScheduleResult::Rejected
+        );
+    }
+
+    /// ADR-35 decision 5's source: the lane says which Vaults are waiting and
+    /// which is running, and tells its observer each time that moves.
+    #[tokio::test]
+    async fn the_indexing_lane_reports_waiting_and_running_vaults_to_its_observer() {
+        use super::IndexLaneState::{Running, Waiting};
+        let large = vault_id("00000000-0000-4000-8000-000000000001");
+        let small = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        coordinator.observe_index_lane({
+            let seen = seen.clone();
+            move |coordinator, vault_id| {
+                seen.lock()
+                    .expect("observer log")
+                    .push((vault_id, coordinator.index_lane_state(vault_id)));
+            }
+        });
+        let take = |seen: &Arc<std::sync::Mutex<Vec<_>>>| {
+            std::mem::take(&mut *seen.lock().expect("observer log"))
+        };
+
+        coordinator.request(large, VaultWorkKind::Git);
+        assert_eq!(take(&seen), vec![], "Git work is not indexing");
+        assert_eq!(coordinator.index_lane_state(large), None);
+
+        coordinator.request(large, VaultWorkKind::Index);
+        coordinator.request(small, VaultWorkKind::Index);
+        assert_eq!(
+            take(&seen),
+            vec![(large, Some(Waiting)), (small, Some(Waiting))]
+        );
+
+        // The Git turn was requested first and runs first; it moves nothing.
+        let git = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("Git turn");
+        assert_eq!(git.request.kind(), VaultWorkKind::Git);
+        assert_eq!(take(&seen), vec![]);
+
+        let release = Arc::new(Notify::new());
+        let (_, paused) = park_next_turn(&mut worker, release.clone()).await;
+        assert_eq!(take(&seen), vec![(large, Some(Running))]);
+        assert_eq!(coordinator.index_lane_state(small), Some(Waiting));
+
+        coordinator.requeue_paused_index_turn(large);
+        assert_eq!(
+            take(&seen),
+            vec![(large, Some(Running))],
+            "still running until the pausing turn returns"
+        );
+        release.notify_one();
+        paused.await.expect("paused turn task");
+        assert_eq!(take(&seen), vec![(large, Some(Waiting))]);
+
+        coordinator.drain_vault(large);
+        assert_eq!(take(&seen), vec![(large, None)]);
+        drain_in_order(&mut worker).await;
+        assert_eq!(take(&seen), vec![(small, Some(Running)), (small, None)]);
+    }
+
+    /// Startup reconstruction queues first Index turns before the observer
+    /// is set, so setting it reports every Vault already queued.
+    #[tokio::test]
+    async fn setting_the_observer_reports_vaults_already_queued() {
+        use super::IndexLaneState::Waiting;
+        let first = vault_id("00000000-0000-4000-8000-000000000001");
+        let second = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, _worker) = VaultWorkCoordinator::new();
+        coordinator.request(first, VaultWorkKind::Index);
+        coordinator.request(second, VaultWorkKind::Index);
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        coordinator.observe_index_lane({
+            let seen = seen.clone();
+            move |coordinator, vault_id| {
+                seen.lock()
+                    .expect("observer log")
+                    .push((vault_id, coordinator.index_lane_state(vault_id)));
+            }
+        });
+
+        assert_eq!(
+            *seen.lock().expect("observer log"),
+            vec![(first, Some(Waiting)), (second, Some(Waiting))]
         );
     }
 }
