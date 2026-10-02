@@ -4646,10 +4646,11 @@ mod tests {
     #[tokio::test]
     async fn ready_endpoint_stays_ready_through_a_routine_reindex() {
         let (_app, _tmp, state) = app_for_tests_with_state();
+        let vault_id = crate::vault_registry::VaultId::generate().expect("vault id");
         state.startup.set_ready();
-        state
-            .startup
-            .report_indexing_progress(crate::startup::IndexingProgressSnapshot {
+        state.startup.report_indexing_progress(
+            vault_id,
+            crate::startup::IndexingProgressSnapshot {
                 notes_completed: 1,
                 notes_total: 2,
                 chunks_completed: 1,
@@ -4657,7 +4658,12 @@ mod tests {
                 tokens_completed: 10,
                 tokens_total: 20,
                 elapsed_seconds: 1,
-            });
+            },
+            vec![crate::startup::IndexingParticipant {
+                vault_id,
+                settled: false,
+            }],
+        );
         let readiness = build_router(state, None)
             .oneshot(
                 Request::builder()

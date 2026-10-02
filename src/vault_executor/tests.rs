@@ -3802,3 +3802,153 @@ async fn a_refused_recovery_publish_keeps_the_earlier_publication_and_the_confli
     );
     assert!(after.capabilities.publish_recovery);
 }
+
+/// Two Vaults through the real executor: once the first Vault's turn has
+/// finished, the startup reading covers the second one still queued instead
+/// of claiming 100% for the first alone (#373).
+#[tokio::test]
+async fn first_run_progress_through_the_executor_covers_the_queued_vault() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for (path, prefix) in [(&first_path, "First"), (&second_path, "Second")] {
+        std::fs::create_dir_all(path).expect("Vault directory");
+        for index in 0..3 {
+            std::fs::write(
+                path.join(format!("{prefix} {index}.md")),
+                format!("# {prefix} {index}\n\nA note about sleep and circadian rhythm."),
+            )
+            .expect("write note");
+        }
+    }
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let with_first = add_local_vault(&registry, &empty, "First", first_path);
+    let committed = add_local_vault(&registry, &with_first, "Second", second_path);
+
+    let vaults = VaultCollectionRuntime::new();
+    let (work, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(work.clone()));
+    vaults
+        .reconcile_and_reconstruct(&registry, &committed, &work, &managed_git)
+        .await;
+    let executor = VaultWorkExecutor {
+        vaults: vaults.clone(),
+        registry: registry.clone(),
+        work: work.clone(),
+        managed_git: managed_git.clone(),
+        commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
+        cache: Arc::new(SqliteCache::in_memory(384).expect("open shared cache")),
+        embedder: Arc::new(StubEmbedder::new(384)),
+        runtime_config: RuntimeConfig::for_tests(),
+        startup: StartupTracker::scanning(),
+        model_setup_started: Arc::new(AtomicBool::new(true)),
+        index_retries: IndexRetries::default(),
+    };
+
+    let outcome = worker
+        .run_next(|request| executor.run(request))
+        .await
+        .expect("first Index turn");
+    outcome.result.as_ref().expect("first Index turn succeeds");
+    executor.publish_outcome(&outcome);
+
+    let status = executor.startup.status();
+    assert_eq!(status.state, "indexing");
+    let percent = status.percent.expect("percent");
+    assert!(
+        (1..100).contains(&percent),
+        "one of two equal Vaults done must read part-way, not {percent}%"
+    );
+    assert!(
+        status.eta_seconds.is_some(),
+        "time left still covers the queued Vault after the first one finished"
+    );
+
+    let outcome = worker
+        .run_next(|request| executor.run(request))
+        .await
+        .expect("second Index turn");
+    outcome.result.as_ref().expect("second Index turn succeeds");
+    executor.publish_outcome(&outcome);
+    assert_eq!(executor.startup.status().state, "ready");
+}
+
+/// Counting a queued Vault's notes reads directory entries only. It finishes
+/// while that Vault's foreground mutation guard is held, so it cannot wait on
+/// a write in progress or hold one up.
+#[tokio::test]
+async fn counting_a_queued_vaults_notes_does_not_take_its_mutation_guard() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let queued_path = directory.path().join("queued");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    std::fs::create_dir_all(queued_path.join("sub")).expect("queued Vault directory");
+    std::fs::write(first_path.join("One.md"), "# One").expect("write note");
+    std::fs::write(queued_path.join("A.md"), "# A").expect("write note");
+    std::fs::write(queued_path.join("sub/B.md"), "# B").expect("write note");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let with_first = add_local_vault(&registry, &empty, "First", first_path);
+    let committed = add_local_vault(&registry, &with_first, "Queued", queued_path);
+    let first = vault_id_named(&committed, "First");
+    let queued = vault_id_named(&committed, "Queued");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &committed);
+
+    let _held = vaults
+        .runtime(queued)
+        .expect("queued Vault")
+        .acquire_mutation()
+        .await
+        .expect("hold the queued Vault's mutation guard");
+    let startup = StartupTracker::scanning();
+    report_first_run_progress(
+        &startup,
+        &vaults,
+        first,
+        IndexingProgressSnapshot {
+            notes_total: 1,
+            tokens_total: 10,
+            ..IndexingProgressSnapshot::default()
+        },
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while startup.recorded_note_count(queued).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the note count never landed while the guard was held"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(startup.recorded_note_count(queued), Some(Some(2)));
+    assert_eq!(
+        startup.recorded_note_count(first),
+        None,
+        "the reporting Vault brings its own count"
+    );
+}
+
+#[test]
+fn note_count_honours_exclusions_and_reports_an_unreadable_vault() {
+    let directory = tempdir().expect("temporary Vault directory");
+    let root = directory.path();
+    std::fs::create_dir_all(root.join("drafts")).expect("drafts directory");
+    std::fs::write(root.join("Kept.md"), "").expect("write note");
+    std::fs::write(root.join("drafts/Skipped.md"), "").expect("write note");
+    std::fs::write(root.join("image.png"), "").expect("write asset");
+
+    assert_eq!(count_markdown_notes(root, &[]), Some(2));
+    assert_eq!(
+        count_markdown_notes(root, &["drafts/".to_string()]),
+        Some(1)
+    );
+    assert_eq!(count_markdown_notes(&root.join("missing"), &[]), None);
+}
