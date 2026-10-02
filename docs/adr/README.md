@@ -75,11 +75,11 @@ Copy this for a new record:
 | 35 | [A long Index turn keeps its embedding progress and takes turns with other Vaults](#adr-35--a-long-index-turn-keeps-its-embedding-progress-and-takes-turns-with-other-vaults) | Accepted; decisions 1 and 2 implemented in #382, 3 to 5 in #383 | Don't let a partly embedded Vault answer search; don't embed two Vaults at once; don't let a paused Index turn jump the queue; never make saved progress authoritative |
 | 36 | [A release is cut by two commands, and only the maintainer approves its notes](#adr-36--a-release-is-cut-by-two-commands-and-only-the-maintainer-approves-its-notes) | Accepted; implemented in #402, #403 and #404; where the checklist lives (decision 3), which pull request publish reads it from (decision 5) and when the draft release is created (decision 1) superseded by ADR-37; ADR-42 adds a refusal to decision 2 (#424) | Don't overwrite a published version, don't publish without the maintainer's approval of the notes, and don't put private infrastructure in the public release commands |
 | 37 | [A release is reviewed on its version-bump pull request](#adr-37--a-release-is-reviewed-on-its-version-bump-pull-request) | Accepted; implemented in #408 | Don't let anything but the bump branch carry a change into a release after prepare; don't loosen ADR-36 decision 5 to admit "release fix" pull requests |
-| 38 | [The manual ships inside the binary and is served as Help, never as a Vault](#adr-38--the-manual-ships-inside-the-binary-and-is-served-as-help-never-as-a-vault) | Proposed | Don't serve anything but the bundled manual at the public docs addresses, don't reveal the version on a public route, and don't make Help or the docs tools need a Vault or the embedding model |
-| 39 | [Hatchdoor checks for a newer release only when asked](#adr-39--hatchdoor-checks-for-a-newer-release-only-when-asked) | Proposed | Don't check by default, don't send the version or anything about the instance, and never upgrade automatically |
-| 40 | [A fresh install starts with zero Vaults](#adr-40--a-fresh-install-starts-with-zero-vaults) | Proposed | Don't register a Vault nobody added, don't write starter notes into a user's folder, and don't open on zero Vaults while stored settings still carry the retired single-Vault keys |
-| 41 | [Hatchdoor lists the folders it can see, inside its Vault mount only](#adr-41--hatchdoor-lists-the-folders-it-can-see-inside-its-vault-mount-only) | Proposed | Don't follow a symlink, leave the Vault root, return file names or content, or serve the listing in demo mode |
-| 42 | [Every release ships plain highlights](#adr-42--every-release-ships-plain-highlights) | Proposed | Don't release without 3 to 6 highlight lines, action-needed items first |
+| 38 | [The manual ships inside the binary and is served as Help, never as a Vault](#adr-38--the-manual-ships-inside-the-binary-and-is-served-as-help-never-as-a-vault) | Accepted | Don't serve anything but the bundled manual at the public docs addresses, don't reveal the version on a public route, and don't make Help or the docs tools need a Vault or the embedding model |
+| 39 | [Hatchdoor checks for a newer release only when asked](#adr-39--hatchdoor-checks-for-a-newer-release-only-when-asked) | Accepted | Don't check by default, don't send the version or anything about the instance, and never upgrade automatically |
+| 40 | [A fresh install starts with zero Vaults](#adr-40--a-fresh-install-starts-with-zero-vaults) | Accepted | Don't register a Vault nobody added, don't write starter notes into a user's folder, and don't open on zero Vaults while stored settings still carry the retired single-Vault keys |
+| 41 | [Hatchdoor lists the folders it can see, inside its Vault mount only](#adr-41--hatchdoor-lists-the-folders-it-can-see-inside-its-vault-mount-only) | Accepted | Don't follow a symlink, leave the Vault root, return file names or content, or serve the listing in demo mode |
+| 42 | [Every release ships plain highlights](#adr-42--every-release-ships-plain-highlights) | Accepted | Don't release without 3 to 6 highlight lines, action-needed items first |
 
 > Records 01–13 were reconstructed and adopted on 2026-07-19 from the codebase,
 > the CHANGELOG audit fixes (`F-01`…`F-17`), and the semantic-search evaluation.
@@ -490,7 +490,7 @@ Copy this for a new record:
 
 ## ADR-38 — The manual ships inside the binary and is served as Help, never as a Vault
 
-- **Status:** Proposed (#420), from the resolution of #416 and its addendum. Adds a fourth surface beside ADR-02's three, in the same binary, and builds on ADR-08 and ADR-09 without amending them.
+- **Status:** Accepted (#420), from the resolution of #416 and its addendum. Adds a fourth surface beside ADR-02's three, in the same binary, and builds on ADR-08 and ADR-09 without amending them.
 - **Context:** Hatchdoor's manual is the Obsidian-style folder `docs/user-vault`. A reader finds it on GitHub or on a separate instance that serves it as a Vault, and both copies follow the repository, not the version the reader runs. A beginner who is stuck has nowhere inside Hatchdoor to look, and an agent helping them cannot read the manual for the version in front of it. Agents need it most during model setup, which is exactly when the Vault tools refuse. Serving the manual as an ordinary Vault was rejected: it would show up in note search, the graph, stats and the Vault list beside the user's own notes, and it would need the index and the embedding model before anyone could read it.
 - **Decision:**
   1. **Bundled per version.** `docs/user-vault` is bundled into the binary at build time, so every install carries the manual for its own version.
@@ -505,7 +505,7 @@ Copy this for a new record:
 
 ## ADR-39 — Hatchdoor checks for a newer release only when asked
 
-- **Status:** Proposed (#420), from the resolution of #416 and its addendum. Applies ADR-13 to the one new outbound request.
+- **Status:** Accepted (#420), from the resolution of #416 and its addendum. Applies ADR-13 to the one new outbound request.
 - **Context:** An install learns about a new release only if its operator goes looking, so most installs run old versions without knowing it. Hatchdoor otherwise makes outbound requests only to download a search model and, for Git-backed Vaults, to reach the configured remote. A check that phoned home by default would be a new, unannounced request from every install, and would tell a third party which instances exist and what they run.
 - **Decision:**
   1. **Opt-in, off by default.** A setting turns the check on. It is offered in the first-run checklist, and like every setting it follows ADR-14.
@@ -518,7 +518,7 @@ Copy this for a new record:
 
 ## ADR-40 — A fresh install starts with zero Vaults
 
-- **Status:** Proposed (#420), from the resolution of #416 and its addendum. Removes the legacy single-Vault import (#82) that ADR-18 left in place for first boot. Applies ADR-07 to one new startup refusal. Narrows a consequence of ADR-14.
+- **Status:** Accepted (#420), from the resolution of #416 and its addendum. Removes the legacy single-Vault import (#82) that ADR-18 left in place for first boot. Applies ADR-07 to one new startup refusal. Narrows a consequence of ADR-14.
 - **Context:** On first boot Hatchdoor registers the mounted folder as a Vault by itself and, when it holds no Markdown, writes starter notes into it. A beginner therefore opens on a Vault they did not choose, filled with notes they did not write, sometimes in a folder they meant for something else, and the starter notes are copied into the user's own files where they outlive every upgrade. The same first-boot path carries the legacy single-Vault import, which converted 2.4.x deployments to the Vault registry in 2.5.0 and has had nothing to convert on any install that has run a 2.5.0 or later release. A first-run checklist and a folder picker (ADR-41) replace both as the way a beginner gets set up. Upgrades also need to know which version ran before, to show what changed (ADR-42), and nothing records that today.
 - **Decision:**
   1. **Zero Vaults on a fresh install.** A deployment with no registry starts with an empty one, whatever `VAULT_PATH` holds and whether or not it is set. The mounted folder is no longer registered as a Vault by itself.
@@ -532,7 +532,7 @@ Copy this for a new record:
 
 ## ADR-41 — Hatchdoor lists the folders it can see, inside its Vault mount only
 
-- **Status:** Proposed (#420), from the resolution of #416 and its addendum. Uses the web token of ADR-08.
+- **Status:** Accepted (#420), from the resolution of #416 and its addendum. Uses the web token of ADR-08.
 - **Context:** With no Vault registered on a fresh install (ADR-40), a beginner has to name a folder. Typing a container path they cannot see is where most of them would get stuck: the folder they know is on the host, while Hatchdoor sees it under a mount such as `/data/vault`. A picker over the folders the container can actually see removes the guessing. This listing is the first surface that walks the filesystem outside a Vault, so its limits need writing down.
 - **Decision:**
   1. **One authenticated, read-only listing.** It lists the folders under the configured Vault root (`VAULT_PATH`), with a count of the Markdown files in each, and feeds the folder picker. It sits behind the web token like the rest of the HTTP API (ADR-08).
@@ -546,7 +546,7 @@ Copy this for a new record:
 
 ## ADR-42 — Every release ships plain highlights
 
-- **Status:** Proposed (#420), from the resolution of #416 and its addendum. Adds one refusal to ADR-36 decision 2.
+- **Status:** Accepted (#420), from the resolution of #416 and its addendum. Adds one refusal to ADR-36 decision 2.
 - **Context:** The changelog is written for people who read changelogs. A beginner who upgrades has no idea what changed or whether they must do something, and an action-needed item is buried among fixes. The What's new pop-up, Help and agents all need one short, plain account of each release, and it has to be written every time, which a manual step would not guarantee.
 - **Decision:**
   1. **A What's new page in the manual.** It holds 3 to 6 plain lines per release, counted in total, action-needed items first, newest release first. The pop-up, Help and agents all read the highlights from there, and the MCP opening instructions carry one fixed line pointing agents to it. The page names the running version, so it is private (ADR-38).
