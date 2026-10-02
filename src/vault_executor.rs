@@ -36,7 +36,7 @@ use crate::git::{
     run_managed_git_turn, run_managed_recovery_turn,
 };
 use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
-use crate::startup::StartupTracker;
+use crate::startup::{IndexingParticipant, IndexingProgressSnapshot, StartupTracker};
 use crate::vault_registry::{
     VaultGitMode, VaultId, VaultRegistryStore, VaultSource as RegistryVaultSource,
 };
@@ -246,13 +246,20 @@ impl VaultWorkExecutor {
                     .map(|setting| crate::runtime_config::is_truthy(&setting.value))
                     .unwrap_or(true);
                 let progress_startup = self.startup.clone();
+                let progress_vaults = self.vaults.clone();
+                let vault_id = request.vault_id();
                 dispatch_vault_index_turn_with_progress(
                     &self.vaults,
                     self.cache.clone(),
                     self.embedder.clone(),
                     embed_layers,
                     Some(Arc::new(move |progress| {
-                        progress_startup.report_indexing_progress(progress);
+                        report_first_run_progress(
+                            &progress_startup,
+                            &progress_vaults,
+                            vault_id,
+                            progress,
+                        );
                     })),
                     request,
                 )
@@ -345,7 +352,14 @@ impl VaultWorkExecutor {
             Err(error) if error.retryable() => self.schedule_index_retry(vault_id),
             Err(_) => {}
         }
-        if !self.startup.collection_indexes_ready() && collection_indexes_settled(&self.vaults) {
+        if self.startup.collection_indexes_ready() {
+            return;
+        }
+        // The finished turn's Vault now counts as done in the startup
+        // reading, even if it failed partway.
+        self.startup
+            .refresh_indexing_participants(indexing_participants(&self.vaults));
+        if collection_indexes_settled(&self.vaults) {
             self.startup.set_ready();
             self.model_setup_started.store(false, Ordering::Release);
             info!("Vault collection indexing complete");
@@ -384,13 +398,104 @@ impl VaultWorkExecutor {
 /// readiness (#326). An empty collection is never Ready: there is nothing
 /// that could have finished indexing.
 fn collection_indexes_settled(vaults: &VaultCollectionRuntime) -> bool {
-    let active = vaults.active_vault_ids();
-    !active.is_empty()
-        && active.into_iter().all(|vault_id| {
-            vaults
+    let participants = indexing_participants(vaults);
+    !participants.is_empty() && participants.iter().all(|participant| participant.settled)
+}
+
+/// Every active Vault with its settled state, by the rule
+/// [`collection_indexes_settled`] uses, for the startup reading (#373).
+fn indexing_participants(vaults: &VaultCollectionRuntime) -> Vec<IndexingParticipant> {
+    vaults
+        .active_vault_ids()
+        .into_iter()
+        .map(|vault_id| IndexingParticipant {
+            vault_id,
+            settled: vaults
                 .runtime(vault_id)
-                .is_some_and(|runtime| index_settled(&runtime.snapshot()))
+                .is_some_and(|runtime| index_settled(&runtime.snapshot())),
         })
+        .collect()
+}
+
+/// Report one Index turn's progress to the startup tracker, with the whole
+/// collection it belongs to, while first-run indexing is still under way.
+///
+/// The first report of a pass also starts counting the other Vaults' notes,
+/// so the reading can weigh the ones still queued. That count runs on its own
+/// thread and reads directory entries only: no note content, and none of the
+/// Vault's mutation guards, so it cannot block a write or the turn reporting
+/// here.
+fn report_first_run_progress(
+    startup: &StartupTracker,
+    vaults: &VaultCollectionRuntime,
+    vault_id: VaultId,
+    progress: IndexingProgressSnapshot,
+) {
+    // Routine reindexing after `Ready` is reported per Vault, not here, so it
+    // need not read the collection on every progress tick (#326).
+    if startup.collection_indexes_ready() {
+        return;
+    }
+    startup.report_indexing_progress(vault_id, progress, indexing_participants(vaults));
+    let Some(generation) = startup.claim_note_counts() else {
+        return;
+    };
+    let queued: Vec<(VaultId, PathBuf, Vec<String>)> = vaults
+        .active_vault_ids()
+        .into_iter()
+        .filter(|queued_id| *queued_id != vault_id)
+        .filter_map(|queued_id| {
+            let runtime = vaults.runtime(queued_id)?;
+            Some((
+                queued_id,
+                runtime.vault_path().to_path_buf(),
+                runtime.definition().exclude_patterns().to_vec(),
+            ))
+        })
+        .collect();
+    let startup = startup.clone();
+    let spawned = std::thread::Builder::new()
+        .name("hatchdoor-note-count".to_string())
+        .spawn(move || {
+            for (queued_id, path, exclude_patterns) in queued {
+                let notes = count_markdown_notes(&path, &exclude_patterns);
+                startup.record_note_count(generation, queued_id, notes);
+            }
+        });
+    if let Err(error) = spawned {
+        // The reading weighs uncounted Vaults at the average instead.
+        warn!(%error, "could not start counting queued Vaults' notes");
+    }
+}
+
+/// An approximate count of the Markdown notes under `root`, honouring the
+/// Vault's exclude patterns, or `None` when the directory cannot be read.
+/// Walks directory entries only; no file is opened.
+fn count_markdown_notes(root: &Path, exclude_patterns: &[String]) -> Option<usize> {
+    let exclude = crate::vault::ExcludeMatcher::new(exclude_patterns).ok()?;
+    let mut entries = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || entry.path().strip_prefix(root).map_or(true, |relative| {
+                    !exclude.is_excluded(relative, entry.file_type().is_dir())
+                })
+        });
+    // An unreadable root is a Vault that cannot be counted; an unreadable
+    // entry deeper down only makes the count approximate.
+    if entries.next()?.is_err() {
+        return None;
+    }
+    Some(
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry.path().extension().and_then(|ext| ext.to_str()) == Some("md")
+            })
+            .count(),
+    )
 }
 
 fn index_settled(snapshot: &CollectionVaultSnapshot) -> bool {

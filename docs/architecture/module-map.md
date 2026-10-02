@@ -181,7 +181,14 @@ that production inventory are still checked for stale paths and duplicates.
   from it. `report_indexing_progress` is how an Index turn reports progress,
   and it never moves a tracker that has already settled `Ready`: a routine
   reindex is one Vault's upkeep, reported on that Vault, not an instance
-  readiness change (#326).
+  readiness change (#326). Each report names its Vault and carries every
+  active Vault's settled state, so while first-run indexing covers several
+  Vaults, `percent` and `eta_seconds` on the startup status describe the whole
+  job, weighted by tokens to embed and never decreasing within one pass; the
+  `notes_*`, `chunks_*` and `tokens_*` counters stay the current Vault's. A
+  queued Vault is weighted by an approximate note count the executor takes
+  off-thread from directory entries alone, without its mutation guard. Model
+  setup starting over starts the pass over. All of it is in memory (#373).
 - `VaultRuntime` and its serialized snapshot expose only the process startup's
   local source/mode, lifecycle phase, and derived non-Git capabilities. Git
   source, mode, and capabilities are derived per Vault by
@@ -428,8 +435,13 @@ commit identity, overridden per Vault by
 Ready once every active Vault's Index turn has settled — searchable (`Ready`
 or `Stale`), failed with the failure on that Vault's own status, or with no
 local Markdown to index — and an empty collection is never Ready. A single
-Vault's failure never marks the instance failed (#326). `publish_outcome`
-also retries a retryable Index failure (other than `embedder_not_ready`)
+Vault's failure never marks the instance failed (#326). The same settled
+rule, as `indexing_participants`, goes to the startup tracker with every
+first-run Index progress report and again after each finished turn, so the
+startup reading covers the whole collection; the first report of a pass also
+spawns one thread that counts the queued Vaults' `.md` files from directory
+entries, under the Vault's exclusions and without its mutation guard (#373).
+`publish_outcome` also retries a retryable Index failure (other than `embedder_not_ready`)
 through `request_if_idle` after a backoff that starts at
 `INDEX_RETRY_BASE_DELAY` and doubles, at most `INDEX_RETRY_LIMIT` times per
 run of consecutive failures; a success resets the count. A turn that
