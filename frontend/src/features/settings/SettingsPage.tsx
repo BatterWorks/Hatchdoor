@@ -16,6 +16,7 @@ import {
   listHeldDrafts,
   type HeldDraft,
 } from "../../lib/writeDrafts";
+import { SettingsModal } from "./SettingsModal";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
@@ -40,23 +41,11 @@ type Confirmation = {
   confirm: Consequence[];
 };
 
-/** Remote-only fields: absent, not locked, when the mode is not remote (#61). */
-const REMOTE_ONLY = [
-  "HATCHDOOR_GIT_HTTPS_USERNAME",
-  "HATCHDOOR_GIT_HTTPS_TOKEN",
-];
-
-/** Shown only while versioning is on at all. */
-const VERSIONING_DETAIL = [
-  ...REMOTE_ONLY,
-  "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
-  "HATCHDOOR_GIT_AUTHOR_NAME",
-  "HATCHDOOR_GIT_AUTHOR_EMAIL",
-  "HATCHDOOR_GIT_BRANCH",
-];
-
 /** These legacy instance settings describe one Vault. Their controls move to
- * that Vault's page; #149 supplies the detailed Git behaviour and sign-in UI. */
+ * that Vault's page; #149 supplies the detailed Git behaviour and sign-in UI.
+ * The two author keys are not among them: they are the server-wide commit
+ * identity a Vault without its own falls back to, so they are always shown,
+ * whatever the retired `HATCHDOOR_GIT_SYNC_ENABLED` reads (#340). */
 const PER_VAULT_SETTING_KEYS = new Set([
   "HATCHDOOR_ARCHIVE_PREFIX",
   "HATCHDOOR_EXCLUDE",
@@ -151,16 +140,22 @@ const COPY: Record<
     label: "Websites allowed to connect",
     help: "Assistants running inside a browser must come from one of these addresses. Separated by commas.",
   },
+  HATCHDOOR_PUBLIC_URL: {
+    section: "agents",
+    label: "Public address",
+    help: "The address people and assistants use to reach this server. Assistants download and upload files through short-lived links built on it. Left empty, links use the address the assistant connected to, as reported by a proxy's forwarded headers (Forwarded, or X-Forwarded-Proto and X-Forwarded-Host). Set it when the proxy sends none of those or serves Hatchdoor under a path; when set, it always wins.",
+    example: "https://notes.example.com",
+  },
   HATCHDOOR_MAX_ATTACHMENT_BYTES: {
     section: "uploads",
     label: "Largest file from this app",
-    help: "The biggest file you can drop into a note from your browser.",
+    help: "The biggest file you can drop into a note from your browser, or an assistant can upload through a link.",
     unit: "in megabytes",
   },
   HATCHDOOR_MCP_MAX_BASE64_BYTES: {
     section: "uploads",
     label: "Largest file from an assistant",
-    help: "The biggest file an assistant can send inline. Assistants that can make a normal upload are not limited by this.",
+    help: "The biggest file an assistant can send inline, and the biggest it can download. An assistant uploading through a link is held to the limit above instead.",
     unit: "in megabytes",
   },
   HATCHDOOR_GIT_SYNC_ENABLED: {
@@ -187,12 +182,12 @@ const COPY: Record<
   HATCHDOOR_GIT_AUTHOR_NAME: {
     section: "notes",
     label: "Recorded as (name)",
-    help: "The name attached to every recorded change.",
+    help: "The name attached to changes recorded in a Vault that has no commit identity of its own.",
   },
   HATCHDOOR_GIT_AUTHOR_EMAIL: {
     section: "notes",
     label: "Recorded as (email)",
-    help: "The email attached to every recorded change.",
+    help: "The email attached to changes recorded in a Vault that has no commit identity of its own.",
   },
   HATCHDOOR_GIT_BRANCH: {
     section: "notes",
@@ -200,12 +195,6 @@ const COPY: Record<
     help: "Which line of history changes are recorded on. Hatchdoor always uses whichever one your vault folder is already on.",
   },
 };
-
-const MODES = [
-  { id: "off", label: "Off" },
-  { id: "local", label: "This machine" },
-  { id: "remote", label: "Send elsewhere" },
-];
 
 const REINDEX_CONFIRMATION =
   "Saving this rebuilds the search index. The setting takes effect right away and search keeps working the whole time — it just keeps answering from the old setting until the rebuild finishes.";
@@ -228,19 +217,6 @@ const LOCK_WHY: Record<NonNullable<Setting["locked"]>, string> = {
   demo: "This is fixed for the public demo deployment and cannot be changed from here.",
 };
 
-/**
- * The wire still carries the boolean spellings versioning had before it grew a
- * third position, so the segmented control normalises what it is given rather
- * than showing nothing selected for a value it does not recognise.
- */
-function normalizeMode(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "local") return "local";
-  if (["remote", "true", "1", "yes", "on"].includes(normalized))
-    return "remote";
-  return "off";
-}
-
 function toMb(bytes: string | null): string {
   if (!bytes) return "";
   const value = Number(bytes);
@@ -257,16 +233,12 @@ function fromMb(mb: string): string {
 /**
  * A locked setting is a record of the same thing the control would have shown,
  * so it is spelled in the same words: On rather than true, a megabyte count
- * rather than a byte count, the segment's name rather than the wire's alias.
+ * rather than a byte count.
  */
 function plaqueValue(setting: Setting): string {
   if (setting.kind === "secret") return setting.configured ? "set" : "not set";
   const value = setting.value ?? "";
   if (setting.kind === "switch") return value === "true" ? "On" : "Off";
-  if (setting.kind === "mode") {
-    const selected = normalizeMode(value);
-    return MODES.find((item) => item.id === selected)!.label;
-  }
   if (setting.key.includes("BYTES")) return `${toMb(value)} MB`;
   return value || "empty";
 }
@@ -360,20 +332,9 @@ export function SettingsPage({
 
   const effective = (setting: Setting) =>
     drafts[setting.key] ?? setting.value ?? "";
-  const mode = normalizeMode(
-    drafts.HATCHDOOR_GIT_SYNC_ENABLED ??
-      settings.find((item) => item.key === "HATCHDOOR_GIT_SYNC_ENABLED")
-        ?.value ??
-      "off",
-  );
 
-  const visible = (setting: Setting) => {
-    if (PER_VAULT_SETTING_KEYS.has(setting.key)) return false;
-    if (!COPY[setting.key]) return false;
-    if (mode === "off" && VERSIONING_DETAIL.includes(setting.key)) return false;
-    if (mode === "local" && REMOTE_ONLY.includes(setting.key)) return false;
-    return true;
-  };
+  const visible = (setting: Setting) =>
+    Boolean(COPY[setting.key]) && !PER_VAULT_SETTING_KEYS.has(setting.key);
   const inSection = (id: SectionId) =>
     settings.filter((item) => COPY[item.key]?.section === id && visible(item));
 
@@ -384,15 +345,13 @@ export function SettingsPage({
     .filter((item) => drafts[item.key] !== undefined)
     .map((item) => item.key);
 
+  // The footer counts with the same test the sections render with, so it
+  // cannot claim a row no section shows (#340).
   const editableCount = settings.filter(
-    (item) =>
-      COPY[item.key] && !PER_VAULT_SETTING_KEYS.has(item.key) && !item.locked,
+    (item) => visible(item) && !item.locked,
   ).length;
   const pinnedCount = settings.filter(
-    (item) =>
-      COPY[item.key] &&
-      !PER_VAULT_SETTING_KEYS.has(item.key) &&
-      item.locked === "environment",
+    (item) => visible(item) && item.locked === "environment",
   ).length;
 
   const edit = (key: string, value: string) => {
@@ -400,13 +359,25 @@ export function SettingsPage({
     setDrafts((old) => ({ ...old, [key]: value }));
   };
 
+  // Discard and a successful save are scoped to the keys they were about, not
+  // the whole page: `drafts` spans every section, and the buttons that act on
+  // it name one (#338). Discard drops every key the active section owns, shown
+  // or not.
+  const withoutKeys = <T,>(record: Record<string, T>, keys: Set<string>) =>
+    Object.fromEntries(
+      Object.entries(record).filter(([key]) => !keys.has(key)),
+    );
+
   const discard = () => {
-    setDrafts({});
-    setErrors({});
+    const sectionKeys = new Set(
+      Object.keys(drafts).filter((key) => COPY[key]?.section === active),
+    );
+    setDrafts((old) => withoutKeys(old, sectionKeys));
+    setErrors((old) => withoutKeys(old, sectionKeys));
     setBanner(null);
     setBusy(null);
     setSaved(null);
-    setReplacing({});
+    setReplacing((old) => withoutKeys(old, sectionKeys));
   };
 
   const send = async (
@@ -464,10 +435,11 @@ export function SettingsPage({
         );
         return;
       }
+      const sentKeys = new Set(Object.keys(updates));
       setSettings(payload.settings ?? settings);
-      setDrafts({});
-      setRevealed({});
-      setReplacing({});
+      setDrafts((old) => withoutKeys(old, sentKeys));
+      setRevealed((old) => withoutKeys(old, sentKeys));
+      setReplacing((old) => withoutKeys(old, sentKeys));
       setSaved("Saved");
     } catch {
       setBanner("Settings could not be saved. Try again.");
@@ -577,28 +549,6 @@ export function SettingsPage({
           </span>
           <span>{on ? "On" : "Off"}</span>
         </button>
-      );
-    }
-
-    if (setting.kind === "mode") {
-      const selected = normalizeMode(value);
-      return (
-        <div
-          className="settings-segmented"
-          role="group"
-          aria-label={copy.label}
-        >
-          {MODES.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              aria-pressed={selected === item.id}
-              onClick={() => edit(setting.key, item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
       );
     }
 
@@ -942,40 +892,36 @@ export function SettingsPage({
       </div>
 
       {confirmation ? (
-        <div className="settings-modal-back">
-          <div
-            className="settings-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Before this is saved"
-          >
-            <h3>Before this is saved</h3>
-            <p>{CONSEQUENCE_COPY[confirmation.consequence]}</p>
-            <div className="settings-modal-actions">
-              <button
-                type="button"
-                className="settings-btn"
-                onClick={() => setConfirmation(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="settings-btn settings-btn-hot"
-                onClick={() => {
-                  const pending = confirmation;
-                  setConfirmation(null);
-                  void send(pending.updates, [
-                    ...pending.confirm,
-                    pending.consequence,
-                  ]);
-                }}
-              >
-                Go ahead
-              </button>
-            </div>
+        <SettingsModal
+          label="Before this is saved"
+          onClose={() => setConfirmation(null)}
+        >
+          <h3>Before this is saved</h3>
+          <p>{CONSEQUENCE_COPY[confirmation.consequence]}</p>
+          <div className="settings-modal-actions">
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => setConfirmation(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="settings-btn settings-btn-hot"
+              onClick={() => {
+                const pending = confirmation;
+                setConfirmation(null);
+                void send(pending.updates, [
+                  ...pending.confirm,
+                  pending.consequence,
+                ]);
+              }}
+            >
+              Go ahead
+            </button>
           </div>
-        </div>
+        </SettingsModal>
       ) : null}
     </div>
   );

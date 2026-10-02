@@ -5,6 +5,7 @@ import {
   describeMissingVaults,
   describeNotSearchableVaults,
   describeVaultsNotDrawn,
+  joinWithAnd,
   missingVaultNames,
   notSearchableVaultNames,
 } from "./vaultParticipants";
@@ -51,15 +52,15 @@ describe("not-searchable participants", () => {
     expect(notSearchableVaultNames(participants)).toEqual(["Personal"]);
   });
 
-  it("says one Vault is still building search", () => {
+  it("says semantic search could not reach some notes in one Vault", () => {
     expect(describeNotSearchableVaults(["Personal"])).toBe(
-      "Personal is still building search.",
+      "Semantic search could not reach some notes in Personal. Keyword search can.",
     );
   });
 
-  it("says several Vaults are still building search", () => {
+  it("says semantic search could not reach some notes in several Vaults", () => {
     expect(describeNotSearchableVaults(["Personal", "Work"])).toBe(
-      "Personal and Work are still building search.",
+      "Semantic search could not reach some notes in Personal and Work. Keyword search can.",
     );
   });
 });
@@ -99,5 +100,16 @@ describe("describeVaultsNotDrawn", () => {
     expect(
       describeVaultsNotDrawn(["Field Station", "Archive", "Journal"]),
     ).toBe("Field Station, Archive, and Journal could not be drawn.");
+  });
+});
+
+describe("joinWithAnd", () => {
+  it("lists one, two, and three or more Vault names", () => {
+    expect(joinWithAnd([])).toBe("");
+    expect(joinWithAnd(["Work"])).toBe("Work");
+    expect(joinWithAnd(["Work", "Archive"])).toBe("Work and Archive");
+    expect(joinWithAnd(["Work", "Archive", "Journal"])).toBe(
+      "Work, Archive, and Journal",
+    );
   });
 });

@@ -13,7 +13,7 @@ import {
   SearchIcon,
 } from "../components/icons";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
-import { scopeName } from "./vaultSlotLogic";
+import { deriveVaultSlot, scopeName } from "./vaultSlotLogic";
 import type {
   ActiveNoteMeta,
   VaultId,
@@ -141,6 +141,17 @@ export function AppTopbar({
   // Vaults, same as the desktop echo and the sidebar Scope zone — narrowing
   // has nothing to offer there.
   const showScopeRow = isMobile && vaults.length > 1;
+  // At one enabled Vault there is no scope row, and the explorer head that
+  // reports the Vault's condition lives in the drawer, hidden while it is
+  // closed. So a condition (conflict, sync stopped, sync failed, stale, …)
+  // takes this row in a head-only, non-pickable form (#334); a healthy
+  // single Vault still gets no row at all.
+  const soleVault = vaults.length === 1 ? vaults[0] : undefined;
+  const showSoleVaultCondition =
+    isMobile &&
+    soleVault !== undefined &&
+    deriveVaultSlot(soleVault, vaultNoteCounts[soleVault.vault_id], demoMode)
+      .kind === "condition";
   const narrowedScopeVault =
     scope === "all"
       ? undefined
@@ -505,6 +516,23 @@ export function AppTopbar({
         </div>
       </header>
 
+      {showSoleVaultCondition && soleVault ? (
+        <div className="topbar-mobile-meta">
+          <div className="topbar-scope-trigger is-static">
+            <span className="topbar-scope-name">{soleVault.name}</span>
+            <span className="topbar-scope-rule" aria-hidden="true">
+              /
+            </span>
+            <span className="topbar-scope-slot">
+              <VaultSlot
+                vault={soleVault}
+                noteCount={vaultNoteCounts[soleVault.vault_id]}
+                demoMode={demoMode}
+              />
+            </span>
+          </div>
+        </div>
+      ) : null}
       {showScopeRow ? (
         <div className="topbar-mobile-meta" ref={scopeHostRef}>
           <button

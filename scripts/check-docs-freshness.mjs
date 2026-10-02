@@ -12,6 +12,13 @@
 // Run it, read the notes it names, fix what drifted, then re-run with
 // `--acknowledge` to record that the review happened. Acknowledging without
 // reading defeats the only thing this gate does.
+//
+// It also refuses a branch that changes code Hatchdoor ships without editing
+// CHANGELOG.md. About forty merges after v2.6.1 went in without an entry and
+// the gap only surfaced when someone asked. `--acknowledge` does not waive
+// this half: a branch whose change nobody outside the code can notice says so
+// with a `Changelog: none, <reason>` trailer on one of its commits, so the
+// reason stays in history.
 
 import { spawnSync } from "node:child_process";
 import { lstat } from "node:fs/promises";
@@ -137,8 +144,39 @@ const SURFACES = [
   {
     id: "markdown",
     label: "Markdown parsing, links, and note paths",
-    paths: ["src/vault/links.rs", "src/vault/paths.rs", "src/cache/parse.rs"],
+    paths: [
+      "src/vault/links.rs",
+      "src/vault/markdown_links.rs",
+      "src/vault/paths.rs",
+      "src/cache/parse.rs",
+    ],
     notes: [`${REFERENCE}/Supported Markdown reference.md`],
+  },
+  {
+    id: "link-inserts",
+    label: "Links and embeds Hatchdoor inserts, in the Vault's link style",
+    // ADR-33: the style is read on the server and followed by the editor's
+    // autocomplete and attachment inserts, which three notes describe.
+    paths: [
+      "src/vault/link_style.rs",
+      "frontend/src/components/note-page/autocomplete.ts",
+      "frontend/src/components/note-page/attachmentDrop.ts",
+      "frontend/src/components/note-page/linkStyle.ts",
+    ],
+    notes: [
+      `${REFERENCE}/Supported Markdown reference.md`,
+      `${GUIDES}/How to import and work with attachments.md`,
+      `${GUIDES}/How to edit notes with the live editor.md`,
+    ],
+  },
+  {
+    id: "vault-shape",
+    label: "The Vault shape list_vaults and GET /api/v1/vaults return",
+    paths: ["src/vault_management.rs"],
+    notes: [
+      `${REFERENCE}/HTTP API reference.md`,
+      `${REFERENCE}/MCP tools reference.md`,
+    ],
   },
   {
     id: "write-mutations",
@@ -198,6 +236,58 @@ const SURFACES = [
     ],
   },
 ];
+
+const CHANGELOG = "CHANGELOG.md";
+
+// What ships in the image or reaches an operator's deployment. A change here
+// needs a changelog entry unless a trailer says why not.
+const SHIPPED_PATHS = [
+  "src/",
+  "frontend/src/",
+  "frontend/index.html",
+  "frontend/public/",
+  "frontend/package.json",
+  "Cargo.toml",
+  "Dockerfile",
+  "docker-compose.yml",
+  ".env.example",
+  "docs/starter-vault/",
+];
+
+// Test code sits inside the shipped trees but never ships.
+function isTestFile(file) {
+  return (
+    /\.test\.[cm]?[jt]sx?$/.test(file) ||
+    file.startsWith("frontend/src/test/") ||
+    /(^|\/)tests\.rs$/.test(file) ||
+    /(^|\/)tests\//.test(file)
+  );
+}
+
+function shippedChanges(files) {
+  return files.filter(
+    (file) =>
+      SHIPPED_PATHS.some((prefix) => matches(file, prefix)) &&
+      !isTestFile(file),
+  );
+}
+
+// The `Changelog:` trailers on the branch's own commits. Only committed work
+// can carry one, so a waiver lands with the commit it explains.
+function changelogWaivers(mergeBase) {
+  const result = git([
+    "log",
+    "--format=%(trailers:key=Changelog,valueonly,separator=%x00)%x00",
+    `${mergeBase}..HEAD`,
+  ]);
+  if (result.status !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split("\0")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+}
 
 function git(args) {
   const result = spawnSync("git", args, {
@@ -429,7 +519,51 @@ const changedNotes = new Set(
   files.filter((file) => file.startsWith(`${VAULT_ROOT}/`)),
 );
 
+const shipped = shippedChanges(files);
+const changelogEdited = files.includes(CHANGELOG);
+const waivers = changelogWaivers(mergeBase);
+const changelogMissing =
+  shipped.length > 0 && !changelogEdited && waivers.length === 0;
+
+const SHIPPED_LISTED = 10;
+
+function reportChangelog() {
+  if (shipped.length === 0) {
+    return;
+  }
+  if (changelogEdited) {
+    console.error(`\nCHANGELOG\n  ${CHANGELOG} is edited on this branch.`);
+    return;
+  }
+  if (waivers.length > 0) {
+    console.error(`\nCHANGELOG\n  No entry, by trailer: ${waivers.join("; ")}`);
+    return;
+  }
+  console.error(
+    `\nCHANGELOG ENTRY MISSING\n  This branch changes code Hatchdoor ships and does not edit ${CHANGELOG}:`,
+  );
+  for (const file of shipped.slice(0, SHIPPED_LISTED)) {
+    console.error(`    ${file}`);
+  }
+  if (shipped.length > SHIPPED_LISTED) {
+    console.error(`    and ${shipped.length - SHIPPED_LISTED} more`);
+  }
+  console.error(`
+  Add an entry under "## Unreleased" for anything a user, operator or agent
+  can notice. If nothing here is noticeable (a test-only change, an internal
+  refactor), say so in a commit on this branch with a trailer:
+
+    Changelog: none, <reason>`);
+}
+
 if (surfaces.length === 0) {
+  if (changelogMissing) {
+    console.error(
+      `Documentation freshness check failed: no user-facing surface changed since ${base} (${mergeBase.slice(0, 9)}), but the changelog needs an entry.`,
+    );
+    reportChangelog();
+    process.exit(1);
+  }
   console.log(
     `Documentation freshness OK: no user-facing surface changed since ${base} (${mergeBase.slice(0, 9)}).`,
   );
@@ -473,10 +607,18 @@ for (const [note, reasons] of [...notesToReview].sort(([left], [right]) =>
   console.error(`    covers: ${[...new Set(reasons)].join("; ")}`);
 }
 
+reportChangelog();
+
 if (acknowledged) {
   console.error(
     `\nAcknowledged: ${notesToReview.size} note(s) reviewed against ${surfaces.length} changed surface(s).`,
   );
+  if (changelogMissing) {
+    console.error(
+      "The changelog entry is still missing. Acknowledging the notes does not waive it.",
+    );
+    process.exit(1);
+  }
   process.exit(0);
 }
 

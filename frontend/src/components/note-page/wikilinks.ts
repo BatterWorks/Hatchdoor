@@ -4,6 +4,11 @@ import { escapeMarkdownLabel, parseWikilinkTarget } from "../../lib/markdown";
 import { slugifyHeading } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
 import type { VaultId, VaultResolveBatchResponse } from "../../types";
+import {
+  decodePercent,
+  findMarkdownImages,
+  findMarkdownNoteLinks,
+} from "./markdownLinks";
 
 export type ResolvedWikilink = { slug: string; archived: boolean };
 
@@ -28,11 +33,17 @@ const resolveCache = new Map<string, ResolvedWikilink | null>();
 // note's path is part of the key for exactly that reason.
 const assetResolveCache = new Map<string, string | null>();
 
+// Markdown note links (ADR-28) name a note by path from the linking note's
+// folder, so like assets they are keyed by the note's path as well.
+const noteLinkResolveCache = new Map<string, ResolvedWikilink | null>();
+
 function cacheKey(vaultId: VaultId, target: string): string {
   return `${vaultId}:${target}`;
 }
 
-function assetCacheKey(
+// For targets read relative to the note they are written in: assets and
+// Markdown note links.
+function pathCacheKey(
   vaultId: VaultId,
   noteRelativePath: string,
   target: string,
@@ -40,8 +51,45 @@ function assetCacheKey(
   return `${vaultId}:${noteRelativePath}:${target}`;
 }
 
+// The answers `cache` already holds for `targets`, and the targets it lacks.
+function fromCache<T>(
+  cache: Map<string, T | null>,
+  targets: string[],
+  keyOf: (target: string) => string,
+): { found: Map<string, T | null>; missing: string[] } {
+  const found = new Map<string, T | null>();
+  const missing: string[] = [];
+  for (const target of targets) {
+    const key = keyOf(target);
+    if (cache.has(key)) {
+      found.set(target, cache.get(key) ?? null);
+    } else {
+      missing.push(target);
+    }
+  }
+  return { found, missing };
+}
+
+// The href a resolved note link gets, wikilink or Markdown link alike, and
+// the one a missing one gets. `anchor` is already a heading slug.
+function noteRouteHref(
+  vaultId: VaultId,
+  hit: ResolvedWikilink,
+  anchor: string,
+): string {
+  const prefix = hit.archived
+    ? "/__archived__/"
+    : `/v/${encodeURIComponent(vaultId)}/n/`;
+  return `${prefix}${hit.slug}${anchor ? `#${anchor}` : ""}`;
+}
+
+function missingNoteHref(target: string): string {
+  return `/__missing__/${encodeURIComponent(target)}`;
+}
+
 /**
- * Rewrite every wikilink in `markdown` to a markdown link or image.
+ * Rewrite every wikilink in `markdown` to a markdown link or image, and every
+ * Markdown note link to the same in-app route a wikilink gets.
  *
  * Line-count preserving by contract: the result always has exactly as many
  * lines as the input, which is what lets a rendered node's position be mapped
@@ -53,45 +101,110 @@ export function rewriteWikilinks(
   noteRelativePath: string,
   resolved: Map<string, ResolvedWikilink | null>,
   resolvedAssets: Map<string, string | null> = new Map(),
+  resolvedNoteLinks: Map<string, ResolvedWikilink | null> = new Map(),
 ): string {
-  return markdown.replace(
-    WIKILINK_PATTERN,
-    (_whole, bang: string, body: string) => {
-      const parsed = parseWikilinkTarget(body);
+  return rewriteMarkdownDestinations(
+    vaultId,
+    markdown,
+    resolvedNoteLinks,
+    resolvedAssets,
+  ).replace(WIKILINK_PATTERN, (_whole, bang: string, body: string) => {
+    const parsed = parseWikilinkTarget(body);
 
-      if (bang === "!") {
-        const source = assetHref(
+    if (bang === "!") {
+      const source = assetHref(
+        vaultId,
+        parsed.target,
+        noteRelativePath,
+        resolvedAssets,
+      );
+      return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
+    }
+
+    if (isPdfAssetTarget(parsed.target)) {
+      const source = assetHref(
+        vaultId,
+        parsed.target,
+        noteRelativePath,
+        resolvedAssets,
+      );
+      return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
+    }
+
+    const hit = resolved.get(parsed.target) ?? null;
+    if (hit) {
+      const href = noteRouteHref(vaultId, hit, extractAnchor(parsed.target));
+      const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
+      return `[${escapeMarkdownLabel(label)}](${href})`;
+    }
+    return `[${escapeMarkdownLabel(parsed.label)}](${missingNoteHref(parsed.target)})`;
+  });
+}
+
+/**
+ * The Vault file a Markdown image destination names, decoded the way the
+ * server reads a written path, plus any `?`/`#` suffix; `null` for an external
+ * image, which keeps its own address.
+ */
+function imageAssetTarget(
+  raw: string,
+): { path: string; suffix: string } | null {
+  if (raw.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) {
+    return null;
+  }
+  const [pathPart, suffix] = splitPathSuffix(raw);
+  const path = decodePercent(pathPart.replace(/\\([!-/:-@[-`{-~])/g, "$1"));
+  return path ? { path, suffix } : null;
+}
+
+/**
+ * Point each Markdown note link's destination at its note's route, or at the
+ * `/__missing__/` form a missing wikilink gets, and each Markdown image the
+ * server resolved at that file, so the renderer needs no branch of its own
+ * for them. An image the server did not resolve keeps its destination. Only
+ * destinations change: link text and titles stay as written, and so does the
+ * line count.
+ */
+function rewriteMarkdownDestinations(
+  vaultId: VaultId,
+  markdown: string,
+  resolved: Map<string, ResolvedWikilink | null>,
+  resolvedAssets: Map<string, string | null>,
+): string {
+  const edits: { start: number; end: number; angle: boolean; href: string }[] =
+    [];
+  for (const link of findMarkdownNoteLinks(markdown)) {
+    const hit = resolved.get(link.rawPath) ?? null;
+    const href = hit
+      ? noteRouteHref(
           vaultId,
-          parsed.target,
-          noteRelativePath,
-          resolvedAssets,
-        );
-        return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
-      }
+          hit,
+          link.anchor ? slugifyHeading(decodePercent(link.anchor)) : "",
+        )
+      : missingNoteHref(decodePercent(link.rawPath));
+    edits.push({ ...link, href });
+  }
+  for (const image of findMarkdownImages(markdown)) {
+    const target = imageAssetTarget(image.raw);
+    const resolvedPath = target ? resolvedAssets.get(target.path) : null;
+    if (target && resolvedPath) {
+      edits.push({
+        ...image,
+        href: assetUrl(vaultId, resolvedPath, target.suffix),
+      });
+    }
+  }
+  edits.sort((left, right) => left.start - right.start);
 
-      if (isPdfAssetTarget(parsed.target)) {
-        const source = assetHref(
-          vaultId,
-          parsed.target,
-          noteRelativePath,
-          resolvedAssets,
-        );
-        return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
-      }
-
-      const hit = resolved.get(parsed.target) ?? null;
-      if (hit) {
-        const anchor = extractAnchor(parsed.target);
-        const hash = anchor ? `#${anchor}` : "";
-        const prefix = hit.archived
-          ? "/__archived__/"
-          : `/v/${encodeURIComponent(vaultId)}/n/`;
-        const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
-        return `[${escapeMarkdownLabel(label)}](${prefix}${hit.slug}${hash})`;
-      }
-      return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
-    },
-  );
+  let out = "";
+  let cursor = 0;
+  for (const edit of edits) {
+    const start = edit.angle ? edit.start - 1 : edit.start;
+    const end = edit.angle ? edit.end + 1 : edit.end;
+    out += markdown.slice(cursor, start) + edit.href;
+    cursor = end;
+  }
+  return out + markdown.slice(cursor);
 }
 
 /**
@@ -135,40 +248,47 @@ export function useResolvedWikilinks(
       // `#page=3` suffix addresses the viewer rather than naming a different
       // one.
       const uniqueAssetTargets = [
-        ...new Set(
-          matches
+        ...new Set([
+          ...matches
             .filter(isAsset)
             .map((m) => splitPathSuffix(parseWikilinkTarget(m[2]).target)[0])
             .filter((target) => target.length > 0),
-        ),
+          // A Markdown image names a file by path the same way (ADR-28's
+          // ladder), so it is resolved by the server too: a root-anchored
+          // or bare-name path does not resolve against the note's folder.
+          ...findMarkdownImages(markdown)
+            .map((image) => imageAssetTarget(image.raw)?.path)
+            .filter((target): target is string => target !== undefined),
+        ]),
       ];
 
-      const map = new Map<string, ResolvedWikilink | null>();
-      for (const target of uniqueTargets) {
-        const key = cacheKey(vaultId, target);
-        if (resolveCache.has(key)) {
-          map.set(target, resolveCache.get(key) ?? null);
-        }
-      }
-      const missing = uniqueTargets.filter(
-        (target) => !resolveCache.has(cacheKey(vaultId, target)),
+      const uniqueNoteLinkTargets = [
+        ...new Set(findMarkdownNoteLinks(markdown).map((link) => link.rawPath)),
+      ];
+
+      const pathKey = (target: string) =>
+        pathCacheKey(vaultId, noteRelativePath, target);
+      const { found: map, missing } = fromCache(
+        resolveCache,
+        uniqueTargets,
+        (target) => cacheKey(vaultId, target),
+      );
+      const { found: assetMap, missing: missingAssets } = fromCache(
+        assetResolveCache,
+        uniqueAssetTargets,
+        pathKey,
+      );
+      const { found: noteLinkMap, missing: missingNoteLinks } = fromCache(
+        noteLinkResolveCache,
+        uniqueNoteLinkTargets,
+        pathKey,
       );
 
-      const assetMap = new Map<string, string | null>();
-      for (const target of uniqueAssetTargets) {
-        const key = assetCacheKey(vaultId, noteRelativePath, target);
-        if (assetResolveCache.has(key)) {
-          assetMap.set(target, assetResolveCache.get(key) ?? null);
-        }
-      }
-      const missingAssets = uniqueAssetTargets.filter(
-        (target) =>
-          !assetResolveCache.has(
-            assetCacheKey(vaultId, noteRelativePath, target),
-          ),
-      );
-
-      if (missing.length > 0 || missingAssets.length > 0) {
+      if (
+        missing.length > 0 ||
+        missingAssets.length > 0 ||
+        missingNoteLinks.length > 0
+      ) {
         try {
           const res = await apiFetch(
             `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
@@ -180,6 +300,11 @@ export function useResolvedWikilinks(
               body: JSON.stringify({
                 targets: missing,
                 asset_targets: missingAssets,
+                // Sent only when there are some, so a note without Markdown
+                // note links asks exactly what it asked before ADR-28.
+                ...(missingNoteLinks.length > 0 && {
+                  note_link_targets: missingNoteLinks,
+                }),
                 note_path: noteRelativePath,
               }),
             },
@@ -194,12 +319,16 @@ export function useResolvedWikilinks(
               map.set(result.target, resolved);
               resolveCache.set(cacheKey(vaultId, result.target), resolved);
             }
+            for (const result of json.note_link_results ?? []) {
+              const resolved = result.slug
+                ? { slug: result.slug, archived: result.archived }
+                : null;
+              noteLinkMap.set(result.target, resolved);
+              noteLinkResolveCache.set(pathKey(result.target), resolved);
+            }
             for (const result of json.asset_results ?? []) {
               assetMap.set(result.target, result.path);
-              assetResolveCache.set(
-                assetCacheKey(vaultId, noteRelativePath, result.target),
-                result.path,
-              );
+              assetResolveCache.set(pathKey(result.target), result.path);
             }
           }
         } catch {
@@ -213,6 +342,7 @@ export function useResolvedWikilinks(
         noteRelativePath,
         map,
         assetMap,
+        noteLinkMap,
       );
 
       if (!cancelled) {
@@ -226,6 +356,38 @@ export function useResolvedWikilinks(
   }, [vaultId, markdown, noteRelativePath]);
 
   return state;
+}
+
+/**
+ * Which file each of `targets` names from the note at `noteRelativePath`, by
+ * the server's attachment resolution. Uncached: it is asked once per insert,
+ * about a file that may have only just been uploaded.
+ */
+export async function resolveAssetTargets(
+  vaultId: VaultId,
+  noteRelativePath: string,
+  targets: string[],
+): Promise<Map<string, string | null>> {
+  const res = await apiFetch(
+    `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        targets: [],
+        asset_targets: targets,
+        note_path: noteRelativePath,
+      }),
+    },
+  );
+  const resolved = new Map<string, string | null>();
+  if (res.ok) {
+    const json = (await res.json()) as VaultResolveBatchResponse;
+    for (const result of json.asset_results ?? []) {
+      resolved.set(result.target, result.path);
+    }
+  }
+  return resolved;
 }
 
 export function resolveAssetHref(
@@ -274,7 +436,12 @@ function assetHref(
   if (!resolvedPath) {
     return resolveAssetHref(vaultId, rawTarget, noteRelativePath);
   }
-  const encoded = resolvedPath.split("/").map(encodeURIComponent).join("/");
+  return assetUrl(vaultId, resolvedPath, suffix);
+}
+
+/** The route serving the Vault file at `vaultPath`. */
+function assetUrl(vaultId: VaultId, vaultPath: string, suffix: string): string {
+  const encoded = vaultPath.split("/").map(encodeURIComponent).join("/");
   return withAccessToken(
     `/api/v1/vaults/${encodeURIComponent(vaultId)}/assets/${encoded}${suffix}`,
   );

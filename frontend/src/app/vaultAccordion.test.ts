@@ -13,6 +13,7 @@ import {
   resolveInitialUnfoldedVault,
   resolveLandingVaultId,
   setStoredUnfoldedVault,
+  vaultFolderUpdate,
   withVaultFolderChange,
 } from "./vaultAccordion";
 
@@ -144,5 +145,23 @@ describe("per-Vault folder-open namespacing", () => {
     stored = withVaultFolderChange(stored, vaultB, { Reading: true });
 
     expect(expandedFoldersForVault(stored, vaultA)).toEqual({ Journal: true });
+  });
+
+  it("applies each Vault update to the latest record, so two in a row both survive (#305)", () => {
+    const outer = vaultFolderUpdate(vaultA, (previous) => ({
+      ...previous,
+      homelab: true,
+    }));
+    const inner = vaultFolderUpdate(vaultA, (previous) => ({
+      ...previous,
+      "homelab/hosts": true,
+    }));
+    const stored = outer(inner(withVaultFolderChange({}, vaultB, { x: true })));
+
+    expect(expandedFoldersForVault(stored, vaultA)).toEqual({
+      homelab: true,
+      "homelab/hosts": true,
+    });
+    expect(expandedFoldersForVault(stored, vaultB)).toEqual({ x: true });
   });
 });

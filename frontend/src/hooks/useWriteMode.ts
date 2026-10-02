@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getWriteCapabilities } from "../api/writeApi";
+import { getWriteCapabilities, isDemoReadOnlyError } from "../api/writeApi";
 import type { VaultId } from "../types";
 
 /**
@@ -13,53 +13,85 @@ import type { VaultId } from "../types";
  * `settings_enabled` in #101); the shell derives it from Vault discovery's
  * `demo_mode` instead.
  *
- * In demo mode `getWriteCapabilities` itself already fails closed: the
- * server wraps `GET .../write-capabilities` in the same `demo_guard` every
- * mutation route carries, so the request 403s with `demo_read_only` before
- * this hook's `enabled` field is ever read, and the catch below already
- * resolves `writeEnabled` to `false`. No demo-mode branch belongs here.
+ * Write mode is re-derived, not read once per Vault (#339). A backend that
+ * restarts into demo mode is noticed by the collection (its revision stream
+ * reconnects and discovery answers `demo_mode: true`), so:
+ *
+ * - `demoMode` true resolves `writeEnabled` to `false` in the same render,
+ *   without waiting on a request: a demo instance never exposes a write
+ *   affordance.
+ * - `revision` (the collection revision) re-asks `write-capabilities` on every
+ *   change, so a posture change the collection announces reaches every open
+ *   tab without a reload.
+ * - `recheck` re-asks on demand; the shell calls it when a write comes back
+ *   `demo_read_only`, the one answer that proves the posture moved under it.
+ *
+ * On a demo instance the request itself also fails closed: the server wraps
+ * `GET .../write-capabilities` in the same `demo_guard` every mutation route
+ * carries, so it 403s with `demo_read_only`. A first read for a Vault fails
+ * closed on any error. A re-read that fails for any other reason (a dropped
+ * connection mid-edit) keeps the answer already held rather than tearing an
+ * open editor down over a transient fault; a refusal still switches it off.
  */
-export function useWriteMode(vaultId: VaultId | undefined) {
-  const [writeEnabled, setWriteEnabled] = useState(false);
+export function useWriteMode(
+  vaultId: VaultId | undefined,
+  {
+    demoMode = false,
+    revision = null,
+  }: { demoMode?: boolean; revision?: number | null } = {},
+) {
+  const [serverWriteEnabled, setServerWriteEnabled] = useState(false);
   const [writeWarnings, setWriteWarnings] = useState<string[]>([]);
   const [writeNotice, setWriteNotice] = useState<string | null>(null);
+  const [recheckId, setRecheckId] = useState(0);
+  // The Vault the held answer belongs to: a read for a different Vault is a
+  // first read and fails closed, a read for the same one is a re-read.
+  const answeredVaultRef = useRef<VaultId | undefined>(undefined);
+
+  const recheck = useCallback(() => setRecheckId((id) => id + 1), []);
 
   useEffect(() => {
-    if (!vaultId) {
-      setWriteEnabled(false);
+    if (!vaultId || demoMode) {
+      answeredVaultRef.current = undefined;
+      setServerWriteEnabled(false);
       setWriteWarnings([]);
       return;
     }
 
     let cancelled = false;
+    const rereading = answeredVaultRef.current === vaultId;
 
     void (async () => {
       try {
         const capabilities = await getWriteCapabilities(vaultId);
         if (!cancelled) {
-          setWriteEnabled(Boolean(capabilities.enabled));
+          answeredVaultRef.current = vaultId;
+          setServerWriteEnabled(Boolean(capabilities.enabled));
           setWriteWarnings(
             Array.isArray(capabilities.warnings) ? capabilities.warnings : [],
           );
         }
-      } catch {
-        if (!cancelled) {
-          setWriteEnabled(false);
-          setWriteWarnings([]);
+      } catch (error) {
+        if (cancelled || (rereading && !isDemoReadOnlyError(error))) {
+          return;
         }
+        answeredVaultRef.current = undefined;
+        setServerWriteEnabled(false);
+        setWriteWarnings([]);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [vaultId]);
+  }, [vaultId, demoMode, revision, recheckId]);
 
   return {
-    writeEnabled,
+    writeEnabled: serverWriteEnabled && !demoMode,
     writeWarnings,
     setWriteWarnings,
     writeNotice,
     setWriteNotice,
+    recheck,
   };
 }

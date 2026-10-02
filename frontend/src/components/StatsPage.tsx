@@ -8,6 +8,7 @@ import { useVaultCollection } from "../vaults";
 
 import { StateBlock } from "./ui";
 import type {
+  CreatedDateStatus,
   FolderStat,
   LinkedNoteRef,
   MonthActivity,
@@ -36,9 +37,43 @@ function fmtMonth(m: string): string {
   return date.toLocaleString("en", { month: "short" });
 }
 
+/**
+ * The largest value in `arr`, floored at 1 so it is always safe to divide a
+ * bar's value by. A window nobody wrote in has a maximum of zero, and scaling
+ * against that asks for a NaN height.
+ */
 function maxOf(arr: number[]): number {
-  return arr.length === 0 ? 1 : Math.max(...arr);
+  return Math.max(1, ...arr);
 }
+
+/**
+ * How many calendar months the "Notes created" window spans, matching the
+ * backend's window. The chart draws whatever the backend sends, but it
+ * averages over this and names it in the section heading.
+ */
+const ACTIVITY_WINDOW_MONTHS = 6;
+
+/**
+ * How long to wait before asking again for a Vault whose history the server
+ * was still reading (#300). The server itself waits a moment for the walk
+ * before answering, so this only paces a long one.
+ */
+const HISTORY_RETRY_MS = 3000;
+
+/**
+ * How many times to ask again before leaving the notice up. A walk that has
+ * not finished in about a minute and a half is not worth polling for; the next
+ * visit to the page asks afresh.
+ */
+const HISTORY_RETRY_LIMIT = 20;
+
+/** The line under the chart when some created dates are not what they should be. */
+const CREATED_DATE_NOTICE: Record<CreatedDateStatus, string | null> = {
+  complete: null,
+  estimated:
+    "Some dates are estimated: this repository's history is incomplete.",
+  reading: "Reading history…",
+};
 
 function SectionHead({ num, title }: { num: string; title: string }) {
   return (
@@ -97,24 +132,35 @@ function RankedList({
   );
 }
 
-function ActivityChart({ months }: { months: MonthActivity[] }) {
+function ActivityChart({
+  months,
+  status,
+}: {
+  months: MonthActivity[];
+  status: CreatedDateStatus;
+}) {
   if (months.length === 0) return null;
-  const max = maxOf(months.map((m) => m.modified_count));
+  const max = maxOf(months.map((m) => m.created_count));
   const peak = months.reduce((a, b) =>
-    a.modified_count >= b.modified_count ? a : b,
+    a.created_count >= b.created_count ? a : b,
   );
-  const avg = months.reduce((s, m) => s + m.modified_count, 0) / months.length;
+  // Over the window, not over the bars that arrived. The backend guarantees
+  // one entry per month of the window, so the two are equal today; dividing by
+  // the window is what keeps the figure honest if they ever part.
+  const avg =
+    months.reduce((s, m) => s + m.created_count, 0) / ACTIVITY_WINDOW_MONTHS;
+  const notice = CREATED_DATE_NOTICE[status];
 
   return (
     <>
       <div className="stats-activity">
         {months.map((m) => (
           <div key={m.month} className="stats-act-col">
-            <span className="stats-act-count">{m.modified_count}</span>
+            <span className="stats-act-count">{m.created_count}</span>
             <div
               className="stats-act-bar"
               style={{
-                height: `${Math.max(2, (m.modified_count / max) * 68)}px`,
+                height: `${Math.max(2, (m.created_count / max) * 68)}px`,
               }}
             />
             <span className="stats-act-month">{fmtMonth(m.month)}</span>
@@ -123,10 +169,16 @@ function ActivityChart({ months }: { months: MonthActivity[] }) {
       </div>
       <div className="stats-activity-meta">
         <span>
-          Peak: {fmtMonth(peak.month)} · {peak.modified_count} notes
+          Peak: {fmtMonth(peak.month)} · {peak.created_count} new{" "}
+          {peak.created_count === 1 ? "note" : "notes"}
         </span>
         <span>Avg: {avg.toFixed(1)} / month</span>
       </div>
+      {notice ? (
+        <div className="stats-activity-meta" role="status">
+          <span>{notice}</span>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -239,6 +291,29 @@ interface VaultStatsResult {
   error: string | null;
 }
 
+/** One Vault's `stats/detail` read, with a failure kept as that Vault's answer. */
+async function loadVaultStats(vault: VaultSummary): Promise<VaultStatsResult> {
+  try {
+    const res = await apiFetch(
+      `/api/v1/vaults/${encodeURIComponent(vault.vault_id)}/stats/detail`,
+    );
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res, "Stats failed"));
+    }
+    const projection = (await res.json()) as VaultQualifiedStats;
+    return { vault, stats: projection.stats, error: null };
+  } catch (err) {
+    return {
+      vault,
+      stats: null,
+      error:
+        err instanceof Error
+          ? err.message
+          : "Failed to load stats for this Vault.",
+    };
+  }
+}
+
 /**
  * Every Vault the current scope covers, in Vault-management order: the one
  * named Vault when scope is narrowed, every enabled Vault under `"all"`.
@@ -259,7 +334,13 @@ function vaultsInScope(
 
 export function StatsPage() {
   const [scope] = useVaultScope();
-  const { vaults, loading: loadingVaults } = useVaultCollection();
+  const {
+    vaults,
+    loading: loadingVaults,
+    readState,
+    error: discoveryError,
+    refresh: reloadVaults,
+  } = useVaultCollection();
   const targets = vaultsInScope(scope, vaults);
   // Statistics stay grouped per Vault (#62) and `stats/detail` is an exact
   // single-Vault read, so `all` is N reads presented as N sections rather
@@ -285,29 +366,7 @@ export function StatsPage() {
       setLoading(true);
       setError(null);
       try {
-        const loaded = await Promise.all(
-          targets.map(async (vault): Promise<VaultStatsResult> => {
-            try {
-              const res = await apiFetch(
-                `/api/v1/vaults/${encodeURIComponent(vault.vault_id)}/stats/detail`,
-              );
-              if (!res.ok) {
-                throw new Error(await readErrorMessage(res, "Stats failed"));
-              }
-              const projection = (await res.json()) as VaultQualifiedStats;
-              return { vault, stats: projection.stats, error: null };
-            } catch (err) {
-              return {
-                vault,
-                stats: null,
-                error:
-                  err instanceof Error
-                    ? err.message
-                    : "Failed to load stats for this Vault.",
-              };
-            }
-          }),
-        );
+        const loaded = await Promise.all(targets.map(loadVaultStats));
         if (!cancelled) setResults(loaded);
       } catch (err) {
         if (!cancelled)
@@ -323,6 +382,44 @@ export function StatsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadingVaults, targetIds]);
 
+  // A Vault whose history the server was still reading is asked again, alone
+  // and in place, until its chart is final or the retries run out (#300). A
+  // retry that fails keeps the answer already on screen rather than replacing
+  // it with an error.
+  const [historyRetries, setHistoryRetries] = useState(0);
+  useEffect(() => {
+    const reading = results.filter(
+      (result) => result.stats?.created_date_status === "reading",
+    );
+    if (reading.length === 0 || historyRetries >= HISTORY_RETRY_LIMIT) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const refreshed = await Promise.all(
+          reading.map((result) => loadVaultStats(result.vault)),
+        );
+        if (cancelled) return;
+        setHistoryRetries((count) => count + 1);
+        setResults((current) =>
+          current.map((result) => {
+            const next = refreshed.find(
+              (candidate) =>
+                candidate.vault.vault_id === result.vault.vault_id &&
+                candidate.stats !== null,
+            );
+            return next ?? result;
+          }),
+        );
+      })();
+    }, HISTORY_RETRY_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [results, historyRetries]);
+
   if (loadingVaults || loading) {
     return (
       <div className="stats-loading">
@@ -330,6 +427,20 @@ export function StatsPage() {
         <div className="stats-loading-block" />
         <div className="stats-loading-block" />
       </div>
+    );
+  }
+
+  // No Vault list to scope to because discovery failed, not because there are
+  // none (#333).
+  if (readState === "error") {
+    return (
+      <StateBlock
+        tone="error"
+        title="Stats Unavailable"
+        description={discoveryError ?? "Could not load your Vaults."}
+        actionLabel="Try again"
+        onAction={() => void reloadVaults()}
+      />
     );
   }
 
@@ -438,10 +549,16 @@ function VaultStatsReport({
         </div>
       </div>
 
-      {/* Row 2: Writing Activity */}
+      {/* Row 2: Notes created, by created date rather than last edit (#300) */}
       <div className="stats-section" style={{ marginBottom: "2rem" }}>
-        <SectionHead num="03" title="Writing Activity — last 6 months" />
-        <ActivityChart months={stats.activity_by_month} />
+        <SectionHead
+          num="03"
+          title={`Notes created, last ${ACTIVITY_WINDOW_MONTHS} months`}
+        />
+        <ActivityChart
+          months={stats.activity_by_month}
+          status={stats.created_date_status}
+        />
       </div>
 
       {/* Row 3: Folders + Word extremes */}

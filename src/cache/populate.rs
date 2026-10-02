@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::mem::MaybeUninit;
@@ -15,12 +16,14 @@ use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex, normalize_title};
+use crate::vault_registry::VaultId;
 
 use super::SqliteCache;
 use super::parse::{
     FileSnapshot, content_hash, current_unix_timestamp, extract_headings, extract_tags,
     file_snapshot, parse_frontmatter_metadata,
 };
+use super::vault_snapshots::SavedEmbeddings;
 
 /// Build-time variables the benchmark can sweep. Production uses `Default`
 /// (800/50 chunks, contextual documents); the eval harness overrides them per
@@ -57,10 +60,17 @@ impl Default for BuildOptions {
 }
 
 /// What one *running* build's caller hands it beyond the index and options:
-/// where to report progress, and the Vault lock it holds only while the build
-/// is still reading Markdown from disk.
+/// which Vault it builds, where to report progress, the Vault lock it holds
+/// only while the build is still reading Markdown from disk, and where it
+/// saves and finds embedding progress.
 #[derive(Default)]
-pub(crate) struct BuildHandles {
+pub(crate) struct BuildHandles<'a> {
+    /// The Vault this build indexes. Every line the build logs, the progress
+    /// heartbeat's included, carries it as a `vault_id` field so a
+    /// multi-Vault instance's logs say whose index is running (issue #155).
+    /// Only the ID: the display name is user text and the path is private.
+    /// `None` for builds with no Vault behind them (tests, eval).
+    pub(crate) vault_id: Option<VaultId>,
     pub(crate) on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     /// The Index turn's foreground mutation guard, dropped the moment the last
     /// note's content is in memory, so a foreground writer does not wait out
@@ -68,6 +78,78 @@ pub(crate) struct BuildHandles {
     /// is in-memory work and SQLite writes to this cache; nothing downstream
     /// opens a Vault path. `None` for a caller holding no such lock.
     pub(crate) vault_read_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    /// The Vault's saved embedding progress in the shared on-disk cache
+    /// (ADR-35). The build reuses a saved vector for any chunk whose
+    /// embedding input it matches, and saves each vector it computes as it
+    /// goes. `None` for a build with no Vault behind it, which embeds
+    /// everything it cannot reuse from its own tables.
+    pub(crate) saved_embeddings: Option<SavedEmbeddings<'a>>,
+    /// When the build stops early so another Vault can index (ADR-35
+    /// decision 3). `None` for a build that always runs to the end.
+    pub(crate) index_yield: Option<&'a IndexYield>,
+}
+
+/// The error a build returns when it stopped early for [`IndexYield`]. The
+/// caller tells it from a failure by asking [`IndexYield::yielded`], never
+/// by this text.
+const YIELDED: &str = "the build stopped early so another Vault could index";
+
+/// How a long Index turn takes turns with other Vaults (ADR-35 decision 3).
+///
+/// Once the build has embedded for `every`, it asks whether another Vault is
+/// waiting to index, before it embeds its next chunk. If one is, the build
+/// stops there: the vectors it computed are already in its saved progress,
+/// and the caller requeues the Vault behind the one waiting. If none is, it
+/// carries on and asks again after each further `every`. The clock is
+/// embedding time in this build, not chunks, so the bound on a waiting Vault
+/// holds on any hardware.
+///
+/// Asking before a chunk rather than after one means a build that has just
+/// embedded its last chunk finishes instead of pausing with nothing left to
+/// do. A build that has embedded nothing yet never stops either, so two
+/// Vaults can never hand the slot back and forth without either of them
+/// getting anywhere.
+pub(crate) struct IndexYield {
+    every: Duration,
+    another_vault_waits: Box<dyn Fn() -> bool + Send>,
+    next_check: Cell<Duration>,
+    embedded_any: Cell<bool>,
+    yielded: Cell<bool>,
+}
+
+impl IndexYield {
+    pub(crate) fn new(every: Duration, another_vault_waits: Box<dyn Fn() -> bool + Send>) -> Self {
+        Self {
+            every,
+            another_vault_waits,
+            next_check: Cell::new(every),
+            embedded_any: Cell::new(false),
+            yielded: Cell::new(false),
+        }
+    }
+
+    fn chunk_embedded(&self) {
+        self.embedded_any.set(true);
+    }
+
+    /// Whether the build stopped early for another Vault.
+    pub(crate) fn yielded(&self) -> bool {
+        self.yielded.get()
+    }
+
+    /// Asked before each chunk with the time this build has spent embedding
+    /// so far.
+    fn should_stop(&self, embedding: Duration) -> bool {
+        if !self.embedded_any.get() || embedding < self.next_check.get() {
+            return false;
+        }
+        if (self.another_vault_waits)() {
+            self.yielded.set(true);
+            return true;
+        }
+        self.next_check.set(embedding + self.every);
+        false
+    }
 }
 
 pub enum UpsertOutcome {
@@ -147,7 +229,7 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        handles: BuildHandles,
+        handles: BuildHandles<'_>,
         embed_layers: bool,
         opts: &BuildOptions,
     ) -> Result<(), String> {
@@ -165,15 +247,30 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        handles: BuildHandles,
+        handles: BuildHandles<'_>,
         embed_layers: bool,
         opts: &BuildOptions,
         build_stamp: Option<BuildStamp>,
     ) -> Result<(), String> {
         let BuildHandles {
+            vault_id,
             on_progress,
             vault_read_guard,
+            mut saved_embeddings,
+            index_yield,
         } = handles;
+        // Entered here, on the thread that runs the build, rather than relied
+        // on to cross `spawn_blocking` from the Index turn: an ambient span
+        // does not follow work onto another thread. The heartbeat thread gets
+        // this span handed to it for the same reason.
+        // Error level so the span survives any filter an operator sets: under
+        // `RUST_LOG=warn` an info span would be filtered out and take
+        // `vault_id` off the very warnings that most need it.
+        let build_span = match vault_id {
+            Some(vault_id) => tracing::error_span!("index", %vault_id),
+            None => tracing::Span::none(),
+        };
+        let _in_build_span = build_span.enter();
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
@@ -336,6 +433,7 @@ impl SqliteCache {
                         embed_this_note,
                         embedder,
                         opts,
+                        saved_embeddings.as_ref(),
                     ) {
                         Ok(prepared) => prepared_notes.push(prepared),
                         Err(error) => {
@@ -381,14 +479,49 @@ impl SqliteCache {
             ));
         }
 
-        let total_chunks_to_embed: usize = prepared_notes
-            .iter()
-            .map(|note| note.texts_to_embed.len())
-            .sum();
-        let total_tokens_to_embed: usize = prepared_notes
-            .iter()
-            .flat_map(|note| note.embedding_input_token_lengths.iter())
-            .sum();
+        // Work an earlier, interrupted turn saved counts towards this turn's
+        // total and is already complete, so the percentage resumes where it
+        // stopped instead of starting over from zero (ADR-35).
+        let resumed_chunks: usize = prepared_notes.iter().map(|note| note.resumed.chunks).sum();
+        let resumed_tokens: usize = prepared_notes.iter().map(|note| note.resumed.tokens).sum();
+        let resumed_embedding_time: Duration =
+            prepared_notes.iter().map(|note| note.resumed.took).sum();
+        // Saved progress for anything this build will not embed belongs to
+        // content that has since changed or left the Vault. Pruned once the
+        // workload is known, so it cannot accumulate across interrupted
+        // turns, and only when every note was read and prepared: a note this
+        // pass could not read is missing from the workload, not gone from
+        // the Vault, and its saved vectors are still worth keeping.
+        if per_note_failures == 0
+            && let Some(saved) = saved_embeddings.as_mut()
+        {
+            let wanted: HashSet<&str> = prepared_notes
+                .iter()
+                .filter(|note| note.embed)
+                .flat_map(|note| note.chunking.chunks.iter())
+                .map(|chunk| chunk.content_hash.as_str())
+                .collect();
+            saved.retain(&wanted);
+        }
+
+        let total_chunks_to_embed: usize = resumed_chunks
+            + prepared_notes
+                .iter()
+                .map(|note| note.texts_to_embed.len())
+                .sum::<usize>();
+        let total_tokens_to_embed: usize = resumed_tokens
+            + prepared_notes
+                .iter()
+                .flat_map(|note| note.embedding_input_token_lengths.iter())
+                .sum::<usize>();
+        if resumed_chunks > 0 {
+            tracing::info!(
+                resumed_chunks,
+                "Resuming embedding: {} {} already saved by an earlier, interrupted turn",
+                format_count(resumed_chunks),
+                pluralize(resumed_chunks as u64, "chunk")
+            );
+        }
         tracing::debug!(
             changed_notes = prepared_notes.len(),
             total_chunks_to_embed,
@@ -402,7 +535,16 @@ impl SqliteCache {
             total_chunks_to_embed,
             total_tokens_to_embed,
             embedding_started_at,
+            resumed_embedding_time,
+            build_span.clone(),
+            progress_log_delay,
         );
+        progress
+            .chunks_processed
+            .store(resumed_chunks, Ordering::Relaxed);
+        progress
+            .tokens_processed
+            .store(resumed_tokens, Ordering::Relaxed);
         progress
             .notes_processed
             .store(notes_unchanged + per_note_failures, Ordering::Relaxed);
@@ -416,18 +558,34 @@ impl SqliteCache {
             chunks_total: total_chunks_to_embed,
             tokens_total: total_tokens_to_embed,
             started_at: embedding_started_at,
+            resumed_embedding_time,
         };
         progress_reporter.notify();
 
         let indexing_result = (|| -> Result<(), String> {
             for prepared in prepared_notes {
                 let slug = prepared.slug.clone();
-                match embed_prepared_note(&tx, prepared, embedder, &progress_reporter) {
+                match embed_prepared_note(
+                    &tx,
+                    prepared,
+                    embedder,
+                    &progress_reporter,
+                    saved_embeddings.as_mut(),
+                    index_yield,
+                ) {
                     Ok(stats) => {
                         notes_changed += 1;
                         chunks_embedded += stats.embedded;
                         chunks_reused += stats.reused;
                         metrics.record_chunk_stats(&stats);
+                    }
+                    // Not this note's failure: the whole build is stopping,
+                    // and the candidate it was filling is never published.
+                    Err(error) if index_yield.is_some_and(IndexYield::yielded) => {
+                        tracing::info!(
+                            "Pausing embedding so another Vault can index; progress is saved"
+                        );
+                        return Err(error);
                     }
                     Err(error) => {
                         per_note_failures += 1;
@@ -814,6 +972,11 @@ struct ProgressReporter<'a> {
     chunks_total: usize,
     tokens_total: usize,
     started_at: Instant,
+    /// The embedding time an interrupted earlier turn spent on the work this
+    /// one resumed. Reported elapsed time includes it, so the time-left
+    /// estimate, which divides elapsed time by completed work, keeps the
+    /// real throughput instead of crediting resumed work as instantaneous.
+    resumed_embedding_time: Duration,
 }
 
 impl ProgressReporter<'_> {
@@ -828,16 +991,23 @@ impl ProgressReporter<'_> {
             chunks_total: self.chunks_total,
             tokens_completed: self.progress.tokens_processed.load(Ordering::Relaxed),
             tokens_total: self.tokens_total,
-            elapsed_seconds: self.started_at.elapsed().as_secs(),
+            elapsed_seconds: (self.resumed_embedding_time + self.started_at.elapsed()).as_secs(),
         });
     }
 }
 
+/// `span` is the build's Vault span, and the heartbeat logs inside it. A new
+/// OS thread starts with neither the caller's span nor, when the caller set
+/// its subscriber per thread, the caller's subscriber, so both are carried
+/// across explicitly; otherwise the heartbeat's lines lose their `vault_id`.
 fn start_indexing_heartbeat(
     total_notes: usize,
     total_chunks: usize,
     total_tokens: usize,
     started_at: Instant,
+    resumed_embedding_time: Duration,
+    span: tracing::Span,
+    log_delay: fn(bool) -> Duration,
 ) -> (
     Arc<IndexingProgress>,
     mpsc::Sender<()>,
@@ -846,10 +1016,12 @@ fn start_indexing_heartbeat(
     let progress = Arc::new(IndexingProgress::default());
     let heartbeat_progress = progress.clone();
     let (stop_tx, stop_rx) = mpsc::channel();
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
     let heartbeat = thread::spawn(move || {
+        let _dispatch = tracing::dispatcher::set_default(&dispatch);
+        let _in_span = span.enter();
         let mut has_logged = false;
-        while let Err(mpsc::RecvTimeoutError::Timeout) =
-            stop_rx.recv_timeout(progress_log_delay(has_logged))
+        while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(log_delay(has_logged))
         {
             log_indexing_progress(
                 heartbeat_progress.notes_processed.load(Ordering::Relaxed),
@@ -858,7 +1030,7 @@ fn start_indexing_heartbeat(
                 total_chunks,
                 heartbeat_progress.tokens_processed.load(Ordering::Relaxed),
                 total_tokens,
-                started_at.elapsed(),
+                resumed_embedding_time + started_at.elapsed(),
                 heartbeat_progress.failures.load(Ordering::Relaxed),
             );
             has_logged = true;
@@ -1534,6 +1706,17 @@ struct PreparedNote {
     chunk_measurements: Vec<ChunkMeasurement>,
     chunking_elapsed: Duration,
     vector_reuse_elapsed: Duration,
+    /// The part of this note's embedding an interrupted earlier turn saved.
+    /// Those vectors are already in `preserved`.
+    resumed: ResumedWork,
+}
+
+/// Embedding work found in saved progress rather than done again.
+#[derive(Default)]
+struct ResumedWork {
+    chunks: usize,
+    tokens: usize,
+    took: Duration,
 }
 
 /// Reuse/change-detection hash for Hatchdoor's canonical contextual document.
@@ -1587,6 +1770,7 @@ fn prepare_note_for_embedding(
     embed: bool,
     embedder: &dyn Embedder,
     opts: &BuildOptions,
+    saved_embeddings: Option<&SavedEmbeddings<'_>>,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
     let mut chunking = chunk_note(&content, embedder, opts.chunk);
@@ -1623,13 +1807,28 @@ fn prepare_note_for_embedding(
             chunk_measurements: Vec::new(),
             chunking_elapsed,
             vector_reuse_elapsed: Duration::ZERO,
+            resumed: ResumedWork::default(),
         });
     }
 
     let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, &slug)?;
-    let preserved =
+    let mut preserved =
         preserve_existing_vectors(tx, &slug, layer.as_deref(), &chunking.chunks, &existing)?;
+    // What the build's own tables could not supply, an interrupted earlier
+    // turn may have saved. Its cost is counted below, once measured.
+    let mut resumed_took_by_hash: HashMap<String, Duration> = HashMap::new();
+    if let Some(saved_embeddings) = saved_embeddings {
+        for chunk in &chunking.chunks {
+            if preserved.contains_key(&chunk.content_hash) {
+                continue;
+            }
+            if let Some(saved) = saved_embeddings.find(&chunk.content_hash) {
+                resumed_took_by_hash.insert(chunk.content_hash.clone(), saved.took);
+                preserved.insert(chunk.content_hash.clone(), saved.vector);
+            }
+        }
+    }
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let chunk_measurements = chunking
@@ -1677,6 +1876,19 @@ fn prepare_note_for_embedding(
         );
     }
 
+    // Counted per chunk, not per saved vector: chunks that repeat one input
+    // were each embedded, and each paid for, by the turn that saved it, so
+    // crediting the time once would make the resumed throughput look faster
+    // than it was and the time-left estimate too short.
+    let mut resumed = ResumedWork::default();
+    for measurement in &chunk_measurements {
+        if let Some(took) = resumed_took_by_hash.get(&measurement.content_hash) {
+            resumed.chunks += 1;
+            resumed.tokens += measurement.input_tokens;
+            resumed.took += *took;
+        }
+    }
+
     let embedding_input_bytes = texts_to_embed.iter().map(String::len).sum();
     let embedding_input_token_lengths: Vec<usize> = indices_needing_embed
         .iter()
@@ -1701,6 +1913,7 @@ fn prepare_note_for_embedding(
         chunk_measurements: embedded_chunk_measurements,
         chunking_elapsed,
         vector_reuse_elapsed,
+        resumed,
     })
 }
 
@@ -1709,6 +1922,8 @@ fn embed_prepared_note(
     prepared: PreparedNote,
     embedder: &dyn Embedder,
     progress_reporter: &ProgressReporter<'_>,
+    mut saved_embeddings: Option<&mut SavedEmbeddings<'_>>,
+    index_yield: Option<&IndexYield>,
 ) -> Result<ChunkStats, String> {
     let progress = progress_reporter.progress;
     let pipeline_started = Instant::now();
@@ -1726,6 +1941,7 @@ fn embed_prepared_note(
         chunk_measurements,
         chunking_elapsed,
         vector_reuse_elapsed,
+        resumed: _,
     } = prepared;
     if chunking.chunks.is_empty() {
         let sqlite_started = Instant::now();
@@ -1807,21 +2023,37 @@ fn embed_prepared_note(
     let mut embedding_call_input_counts = Vec::with_capacity(calls);
     let mut embedding_call_token_counts = Vec::with_capacity(calls);
     let mut embedding_call_padded_token_counts = Vec::with_capacity(calls);
-    for (texts, token_lengths) in texts_to_embed
+    for ((texts, token_lengths), chunk_indices) in texts_to_embed
         .chunks(batch_size)
         .zip(embedding_input_token_lengths.chunks(batch_size))
+        .zip(indices_needing_embed.chunks(batch_size))
     {
+        // A chunk boundary: everything embedded before it is recorded.
+        if index_yield.is_some_and(|index_yield| {
+            index_yield.should_stop(progress_reporter.started_at.elapsed())
+        }) {
+            return Err(YIELDED.to_string());
+        }
         let input_tokens: usize = token_lengths.iter().sum();
         let padded_tokens = token_lengths.iter().copied().max().unwrap_or(0) * texts.len();
         let call_started = Instant::now();
         let vectors = embedder.embed(texts)?;
-        embedding_call_durations.push(call_started.elapsed());
+        let call_took = call_started.elapsed();
+        embedding_call_durations.push(call_took);
         if vectors.len() != texts.len() {
             return Err(format!(
                 "embedder returned {} vectors for {} inputs",
                 vectors.len(),
                 texts.len()
             ));
+        }
+        if let Some(saved) = saved_embeddings.as_deref_mut() {
+            // A batch's time is split evenly across its inputs; production
+            // embeds one input per call, so this is exact there.
+            let took_each = call_took / u32::try_from(texts.len()).unwrap_or(u32::MAX).max(1);
+            for (index, vector) in chunk_indices.iter().zip(&vectors) {
+                saved.record(&chunking.chunks[*index].content_hash, vector, took_each);
+            }
         }
         embedding_padded_tokens += padded_tokens;
         embedding_call_input_counts.push(texts.len());
@@ -1835,6 +2067,9 @@ fn embed_prepared_note(
             .tokens_processed
             .fetch_add(input_tokens, Ordering::Relaxed);
         progress_reporter.notify();
+        if let Some(index_yield) = index_yield {
+            index_yield.chunk_embedded();
+        }
     }
     let embedding_elapsed = embedding_started.elapsed();
     if !texts_to_embed.is_empty() {
@@ -1961,6 +2196,58 @@ fn preserve_existing_vectors(
         }
     }
     Ok(out)
+}
+
+/// Captures log lines the way production formats them (`config::init_logging`
+/// uses the compact formatter without targets), so a test can assert on the
+/// fields an operator would actually see.
+#[cfg(test)]
+pub(super) mod log_capture {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub(in crate::cache) struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        /// A dispatcher writing here at `level` and above. Set it per thread
+        /// with `tracing::dispatcher::with_default`; the build must carry it
+        /// into any thread it starts itself.
+        pub(in crate::cache) fn dispatch(&self, level: tracing::Level) -> tracing::Dispatch {
+            let sink = self.clone();
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_max_level(level)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .compact()
+                    .with_writer(move || sink.clone())
+                    .finish(),
+            )
+        }
+
+        pub(in crate::cache) fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("captured logs lock").clone())
+                .expect("UTF-8 log output")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured logs lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2612,18 +2899,21 @@ mod tests {
 #[cfg(test)]
 mod chunk_integration_tests {
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use tempfile::TempDir;
+    use tempfile::{TempDir, tempdir};
 
     use super::{
-        BuildOptions, embedding_reuse_hash, estimated_remaining, format_count, format_elapsed,
-        format_eta, format_note_count, indexing_progress_message, progress_log_delay,
+        BuildHandles, BuildOptions, embedding_reuse_hash, estimated_remaining, format_count,
+        format_elapsed, format_eta, format_note_count, indexing_progress_message, log_capture,
+        progress_log_delay, start_indexing_heartbeat,
     };
     use crate::cache::SqliteCache;
     use crate::chunk::ChunkOptions;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
+    use crate::vault_registry::VaultId;
 
     fn make_vault(files: &[(&str, &str)]) -> TempDir {
         let dir = TempDir::new().expect("tempdir");
@@ -3121,6 +3411,195 @@ mod chunk_integration_tests {
         );
     }
 
+    /// Every line of the given message must carry exactly `vault`'s ID, once.
+    fn assert_lines_belong_to(lines: &[String], message: &str, vault: VaultId, other: VaultId) {
+        let matching: Vec<&String> = lines.iter().filter(|line| line.contains(message)).collect();
+        assert!(!matching.is_empty(), "no `{message}` line in {lines:#?}");
+        for line in matching {
+            assert_eq!(
+                line.matches(&format!("vault_id={vault}")).count(),
+                1,
+                "`{message}` line lacks its Vault's ID: {line}"
+            );
+            assert!(
+                !line.contains(&other.to_string()),
+                "`{message}` line carries the other Vault's ID: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_builds_label_every_line_with_their_own_vault() {
+        let first = VaultId::generate().expect("Vault ID");
+        let second = VaultId::generate().expect("Vault ID");
+        let first_dir = tempdir().expect("temp dir");
+        std::fs::write(first_dir.path().join("One.md"), "# One\n\nfirst Vault").expect("note");
+        std::fs::write(
+            first_dir.path().join("Broken.md"),
+            "---\ntags: [unclosed\n---\n# Broken\n\nbody",
+        )
+        .expect("note");
+        let second_dir = tempdir().expect("temp dir");
+        for name in ["A", "B", "C"] {
+            std::fs::write(
+                second_dir.path().join(format!("{name}.md")),
+                format!("# {name}\n\nsecond Vault"),
+            )
+            .expect("note");
+        }
+        let logs = log_capture::CapturedLogs::default();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let builds: Vec<_> = [(first, first_dir.path()), (second, second_dir.path())]
+            .into_iter()
+            .map(|(vault_id, path)| {
+                let index = VaultIndex::build(path).expect("index");
+                let dispatch = logs.dispatch(tracing::Level::DEBUG);
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        let cache = SqliteCache::in_memory(384).expect("cache");
+                        barrier.wait();
+                        cache
+                            .replace_with_options(
+                                &index,
+                                &StubEmbedder::new(384),
+                                BuildHandles {
+                                    vault_id: Some(vault_id),
+                                    ..BuildHandles::default()
+                                },
+                                true,
+                                &BuildOptions::default(),
+                            )
+                            .expect("populate");
+                    });
+                })
+            })
+            .collect();
+        for build in builds {
+            build.join().expect("build thread");
+        }
+
+        let lines = logs.lines();
+        assert_lines_belong_to(&lines, "Preparing search index for 2 notes", first, second);
+        assert_lines_belong_to(&lines, "Preparing search index for 3 notes", second, first);
+        assert_lines_belong_to(&lines, "Ignoring malformed YAML frontmatter", first, second);
+        assert_lines_belong_to(&lines, "Search index ready: 2 notes", first, second);
+        assert_lines_belong_to(&lines, "Search index ready: 3 notes", second, first);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("Updating links between notes"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("Indexing performance summary"))
+                .count(),
+            2
+        );
+        // Nothing the builds logged is left unattributed, and no line names a
+        // Vault's directory.
+        for line in &lines {
+            assert_eq!(line.matches("vault_id=").count(), 1, "unattributed: {line}");
+            for dir in [&first_dir, &second_dir] {
+                assert!(
+                    !line.contains(&*dir.path().to_string_lossy()),
+                    "path leaked: {line}"
+                );
+            }
+        }
+    }
+
+    /// An operator who turns logging down to warnings still sees whose
+    /// warnings they are.
+    #[test]
+    fn per_note_warnings_keep_their_vault_id_at_warn_level() {
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
+        std::fs::write(dir.path().join("binary.md"), [0xff_u8, 0xfe, 0x00, 0x9c])
+            .expect("write non-UTF-8 note");
+        let index = VaultIndex::build(dir.path()).expect("index");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let logs = log_capture::CapturedLogs::default();
+
+        tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::WARN), || {
+            cache
+                .replace_with_options(
+                    &index,
+                    &FailingEmbedder {
+                        inner: StubEmbedder::new(384),
+                    },
+                    BuildHandles {
+                        vault_id: Some(vault_id),
+                        ..BuildHandles::default()
+                    },
+                    true,
+                    &BuildOptions::default(),
+                )
+                .expect("populate");
+        });
+
+        let lines = logs.lines();
+        for message in ["Per-note embedding failed", "Skipping unreadable note"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains(message)
+                        && line.contains(&format!("vault_id={vault_id}"))),
+                "no `{message}` line carrying the Vault's ID in {lines:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_heartbeats_each_log_their_own_vault() {
+        let logs = log_capture::CapturedLogs::default();
+        let heartbeats: Vec<_> = [
+            (VaultId::generate().expect("Vault ID"), 4),
+            (VaultId::generate().expect("Vault ID"), 7),
+        ]
+        .into_iter()
+        .map(|(vault_id, total_notes)| {
+            let dispatch = logs.dispatch(tracing::Level::DEBUG);
+            let logs = logs.clone();
+            thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    let span = tracing::error_span!("index", %vault_id);
+                    let (_progress, stop, heartbeat) = start_indexing_heartbeat(
+                        total_notes,
+                        10,
+                        100,
+                        Instant::now(),
+                        Duration::ZERO,
+                        span,
+                        |_| Duration::from_millis(5),
+                    );
+                    let line = format!("Indexing: 0 of {total_notes} notes");
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !logs.lines().iter().any(|logged| logged.contains(&line)) {
+                        assert!(Instant::now() < deadline, "no heartbeat line `{line}`");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    stop.send(()).expect("stop heartbeat");
+                    heartbeat.join().expect("heartbeat thread");
+                });
+                vault_id
+            })
+        })
+        .collect();
+        let ids: Vec<VaultId> = heartbeats
+            .into_iter()
+            .map(|heartbeat| heartbeat.join().expect("heartbeat owner"))
+            .collect();
+
+        let lines = logs.lines();
+        assert_lines_belong_to(&lines, "Indexing: 0 of 4 notes", ids[0], ids[1]);
+        assert_lines_belong_to(&lines, "Indexing: 0 of 7 notes", ids[1], ids[0]);
+    }
+
     #[test]
     fn progress_logging_starts_after_ten_seconds_then_repeats_each_minute() {
         assert_eq!(progress_log_delay(false), Duration::from_secs(10));
@@ -3410,5 +3889,73 @@ mod chunk_integration_tests {
             "stored chunk hash must be over the contextual document, so a heading \
              edit invalidates the cached vector instead of reusing a stale one"
         );
+    }
+}
+
+#[cfg(test)]
+mod index_yield_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::IndexYield;
+
+    fn yield_point(every: Duration) -> (IndexYield, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let waiting = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let index_yield = IndexYield::new(
+            every,
+            Box::new({
+                let waiting = waiting.clone();
+                let asked = asked.clone();
+                move || {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    waiting.load(Ordering::SeqCst)
+                }
+            }),
+        );
+        (index_yield, waiting, asked)
+    }
+
+    /// The queue is asked once per slice of embedding time, not at every
+    /// chunk, and only a waiting Vault stops the build.
+    #[test]
+    fn the_queue_is_asked_once_per_slice_of_embedding_time() {
+        let minute = Duration::from_secs(60);
+        let (index_yield, waiting, asked) = yield_point(minute);
+        index_yield.chunk_embedded();
+
+        assert!(!index_yield.should_stop(Duration::from_secs(59)));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "not asked inside the slice"
+        );
+        assert!(!index_yield.should_stop(Duration::from_secs(61)));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "asked once the slice is up"
+        );
+        assert!(!index_yield.should_stop(Duration::from_secs(90)));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "nobody was waiting, so the next question waits a further slice"
+        );
+
+        waiting.store(true, Ordering::SeqCst);
+        assert!(index_yield.should_stop(Duration::from_secs(122)));
+        assert!(index_yield.yielded());
+    }
+
+    #[test]
+    fn a_build_that_has_embedded_nothing_does_not_stop() {
+        let (index_yield, waiting, _) = yield_point(Duration::ZERO);
+        waiting.store(true, Ordering::SeqCst);
+        assert!(!index_yield.should_stop(Duration::from_secs(600)));
+        assert!(!index_yield.yielded());
+        index_yield.chunk_embedded();
+        assert!(index_yield.should_stop(Duration::from_secs(600)));
     }
 }

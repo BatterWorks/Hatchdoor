@@ -1,0 +1,57 @@
+name: Close issues on development
+
+# GitHub acts on `Closes #N` only when a pull request merges into the default
+# branch, which is `main`. Work lands on `development` first and reaches `main`
+# only at release, so without this an issue stays open until the next release.
+#
+# When a pull request merges into `development`, this closes every issue in
+# this repository that the pull request's title, body, or commit messages name
+# with a closing keyword (close, fix, resolve and their -s/-d forms). An issue
+# that is already closed is left alone.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [development]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  close:
+    name: close
+    if: ${{ github.event.pull_request.merged }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close the issues this pull request resolves
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # The text is fetched here rather than interpolated into the script,
+          # so nothing a contributor writes in a title or body can run.
+          text="$(gh pr view "$PR" --repo "$REPO" --json title,body,commits \
+            --jq '[.title, .body, (.commits[] | .messageHeadline, .messageBody)] | join("\n")')"
+          numbers="$(printf '%s\n' "$text" \
+            | grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+#[0-9]+' \
+            | grep -oE '[0-9]+$' | sort -un || true)"
+          if [ -z "$numbers" ]; then
+            echo "No closing references in #$PR."
+            exit 0
+          fi
+          for number in $numbers; do
+            # Issues and pull requests share one number space; a pull request
+            # named here is never closed.
+            state="$(gh api "repos/$REPO/issues/$number" \
+              --jq 'if .pull_request then "pull-request" else .state end' 2>/dev/null || echo missing)"
+            case "$state" in
+              open)
+                gh issue close "$number" --repo "$REPO" --reason completed \
+                  --comment "Closed by #$PR, merged into \`development\`."
+                ;;
+              closed) echo "#$number is already closed." ;;
+              *) echo "#$number is a $state, not an open issue, skipping." ;;
+            esac
+          done

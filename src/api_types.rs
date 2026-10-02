@@ -27,10 +27,38 @@ pub struct LinkedNoteRef {
     pub backlink_count: i64,
 }
 
+/// One calendar month of the "Notes created" window, as a zero-padded
+/// `YYYY-MM` key and the number of Notes whose created date falls in it
+/// (#300, ADR-29).
+///
+/// `VaultStatsResponse::activity_by_month` carries these as a window rather
+/// than a list of findings (#298): exactly six entries, oldest first, one per
+/// calendar month ending at the current UTC month, with a count of zero for a
+/// month nobody started a note in. Notes outside the window are counted in no
+/// entry.
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct MonthActivity {
     pub month: String,
-    pub modified_count: i64,
+    pub created_count: i64,
+}
+
+/// Whether every created date behind `activity_by_month` came from where it
+/// should have (#300, ADR-29).
+///
+/// A Git-backed Vault dates a note without a `created` property from its
+/// history. When that history is shallow, unreadable, or still being read, the
+/// note falls back to its modification time and the chart is partly an
+/// estimate. A plain folder has no history to miss, so its fallback is
+/// `Complete`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreatedDateStatus {
+    Complete,
+    /// Some notes were dated by modification time because the history that
+    /// would date them is not in the repository or could not be read.
+    Estimated,
+    /// The history is still being read; asking again shortly will do better.
+    Reading,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
@@ -59,6 +87,7 @@ pub struct VaultStatsResponse {
     pub top_tags: Vec<TagStat>,
     pub most_linked: Vec<LinkedNoteRef>,
     pub activity_by_month: Vec<MonthActivity>,
+    pub created_date_status: CreatedDateStatus,
     pub notes_per_folder: Vec<FolderStat>,
     pub longest_notes: Vec<NoteWordRef>,
     pub shortest_notes: Vec<NoteWordRef>,
@@ -116,6 +145,12 @@ pub struct ResolveBatchRequest {
     /// targets are read from the Vault root.
     #[serde(default)]
     pub note_path: Option<String>,
+    /// Markdown note-link destinations as written, such as
+    /// `../20-projects/Beacon%20Launch.md#Goals` (ADR-28). They resolve to a
+    /// slug like `targets`, but by path from `note_path`'s folder rather than
+    /// by title. Defaulted so an older client sees no change.
+    #[serde(default)]
+    pub note_link_targets: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

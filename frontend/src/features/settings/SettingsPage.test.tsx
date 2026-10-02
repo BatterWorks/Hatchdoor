@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -71,6 +77,14 @@ const settings = [
     kind: "text",
   },
   {
+    key: "HATCHDOOR_PUBLIC_URL",
+    value: "",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "text",
+  },
+  {
     key: "HATCHDOOR_MAX_ATTACHMENT_BYTES",
     value: "10485760",
     source: "default",
@@ -101,6 +115,16 @@ const settings = [
     locked: null,
     class: "instant",
     kind: "text",
+  },
+  {
+    // The retired instance-wide Git switch, at its shipped default. The page
+    // hides it and must not let it hide anything else (#340).
+    key: "HATCHDOOR_GIT_SYNC_ENABLED",
+    value: "false",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "mode",
   },
 ] as const;
 
@@ -136,9 +160,23 @@ function vault(name: string, enabled = true) {
   };
 }
 
-function mockPage(vaults = [vault("Field notes")]) {
-  mockedApiFetch.mockImplementation(async (input) => {
+function mockPage(
+  vaults = [vault("Field notes")],
+  onPatch?: (updates: Record<string, string>) => void,
+) {
+  mockedApiFetch.mockImplementation(async (input, init) => {
     const url = String(input);
+    if (url === "/api/settings" && init?.method === "PATCH") {
+      const { updates } = JSON.parse(String(init.body)) as {
+        updates: Record<string, string>;
+      };
+      onPatch?.(updates);
+      return json({
+        settings: settings.map((item) =>
+          item.key in updates ? { ...item, value: updates[item.key] } : item,
+        ),
+      });
+    }
     if (url === "/api/settings") return json({ settings });
     if (url === "/api/v1/vaults")
       return json({
@@ -248,6 +286,35 @@ describe("SettingsPage", () => {
     expect(requested).not.toContain("/api/git-status");
   });
 
+  it("offers the server commit identity with Git sync at its default (#340)", async () => {
+    mockPage();
+    renderSettingsPage();
+
+    // Every Vault without its own commit identity falls back to these two, so
+    // they stay editable however the retired instance-wide Git switch reads.
+    expect(await screen.findByLabelText("Recorded as (name)")).toHaveValue(
+      "Server author",
+    );
+    expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
+      "author@example.test",
+    );
+    // The footer counts the rows the page renders: all eleven, none hidden.
+    expect(screen.getByText(/11 editable here, 0 set in/)).toBeVisible();
+  });
+
+  it("offers the public address under Agent access", async () => {
+    mockPage();
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+
+    expect(await screen.findByText("Public address")).toBeVisible();
+    expect(
+      screen.getByPlaceholderText("https://notes.example.com"),
+    ).toBeVisible();
+  });
+
   it("surfaces a held draft under This server and withdraws once it is discarded", async () => {
     window.localStorage.setItem(
       "hatchdoor:heldDraft:note:orphaned",
@@ -284,5 +351,76 @@ describe("SettingsPage", () => {
     expect(
       window.localStorage.getItem("hatchdoor:heldDraft:note:orphaned"),
     ).toBeNull();
+  });
+
+  describe("keeps each section's unsaved edits to itself (#338)", () => {
+    async function editAcrossTwoSections() {
+      fireEvent.click(
+        await screen.findByRole("button", { name: /Agent access/ }),
+      );
+      fireEvent.change(await screen.findByLabelText("Public address"), {
+        target: { value: "https://notes.example.test" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Uploads/ }));
+      fireEvent.change(
+        await screen.findByLabelText("Largest file from this app"),
+        { target: { value: "20" } },
+      );
+    }
+
+    it("saving one section leaves another section's edit in place", async () => {
+      const sent: Record<string, string>[] = [];
+      mockPage(undefined, (updates) => sent.push(updates));
+      renderSettingsPage();
+      await editAcrossTwoSections();
+
+      fireEvent.click(screen.getByRole("button", { name: "Save uploads" }));
+      await screen.findByText("Saved");
+      expect(sent).toHaveLength(1);
+      expect(Object.keys(sent[0])).toEqual(["HATCHDOOR_MAX_ATTACHMENT_BYTES"]);
+
+      fireEvent.click(screen.getByRole("button", { name: /Agent access/ }));
+      expect(await screen.findByLabelText("Public address")).toHaveValue(
+        "https://notes.example.test",
+      );
+    });
+
+    it("discarding one section leaves another section's edit in place", async () => {
+      mockPage();
+      renderSettingsPage();
+      await editAcrossTwoSections();
+
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect(screen.getByLabelText("Largest file from this app")).toHaveValue(
+        10,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /Agent access/ }));
+      expect(await screen.findByLabelText("Public address")).toHaveValue(
+        "https://notes.example.test",
+      );
+    });
+  });
+
+  it("focuses the reindex confirmation and closes it on Escape", async () => {
+    mockPage();
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByLabelText("Meaning search in demoted layers"),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save notes handling" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Before this is saved",
+    });
+    expect(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    ).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: "Before this is saved" }),
+    ).not.toBeInTheDocument();
   });
 });

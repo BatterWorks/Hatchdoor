@@ -12,9 +12,40 @@
 //!
 //! Chaining trusts this batch's own prior write, not the caller's own value,
 //! so it must never be checked against a Vault an external writer could have
-//! touched in between: [`batch_tool`] acquires each touched Vault's mutation
-//! lock once and holds it for the rest of the call, rather than per item like
-//! a standalone write does, closing that window instead of narrowing it.
+//! touched in between: [`batch_tool`] acquires every touched Vault's mutation
+//! lock before the first item runs and holds them for the rest of the call,
+//! rather than per item like a standalone write does, closing that window
+//! instead of narrowing it.
+//!
+//! **Acquisition is ordered, not lazy** (issue #321). A batch is the only
+//! thing in the instance that holds more than one Vault's mutation lock at a
+//! time, so it is the only place a lock cycle can form — and it formed
+//! trivially, because locks used to be taken lazily in whatever order the
+//! caller's items happened to name Vaults. Two concurrent calls whose items
+//! named Vaults A and B in opposite orders deadlocked each other for the life
+//! of the process. [`lock_touched_vaults`] instead pre-scans the items,
+//! collects the distinct Vault IDs, **sorts them**, and acquires in that one
+//! canonical order. A total order over the only multi-lock holder makes a
+//! cycle impossible, which is why there is no acquisition timeout here: a
+//! batch may legitimately wait minutes behind a Git turn's network work
+//! (ADR-18), and a timeout would turn that wait into a spurious failure while
+//! buying nothing the ordering has not already bought.
+//!
+//! The pre-scan also resolves each Vault's control block for the whole call,
+//! and every item against that Vault runs on that one block. The lock lives
+//! on the control block, so re-resolving per item could hand a later item a
+//! *replacement* block published by a mid-batch definition edit — a different
+//! mutex, i.e. a write with no live exclusion.
+//!
+//! Since #321 a replacement block inherits the retiring one's exclusion, so a
+//! definition edit is survivable rather than fatal, and both halves of the
+//! call handle it. [`lock_one_vault`] re-resolves when the block it queued on
+//! is retired before its turn at the lock arrives, and [`dispatch_one`]
+//! re-resolves when the edit lands after the lock was taken, continuing only
+//! against a live block that shares the exclusion this call holds. A Vault
+//! that comes back without it, or does not come back at all, is refused with
+//! a structured error rather than written unlocked, and every item naming a
+//! Vault the pre-scan could not lock reports the reason it recorded.
 //!
 //! Note what the caller pays for that: while a batch runs, every other writer
 //! to a Vault it has already written — the Web UI, the V1 HTTP adapter, another
@@ -45,7 +76,10 @@ use super::super::limits::{BATCH_MAX_READ_ITEMS, BATCH_MAX_WRITE_ITEMS};
 use super::super::protocol::{JsonRpcFailure, OUTCOME_FIELD, tool_success};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
 use super::write::WRITE_OPS;
-use super::{READ_OPS, WRITE_DISABLED_MESSAGE, dispatch_read_tool, write, write_tool_annotations};
+use super::{
+    READ_OPS, WRITE_DISABLED_CODE, WRITE_DISABLED_MESSAGE, dispatch_read_tool,
+    environment_cleanup_refusal, write, write_tool_annotations,
+};
 
 /// The write ops that carry both `slug` and `expected_content_hash` — the
 /// only ones eligible for within-batch hash chaining. `create_note` and the
@@ -64,6 +98,13 @@ const HASH_CHAINED_OPS: &[&str] = &[
     "delete_note",
 ];
 
+/// Write ops a batch refuses although they are write tools. `rename_tag` and
+/// `delete_tag` touch every note carrying a tag and have their own
+/// plan-then-apply handshake; inside a best-effort batch with no rollback
+/// between items, the all-or-nothing promise each makes would be one item's
+/// promise among many.
+const NOT_BATCHABLE_WRITE_OPS: &[&str] = &["rename_tag", "delete_tag"];
+
 /// `(vault_id, slug) -> content_hash`, tracking each note's most recent
 /// resulting hash from an earlier item in this same batch call. Keyed by the
 /// raw `vault_id` string rather than a parsed `VaultId`: this is pure
@@ -72,12 +113,50 @@ const HASH_CHAINED_OPS: &[&str] = &[
 /// carries no `Hash` impl to key a map with.
 type HashChain = HashMap<(String, String), String>;
 
-/// One mutation guard per Vault this batch call has touched, held from the
-/// first write item against that Vault through the end of the whole call — see
-/// the module doc comment for why. A `Vec` rather than a map: `VaultId` has no
-/// `Hash` impl, and a batch touches at most a handful of distinct Vaults, so a
-/// linear scan against `BATCH_MAX_WRITE_ITEMS` (20) entries is cheap.
-type VaultLocks = Vec<(VaultId, tokio::sync::OwnedMutexGuard<()>)>;
+/// One Vault this batch call writes to: the guard it holds on that Vault for
+/// the whole call, and the control block that guard was taken from, resolved
+/// once so every item against the Vault runs on one generation of it — see
+/// the module doc comment for both.
+struct LockedVault {
+    vault_id: VaultId,
+    vault: write::McpVault,
+    /// Dropped when the batch returns, which is what releases the Vault.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Why a Vault this batch's items name could not be locked, kept so every
+/// item naming it reports the reason it would have reported standing alone,
+/// rather than a generic refusal. Stored field by field because
+/// [`JsonRpcFailure`] is not `Clone` and several items may name one Vault.
+struct UnlockedVault {
+    vault_id: VaultId,
+    code: i64,
+    message: String,
+    tool_level: bool,
+    domain_error: Option<Value>,
+}
+
+impl UnlockedVault {
+    fn failure(&self) -> JsonRpcFailure {
+        JsonRpcFailure {
+            code: self.code,
+            message: self.message.clone(),
+            tool_level: self.tool_level,
+            domain_error: self.domain_error.clone(),
+        }
+    }
+}
+
+/// What the pre-scan settled for this call: the Vaults it locked, in canonical
+/// acquisition order, and the ones it could not lock with the reason. `Vec`s
+/// rather than maps: `VaultId` has no `Hash` impl, and a batch touches at most
+/// a handful of distinct Vaults, so a linear scan against
+/// `BATCH_MAX_WRITE_ITEMS` (20) entries is cheap.
+#[derive(Default)]
+struct VaultLocks {
+    held: Vec<LockedVault>,
+    unlocked: Vec<UnlockedVault>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,14 +171,74 @@ struct BatchOperation {
     arguments: Value,
 }
 
+/// Appended to every refusal of a malformed batch payload, so the caller learns
+/// the shape it should have sent rather than only the next field serde expected.
+const BATCH_SHAPE_HINT: &str = "batch takes only `operations`, an array of `{op, arguments}` \
+     items. Each tool's own arguments, vault_id and commit_summary included, go inside an \
+     item's `arguments`.";
+
+/// Parses the `batch` arguments, naming every unknown field in one refusal.
+///
+/// `deny_unknown_fields` stops at the first stray key, and without
+/// `preserve_order` serde walks keys alphabetically, so a caller sending a
+/// top-level `vault_id` and a batch-level `commit_summary` used to learn about
+/// them one round trip at a time (#297). The keys at both levels are checked
+/// here first; serde then reports anything else, such as a missing `op` or a
+/// wrong type, with the same shape appended.
+fn parse_batch_args(arguments: Value) -> Result<BatchArgs, JsonRpcFailure> {
+    let mut unknown: Vec<String> = Vec::new();
+    if let Some(object) = arguments.as_object() {
+        unknown.extend(unknown_keys(object, &["operations"], ""));
+        if let Some(operations) = object.get("operations").and_then(Value::as_array) {
+            for (index, item) in operations.iter().enumerate() {
+                // A non-object item has no keys to name; serde refuses it below.
+                if let Some(item) = item.as_object() {
+                    let prefix = format!("operations[{index}].");
+                    unknown.extend(unknown_keys(item, &["op", "arguments"], &prefix));
+                }
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        let noun = if unknown.len() == 1 {
+            "field"
+        } else {
+            "fields"
+        };
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "Invalid batch arguments: unknown {noun} {}. {BATCH_SHAPE_HINT}",
+            unknown.join(", ")
+        )));
+    }
+    serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!(
+            "Invalid batch arguments: {error}. {BATCH_SHAPE_HINT}"
+        ))
+    })
+}
+
+/// The keys of `object` outside `known`, sorted and quoted with `prefix` so
+/// the refusal reads the same whatever order the caller sent them in.
+fn unknown_keys(
+    object: &serde_json::Map<String, Value>,
+    known: &[&str],
+    prefix: &str,
+) -> Vec<String> {
+    let mut keys: Vec<String> = object
+        .keys()
+        .filter(|key| !known.contains(&key.as_str()))
+        .map(|key| format!("`{prefix}{key}`"))
+        .collect();
+    keys.sort();
+    keys
+}
+
 pub(super) async fn batch_tool(
     state: AppState,
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: BatchArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid batch arguments: {error}"))
-    })?;
+    let args = parse_batch_args(arguments)?;
     if args.operations.is_empty() {
         return Err(JsonRpcFailure::invalid_params(
             "batch operations cannot be empty",
@@ -111,6 +250,11 @@ pub(super) async fn batch_tool(
     for (index, item) in args.operations.iter().enumerate() {
         if READ_OPS.contains(&item.op.as_str()) {
             read_count += 1;
+        } else if NOT_BATCHABLE_WRITE_OPS.contains(&item.op.as_str()) {
+            return Err(JsonRpcFailure::invalid_params(format!(
+                "batch item {index}: op '{}' is not allowed inside batch; call it on its own",
+                item.op
+            )));
         } else if WRITE_OPS.contains(&item.op.as_str()) {
             write_count += 1;
         } else {
@@ -133,12 +277,12 @@ pub(super) async fn batch_tool(
     }
 
     let mut chain: HashChain = HashMap::new();
-    // Held across the whole loop below (dropped only when `batch_tool`
-    // returns): once a Vault has been written to by this batch, its mutation
-    // lock stays held until the call finishes, so nothing outside this call
-    // can land a write that a later chained item's substituted hash would
-    // then silently overwrite.
-    let mut locks: VaultLocks = Vec::new();
+    // Taken before the first item runs, in one canonical order, and held
+    // across the whole loop below (dropped only when `batch_tool` returns):
+    // nothing outside this call can land a write that a later chained item's
+    // substituted hash would then silently overwrite, and no two concurrent
+    // batches can take two Vaults in opposite orders.
+    let mut locks = lock_touched_vaults(&state, config, &args.operations).await;
     let mut items = Vec::with_capacity(args.operations.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
@@ -193,10 +337,90 @@ pub(super) async fn batch_tool(
     })))
 }
 
+/// Take every Vault mutation lock this batch's write items will need, in one
+/// canonical order, before any item runs.
+///
+/// The order is the Vault IDs sorted, which is what makes a lock cycle
+/// between two concurrent batches impossible — see the module doc comment. A
+/// Vault this cannot lock is recorded with the reason instead, and
+/// [`dispatch_one`] hands that reason to every item naming it rather than
+/// writing to a Vault this call does not hold.
+async fn lock_touched_vaults(
+    state: &AppState,
+    config: &McpConfig,
+    operations: &[BatchOperation],
+) -> VaultLocks {
+    let mut locks = VaultLocks::default();
+    if !config.write_enabled {
+        return locks;
+    }
+    let mut vault_ids: Vec<VaultId> = Vec::new();
+    for item in operations {
+        if !WRITE_OPS.contains(&item.op.as_str()) {
+            continue;
+        }
+        let Ok(vault_id) = write::parse_vault_id(&item.arguments) else {
+            continue;
+        };
+        if !vault_ids.contains(&vault_id) {
+            vault_ids.push(vault_id);
+        }
+    }
+    vault_ids.sort();
+
+    locks.held.reserve(vault_ids.len());
+    for vault_id in vault_ids {
+        match lock_one_vault(state, vault_id).await {
+            Ok(locked) => locks.held.push(locked),
+            Err(failure) => locks.unlocked.push(UnlockedVault {
+                vault_id,
+                code: failure.code,
+                message: failure.message,
+                tool_level: failure.tool_level,
+                domain_error: failure.domain_error,
+            }),
+        }
+    }
+    locks
+}
+
+/// How many times acquisition may lose its control block to a reconcile before
+/// the Vault is given up on. A definition edit revokes the block a waiter is
+/// queued on, and the waiter learns that only once the lock is granted, so the
+/// replacement has to be resolved and taken instead. Bounded because retrying
+/// is only ever right for a *finite* burst of edits.
+const MUTATION_ACQUIRE_ATTEMPTS: usize = 4;
+
+/// Resolve one Vault and take its mutation lock, following a definition edit
+/// that retires the control block while this is queued behind it.
+async fn lock_one_vault(
+    state: &AppState,
+    vault_id: VaultId,
+) -> Result<LockedVault, JsonRpcFailure> {
+    let mut last = None;
+    for _ in 0..MUTATION_ACQUIRE_ATTEMPTS {
+        // Resolved inside the loop: after a retirement the live block is a
+        // different one, and it is the live block this call must run on.
+        let vault = write::scoped_vault_by_id(state, vault_id)?;
+        match write::acquire_mutation(&vault).await {
+            Ok(guard) => {
+                return Ok(LockedVault {
+                    vault_id,
+                    vault,
+                    _guard: guard,
+                });
+            }
+            Err(failure) => last = Some(failure),
+        }
+    }
+    Err(last.unwrap_or_else(|| write::exclusion_lost_error(vault_id)))
+}
+
 /// Dispatches one batch item to the same tool function a standalone call to
 /// `op` would use. Mirrors `mod.rs`'s own dispatch match, restricted to the
 /// note/attachment allowlist above. `locks` carries every Vault mutation
-/// guard this batch call has acquired so far — see [`VaultLocks`].
+/// guard this batch call holds — see [`VaultLocks`] and
+/// [`lock_touched_vaults`].
 async fn dispatch_one(
     state: AppState,
     config: &McpConfig,
@@ -207,20 +431,53 @@ async fn dispatch_one(
     match op {
         _ if READ_OPS.contains(&op) => dispatch_read_tool(state, config, op, arguments).await,
         _ if WRITE_OPS.contains(&op) => {
+            // Both refusals carry a stable string code (#327), like every
+            // other item error: an item is data, not a JSON-RPC error.
+            if let Some(refusal) = environment_cleanup_refusal(&state) {
+                return Err(structured_item_failure(&refusal));
+            }
             if !config.write_enabled {
-                return Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE));
+                return Err(structured_item_failure(
+                    &crate::vault_error::VaultOperationError::new(
+                        WRITE_DISABLED_CODE,
+                        WRITE_DISABLED_MESSAGE,
+                        None,
+                        false,
+                    ),
+                ));
             }
-            let vault = write::scoped_vault(&state, &arguments)?;
-            // Acquire this Vault's mutation lock only the first time the
-            // batch touches it, and hold the guard in `locks` for the rest
-            // of the call rather than dropping it at the end of this item —
-            // see the module doc comment. `tokio::sync::Mutex` is not
-            // reentrant, so re-acquiring an already-held guard here would
-            // deadlock; the linear scan below is what prevents that.
-            if !locks.iter().any(|(id, _)| *id == vault.vault_id) {
-                locks.push((vault.vault_id, write::acquire_mutation(&vault).await?));
+            let vault_id = write::parse_vault_id(&arguments)?;
+            let Some(locked) = locks
+                .held
+                .iter_mut()
+                .find(|locked| locked.vault_id == vault_id)
+            else {
+                // Not locked, so the pre-scan could not resolve, gate or take
+                // this Vault. Report the reason it recorded — the same one a
+                // standalone call would have given — rather than writing to a
+                // Vault this call does not hold.
+                return Err(locks
+                    .unlocked
+                    .iter()
+                    .find(|unlocked| unlocked.vault_id == vault_id)
+                    .map(UnlockedVault::failure)
+                    .unwrap_or_else(|| write::exclusion_lost_error(vault_id)));
+            };
+            if !locked.vault.still_admits_operations() {
+                // The Vault was reconciled mid-batch. A definition edit
+                // publishes a replacement block that inherits the exclusion
+                // (#321), so the guard held here still serializes against it
+                // and the item runs on the live block. A Vault that is gone,
+                // disabled, or now refuses writes reports that for itself,
+                // and one whose replacement does *not* share the exclusion is
+                // refused outright — running it would be an unlocked write.
+                let fresh = write::scoped_vault_by_id(&state, vault_id)?;
+                if !fresh.shares_write_exclusion(&locked.vault) {
+                    return Err(write::exclusion_lost_error(vault_id));
+                }
+                locked.vault = fresh;
             }
-            write::dispatch_write_tool(state, &vault, op, arguments, config).await
+            write::dispatch_write_tool(state, &locked.vault, op, arguments, config).await
         }
         _ => Err(JsonRpcFailure::invalid_params(format!(
             "batch op '{op}' is not a valid batch operation"
@@ -288,7 +545,13 @@ fn record_chain(chain: &mut HashChain, op: &str, result: &Value) {
 /// `JsonRpcFailure` for [`failure_to_error_value`] to shape.
 fn item_error_value(value: &Value) -> Value {
     let Some(mut error) = value.get("structuredContent").cloned() else {
-        return json!({ "message": value["content"][0]["text"] });
+        // No read tool renders an unstructured error today; should one ever,
+        // its item still carries a string code (#327).
+        return json!({
+            "code": plain_failure_code(0),
+            "message": value["content"][0]["text"],
+            "retryable": false,
+        });
     };
     if let Some(object) = error.as_object_mut() {
         object.remove(OUTCOME_FIELD);
@@ -296,22 +559,54 @@ fn item_error_value(value: &Value) -> Value {
     error
 }
 
-/// Renders a per-item dispatch failure the same way the top-level dispatcher
-/// renders a tool-level one (`mod.rs`'s own tail): a JSON-object message
-/// decodes to the structured domain error it already is, and a plain-text
-/// message (an invalid-params rejection, say) falls back to a `{code,
-/// message}` pair carrying the JSON-RPC error code.
+/// A per-item refusal shaped as the structured domain error it is, so
+/// [`failure_to_error_value`] hands the item that object verbatim.
+fn structured_item_failure(error: &crate::vault_error::VaultOperationError) -> JsonRpcFailure {
+    JsonRpcFailure::not_found(
+        serde_json::to_string(error).unwrap_or_else(|_| error.message.clone()),
+    )
+}
+
+/// Renders a per-item dispatch failure as the bare `{code, message,
+/// vault_id?, retryable}` object every item error shares, and `code` is
+/// always a stable string (#327): the server instructions tell agents to
+/// branch on it, so it must never be a JSON-RPC number.
+///
+/// A failure carrying its structured domain error (an unwritable target path)
+/// reports that; a JSON-object message decodes to the structured error it
+/// already is, the same way the top-level dispatcher's tail does; and a
+/// plain-text message (an argument-parse rejection, a missing `vault_id`)
+/// falls back to a string code named for its JSON-RPC class, with the number
+/// kept alongside as `jsonrpc_code`.
 fn failure_to_error_value(failure: JsonRpcFailure) -> Value {
+    if let Some(domain_error) = failure.domain_error {
+        return domain_error;
+    }
     match serde_json::from_str::<Value>(&failure.message) {
-        Ok(structured) => structured,
-        Err(_) => json!({ "code": failure.code, "message": failure.message }),
+        Ok(structured) if structured.get("code").is_some_and(Value::is_string) => structured,
+        _ => json!({
+            "code": plain_failure_code(failure.code),
+            "message": failure.message,
+            "retryable": false,
+            "jsonrpc_code": failure.code,
+        }),
+    }
+}
+
+/// The stable string code for a plain-text failure, by its JSON-RPC class.
+fn plain_failure_code(jsonrpc_code: i64) -> &'static str {
+    match jsonrpc_code {
+        -32602 => "invalid_arguments",
+        -32601 => "unknown_operation",
+        JsonRpcFailure::INTERNAL_ERROR_CODE => "internal_error",
+        _ => "operation_failed",
     }
 }
 
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag and delete_tag are not allowed inside a batch; call them on their own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, publish_recovery_branch, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Each search_notes item counts against the per-minute tool-call quota as a standalone search would. Every failed item's error carries a string code to branch on. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -329,7 +624,7 @@ pub(super) fn batch_tool_schema() -> Value {
                             },
                             "arguments": {
                                 "type": "object",
-                                "description": "That tool's own arguments exactly as it is called standalone, including vault_id."
+                                "description": "That tool's own arguments exactly as it is called standalone. This is the only place vault_id and commit_summary go; batch itself takes neither."
                             }
                         },
                         "required": ["op", "arguments"],
@@ -365,6 +660,7 @@ mod tests {
             "disconnect_vault",
             "sync_vault",
             "retry_vault",
+            "publish_recovery_branch",
             "refresh_vault",
             "get_model_setup_status",
             "accept_gemma_terms",
@@ -374,6 +670,17 @@ mod tests {
             assert!(
                 !READ_OPS.contains(&excluded) && !WRITE_OPS.contains(&excluded),
                 "{excluded} must not be an allowed batch op"
+            );
+        }
+    }
+
+    #[test]
+    fn not_batchable_write_ops_are_write_ops() {
+        for op in NOT_BATCHABLE_WRITE_OPS {
+            assert!(WRITE_OPS.contains(op), "{op} must also be a write op");
+            assert!(
+                !HASH_CHAINED_OPS.contains(op),
+                "{op} can never be chained into"
             );
         }
     }
@@ -393,6 +700,8 @@ mod tests {
             bearer_token: None,
             allowed_origins: Vec::new(),
             rate_limits_enabled: true,
+            public_url: None,
+            request_origin: None,
         };
         let advertised: Vec<String> = super::super::tools_list(&config)
             .iter()
@@ -483,8 +792,19 @@ mod tests {
         assert_eq!(structured["code"], "note_not_found");
 
         let plain = failure_to_error_value(JsonRpcFailure::invalid_params("bad input"));
-        assert_eq!(plain["code"], -32602);
+        assert_eq!(plain["code"], "invalid_arguments");
         assert_eq!(plain["message"], "bad input");
+        assert_eq!(plain["retryable"], false);
+        assert_eq!(plain["jsonrpc_code"], -32602);
+
+        let internal = failure_to_error_value(JsonRpcFailure::internal("boom"));
+        assert_eq!(internal["code"], "internal_error");
+
+        let carried = failure_to_error_value(
+            JsonRpcFailure::invalid_params("noise")
+                .with_domain_error(json!({"code": "noise_excluded_write", "message": "noise"})),
+        );
+        assert_eq!(carried["code"], "noise_excluded_write");
     }
 
     /// Both halves of the allow-list produce the same bare error object for an
@@ -502,7 +822,108 @@ mod tests {
         );
 
         let plain_text = item_error_value(&crate::mcp::protocol::tool_error("no payload".into()));
-        assert_eq!(plain_text, json!({"message": "no payload"}));
+        assert_eq!(
+            plain_text,
+            json!({"code": "operation_failed", "message": "no payload", "retryable": false})
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_collected_across_both_levels_in_one_message() {
+        let failure = parse_batch_args(json!({
+            "vault_id": "v",
+            "commit_summary": "s",
+            "operations": [
+                {"op": "get_note", "arguments": {}},
+                {"op": "update_note", "arguments": {}, "slug": "a", "commit_summary": "c"},
+                "not an object"
+            ]
+        }))
+        .expect_err("unknown fields are refused");
+
+        assert_eq!(failure.code, JsonRpcFailure::invalid_params("").code);
+        assert_eq!(
+            failure.message,
+            "Invalid batch arguments: unknown fields `commit_summary`, `vault_id`, \
+             `operations[1].commit_summary`, `operations[1].slug`. batch takes only \
+             `operations`, an array of `{op, arguments}` items. Each tool's own arguments, \
+             vault_id and commit_summary included, go inside an item's `arguments`."
+        );
+    }
+
+    #[test]
+    fn a_single_unknown_field_is_named_in_the_singular() {
+        let failure = parse_batch_args(json!({"vault_id": "v", "operations": []}))
+            .expect_err("unknown field is refused");
+        assert!(
+            failure
+                .message
+                .starts_with("Invalid batch arguments: unknown field `vault_id`. batch takes only"),
+            "{}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn a_malformed_payload_without_unknown_fields_still_states_the_shape() {
+        let failure = parse_batch_args(json!({"operations": [{"op": "get_note"}]}))
+            .expect_err("a missing field is refused");
+        assert!(failure.message.contains("missing field `arguments`"));
+        assert!(
+            failure
+                .message
+                .contains("batch takes only `operations`, an array of `{op, arguments}` items"),
+            "{}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn a_well_formed_payload_parses() {
+        let args = parse_batch_args(json!({
+            "operations": [{"op": "get_note", "arguments": {"vault_id": "v", "slug": "home"}}]
+        }))
+        .expect("valid batch arguments");
+        assert_eq!(args.operations.len(), 1);
+        assert_eq!(args.operations[0].op, "get_note");
+    }
+
+    #[test]
+    fn batch_tool_description_states_where_vault_id_and_commit_summary_belong() {
+        let schema = batch_tool_schema();
+        let description = schema["description"].as_str().expect("description");
+        assert!(
+            description.contains(
+                "Unlike every other tool, batch takes no top-level vault_id and no batch-level \
+                 commit_summary: each goes inside the arguments of the operations whose tool \
+                 takes it."
+            ),
+            "{description}"
+        );
+        let arguments = schema["inputSchema"]["properties"]["operations"]["items"]["properties"]
+            ["arguments"]["description"]
+            .as_str()
+            .expect("arguments description");
+        assert!(
+            arguments.contains("the only place vault_id and commit_summary go"),
+            "{arguments}"
+        );
+    }
+
+    #[test]
+    fn batch_tool_schema_keeps_operations_as_its_only_property() {
+        let schema = batch_tool_schema();
+        let input = &schema["inputSchema"];
+        assert_eq!(input["required"], json!(["operations"]));
+        assert_eq!(input["additionalProperties"], false);
+        assert_eq!(
+            input["properties"]
+                .as_object()
+                .expect("properties")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["operations"]
+        );
     }
 
     #[test]

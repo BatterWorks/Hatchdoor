@@ -32,10 +32,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::mcp::results::UploadKind;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{AttachmentOutcome, SectionMode};
 use crate::vault_error::VaultOperationError;
-use crate::vault_mutation::{NoteWriteOutcome, VaultMutation};
+use crate::vault_mutation::{NoteWriteOutcome, VaultMutation, is_note_upload_target};
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultControlBlock;
@@ -71,18 +72,34 @@ impl McpVault {
         )
         .with_commit_summary(commit_summary)
     }
+
+    /// Whether the control block this target was resolved from is still the
+    /// live one. A Vault definition edit reconciles a replacement block and
+    /// revokes this one, so a caller holding a guard across that window —
+    /// `batch`, for the length of a whole call — asks here before running
+    /// another operation on it.
+    pub(super) fn still_admits_operations(&self) -> bool {
+        self.control.is_accepting_operations()
+    }
+
+    /// Whether `self` serializes against a guard taken from `other`. True for
+    /// a replacement block that inherited the retiring one's write exclusion,
+    /// which is what a definition edit produces (issue #321).
+    pub(super) fn shares_write_exclusion(&self, other: &Self) -> bool {
+        self.control
+            .write_exclusion()
+            .is_same(&other.control.write_exclusion())
+    }
 }
 
 /// Resolve the explicit `vault_id` without asserting anything about the
 /// Vault's write posture, so [`scoped_vault`] can apply the capability check
 /// separately and report it as its own outcome.
 fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonRpcFailure> {
-    let raw = arguments
-        .get("vault_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| JsonRpcFailure::invalid_params("vault_id is required"))?;
-    let vault_id = VaultId::from_str(raw)
-        .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))?;
+    readable_vault_by_id(state, parse_vault_id(arguments)?)
+}
+
+fn readable_vault_by_id(state: &AppState, vault_id: VaultId) -> Result<McpVault, JsonRpcFailure> {
     let core = VaultReadCore::new(&state.startup_sqlite, &state.vaults);
     let control = core.control_block(vault_id).map_err(vault_error)?;
     Ok(McpVault {
@@ -92,14 +109,48 @@ fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonR
     })
 }
 
+/// The `vault_id` a write item addresses, parsed but not resolved. `batch`
+/// reads it out of every write item up front, before anything is resolved or
+/// locked, to put its lock acquisitions in a canonical order.
+pub(super) fn parse_vault_id(arguments: &Value) -> Result<VaultId, JsonRpcFailure> {
+    let raw = arguments
+        .get("vault_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| JsonRpcFailure::invalid_params("vault_id is required"))?;
+    VaultId::from_str(raw)
+        .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))
+}
+
 pub(super) fn scoped_vault(
     state: &AppState,
     arguments: &Value,
 ) -> Result<McpVault, JsonRpcFailure> {
-    let vault = readable_vault(state, arguments)?;
+    scoped_vault_by_id(state, parse_vault_id(arguments)?)
+}
+
+pub(super) fn scoped_vault_by_id(
+    state: &AppState,
+    vault_id: VaultId,
+) -> Result<McpVault, JsonRpcFailure> {
+    let vault = readable_vault_by_id(state, vault_id)?;
     crate::vault_mutation::ensure_mutable(vault.vault_id, &vault.control)
         .map_err(mutation_error)?;
     Ok(vault)
+}
+
+/// A batch write item that can no longer run under the exclusion its call
+/// acquired: the Vault was reconciled mid-batch onto a control block that
+/// does not share it. Retryable, because the batch's own locks are released
+/// when it returns and a fresh call resolves the live block.
+pub(super) fn exclusion_lost_error(vault_id: VaultId) -> JsonRpcFailure {
+    mutation_error(VaultOperationError::new(
+        "vault_write_exclusion_lost",
+        "Nothing was written: this Vault's definition changed while the batch was running, so \
+         this item would have run outside the write lock the batch holds. Retry the remaining \
+         items in a new call.",
+        Some(vault_id),
+        true,
+    ))
 }
 
 pub(super) async fn acquire_mutation(
@@ -126,7 +177,9 @@ fn vault_error(error: VaultReadError) -> JsonRpcFailure {
 fn mutation_error(error: VaultOperationError) -> JsonRpcFailure {
     match error.code.as_str() {
         "noise_excluded_write" | "layer_marker_write" => {
-            JsonRpcFailure::invalid_params(error.message)
+            let domain_error =
+                serde_json::to_value(&error).unwrap_or_else(|_| json!({ "code": error.code }));
+            JsonRpcFailure::invalid_params(error.message).with_domain_error(domain_error)
         }
         "internal_error" => JsonRpcFailure::internal(error.message),
         _ => JsonRpcFailure::not_found(
@@ -161,7 +214,7 @@ fn note_write_result(vault_id: VaultId, outcome: NoteWriteOutcome) -> Value {
 /// `write_ops_match_the_advertised_catalogue` fails if it is added to the
 /// catalogue and forgotten here.
 ///
-/// Vault-management tools (`create_vault` through `retry_vault`) are deliberately
+/// Vault-management tools (`create_vault` through `publish_recovery_branch`) are deliberately
 /// absent: they mutate the registry, not a Vault's content, and are dispatched
 /// and gated separately.
 pub(super) const WRITE_OPS: &[&str] = &[
@@ -177,9 +230,12 @@ pub(super) const WRITE_OPS: &[&str] = &[
     "archive_note",
     "delete_note",
     "import_attachment",
+    "create_upload_link",
     "move_attachment",
     "rename_attachment",
     "delete_attachment",
+    "rename_tag",
+    "delete_tag",
 ];
 
 /// Dispatches one write op to its underlying tool function. Shared by the
@@ -208,9 +264,12 @@ pub(super) async fn dispatch_write_tool(
         "archive_note" => archive_note_tool(state, vault, arguments).await,
         "delete_note" => delete_note_tool(state, vault, arguments).await,
         "import_attachment" => import_attachment_tool(state, vault, arguments, config).await,
+        "create_upload_link" => create_upload_link_tool(state, vault, arguments, config).await,
         "move_attachment" => move_attachment_tool(state, vault, arguments).await,
         "rename_attachment" => rename_attachment_tool(state, vault, arguments).await,
         "delete_attachment" => delete_attachment_tool(state, vault, arguments).await,
+        "rename_tag" => rename_tag_tool(state, vault, arguments).await,
+        "delete_tag" => delete_tag_tool(state, vault, arguments).await,
         // Unreachable while [`WRITE_OPS`] and the arms above agree, which
         // `write_ops_match_the_advertised_catalogue` enforces. An error rather
         // than a panic anyway: a name that drifts out of step must not be able
@@ -285,10 +344,15 @@ pub(super) async fn append_to_note_tool(
         JsonRpcFailure::invalid_params(format!("Invalid append_to_note arguments: {error}"))
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
-    let content = non_empty_argument("content", args.content)?;
+    // Checked for emptiness but passed on untrimmed: the write layer reports
+    // any line break it adds to the caller's text, so stripping the caller's
+    // own trailing newline here would make that report false (#316).
+    if args.content.trim().is_empty() {
+        return Err(JsonRpcFailure::invalid_params("content cannot be empty"));
+    }
     let outcome = vault
         .mutation(args.commit_summary)
-        .append_to_note(&slug, &content, &args.expected_content_hash)
+        .append_to_note(&slug, &args.content, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
     Ok(note_write_result(vault.vault_id, outcome))
@@ -508,6 +572,108 @@ pub(super) async fn import_attachment_tool(
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
+/// Mint an upload transfer link (ADR-27, ADR-32) for one target: the route an
+/// agent takes when it can make an HTTP request but holds neither the MCP
+/// token nor the server's address. A `.md` target is a note upload, which
+/// replaces an existing note only under its expected content hash; anything
+/// else is an attachment upload. Refuses at once whatever the upload itself
+/// would refuse before the bytes arrive, so an agent never sends a file to a
+/// link that was doomed; the upload checks again when it lands.
+pub(super) async fn create_upload_link_tool(
+    state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    let args: CreateUploadLinkArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid create_upload_link arguments: {error}"))
+    })?;
+    let target_relative_path =
+        non_empty_argument("target_relative_path", args.target_relative_path)?;
+    let overwrite = args.overwrite.unwrap_or(false);
+    let expected_content_hash = match args.expected_content_hash {
+        Some(hash) if hash.trim().is_empty() => {
+            return Err(JsonRpcFailure::invalid_params(
+                "expected_content_hash cannot be empty.",
+            ));
+        }
+        hash => hash.map(|hash| hash.trim().to_string()),
+    };
+    let upload_kind = if is_note_upload_target(&target_relative_path) {
+        match (overwrite, &expected_content_hash) {
+            (true, None) => {
+                return Err(JsonRpcFailure::invalid_params(
+                    "Replacing a note through an upload link requires expected_content_hash, the note's current hash from get_frontmatter or get_note.",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(JsonRpcFailure::invalid_params(
+                    "expected_content_hash applies only to a link that replaces a note; set overwrite to true, or leave the hash out to create a new note.",
+                ));
+            }
+            _ => {}
+        }
+        vault
+            .mutation(None)
+            .check_note_upload(&target_relative_path, expected_content_hash.as_deref())
+            .await
+            .map_err(mutation_error)?;
+        UploadKind::Note
+    } else {
+        if expected_content_hash.is_some() {
+            return Err(JsonRpcFailure::invalid_params(
+                "expected_content_hash applies only to a note upload, a target ending in .md.",
+            ));
+        }
+        vault
+            .mutation(None)
+            .check_attachment_import(&target_relative_path, overwrite)
+            .await
+            .map_err(mutation_error)?;
+        UploadKind::Attachment
+    };
+
+    let (key, base) = super::transfer_link_signer(&state, config)?;
+    let link = match &expected_content_hash {
+        Some(hash) => state.transfer_links.mint_note_replace(
+            &key,
+            base,
+            vault.vault_id,
+            &target_relative_path,
+            hash,
+        ),
+        None => state.transfer_links.mint_upload(
+            &key,
+            base,
+            vault.vault_id,
+            &target_relative_path,
+            overwrite,
+        ),
+    };
+    let usage = match upload_kind {
+        UploadKind::Note => NOTE_UPLOAD_USAGE,
+        UploadKind::Attachment => ATTACHMENT_UPLOAD_USAGE,
+    };
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::UploadLinkResult {
+            vault_id: vault.vault_id.to_string(),
+            target_relative_path,
+            upload_kind,
+            overwrite,
+            expected_content_hash,
+            upload_url: link.url,
+            method: "POST",
+            expires_at: link.expires_at,
+            max_bytes: config.max_attachment_bytes,
+            usage,
+        },
+    )))
+}
+
+const ATTACHMENT_UPLOAD_USAGE: &str = "POST multipart/form-data to upload_url with the file in a field named `file`, e.g. curl -F file=@/path/to/file '<upload_url>'. No token or other header is needed. A `target_relative_path` field is optional and must match this link's target. The link works once and expires five minutes after it was minted; ask for a new one if it is refused.";
+
+const NOTE_UPLOAD_USAGE: &str = "POST multipart/form-data to upload_url with the Markdown file in a field named `file`, e.g. curl -F file=@/path/to/note.md '<upload_url>'. No token or other header is needed. The file becomes a note exactly as create_note would write it: it must be UTF-8 with no NUL bytes, CRLF/CR line endings become LF and a final newline is added, and the answer is the note-write result (slug, relative_path, content_hash, layer, quality_warnings). A replacing link writes only while the note still has expected_content_hash, and otherwise fails with write_conflict. A `target_relative_path` field is optional and must match this link's target. The link works once and expires five minutes after it was minted; ask for a new one if it is refused.";
+
 pub(super) async fn move_attachment_tool(
     _state: AppState,
     vault: &McpVault,
@@ -565,6 +731,92 @@ pub(super) async fn delete_attachment_tool(
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
+pub(super) async fn rename_tag_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: RenameTagArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid rename_tag arguments: {error}"))
+    })?;
+    let outcome = vault
+        .mutation(args.commit_summary)
+        .rename_tag(
+            &args.old_tag,
+            &args.new_tag,
+            args.expected_plan_hash.as_deref(),
+        )
+        .await
+        .map_err(mutation_error)?;
+    Ok(rename_tag_result(vault.vault_id, outcome))
+}
+
+fn rename_tag_result(vault_id: VaultId, outcome: crate::vault::TagRename) -> Value {
+    tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::RenameTagResult {
+            vault_id: vault_id.to_string(),
+            ok: true,
+            applied: outcome.applied,
+            old_tag: outcome.old_tag,
+            new_tag: outcome.new_tag,
+            notes_affected: outcome.notes.len(),
+            frontmatter_notes: outcome.frontmatter_notes,
+            body_notes: outcome.body_notes,
+            already_tagged_notes: outcome.already_tagged_notes,
+            plan_hash: outcome.plan_hash,
+            notes: outcome
+                .notes
+                .into_iter()
+                .map(|note| crate::mcp::results::RenameTagNote {
+                    slug: note.slug,
+                    relative_path: note.relative_path,
+                    frontmatter: note.frontmatter,
+                    body: note.body,
+                    content_hash: note.content_hash,
+                })
+                .collect(),
+        },
+    ))
+}
+
+pub(super) async fn delete_tag_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: DeleteTagArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid delete_tag arguments: {error}"))
+    })?;
+    let outcome = vault
+        .mutation(args.commit_summary)
+        .delete_tag(&args.tag, args.expected_plan_hash.as_deref())
+        .await
+        .map_err(mutation_error)?;
+    Ok(delete_tag_result(vault.vault_id, outcome))
+}
+
+fn delete_tag_result(vault_id: VaultId, outcome: crate::vault::TagDelete) -> Value {
+    tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::DeleteTagResult {
+            vault_id: vault_id.to_string(),
+            ok: true,
+            applied: outcome.applied,
+            tag: outcome.tag,
+            notes_affected: outcome.notes.len(),
+            plan_hash: outcome.plan_hash,
+            notes: outcome
+                .notes
+                .into_iter()
+                .map(|note| crate::mcp::results::DeleteTagNote {
+                    slug: note.slug,
+                    relative_path: note.relative_path,
+                    content_hash: note.content_hash,
+                })
+                .collect(),
+        },
+    ))
+}
+
 fn attachment_success(vault_id: VaultId, outcome: AttachmentOutcome) -> Value {
     tool_success(crate::mcp::results::result_to_value(
         &crate::mcp::results::AttachmentWriteResult {
@@ -582,7 +834,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "create_note",
-            "description": "Create a Markdown note at a vault-relative path. Parent folders are created automatically. Fails if the note exists unless overwrite is true.",
+            "description": "Create a Markdown note at a vault-relative path. Parent folders are created automatically. Fails if the note exists unless overwrite is true. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -598,7 +850,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "update_note",
-            "description": "Replace the full Markdown content of an existing note. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Replace the full Markdown content of an existing note. The whole note is normalised on write: CRLF and CR line endings become LF and a missing final newline is added, quality_warnings names whichever of the two was applied, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -614,7 +866,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "append_to_note",
-            "description": "Append Markdown content to an existing note. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Append Markdown content to an existing note. The existing text is left as it was. The appended text takes the note's own line ending (CRLF or LF, whichever the note mostly uses), a line break is added before it when the note's last line has none and after it when the text has none, quality_warnings names each conversion or added line break, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -630,7 +882,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "edit_note",
-            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. Every byte outside the replaced text is left as it was. Line breaks in new_string take the note's own line ending (CRLF or LF, whichever the note mostly uses), quality_warnings names any conversion, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -648,7 +900,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "replace_section",
-            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. Every byte outside the section is left as it was. Line breaks in content take the note's own line ending (CRLF or LF, whichever the note mostly uses), a line break is added where content would otherwise run into an adjacent line, quality_warnings names each conversion or added line break, and the returned content_hash is the hash of the file as written. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -682,7 +934,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_note",
-            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -698,7 +950,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_note",
-            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -714,7 +966,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_rename_note",
-            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -730,7 +982,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "archive_note",
-            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -745,7 +997,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_note",
-            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references is trashed with it. The trashed copy keeps the link it holds to itself as written, since the note it names is gone either way. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references is trashed with it. The trashed copy keeps the link it holds to itself as written, since the note it names is gone either way. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -760,7 +1012,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "import_attachment",
-            "description": "Upload an attachment into one Vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (call get_attachment_import_config for this Vault to see the limit in bytes and the allowed extensions). Prefer the Vault-scoped HTTP upload endpoint (POST /api/v1/vaults/{vault_id}/attachments) when possible. Returns compact metadata for the imported file.",
+            "description": "Upload an attachment into one Vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (call get_attachment_import_config for this Vault to see the limit in bytes and the allowed extensions). Prefer create_upload_link whenever the client can make an HTTP request: the file then never passes through this conversation. Returns compact metadata for the imported file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -775,8 +1027,23 @@ pub(super) fn write_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(true, false)
         }),
         json!({
+            "name": "create_upload_link",
+            "description": "Get a short-lived upload link for one file, the recommended way to upload an attachment, or to import an existing Markdown file as a note, from any client that can make an HTTP request (shell, curl). The link carries its own credential and the server's address (the configured public address if set, else the address the client reached this MCP endpoint on, as reported by a reverse proxy's forwarded headers), so no token or endpoint knowledge is needed: POST the file to it as multipart/form-data in a field named `file`. It is good for one upload to exactly target_relative_path, works once, and expires five minutes after it is minted, or sooner if the server restarts or MCP write mode is turned off. A target ending in .md is a note upload: the file is written the way create_note writes a note, so its content never has to pass through this conversation. Replacing an existing note needs overwrite true and expected_content_hash, the note's current hash from get_frontmatter; the upload then writes only if the note still has that hash. Refused at once when the target is invalid, has an extension uploads do not allow, already exists and overwrite is false, or is a note whose hash no longer matches. The size limit is max_bytes in the answer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png, or Imports/Report.md for a note."},
+                    "overwrite": {"type": "boolean", "default": false, "description": "Allow the upload to replace an existing file at the target. For a note this also needs expected_content_hash."},
+                    "expected_content_hash": {"type": "string", "minLength": 1, "description": "Only for replacing a note (a .md target with overwrite true): the note's current content_hash from get_frontmatter or get_note."}
+                },
+                "required": ["target_relative_path"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
             "name": "move_attachment",
-            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
+            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -791,7 +1058,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_attachment",
-            "description": "Rename an existing attachment in its current folder and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
+            "description": "Rename an existing attachment in its current folder and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -806,7 +1073,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_attachment",
-            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
+            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -814,6 +1081,37 @@ pub(super) fn write_tools_list() -> Vec<Value> {
                     "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["source_relative_path"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "rename_tag",
+            "description": "Rename a tag across one whole Vault, in frontmatter tags lists and in inline #namespaced/tags in note bodies. Always two calls. Without expected_plan_hash nothing is written: the answer is the plan, listing every note that would change, and its plan_hash. Call again with that plan_hash as expected_plan_hash to apply it; if the Vault changed in between, the call is refused with tag_rename_plan_stale and nothing is written. Renaming a tag also renames every tag nested under it (domain renames domain/homelab too), even when no note carries the parent itself. Matching ignores case; new_tag must be lowercase letters, digits, '-', '_' and '/'. Renaming into a tag a note already carries leaves it there once, and already_tagged_notes counts the notes that carried new_tag before, which is what makes the rename a merge. Only the renamed characters change: list shape, key order, quoting and every other byte stay as they were, and hashtags inside code blocks or inline code are not tags and are left alone. If any note carries the tag in a form that cannot be edited that way, the plan is refused with tag_shape_unsupported, naming each note, and nothing is written. A tag no note carries plans zero notes and no plan_hash. If a write fails partway, every note already rewritten is restored. Not allowed inside batch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "old_tag": {"type": "string", "minLength": 1, "description": "The tag to rename, with or without a leading #. Matched case-insensitively, with everything nested under it."},
+                    "new_tag": {"type": "string", "minLength": 1, "description": "The new name, with or without a leading #: lowercase letters, digits, '-', '_' and '/'."},
+                    "expected_plan_hash": {"type": "string", "minLength": 1, "description": "The plan_hash from a previous call with the same tags. Omit it to plan; supply it to apply that plan."},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["old_tag", "new_tag"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "delete_tag",
+            "description": "Delete one tag across one whole Vault by removing it from frontmatter tags lists. After a successful delete, a tag search for it finds no notes. Always two calls. Without expected_plan_hash nothing is written: the answer is the plan, listing every note that would change, and its plan_hash. Call again with that plan_hash as expected_plan_hash to apply it; if the Vault changed in between, the call is refused with tag_delete_plan_stale and nothing is written. Only the exact tag is removed, never the tags nested under it, and note bodies are never edited. So the delete is refused, writing nothing, while any note carries a tag nested under it (tag_has_nested_tags, naming each nested tag and how many notes carry it; delete those first, deepest first) or carries the tag inline in its body (tag_used_inline, naming each note; remove it from the text first). Matching ignores case and a leading # is accepted. When a note loses its last tag, it keeps an empty tags: [] list. Only the removed item changes: list shape, key order and every other byte stay as they were. If any note carries the tag in a form that cannot be edited that way, the plan is refused with tag_shape_unsupported, naming each note. A tag no note carries plans zero notes and no plan_hash. If a write fails partway, every note already rewritten is restored. Not allowed inside batch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "minLength": 1, "description": "The tag to delete, with or without a leading #. Matched case-insensitively and exactly: tags nested under it are not deleted."},
+                    "expected_plan_hash": {"type": "string", "minLength": 1, "description": "The plan_hash from a previous call with the same tag. Omit it to plan; supply it to apply that plan."},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["tag"],
                 "additionalProperties": false
             },
             "annotations": write_tool_annotations(true, false)
@@ -990,6 +1288,17 @@ struct ImportAttachmentArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CreateUploadLinkArgs {
+    vault_id: VaultId,
+    target_relative_path: String,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    expected_content_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetAttachmentArgs {
     vault_id: VaultId,
     relative_path: String,
@@ -1029,6 +1338,29 @@ struct RenameAttachmentArgs {
 struct DeleteAttachmentArgs {
     vault_id: VaultId,
     source_relative_path: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteTagArgs {
+    vault_id: VaultId,
+    tag: String,
+    #[serde(default)]
+    expected_plan_hash: Option<String>,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameTagArgs {
+    vault_id: VaultId,
+    old_tag: String,
+    new_tag: String,
+    #[serde(default)]
+    expected_plan_hash: Option<String>,
     #[serde(default)]
     commit_summary: Option<String>,
 }
@@ -1106,6 +1438,61 @@ mod finalize_tests {
         );
     }
 
+    /// Every tool that rewrites other notes' links names the refusal it gives
+    /// when one of those notes is not valid UTF-8 text (#360).
+    #[test]
+    fn link_rewriting_tools_name_the_unrewritable_note_refusal() {
+        let rewriting = [
+            "rename_note",
+            "move_note",
+            "move_rename_note",
+            "archive_note",
+            "delete_note",
+            "move_attachment",
+            "rename_attachment",
+            "delete_attachment",
+        ];
+        for tool in write_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            let description = tool["description"].as_str().expect("description");
+            assert_eq!(
+                description.contains("link_rewrite_unsupported"),
+                rewriting.contains(&name),
+                "{name}"
+            );
+        }
+    }
+
+    /// The two whole-content tools normalise the note and say so in their own
+    /// description, since the hash they return can differ from a hash of what
+    /// the caller sent (#260). The partial writes leave the rest of the note
+    /// as it was (ADR-22, #316) and must not claim a whole-note normalisation.
+    #[test]
+    fn content_writing_tools_describe_their_line_ending_handling() {
+        let normalising = ["create_note", "update_note"];
+        let partial = ["append_to_note", "edit_note", "replace_section"];
+        for tool in write_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            let description = tool["description"].as_str().expect("description");
+            let says_so = description.contains("normalised on write")
+                && description.contains("quality_warnings")
+                && description.contains("content_hash is the hash of the file as written");
+            assert_eq!(
+                says_so,
+                normalising.contains(&name),
+                "{name}: normalisation sentence present = {says_so}"
+            );
+            if partial.contains(&name) {
+                assert!(
+                    description.contains("is left as it was")
+                        && description.contains("the note's own line ending")
+                        && description.contains("content_hash is the hash of the file as written"),
+                    "{name}: partial-write sentence missing"
+                );
+            }
+        }
+    }
+
     #[test]
     fn mutation_error_maps_every_core_code_this_surface_can_receive() {
         // ADR-19: the core reports one structured error and this adapter owns
@@ -1122,10 +1509,17 @@ mod finalize_tests {
             ))
         };
 
-        let noise = map("noise_excluded_write");
-        assert_eq!(noise.code, -32602);
-        assert!(!noise.tool_level);
-        assert_eq!(noise.message, "detail");
+        for code in ["noise_excluded_write", "layer_marker_write"] {
+            let refused = map(code);
+            assert_eq!(refused.code, -32602);
+            assert!(!refused.tool_level);
+            assert_eq!(refused.message, "detail");
+            // #327: the structured error rides along, so a batch item can
+            // report the stable string code instead of -32602.
+            let domain = refused.domain_error.expect("structured domain error");
+            assert_eq!(domain["code"], code);
+            assert_eq!(domain["vault_id"], vault_id.to_string());
+        }
 
         let internal = map("internal_error");
         assert_eq!(internal.code, JsonRpcFailure::INTERNAL_ERROR_CODE);

@@ -75,7 +75,7 @@ function renderApp() {
     onActiveNoteChange: vi.fn(),
     onTagSelect: vi.fn(),
     propertiesCollapsedStorageKey: NOTE_PROPERTIES_COLLAPSED_KEY,
-    vaultRevision: 0,
+    vaultRevision: null,
     writeEnabled: false,
     editRequestId: 0,
     vaults: [],

@@ -19,6 +19,45 @@ fn slugify_reduces_symbols_to_clean_slug() {
 }
 
 #[test]
+fn slugify_folds_accents_to_their_base_letter() {
+    // #306: the accent used to be discarded, so correcting the spelling of a
+    // title moved the note's address.
+    assert_eq!(
+        slugify("Olives & More - Gerard Veá Arbequina olive oil"),
+        "olives-more-gerard-vea-arbequina-olive-oil"
+    );
+    assert_eq!(slugify("Café"), "cafe");
+}
+
+#[test]
+fn slugify_reads_a_combining_accent_as_the_letter_it_sits_on() {
+    // Same word, spelled precomposed and decomposed. Both address one note.
+    assert_eq!(slugify("Cafe\u{301}"), slugify("Caf\u{e9}"));
+}
+
+#[test]
+fn slugify_spells_european_letters_the_way_their_languages_do() {
+    assert_eq!(slugify("Straße"), "strasse");
+    assert_eq!(slugify("Æon"), "aeon");
+    assert_eq!(slugify("œuf"), "oeuf");
+    assert_eq!(slugify("Łódź"), "lodz");
+    assert_eq!(slugify("Þing"), "thing");
+    assert_eq!(slugify("Søren"), "soren");
+}
+
+#[test]
+fn slugify_keeps_other_scripts_rather_than_romanising_them() {
+    assert_eq!(slugify("資料 Обзор"), "資料-обзор");
+    assert_eq!(slugify("हिन्दी"), "हिन्दी");
+}
+
+#[test]
+fn slugify_still_empties_a_name_with_no_letters_in_it() {
+    // The `untitled` fallback lives in the indexer and this is what reaches it.
+    assert_eq!(slugify("!!! ??? ---"), "");
+}
+
+#[test]
 fn normalize_link_target_strips_md_and_normalizes_separators() {
     assert_eq!(
         normalize_link_target(r"Folder\My Note.md"),
@@ -609,4 +648,212 @@ fn resolve_wikilink_resolves_an_escaped_alias_pipe_like_the_unescaped_form() {
             .slug,
         expected.slug
     );
+}
+
+/// A small Vault shaped like the #293 report: an inbox note linking into a
+/// projects folder, plus two notes named Plan in different folders.
+fn markdown_link_vault(home: &str) -> tempfile::TempDir {
+    let dir = tempdir().expect("temp dir");
+    let root = dir.path();
+    for folder in ["00-inbox", "20-projects", "a", "b"] {
+        fs::create_dir_all(root.join(folder)).expect("folder");
+    }
+    fs::write(root.join("00-inbox/Home.md"), home).expect("home");
+    fs::write(root.join("20-projects/Beacon Launch.md"), "# Beacon").expect("beacon");
+    fs::write(root.join("a/Plan.md"), "a plan").expect("a plan");
+    fs::write(root.join("b/Plan.md"), "b plan").expect("b plan");
+    dir
+}
+
+fn outgoing_slugs(vault: &VaultIndex, slug: &str) -> Vec<String> {
+    vault
+        .note_links(slug)
+        .expect("links")
+        .outgoing
+        .into_iter()
+        .map(|link| link.slug)
+        .collect()
+}
+
+#[test]
+fn markdown_note_links_resolve_by_path_in_every_spelling() {
+    let dir = markdown_link_vault("");
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    for written in [
+        "../20-projects/Beacon%20Launch.md",
+        "/20-projects/Beacon%20Launch.md",
+        "../20-projects/Beacon Launch.md",
+        "20-projects/Beacon%20Launch.md",
+        "Beacon%20Launch.md",
+        "../20-projects/Beacon%20Launch.md#Goals",
+    ] {
+        assert_eq!(
+            vault
+                .resolve_note_link(written, "00-inbox")
+                .map(|note| note.slug.as_str()),
+            Some("beacon-launch"),
+            "{written}"
+        );
+    }
+    assert!(vault.resolve_note_link("Nope.md", "00-inbox").is_none());
+    assert!(vault.resolve_note_link("report.pdf", "00-inbox").is_none());
+    assert!(
+        vault
+            .resolve_note_link("https://example.com/Beacon%20Launch.md", "00-inbox")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_markdown_path_never_falls_back_to_a_namesake_title() {
+    let dir = markdown_link_vault("");
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    // The wikilink rule would answer `../b/Plan.md` with whichever Plan came
+    // first; the path names b's, and a path to nowhere names nothing.
+    assert_eq!(
+        vault
+            .resolve_note_link("../b/Plan.md", "a")
+            .unwrap()
+            .relative_path,
+        "b/Plan"
+    );
+    assert_eq!(
+        vault
+            .resolve_note_link("../a/Plan.md", "b")
+            .unwrap()
+            .relative_path,
+        "a/Plan"
+    );
+    assert!(vault.resolve_note_link("../c/Plan.md", "a").is_none());
+    // A bare name picks the nearest namesake.
+    assert_eq!(
+        vault
+            .resolve_note_link("Plan.md", "b")
+            .unwrap()
+            .relative_path,
+        "b/Plan"
+    );
+}
+
+#[test]
+fn a_bare_percent_in_a_markdown_link_is_literal() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("Save 20% now.md"), "sale").expect("sale");
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    for written in [
+        "Save%2020%%20now.md",
+        "Save%2020%25%20now.md",
+        "Save 20% now.md",
+    ] {
+        assert!(vault.resolve_note_link(written, "").is_some(), "{written}");
+    }
+}
+
+#[test]
+fn markdown_note_links_count_as_links_alongside_wikilinks() {
+    let dir = markdown_link_vault(concat!(
+        "[x](../20-projects/Beacon%20Launch.md) and [[Beacon Launch]]\n",
+        "[plan][p] but not ![img](../a/Plan.md) or [pdf](x.pdf)\n",
+        "`[code](../b/Plan.md)`\n",
+        "```\n[fenced](../b/Plan.md)\n```\n",
+        "[p]: ../a/Plan.md\n",
+        "[unused]: ../b/Plan.md\n",
+    ));
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    assert_eq!(
+        outgoing_slugs(&vault, "home"),
+        vec!["beacon-launch".to_string(), "plan".to_string()],
+        "a wikilink and a Markdown link to one note count once; only a used definition counts"
+    );
+    let beacon = vault.note_links("beacon-launch").expect("beacon links");
+    assert_eq!(beacon.backlinks.len(), 1);
+    assert_eq!(beacon.backlinks[0].slug, "home");
+    let b_plan = vault
+        .by_slug
+        .values()
+        .find(|entry| entry.relative_path == "b/Plan")
+        .expect("b plan");
+    assert!(
+        vault.note_links(&b_plan.slug).unwrap().backlinks.is_empty(),
+        "links in code and unused definitions are not links"
+    );
+}
+
+#[test]
+fn note_links_and_embeds_are_counted_by_form_for_the_link_style() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("Attachments")).expect("attachments");
+    fs::write(root.join("Attachments/pic.png"), b"png").expect("asset");
+    fs::write(root.join("Other.md"), "# Other").expect("note");
+    let home = root.join("Home.md");
+    fs::write(
+        &home,
+        "[[Other]] and ![[pic.png]]\n\
+         [md](Other.md) ![](Attachments/pic.png) ![](pic.png)\n\
+         ![remote](https://example.com/x.png) [site](https://example.com)\n\
+         `[[Code]]` and `[code](Code.md)`\n\
+         ```\n[[Fenced]] [f](Fenced.md) ![](fenced.png)\n```\n",
+    )
+    .expect("note");
+
+    let counts = super::links::note_link_forms(&fs::read_to_string(&home).expect("note"));
+
+    assert_eq!(counts.wikilinks, 2);
+    assert_eq!(counts.markdown, 3);
+}
+
+/// ADR-33's inserts, byte for byte what the editor's `noteLinkText` writes
+/// for each path form, resolve through ADR-28 and count as backlinks.
+#[test]
+fn markdown_links_in_each_inserted_path_form_resolve_and_count_as_backlinks() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("Projects")).expect("projects");
+    fs::create_dir_all(root.join("Archive")).expect("archive");
+    fs::write(root.join("Projects/Plan (v2) #1 [draft].md"), "plan").expect("target");
+    fs::write(root.join("Projects/日本語 ノート.md"), "jp").expect("target");
+    fs::write(
+        root.join("Archive/Home.md"),
+        "[Plan (v2) #1 \\[draft\\]](../Projects/Plan%20%28v2%29%20%231%20%5Bdraft%5D.md)\n",
+    )
+    .expect("relative");
+    fs::write(
+        root.join("Archive/Abs.md"),
+        "[Plan (v2) #1 \\[draft\\]](/Projects/Plan%20%28v2%29%20%231%20%5Bdraft%5D.md)\n",
+    )
+    .expect("absolute");
+    fs::write(
+        root.join("Archive/Short.md"),
+        "[Plan (v2) #1 \\[draft\\]](Plan%20%28v2%29%20%231%20%5Bdraft%5D.md) [日本語 ノート](日本語%20ノート.md)\n",
+    )
+    .expect("shortest");
+
+    let index = VaultIndex::build(root).expect("index");
+    let slug_at = |path: &str| {
+        index
+            .ordered_entries()
+            .into_iter()
+            .find(|entry| entry.relative_path == path)
+            .expect("note")
+            .slug
+    };
+    let plan = slug_at("Projects/Plan (v2) #1 [draft]");
+    let backlinks: Vec<String> = index
+        .note_links(&plan)
+        .expect("links")
+        .backlinks
+        .into_iter()
+        .map(|link| link.relative_path)
+        .collect();
+    assert_eq!(backlinks, ["Archive/Abs", "Archive/Home", "Archive/Short"]);
+
+    let japanese = slug_at("Projects/日本語 ノート");
+    let backlinks = index.note_links(&japanese).expect("links").backlinks;
+    assert_eq!(backlinks.len(), 1);
+    assert_eq!(backlinks[0].relative_path, "Archive/Short");
 }

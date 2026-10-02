@@ -28,20 +28,21 @@ use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
-    disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
-    generate_mcp_token_handler, get_settings_handler, health_handler, list_vaults_handler,
-    patch_settings_handler, refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler,
-    reveal_web_token_handler, spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
-    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
-    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
-    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
+    enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
+    list_vaults_handler, patch_settings_handler, publish_recovery_branch_handler,
+    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
+    spa_index_handler, spa_not_found_handler, start_with_no_vaults_handler, sync_vault_handler,
+    upload_transfer_handler, vault_collection_events_handler, vault_scope_graph_handler,
+    vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
+    vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
     vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
-    vault_scoped_rename_note_handler, vault_scoped_resolve_batch_handler,
-    vault_scoped_resolve_handler, vault_scoped_stats_detail_handler,
-    vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
-    vault_scoped_write_capabilities_handler,
+    vault_scoped_note_saved_queries_handler, vault_scoped_rename_note_handler,
+    vault_scoped_resolve_batch_handler, vault_scoped_resolve_handler,
+    vault_scoped_stats_detail_handler, vault_scoped_update_note_handler,
+    vault_scoped_upload_attachment_handler, vault_scoped_write_capabilities_handler,
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -377,6 +378,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 post(retry_vault_handler).layer(demo_guard.clone()),
             )
             .route(
+                "/api/v1/vaults/{vault_id}/recovery-branch",
+                post(publish_recovery_branch_handler).layer(demo_guard.clone()),
+            )
+            .route(
                 "/api/v1/vaults/{vault_id}/refresh",
                 post(refresh_vault_handler).layer(demo_guard.clone()),
             )
@@ -415,6 +420,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/download",
                 get(vault_scoped_note_download_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/saved-queries",
+                get(vault_scoped_note_saved_queries_handler),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/resolve",
@@ -545,6 +554,24 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         ))
     };
 
+    // Transfer links (ADR-27): an agent that holds neither the MCP token nor
+    // the server's address downloads or uploads one file through a link an
+    // MCP call minted. Deliberately outside both guards above: the link's own
+    // signature is the credential, and the bearer and web-token admission
+    // those guards perform must not change. The handlers re-read the live
+    // configuration per request and share the transport's limiter, so a
+    // download spends the same budget an MCP-admitted asset read does.
+    let transfers = Router::new()
+        .route(
+            "/api/v1/vaults/{vault_id}/transfers/{*path}",
+            get(download_transfer_handler).merge(
+                post(upload_transfer_handler)
+                    .layer(DefaultBodyLimit::max(attachment_body_limit))
+                    .layer(demo_guard.clone()),
+            ),
+        )
+        .layer(Extension(mcp_transport.limiter()));
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
@@ -554,6 +581,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(vaults_v1)
         .merge(vault_assets)
         .merge(vault_attachment)
+        .merge(transfers)
         .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
@@ -574,24 +602,20 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )
         .route_service("/sw.js", ServeFile::new("frontend/dist/sw.js"))
         .nest_service("/assets", ServeDir::new("frontend/dist/assets"))
-        .fallback_service(ServeDir::new("frontend/dist"))
+        // An address no route or built file matches still loads the app, which
+        // renders its own not-found state (#302); the reserved prefixes keep a
+        // bare 404.
+        .fallback_service(ServeDir::new("frontend/dist").fallback(get(spa_not_found_handler)))
         .layer(
             TraceLayer::new_for_http()
                 // Custom span so the URI logged never contains the raw web token
-                // that `<img>`/download URLs may carry as ?access_token=...
+                // that `<img>`/download URLs may carry as ?access_token=..., nor
+                // a transfer link's ?signature=...
                 .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
-                    let target = match request.uri().query() {
-                        Some(query) => format!(
-                            "{}?{}",
-                            request.uri().path(),
-                            crate::auth::redact_query_token(query)
-                        ),
-                        None => request.uri().path().to_string(),
-                    };
                     tracing::info_span!(
                         "request",
                         method = %request.method(),
-                        uri = %target,
+                        uri = %traced_uri(request.uri()),
                         version = ?request.version(),
                     )
                 })
@@ -604,25 +628,43 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .with_state(state)
 }
 
+/// The request URI as the trace span records it: the path, and the query with
+/// every credential redacted (`auth::redact_query_token`), so neither the web
+/// token's `access_token` nor a transfer link's `signature` reaches a log.
+fn traced_uri(uri: &axum::http::Uri) -> String {
+    match uri.query() {
+        Some(query) => format!("{}?{}", uri.path(), crate::auth::redact_query_token(query)),
+        None => uri.path().to_string(),
+    }
+}
+
 /// Environment-cleanup recovery keeps liveness and read-only explanation
 /// surfaces reachable, but it is not an alternate operating mode. Refuse all
-/// state-changing HTTP/MCP requests until the operator removes the named keys
+/// state-changing HTTP requests until the operator removes the named keys
 /// and restarts, regardless of which inner router would otherwise own them.
+///
+/// `/mcp` is exempt (#327). Streamable HTTP MCP sends the handshake, the
+/// discovery and list calls, and every read tool as a POST, so a method-based
+/// guard would kill the whole surface with a body its JSON-RPC framing cannot
+/// parse. The MCP tool dispatcher applies the same refusal per tool instead,
+/// as a structured `legacy_environment_cleanup_required` tool error
+/// (`mcp::tools::environment_cleanup_refusal`), and the transport's own auth
+/// and Origin checks still run first.
 async fn reject_startup_recovery_mutation(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    let is_safe_method = matches!(
+    let is_exempt = matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
-    );
+    ) || request.uri().path() == "/mcp";
     let recovery = state
         .legacy_migration_recovery
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    if !is_safe_method
+    if !is_exempt
         && let Some(recovery) = recovery
         && !recovery.can_start_with_no_vaults()
     {
@@ -959,7 +1001,23 @@ pub async fn run_server() {
     // Migration may persist the registry and discard a recognized legacy
     // cache, so run it only after startup security/configuration refusals and
     // before opening SQLite.
-    let vault_registry = VaultRegistryStore::at_default_path();
+    // The registry fences its own state directory off Vault roots; the cache
+    // directory and the settings file's directory are instance state too, so
+    // no Vault may contain or sit inside them either (#325).
+    let settings_path =
+        settings_file_path(&config.cache_db_path, settings_file_override.as_deref());
+    let vault_registry = VaultRegistryStore::at_default_path().with_reserved_directories(
+        [config.cache_db_path.as_path(), settings_path.as_path()]
+            .into_iter()
+            .filter_map(std::path::Path::parent)
+            .map(|directory| {
+                if directory.as_os_str().is_empty() {
+                    std::path::PathBuf::from(".")
+                } else {
+                    directory.to_path_buf()
+                }
+            }),
+    );
     let legacy_vault_path = match &config.vault_source {
         VaultSource::Local { vault_path } => vault_path.clone(),
     };
@@ -1096,7 +1154,7 @@ pub async fn run_server() {
     // forwarding task starts below.
     let watcher_changes = vaults.subscribe_changes();
     // #90 establishes durable reconstruction and lifecycle admission. The
-    // worker loop below is the one global dispatcher for all admitted turns.
+    // dispatch loop below is the one consumer of every admitted turn.
     let (vault_work, vault_worker) = VaultWorkCoordinator::new();
     // Beside the registry, in the same durable state directory: a Vault's
     // poll interval is measured from its last remembered turn, so a redeploy
@@ -1156,31 +1214,50 @@ pub async fn run_server() {
         demo_mode: config.demo_mode,
         runtime_config,
         startup,
+        transfer_links: Default::default(),
+        shutdown: Default::default(),
     };
 
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
     let app = build_router(state.clone(), web_bearer_token);
-    let (shutdown_started, mut shutdown_received) = tokio::sync::watch::channel(false);
     let shutdown_task = tokio::spawn({
         let vault_work = vault_work.clone();
+        let shutdown = state.shutdown.clone();
         async move {
             shutdown_signal().await;
             vault_work.shutdown();
-            shutdown_started.send_replace(true);
+            shutdown.trigger();
         }
     });
 
-    // The one global consumer of `vault_work`/`vault_worker`. It takes the
-    // next coordinator position and hands it to the executor, which owns what
-    // a turn does and what the collection concludes from it. Repair remains
-    // owned by its later packet.
-    // Exits on its own once `vault_work.shutdown()` drains to quiescence.
+    // The one global consumer of `vault_work`/`vault_worker`. It takes each
+    // turn the coordinator admits and runs it on its own task through the
+    // executor, which owns what a turn does and what the collection concludes
+    // from it. The coordinator's lanes bound how many run at once (ADR-31).
+    // Repair remains owned by its later packet.
+    // Exits on its own once `vault_work.shutdown()` has discarded the queue
+    // and every running turn has published its outcome.
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
         let executor = VaultWorkExecutor::from_state(&state);
         async move {
-            while let Some(outcome) = vault_worker.run_next(|request| executor.run(request)).await {
-                executor.publish_outcome(&outcome);
+            let mut running = tokio::task::JoinSet::new();
+            while let Some(turn) = vault_worker.next_turn().await {
+                let executor = executor.clone();
+                running.spawn(async move {
+                    let outcome = turn.run(|request| executor.run(request)).await;
+                    executor.publish_outcome(&outcome);
+                    // Released only now, so the next turn in this lane
+                    // starts after this one's outcome is published, never
+                    // racing it for the Vault's status.
+                    drop(turn);
+                });
+                while let Some(finished) = running.try_join_next() {
+                    log_dispatch_join(finished);
+                }
+            }
+            while let Some(finished) = running.join_next().await {
+                log_dispatch_join(finished);
             }
         }
     });
@@ -1237,10 +1314,7 @@ pub async fn run_server() {
         spawn_model_startup(state.clone(), selected_model);
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_received.changed().await;
-        })
+    serve_until_shutdown(listener, app, state.shutdown.clone())
         .await
         .unwrap_or_else(|e| {
             error!("Server error: {e}");
@@ -1262,6 +1336,28 @@ pub async fn run_server() {
     if let Err(error) = shutdown_task.await {
         error!(%error, "Server shutdown task exited unexpectedly");
     }
+}
+
+/// A turn's task contains its own panics (`VaultWorkTurn::run` and
+/// `VaultWorkExecutor::publish_outcome`), so a failed join is unexpected and
+/// only logged.
+fn log_dispatch_join(finished: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = finished {
+        error!(%error, "Vault background work turn task exited unexpectedly");
+    }
+}
+
+/// Serve `app` until `shutdown` fires, then stop accepting and return once
+/// every open connection has closed. Responses that would stay open forever
+/// end on the same signal (#353), so this returns promptly.
+async fn serve_until_shutdown(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: crate::app_state::ShutdownSignal,
+) -> std::io::Result<()> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { shutdown.wait().await })
+        .await
 }
 
 /// Forward a per-Vault watcher invalidation to the one shared work queue: a
@@ -1558,6 +1654,52 @@ mod tests {
             !coordinator.has_work(committing, VaultWorkKind::Commit),
             "and asks for no further automatic commit while suppressed"
         );
+    }
+
+    /// Open `path` as a streaming GET on a raw socket and return once the
+    /// response headers have arrived, keeping the connection open.
+    async fn open_stream(addr: std::net::SocketAddr, path: &str) -> tokio::net::TcpStream {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .await
+            .expect("send request");
+        let mut head = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buf).await.expect("read response");
+            assert!(read > 0, "server closed before sending headers");
+            head.extend_from_slice(&buf[..read]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "unexpected response: {head}"
+        );
+        stream
+    }
+
+    /// #353: one open browser tab holds the collection events stream, and
+    /// graceful shutdown waits for every connection, so SIGTERM used to leave
+    /// the process running until the supervisor killed it.
+    #[tokio::test]
+    async fn graceful_shutdown_ends_an_open_collection_events_stream() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(serve_until_shutdown(listener, app, state.shutdown.clone()));
+        let _subscriber = open_stream(addr, "/api/v1/vaults/events").await;
+
+        state.shutdown.trigger();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("shutdown must not wait on an open events subscriber")
+            .expect("server task")
+            .expect("serve");
     }
 
     #[test]
@@ -1857,6 +1999,8 @@ mod tests {
             demo_mode,
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
+            transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
 
         (
@@ -1939,6 +2083,8 @@ mod tests {
             demo_mode: false,
             runtime_config,
             startup: StartupTracker::ready(),
+            transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
 
         (build_router(state.clone(), web_bearer_token), tmp, state)
@@ -2108,17 +2254,71 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// #327: a deployment with no web token serves the upload route openly,
+    /// and a live MCP bearer token must not change that. Before the fix the
+    /// gate counted the MCP token as "a credential is configured" and 401'd
+    /// the browser's paste-to-upload, which has no MCP token to send.
+    #[tokio::test]
+    async fn attachment_route_stays_open_with_an_mcp_token_but_no_web_token() {
+        for write_enabled in [true, false] {
+            let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+                None,
+                Some("mcp-secret".to_string()),
+                write_enabled,
+            );
+            let vault_id = create_vault_with_files(
+                &app,
+                "Attachments",
+                &tmp.path().join("attachments"),
+                &[],
+                0,
+            )
+            .await;
+
+            let response = app
+                .oneshot(attachment_upload_request(
+                    &vault_id,
+                    "Attachments/browser-paste.png",
+                    None,
+                ))
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "MCP writes {write_enabled}: an unauthenticated browser upload stays open"
+            );
+            assert!(
+                tmp.path()
+                    .join("attachments/Attachments/browser-paste.png")
+                    .exists()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn mcp_settings_apply_atomically_and_rotate_attachment_authorization() {
-        let (app, tmp, state) = app_for_tests_with_state();
+        // A web token is configured: with none, the attachment route is open
+        // whatever the MCP settings say (#327), and there would be no MCP
+        // authorization to rotate.
+        let (app, tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
         let vault_root = tmp.path().join("mcp-attachments");
-        let vault_id = create_vault_with_files(&app, "Mcp", &vault_root, &[], 0).await;
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Mcp",
+            &vault_root,
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
 
         let invalid = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2143,6 +2343,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2219,6 +2420,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2249,6 +2451,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2277,6 +2480,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2329,6 +2533,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2360,6 +2565,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2748,6 +2954,1060 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Transfer links (ADR-27)
+    // -----------------------------------------------------------------------
+
+    /// One MCP tool call over the real router, answered as its JSON-RPC
+    /// message. The `host` header is what a link built from the arriving
+    /// request uses as its address.
+    async fn mcp_tool_call(
+        app: &Router,
+        token: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        mcp_tool_call_with_headers(app, token, name, arguments, &[]).await
+    }
+
+    /// `mcp_tool_call` with extra request headers, such as the forwarded
+    /// headers a reverse proxy adds (ADR-34).
+    async fn mcp_tool_call_with_headers(
+        app: &Router,
+        token: &str,
+        name: &str,
+        arguments: serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
+        let session = initialize_mcp_session(app, token).await;
+        let mut request = Request::builder()
+            .uri("/mcp")
+            .method("POST")
+            .header("host", "localhost")
+            .header("mcp-session-id", session)
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json");
+        for (header, value) in headers {
+            request = request.header(*header, *value);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                            "params": {"name": name, "arguments": arguments}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+        let json = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .find(|data| !data.is_empty())
+            .unwrap_or(text.trim());
+        serde_json::from_str(json).unwrap_or_else(|error| panic!("{error}: {text}"))
+    }
+
+    /// The path and query of a link built on `http://localhost`, which is what
+    /// `oneshot` takes.
+    fn link_target(url: &str) -> String {
+        url.strip_prefix("http://localhost")
+            .unwrap_or(url)
+            .to_string()
+    }
+
+    fn fetch_link(app: &Router, target: String) -> impl std::future::Future<Output = Response> {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .uri(link_target(&target))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+        }
+    }
+
+    /// A multipart upload with no credential, the shape an agent sends to an
+    /// upload link: `file`, plus `target_relative_path` when given.
+    fn upload_link_request(target: String, named: Option<&str>, bytes: &[u8]) -> Request<Body> {
+        let boundary = "hatchdoor-link-boundary";
+        let mut body = Vec::new();
+        if let Some(named) = named {
+            body.extend(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"target_relative_path\"\r\n\r\n{named}\r\n"
+                )
+                .into_bytes(),
+            );
+        }
+        body.extend(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .into_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend(format!("\r\n--{boundary}--\r\n").into_bytes());
+        Request::builder()
+            .uri(link_target(&target))
+            .method("POST")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .expect("request")
+    }
+
+    async fn transfer_vault(
+        app: &Router,
+        tmp: &TempDir,
+        name: &str,
+        revision: u64,
+    ) -> (String, std::path::PathBuf) {
+        let vault_root = tmp.path().join(name);
+        let vault_id = create_vault_with_files_using_token(
+            app,
+            name,
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            revision,
+            Some("web-secret"),
+        )
+        .await;
+        (vault_id, vault_root)
+    }
+
+    fn parsed_vault_id(raw: &str) -> crate::vault_registry::VaultId {
+        raw.parse().expect("vault id")
+    }
+
+    #[tokio::test]
+    async fn a_download_link_from_get_attachment_alone_fetches_the_file_byte_for_byte() {
+        // The #310 failure: a 1.5 MB manual in the Vault that an agent holding
+        // no token and no server address could not get out.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Manuals", 0).await;
+        let manual: Vec<u8> = (0..1_514_342_u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        std::fs::create_dir_all(vault_root.join("personal/home")).expect("dir");
+        std::fs::write(
+            vault_root.join("personal/home/AEG User Manual (FR).pdf"),
+            &manual,
+        )
+        .expect("manual");
+
+        let answer = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({
+                "vault_id": vault_id,
+                "relative_path": "personal/home/AEG User Manual (FR).pdf"
+            }),
+        )
+        .await;
+        let content = &answer["result"]["structuredContent"]["content"];
+        let url = content["download_url"].as_str().expect("download_url");
+        assert!(url.starts_with("http://localhost/api/v1/vaults/"), "{url}");
+
+        let response = fetch_link(&app, link_target(url)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.len(), manual.len());
+        assert!(bytes.as_ref() == manual.as_slice(), "byte for byte");
+    }
+
+    /// Behind a TLS-terminating proxy the link carries the scheme and host the
+    /// proxy reports (ADR-34), and it still redeems: the signature covers the
+    /// path and query, not the origin, so the test sends it back to the router
+    /// as the proxy would after stripping TLS.
+    #[tokio::test]
+    async fn links_minted_behind_a_proxy_use_its_forwarded_origin_and_still_redeem() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Proxied", 0).await;
+        std::fs::write(vault_root.join("manual.pdf"), b"%PDF-1.7 bytes").expect("pdf");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "manual.pdf"}),
+            &[("x-forwarded-proto", "https")],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        let target = url
+            .strip_prefix("https://localhost")
+            .unwrap_or_else(|| panic!("https on the arriving host: {url}"));
+        let response = fetch_link(&app, target.to_string()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), b"%PDF-1.7 bytes");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "Inbox/first.pdf"}),
+            &[("x-forwarded-proto", "https")],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["upload_url"]
+            .as_str()
+            .expect("upload_url");
+        assert!(url.starts_with("https://localhost/api/v1/vaults/"), "{url}");
+
+        // Unusable forwarded values never fail the call; they fall back.
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "manual.pdf"}),
+            &[
+                ("forwarded", "proto=ftp;host=\"user@evil\";;\""),
+                ("x-forwarded-host", "bad host/x"),
+            ],
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(url.starts_with("http://localhost/api/v1/vaults/"), "{url}");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "Inbox/scan.pdf"}),
+            &[
+                (
+                    "forwarded",
+                    "for=1.2.3.4;proto=https;host=notes.example.com",
+                ),
+                ("x-forwarded-proto", "http"),
+            ],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["upload_url"]
+            .as_str()
+            .expect("upload_url");
+        let target = url
+            .strip_prefix("https://notes.example.com")
+            .unwrap_or_else(|| panic!("Forwarded wins: {url}"));
+        let uploaded = app
+            .clone()
+            .oneshot(upload_link_request(target.to_string(), None, b"scan"))
+            .await
+            .expect("response");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("Inbox/scan.pdf")).expect("written"),
+            b"scan"
+        );
+    }
+
+    /// A configured public address wins over anything a proxy forwards.
+    #[tokio::test]
+    async fn the_public_address_wins_over_forwarded_headers() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Pinned", 0).await;
+        std::fs::write(vault_root.join("clip.png"), b"png").expect("png");
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_PUBLIC_URL".to_string(),
+                "https://pinned.example.com".to_string(),
+            )])
+            .expect("public address");
+
+        let answer = mcp_tool_call_with_headers(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "clip.png"}),
+            &[
+                ("forwarded", "proto=http;host=forwarded.example.com"),
+                ("x-forwarded-host", "other.example.com"),
+            ],
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(
+            url.starts_with("https://pinned.example.com/api/v1/vaults/"),
+            "{url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_link_is_refused_for_any_other_path_or_vault_and_once_revoked() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "First", 0).await;
+        let (other_id, other_root) = transfer_vault(&app, &tmp, "Second", 1).await;
+        std::fs::write(vault_root.join("a.png"), b"a").expect("a");
+        std::fs::write(vault_root.join("b.png"), b"b").expect("b");
+        std::fs::write(other_root.join("a.png"), b"other").expect("other a");
+
+        let link = state.transfer_links.mint_download(
+            &state
+                .transfer_links
+                .key(&state.runtime_config, "mcp-secret"),
+            "http://localhost",
+            parsed_vault_id(&vault_id),
+            "a.png",
+        );
+        let query = link.url.split_once('?').expect("query").1.to_string();
+        assert_eq!(
+            fetch_link(&app, link.url.clone()).await.status(),
+            StatusCode::OK
+        );
+
+        for target in [
+            format!("/api/v1/vaults/{vault_id}/transfers/b.png?{query}"),
+            format!("/api/v1/vaults/{other_id}/transfers/a.png?{query}"),
+            format!("/api/v1/vaults/{vault_id}/transfers/a.png"),
+        ] {
+            let refused = fetch_link(&app, target.clone()).await;
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{target}");
+            assert_eq!(json_body(refused).await["code"], "transfer_link_invalid");
+        }
+
+        // MCP disabled refuses every link, and enabling it again restores it.
+        let save = |key: &str, value: &str| {
+            state
+                .runtime_config
+                .save([(key.to_string(), value.to_string())])
+                .expect("save")
+        };
+        save("HATCHDOOR_MCP_ENABLED", "false");
+        let disabled = fetch_link(&app, link.url.clone()).await;
+        assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(disabled).await["code"], "mcp_disabled");
+        save("HATCHDOOR_MCP_ENABLED", "true");
+        assert_eq!(
+            fetch_link(&app, link.url.clone()).await.status(),
+            StatusCode::OK
+        );
+
+        // A token change strands it for good, even changed back.
+        save("HATCHDOOR_MCP_BEARER_TOKEN", "rotated-secret");
+        save("HATCHDOOR_MCP_BEARER_TOKEN", "mcp-secret");
+        let stranded = fetch_link(&app, link.url.clone()).await;
+        assert_eq!(stranded.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(stranded).await["code"], "transfer_link_invalid");
+    }
+
+    #[tokio::test]
+    async fn a_download_link_keeps_the_mcp_byte_ceiling_and_spends_the_tool_quota() {
+        // A cheaper transport, not a larger allowance: the same ceiling and
+        // the same budget as an MCP-admitted read of the asset route.
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("small ceiling");
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Ceiling", 0).await;
+        std::fs::write(vault_root.join("small.png"), b"12345678").expect("small");
+        std::fs::write(vault_root.join("big.png"), b"0123456789abcdef").expect("big");
+        let mint = |path: &str| {
+            state
+                .transfer_links
+                .mint_download(
+                    &state
+                        .transfer_links
+                        .key(&state.runtime_config, "mcp-secret"),
+                    "http://localhost",
+                    parsed_vault_id(&vault_id),
+                    path,
+                )
+                .url
+        };
+
+        let refused = fetch_link(&app, mint("big.png")).await;
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(json_body(refused).await["code"], "asset_too_large");
+
+        // The refusal above spent one call of the budget, like any tool call.
+        let small = mint("small.png");
+        for _ in 1..crate::mcp::limits::TOOL_CALLS_PER_MINUTE {
+            assert_eq!(
+                fetch_link(&app, small.clone()).await.status(),
+                StatusCode::OK
+            );
+        }
+        let throttled = fetch_link(&app, small.clone()).await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(throttled.headers().contains_key("retry-after"));
+
+        // The bearer route shares that one budget rather than having its own.
+        let bearer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/assets/small.png"))
+                    .header("authorization", "Bearer mcp-secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(bearer.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn a_download_link_reaches_nothing_get_attachment_would_refuse() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Contained", 0).await;
+        std::fs::write(tmp.path().join("outside.png"), b"secret").expect("outside");
+        std::fs::create_dir_all(vault_root.join(".obsidian")).expect("config dir");
+        std::fs::write(vault_root.join(".obsidian/shot.png"), b"noise").expect("noise");
+        std::fs::write(vault_root.join("data.csv"), b"a,b").expect("unservable");
+
+        // The link answers exactly as get_attachment does: refused with the
+        // same code for escaping the Vault, a missing file, a note, and a type
+        // Hatchdoor does not serve, and served alike where get_attachment
+        // serves.
+        for path in [
+            "../outside.png",
+            "missing.png",
+            ".obsidian/shot.png",
+            "Home.md",
+            "data.csv",
+        ] {
+            let answer = mcp_tool_call(
+                &app,
+                "mcp-secret",
+                "get_attachment",
+                serde_json::json!({"vault_id": vault_id, "relative_path": path}),
+            )
+            .await;
+            let refused_by_tool = answer["result"]["isError"] == true;
+
+            let link = state.transfer_links.mint_download(
+                &state
+                    .transfer_links
+                    .key(&state.runtime_config, "mcp-secret"),
+                "http://localhost",
+                parsed_vault_id(&vault_id),
+                path,
+            );
+            let fetched = fetch_link(&app, link.url).await;
+            assert_eq!(fetched.status().is_success(), !refused_by_tool, "{path}");
+            if refused_by_tool {
+                assert_eq!(
+                    json_body(fetched).await["code"],
+                    answer["result"]["structuredContent"]["code"],
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_upload_link_from_create_upload_link_alone_writes_its_target_once() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Uploads", 0).await;
+        // At the size limit exactly (10 MiB by default).
+        let payload = vec![7_u8; crate::mcp::config::DEFAULT_MAX_ATTACHMENT_BYTES as usize];
+
+        let answer = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "Inbox/scan.pdf"}),
+        )
+        .await;
+        let result = &answer["result"]["structuredContent"];
+        assert_eq!(result["method"], "POST");
+        assert_eq!(
+            result["max_bytes"],
+            crate::mcp::config::DEFAULT_MAX_ATTACHMENT_BYTES
+        );
+        let url = link_target(result["upload_url"].as_str().expect("upload_url"));
+
+        let uploaded = app
+            .clone()
+            .oneshot(upload_link_request(url.clone(), None, &payload))
+            .await
+            .expect("response");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("Inbox/scan.pdf")).expect("written"),
+            payload
+        );
+
+        let again = app
+            .clone()
+            .oneshot(upload_link_request(url, None, b"second"))
+            .await
+            .expect("response");
+        assert_eq!(again.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(again).await["code"], "transfer_link_spent");
+    }
+
+    #[tokio::test]
+    async fn an_upload_link_is_refused_for_another_target_and_while_writes_are_off() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Targets", 0).await;
+        let mint = |target: &str| {
+            state
+                .transfer_links
+                .mint_upload(
+                    &state
+                        .transfer_links
+                        .key(&state.runtime_config, "mcp-secret"),
+                    "http://localhost",
+                    parsed_vault_id(&vault_id),
+                    target,
+                    false,
+                )
+                .url
+        };
+
+        // Another target, either by the path or by the form's own field.
+        let link = mint("in/a.png");
+        let (_, query) = link.split_once('?').expect("query");
+        let elsewhere = app
+            .clone()
+            .oneshot(upload_link_request(
+                format!("/api/v1/vaults/{vault_id}/transfers/in/b.png?{query}"),
+                None,
+                b"x",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(elsewhere.status(), StatusCode::FORBIDDEN);
+        let named = app
+            .clone()
+            .oneshot(upload_link_request(
+                mint("in/c.png"),
+                Some("in/d.png"),
+                b"x",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(named.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(named).await["code"], "transfer_link_invalid");
+        assert!(!vault_root.join("in/b.png").exists());
+        assert!(!vault_root.join("in/d.png").exists());
+
+        // Write mode off refuses the upload and the minting.
+        let pending = mint("in/e.png");
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                "false".to_string(),
+            )])
+            .expect("writes off");
+        let off = app
+            .clone()
+            .oneshot(upload_link_request(pending, None, b"x"))
+            .await
+            .expect("response");
+        assert_eq!(off.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(off).await["code"], "mcp_write_disabled");
+        let minting = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "create_upload_link",
+            serde_json::json!({"vault_id": vault_id, "target_relative_path": "in/f.png"}),
+        )
+        .await;
+        assert!(
+            minting["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("HATCHDOOR_MCP_WRITE_ENABLED")),
+            "{minting:#}"
+        );
+        assert!(!vault_root.join("in/e.png").exists());
+
+        // MCP off refuses every link, uploads included.
+        let pending = mint("in/g.png");
+        state
+            .runtime_config
+            .save([
+                (
+                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                    "true".to_string(),
+                ),
+                ("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string()),
+            ])
+            .expect("MCP off");
+        let disabled = app
+            .clone()
+            .oneshot(upload_link_request(pending, None, b"x"))
+            .await
+            .expect("response");
+        assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(disabled).await["code"], "mcp_disabled");
+        assert!(!vault_root.join("in/g.png").exists());
+    }
+
+    #[tokio::test]
+    async fn an_existing_target_is_refused_when_minted_and_again_when_redeemed() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Existing", 0).await;
+        std::fs::write(vault_root.join("taken.png"), b"old").expect("taken");
+        let create = |target: &'static str, overwrite: bool| {
+            let app = app.clone();
+            let vault_id = vault_id.clone();
+            async move {
+                mcp_tool_call(
+                    &app,
+                    "mcp-secret",
+                    "create_upload_link",
+                    serde_json::json!({
+                        "vault_id": vault_id,
+                        "target_relative_path": target,
+                        "overwrite": overwrite
+                    }),
+                )
+                .await
+            }
+        };
+
+        let refused = create("taken.png", false).await;
+        assert_eq!(refused["result"]["isError"], true, "{refused:#}");
+        assert_eq!(
+            refused["result"]["structuredContent"]["code"],
+            "write_conflict"
+        );
+
+        let bad_extension = create("script.exe", false).await;
+        assert_eq!(
+            bad_extension["result"]["isError"], true,
+            "{bad_extension:#}"
+        );
+
+        // Free when minted, taken by the time the file arrives.
+        let answer = create("race.png", false).await;
+        let url = link_target(
+            answer["result"]["structuredContent"]["upload_url"]
+                .as_str()
+                .expect("upload_url"),
+        );
+        std::fs::write(vault_root.join("race.png"), b"first").expect("race");
+        let conflict = app
+            .clone()
+            .oneshot(upload_link_request(url, None, b"second"))
+            .await
+            .expect("response");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read(vault_root.join("race.png")).expect("kept"),
+            b"first"
+        );
+
+        // Replacing, when the link allows it.
+        let answer = create("taken.png", true).await;
+        let url = link_target(
+            answer["result"]["structuredContent"]["upload_url"]
+                .as_str()
+                .expect("upload_url"),
+        );
+        let replaced = app
+            .clone()
+            .oneshot(upload_link_request(url, Some("taken.png"), b"new"))
+            .await
+            .expect("response");
+        assert_eq!(replaced.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("taken.png")).expect("new"),
+            b"new"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_link_keeps_the_attachment_size_limit() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MAX_ATTACHMENT_BYTES".to_string(),
+                "4".to_string(),
+            )])
+            .expect("small limit");
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Limit", 0).await;
+        let link = state.transfer_links.mint_upload(
+            &state
+                .transfer_links
+                .key(&state.runtime_config, "mcp-secret"),
+            "http://localhost",
+            parsed_vault_id(&vault_id),
+            "big.png",
+            false,
+        );
+        let refused = app
+            .clone()
+            .oneshot(upload_link_request(link.url, None, b"12345"))
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(!vault_root.join("big.png").exists());
+    }
+
+    /// `create_upload_link` called over MCP for one target, with optional
+    /// `overwrite` and `expected_content_hash`.
+    async fn mint_upload_link(
+        app: &Router,
+        vault_id: &str,
+        target: &str,
+        overwrite: bool,
+        expected_content_hash: Option<&str>,
+    ) -> serde_json::Value {
+        let mut arguments = serde_json::json!({
+            "vault_id": vault_id,
+            "target_relative_path": target,
+            "overwrite": overwrite
+        });
+        if let Some(hash) = expected_content_hash {
+            arguments["expected_content_hash"] = serde_json::json!(hash);
+        }
+        mcp_tool_call(app, "mcp-secret", "create_upload_link", arguments).await
+    }
+
+    fn minted_url(answer: &serde_json::Value) -> String {
+        link_target(
+            answer["result"]["structuredContent"]["upload_url"]
+                .as_str()
+                .unwrap_or_else(|| panic!("upload_url in {answer:#}")),
+        )
+    }
+
+    async fn post_upload(app: &Router, url: String, bytes: &[u8]) -> Response {
+        app.clone()
+            .oneshot(upload_link_request(url, None, bytes))
+            .await
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn a_note_upload_link_imports_a_markdown_file_whole() {
+        // The #303 failure: a 599-line file that arrived 594 lines long.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Imports", 0).await;
+        let report: String = (1..=599)
+            .map(|line| format!("- gap item {line}\n"))
+            .collect::<String>()
+            .replacen("- gap item 1\n", "# Report\n", 1);
+
+        let answer = mint_upload_link(&app, &vault_id, "Imports/Report.md", false, None).await;
+        let minted = &answer["result"]["structuredContent"];
+        assert_eq!(minted["upload_kind"], "note", "{answer:#}");
+        assert_eq!(minted["expected_content_hash"], serde_json::Value::Null);
+
+        let uploaded = post_upload(&app, minted_url(&answer), report.as_bytes()).await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let written = json_body(uploaded).await;
+        assert_eq!(written["slug"], "report", "{written:#}");
+        assert_eq!(written["relative_path"], "Imports/Report");
+        assert_eq!(
+            written["content_hash"],
+            crate::cache::parse::content_hash(&report)
+        );
+        assert_eq!(written["quality_warnings"], serde_json::json!([]));
+        let on_disk = std::fs::read_to_string(vault_root.join("Imports/Report.md")).expect("note");
+        assert_eq!(on_disk.lines().count(), 599);
+        assert_eq!(on_disk, report);
+
+        // Normalised as create_note normalises, and said so.
+        let answer = mint_upload_link(&app, &vault_id, "Imports/Crlf.md", false, None).await;
+        let uploaded =
+            post_upload(&app, minted_url(&answer), b"# Crlf\r\nline one\r\nline two").await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let written = json_body(uploaded).await;
+        assert_eq!(
+            written["quality_warnings"],
+            serde_json::json!([
+                "normalized CRLF/CR line endings to LF",
+                "added final newline"
+            ])
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault_root.join("Imports/Crlf.md")).expect("note"),
+            "# Crlf\nline one\nline two\n"
+        );
+
+        // An upper-case extension is still a note, written with `.md`.
+        let answer = mint_upload_link(&app, &vault_id, "Imports/Upper.MD", false, None).await;
+        assert_eq!(answer["result"]["structuredContent"]["upload_kind"], "note");
+        let uploaded = post_upload(&app, minted_url(&answer), b"# Upper\n").await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(json_body(uploaded).await["relative_path"], "Imports/Upper");
+        assert!(vault_root.join("Imports/Upper.md").exists());
+        assert!(!vault_root.join("Imports/Upper.MD.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_note_upload_refuses_what_create_note_refuses_and_writes_nothing() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Refusals", 0).await;
+
+        for (target, bytes) in [
+            ("bad-utf8.md", &b"# Bad \xff\xfe text\n"[..]),
+            ("nul.md", &b"# Nul\n\0\n"[..]),
+        ] {
+            let answer = mint_upload_link(&app, &vault_id, target, false, None).await;
+            let refused = post_upload(&app, minted_url(&answer), bytes).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{target}");
+            assert_eq!(json_body(refused).await["code"], "invalid_write_input");
+            assert!(!vault_root.join(target).exists(), "{target}");
+        }
+
+        // Noise is refused before a link exists.
+        let noise = mint_upload_link(&app, &vault_id, ".obsidian/workspace.md", false, None).await;
+        assert!(
+            noise["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("noise-exclusion")),
+            "{noise:#}"
+        );
+        assert!(!vault_root.join(".obsidian/workspace.md").exists());
+
+        // Over the attachment limit, which is the only upload limit.
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MAX_ATTACHMENT_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("small limit");
+        let answer = mint_upload_link(&app, &vault_id, "big.md", false, None).await;
+        assert_eq!(answer["result"]["structuredContent"]["max_bytes"], 8);
+        let refused = post_upload(&app, minted_url(&answer), b"# Too big for it\n").await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(!vault_root.join("big.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_creating_note_link_never_replaces_a_note() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Creating", 0).await;
+
+        let refused = mint_upload_link(&app, &vault_id, "Home.md", false, None).await;
+        assert_eq!(refused["result"]["isError"], true, "{refused:#}");
+        assert_eq!(
+            refused["result"]["structuredContent"]["code"],
+            "write_conflict"
+        );
+
+        let answer = mint_upload_link(&app, &vault_id, "Race.md", false, None).await;
+        std::fs::write(vault_root.join("Race.md"), "# Theirs\n").expect("race");
+        let conflict = post_upload(&app, minted_url(&answer), b"# Mine\n").await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(conflict).await["code"], "write_conflict");
+        assert_eq!(
+            std::fs::read_to_string(vault_root.join("Race.md")).expect("kept"),
+            "# Theirs\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacing_note_link_writes_only_under_the_current_hash() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Replacing", 0).await;
+        let home = vault_root.join("Home.md");
+        let current = crate::cache::parse::content_hash("# Home\n");
+
+        // Refused at once: no hash, a stale hash, a missing note, a hash on a
+        // creating link, and a hash on an attachment.
+        let invalid_params = |answer: &serde_json::Value| {
+            assert_eq!(answer["error"]["code"], -32602, "{answer:#}");
+        };
+        invalid_params(&mint_upload_link(&app, &vault_id, "Home.md", true, None).await);
+        invalid_params(&mint_upload_link(&app, &vault_id, "Home.md", false, Some(&current)).await);
+        invalid_params(&mint_upload_link(&app, &vault_id, "scan.png", true, Some(&current)).await);
+        invalid_params(&mint_upload_link(&app, &vault_id, "scan.png", false, Some(" ")).await);
+        let stale = mint_upload_link(&app, &vault_id, "Home.md", true, Some("stale")).await;
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"], "write_conflict",
+            "{stale:#}"
+        );
+        let missing = mint_upload_link(&app, &vault_id, "Gone.md", true, Some(&current)).await;
+        assert_eq!(
+            missing["result"]["structuredContent"]["code"], "note_not_found",
+            "{missing:#}"
+        );
+
+        // The current hash replaces the note, and the answer chains.
+        let answer = mint_upload_link(&app, &vault_id, "Home.md", true, Some(&current)).await;
+        let minted = &answer["result"]["structuredContent"];
+        assert_eq!(minted["upload_kind"], "note");
+        assert_eq!(minted["expected_content_hash"], current);
+        let replaced = post_upload(&app, minted_url(&answer), b"# Home\n\nImported.\n").await;
+        assert_eq!(replaced.status(), StatusCode::OK);
+        let written = json_body(replaced).await;
+        assert_eq!(written["slug"], "home");
+        let next = written["content_hash"].as_str().expect("hash").to_string();
+        assert_eq!(
+            next,
+            crate::cache::parse::content_hash("# Home\n\nImported.\n")
+        );
+
+        // An edit between minting and redemption survives the upload.
+        let answer = mint_upload_link(&app, &vault_id, "Home.md", true, Some(&next)).await;
+        std::fs::write(&home, "# Home\n\nEdited meanwhile.\n").expect("edit");
+        let conflict = post_upload(&app, minted_url(&answer), b"# Home\n\nClobber.\n").await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(conflict).await["code"], "write_conflict");
+        assert_eq!(
+            std::fs::read_to_string(&home).expect("kept"),
+            "# Home\n\nEdited meanwhile.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacing_note_link_with_a_changed_hash_or_rule_is_invalid() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Tamper", 0).await;
+        let current = crate::cache::parse::content_hash("# Home\n");
+        let url =
+            minted_url(&mint_upload_link(&app, &vault_id, "Home.md", true, Some(&current)).await);
+        let (_, query) = url.split_once('?').expect("query");
+        let hash_param = query
+            .split('&')
+            .find(|pair| pair.starts_with("expected_content_hash="))
+            .expect("hash param");
+        for tampered in [
+            url.replace(hash_param, "expected_content_hash=b3RoZXI"),
+            url.replace("overwrite=true", "overwrite=false"),
+        ] {
+            let refused = post_upload(&app, tampered, b"# Swapped\n").await;
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+            assert_eq!(json_body(refused).await["code"], "transfer_link_invalid");
+        }
+        assert_eq!(
+            std::fs::read_to_string(vault_root.join("Home.md")).expect("kept"),
+            "# Home\n"
+        );
+    }
+
+    /// The request span's `uri` field is the only place a request URL is
+    /// logged, so a link's credential stays out of the logs if it stays out of
+    /// that field. Checked on the span's own formatter rather than through a
+    /// scoped subscriber, whose callsite cache makes a captured-log test flaky
+    /// when tests run in parallel.
+    #[test]
+    fn a_link_signature_never_reaches_the_request_trace() {
+        let state = RuntimeConfig::for_tests();
+        let links = crate::transfer_link::TransferLinks::new();
+        let vault_id: crate::vault_registry::VaultId = "00000000-0000-4000-8000-000000000001"
+            .parse()
+            .expect("vault id");
+        for url in [
+            links
+                .mint_download(&links.key(&state, "t"), "http://h", vault_id, "a.png")
+                .url,
+            links
+                .mint_upload(
+                    &links.key(&state, "t"),
+                    "http://h",
+                    vault_id,
+                    "b.png",
+                    false,
+                )
+                .url,
+        ] {
+            let signature = url.split("signature=").nth(1).expect("signature");
+            let traced = traced_uri(&url.parse().expect("uri"));
+            assert!(traced.contains("signature=REDACTED"), "{traced}");
+            assert!(!traced.contains(signature), "{traced}");
+            assert!(
+                traced.contains("expires="),
+                "other parameters survive: {traced}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn mcp_token_candidate_is_not_persisted_and_reveal_requires_equal_capability() {
         let (app, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
@@ -2870,6 +4130,105 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned)
             .expect("initialize issues Mcp-Session-Id")
+    }
+
+    /// #327: environment-cleanup recovery used to refuse every POST, so the
+    /// whole MCP surface, handshake included, answered with a bare 503 body
+    /// no JSON-RPC client can parse. `/mcp` now reaches the dispatcher, which
+    /// serves the reads and refuses each state-changing tool with the same
+    /// structured code the HTTP API uses.
+    #[tokio::test]
+    async fn environment_cleanup_recovery_answers_mcp_in_json_rpc_with_a_structured_code() {
+        let (_unused_app, _tmp, state) = app_for_tests_with_state();
+        state
+            .runtime_config
+            .save([
+                ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
+                (
+                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+                    "mcp-secret".to_string(),
+                ),
+            ])
+            .expect("configure write-enabled MCP");
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") = Some(
+            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
+                "Remove HATCHDOOR_EXCLUDE and restart.",
+            ),
+        );
+        let app = build_router(state, None);
+
+        // The handshake is a POST and must still succeed.
+        initialize_mcp_session(&app, "mcp-secret").await;
+
+        // Discovery explains the recovery.
+        let listed = mcp_tool_call(&app, "mcp-secret", "list_vaults", serde_json::json!({})).await;
+        assert_eq!(listed["result"]["isError"], false, "{listed}");
+        assert_eq!(
+            listed["result"]["structuredContent"]["legacy_migration_recovery"]["code"],
+            "legacy_environment_cleanup_required"
+        );
+
+        // Every state-changing tool is refused with the structured code.
+        let vault_id = crate::vault_registry::VaultId::generate()
+            .expect("generate Vault id")
+            .to_string();
+        for (name, arguments) in [
+            (
+                "create_vault",
+                serde_json::json!({"name": "New", "source": {"kind": "local", "path": "/tmp/x"}}),
+            ),
+            (
+                "create_note",
+                serde_json::json!({"vault_id": vault_id, "relative_path": "A.md", "content": "x"}),
+            ),
+            ("accept_gemma_terms", serde_json::json!({})),
+        ] {
+            let refused = mcp_tool_call(&app, "mcp-secret", name, arguments).await;
+            assert!(refused.get("error").is_none(), "{name}: {refused}");
+            assert_eq!(refused["result"]["isError"], true, "{name}: {refused}");
+            assert_eq!(
+                refused["result"]["structuredContent"]["code"],
+                "legacy_environment_cleanup_required",
+                "{name}: {refused}"
+            );
+        }
+
+        // A batch's write items are refused the same way, item by item.
+        let batch = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "batch",
+            serde_json::json!({"operations": [{"op": "create_note", "arguments": {
+                "vault_id": vault_id, "relative_path": "A.md", "content": "x"
+            }}]}),
+        )
+        .await;
+        assert_eq!(
+            batch["result"]["structuredContent"]["items"][0]["error"]["code"],
+            "legacy_environment_cleanup_required",
+            "{batch}"
+        );
+
+        // Non-MCP mutations keep the HTTP refusal.
+        let http = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(http.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -3282,6 +4641,41 @@ mod tests {
         assert_eq!(after.status(), StatusCode::OK);
     }
 
+    /// Once the collection has settled, a later Index turn's progress is one
+    /// Vault's upkeep: `/ready` keeps answering 200 through it (#326).
+    #[tokio::test]
+    async fn ready_endpoint_stays_ready_through_a_routine_reindex() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        let vault_id = crate::vault_registry::VaultId::generate().expect("vault id");
+        state.startup.set_ready();
+        state.startup.report_indexing_progress(
+            vault_id,
+            crate::startup::IndexingProgressSnapshot {
+                notes_completed: 1,
+                notes_total: 2,
+                chunks_completed: 1,
+                chunks_total: 2,
+                tokens_completed: 10,
+                tokens_total: 20,
+                elapsed_seconds: 1,
+            },
+            vec![crate::startup::IndexingParticipant {
+                vault_id,
+                settled: false,
+            }],
+        );
+        let readiness = build_router(state, None)
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(readiness.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn vault_scoped_resolve_batch_marks_archived_notes() {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -3380,6 +4774,57 @@ mod tests {
             absent["path"].is_null(),
             "an unresolvable asset stays null so the client can render it missing"
         );
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_resolve_batch_resolves_markdown_note_links_by_path() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("markdown");
+        let vault_id = create_vault_with_files(
+            &app,
+            "Markdown",
+            &vault_root,
+            &[
+                (
+                    "00-inbox/Home.md",
+                    "[x](../20-projects/Beacon%20Launch.md)\n",
+                ),
+                ("20-projects/Beacon Launch.md", "# Beacon\n"),
+                ("a/Plan.md", "a\n"),
+                ("b/Plan.md", "b\n"),
+            ],
+            0,
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/resolve-batch"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"targets":[],"note_link_targets":["../20-projects/Beacon%20Launch.md","../b/Plan.md","Nope.md"],"note_path":"00-inbox/Home"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        assert_eq!(payload["results"], serde_json::json!([]));
+        let results = payload["note_link_results"]
+            .as_array()
+            .expect("note link results array");
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["slug"], "beacon-launch");
+        assert_eq!(results[0]["archived"], false);
+        assert_eq!(
+            results[1]["slug"], "plan-2",
+            "a path names its own folder's note, never the first namesake"
+        );
+        assert!(results[2]["slug"].is_null());
     }
 
     #[tokio::test]
@@ -3774,12 +5219,67 @@ mod tests {
         let payload = json_body(response).await;
         assert_eq!(payload["vault_id"], vault_id);
         assert_eq!(payload["enabled"], true);
+        assert_eq!(
+            payload["atomic_compare_and_swap"], true,
+            "an ordinary filesystem commits a save in one step (#345)"
+        );
         assert!(
             payload["warnings"]
                 .as_array()
                 .expect("warnings")
                 .iter()
                 .any(|warning| warning.as_str().unwrap_or("").contains("unauthenticated"))
+        );
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .all(|warning| !warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("cannot swap two files")),
+            "and says nothing about a weakness it does not have"
+        );
+    }
+
+    /// The route is where a browser learns that this Vault saves with weaker
+    /// protection than usual, so both halves of that answer, the field and
+    /// the sentence, are part of the contract (#345).
+    #[tokio::test]
+    async fn vault_scoped_write_capabilities_route_reports_a_degraded_filesystem() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("degraded");
+        let vault_id = create_vault_with_files(&app, "Degraded", &vault_root, &[], 0).await;
+        crate::rename_flags::force_unsupported_for_tests(&vault_root);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        assert_eq!(
+            payload["enabled"], true,
+            "the Vault is still writable, just not atomically"
+        );
+        assert_eq!(payload["atomic_compare_and_swap"], false);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("cannot swap two files in one step"))
         );
     }
 
@@ -3873,6 +5373,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let payload = json_body(response).await;
         assert_eq!(payload["enabled"], false);
+        assert_ne!(
+            payload["atomic_compare_and_swap"], false,
+            "a read-only Vault has its own reason to report and must never be \
+             blamed on its filesystem (#345)"
+        );
         assert!(
             payload["warnings"]
                 .as_array()
@@ -4224,6 +5729,47 @@ mod tests {
         assert_eq!(json_body(response).await["code"], "noise_excluded_write");
         assert!(vault_root.join("Home.md").exists());
         assert!(!vault_root.join("90-archive/Home.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_rename_a_non_utf8_backlink_cannot_follow_is_refused_with_its_own_code() {
+        // #360: the refusal reaches an HTTP caller as a 409 under its own
+        // code, naming the note, rather than as a sanitized internal error.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let root = tmp.path().join("latin1");
+        std::fs::create_dir_all(&root).expect("vault directory");
+        std::fs::write(root.join("Latin1.md"), b"[[Target]] caf\xe9").expect("latin-1 note");
+        let vault_id =
+            create_vault_with_files(&app, "Latin1", &root, &[("Target.md", "target")], 0).await;
+        let hash = crate::cache::parse::content_hash("target");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/target/rename"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"new_title":"Renamed","expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "link_rewrite_unsupported", "{body:#}");
+        assert_eq!(body["retryable"], false);
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("'Latin1'")
+                    && message.contains("Nothing was written")),
+            "{body:#}"
+        );
+        assert!(root.join("Target.md").exists());
+        assert!(!root.join("Renamed.md").exists());
     }
 
     #[tokio::test]
@@ -4888,6 +6434,7 @@ mod tests {
             "search_error",
             "git_error",
             "watcher_error",
+            "recovery_branch",
         ] {
             assert!(
                 vaults[0].get(absent).is_none(),
@@ -5019,6 +6566,7 @@ mod tests {
             format!("/api/v1/vaults/{vault_id}/notes/clipping"),
             format!("/api/v1/vaults/{vault_id}/notes/clipping/links"),
             format!("/api/v1/vaults/{vault_id}/notes/clipping/download"),
+            format!("/api/v1/vaults/{vault_id}/notes/clipping/saved-queries"),
         ] {
             let response = get(uri.clone()).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
@@ -5198,6 +6746,139 @@ mod tests {
                 .expect("response");
             assert_eq!(response.status(), expected, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn demo_mode_note_download_bundles_only_assets_on_its_readable_surface() {
+        // #342: the download route must refuse exactly what the asset route
+        // refuses, so a demo zip never carries bytes `/assets/...` answers 404.
+        let (demo, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("download-surface");
+        for directory in ["sources", "private"] {
+            std::fs::create_dir_all(vault_root.join(directory)).expect("create asset directory");
+        }
+        let hidden_only = "# Home\n\n![[sources/hidden.png]]\n![](private/excluded.png)\n";
+        std::fs::write(vault_root.join("Home.md"), hidden_only).expect("write hidden-only note");
+        std::fs::write(
+            vault_root.join("Mixed.md"),
+            "# Mixed\n\n![[visible.png]]\n![[sources/hidden.png]]\n",
+        )
+        .expect("write mixed note");
+        std::fs::write(vault_root.join("visible.png"), b"visible").expect("write visible asset");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"hidden")
+            .expect("write demoted asset");
+        std::fs::write(vault_root.join("private/excluded.png"), b"excluded")
+            .expect("write excluded asset");
+
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Download surface".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_root.clone(),
+                    },
+                    exclude_patterns: vec!["private/".to_string()],
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add vault to registry");
+        let vault_id = snapshot
+            .definitions()
+            .find(|definition| definition.name() == "Download surface")
+            .expect("added vault")
+            .vault_id()
+            .to_string();
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let download = |slug: &str| {
+            demo.clone().oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/{slug}/download"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+        };
+
+        let hidden = download("home").await.expect("response");
+        assert_eq!(hidden.status(), StatusCode::OK);
+        assert_eq!(
+            hidden.headers()["content-type"],
+            "text/markdown; charset=utf-8",
+            "a note whose every asset is refused downloads as plain Markdown"
+        );
+        let markdown = to_bytes(hidden.into_body(), usize::MAX)
+            .await
+            .expect("markdown body");
+        assert_eq!(
+            std::str::from_utf8(&markdown).expect("utf-8 markdown"),
+            hidden_only,
+            "a refused asset's link is left as written, like a missing one"
+        );
+
+        let mixed = download("mixed").await.expect("response");
+        assert_eq!(mixed.status(), StatusCode::OK);
+        assert_eq!(mixed.headers()["content-type"], "application/zip");
+        let zip_bytes = to_bytes(mixed.into_body(), usize::MAX)
+            .await
+            .expect("zip body");
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.to_vec())).expect("read zip");
+        let mut names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["Mixed-assets/visible.png", "Mixed.md"]);
+        let mut markdown = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("Mixed.md").expect("markdown entry"),
+            &mut markdown,
+        )
+        .expect("read markdown entry");
+        assert!(markdown.contains("](Mixed-assets/visible.png)"));
+        assert!(markdown.contains("![[sources/hidden.png]]"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_mode_note_download_still_bundles_assets_under_demoted_layers() {
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, false);
+        let vault_root = tmp.path().join("ordinary-download");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::write(
+            vault_root.join("Home.md"),
+            "# Home\n\n![[sources/hidden.png]]\n",
+        )
+        .expect("write note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"operator asset")
+            .expect("write demoted asset");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home/download"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/zip");
     }
 
     #[tokio::test]
@@ -6713,6 +8394,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_scoped_saved_queries_evaluate_the_notes_blocks_and_map_not_found() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("saved-queries");
+        std::fs::create_dir_all(vault_root.join("subscriptions")).expect("create folder");
+        std::fs::write(
+            vault_root.join("Dashboard.md"),
+            "# Dashboard\n\n<!-- hatchdoor-query: cheap -->\n```base\nfilters: 'price < 10'\nviews:\n  - type: table\n    order: [file.name, price]\n```\n\n```base\nformulas:\n  x: 'price * 2'\n```\n",
+        )
+        .expect("write dashboard");
+        std::fs::write(
+            vault_root.join("subscriptions/Newspaper.md"),
+            "---\nprice: 8\n---\n# Newspaper\n",
+        )
+        .expect("write subscription");
+        let vault_id = register_vaults_directly(&state, &[("Home", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        publish_vault_snapshot(&state, &vault_id, &vault_root);
+
+        let get = async |uri: String| {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+        };
+
+        let response = get(format!(
+            "/api/v1/vaults/{vault_id}/notes/dashboard/saved-queries"
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["scope"], vault_id);
+        assert_eq!(body["data"]["vault_id"], vault_id);
+        let queries = body["data"]["queries"].as_array().expect("queries");
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0]["name"], "cheap");
+        assert_eq!(queries[0]["status"], "populated");
+        assert_eq!(queries[0]["rows"][0]["slug"], "newspaper");
+        assert_eq!(
+            queries[0]["rows"][0]["cells"],
+            serde_json::json!(["Newspaper.md", 8])
+        );
+        assert_eq!(queries[1]["status"], "refused");
+        assert_eq!(queries[1]["construct"], "formulas");
+        assert!(
+            queries[1]["message"]
+                .as_str()
+                .expect("message")
+                .contains("formulas")
+        );
+        assert_eq!(body["data"]["marker_problems"], serde_json::json!([]));
+
+        let missing = get(format!(
+            "/api/v1/vaults/{vault_id}/notes/nowhere/saved-queries"
+        ))
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(missing).await["code"], "note_not_found");
+
+        // The note read lists the saved queries by name (#277) and still
+        // returns the file verbatim, never a computed row.
+        let note = json_body(get(format!("/api/v1/vaults/{vault_id}/notes/dashboard")).await).await;
+        assert_eq!(
+            note["saved_queries"],
+            serde_json::json!([{"name": "cheap"}, {"name": null}])
+        );
+        assert_eq!(
+            note["note"]["content"].as_str(),
+            Some(
+                std::fs::read_to_string(vault_root.join("Dashboard.md"))
+                    .expect("read dashboard")
+                    .as_str()
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn vault_scoped_resolve_and_resolve_batch_scope_to_one_vault() {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let first = create_vault_with_files(
@@ -7480,6 +9244,20 @@ mod tests {
         assert_eq!(empty_query.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(empty_query).await["code"], "invalid_search_query");
 
+        // `tag` is a mode a response reports, never one a caller can ask for.
+        let tag_mode = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search?q=%23topic&mode=tag")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(tag_mode.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(tag_mode).await["code"], "invalid_request_query");
+
         let absent_layer = app
             .clone()
             .oneshot(
@@ -7590,6 +9368,68 @@ mod tests {
                 .await
                 .expect("body");
             assert!(String::from_utf8_lossy(&bytes).contains("Frontend not built"));
+        }
+    }
+
+    async fn get_status_and_body(uri: &str) -> (StatusCode, String) {
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn unrecognised_address_reaches_the_spa_shell_as_a_404() {
+        // Issue #302: a cold load of an address no route matches must reach the
+        // app, which renders its own not-found state, rather than the static
+        // file server's empty 404. The status stays 404 because the address is
+        // not a page. Whether the app is there to serve depends on whether
+        // `frontend/dist` happens to exist (see the canonical Note URL test
+        // above), so only a built frontend pins the body.
+        let built = std::path::Path::new("frontend/dist/index.html").exists();
+        for uri in [
+            "/nope",
+            "/setting",
+            "/v/00000000-0000-4000-8000-000000000000/n/20-projects/Beacon%20Launch.md",
+        ] {
+            let (status, body) = get_status_and_body(uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(
+                body.contains("<div id=\"root\">"),
+                built,
+                "{uri} must be answered with the app shell when it is built, got {body:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_prefixes_keep_their_bare_404() {
+        // The API, Vault asset and health prefixes are never answered with the
+        // app, matching the service worker's navigation denylist.
+        for uri in [
+            "/api/nope",
+            "/api/v1/nope",
+            "/vault-assets/nope.png",
+            "/health/nope",
+            "/healthz",
+        ] {
+            let (status, body) = get_status_and_body(uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert!(
+                !body.contains("<div id=\"root\">"),
+                "{uri} must not be answered with the app shell, got {body:?}"
+            );
         }
     }
 }

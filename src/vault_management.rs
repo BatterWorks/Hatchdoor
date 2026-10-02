@@ -34,6 +34,7 @@ use tracing::error;
 
 use crate::app_state::AppState;
 use crate::git::GitPollingClock;
+use crate::vault::{LinkPathForm, LinkStyle};
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::{
     HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
@@ -41,9 +42,9 @@ use crate::vault_registry::{
     VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState, VaultSource,
 };
 use crate::vault_runtime::{
-    CollectionVaultSnapshot, LocalContentStatus, VaultActivationStatus, VaultCapabilities,
-    VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus, VaultRuntimeError,
-    VaultSearchStatus, VaultWatcherStatus,
+    CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
+    VaultCapabilities, VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus,
+    VaultIndexTurn, VaultRuntimeError, VaultSearchStatus, VaultWatcherStatus,
 };
 use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{ScheduleResult, VaultWorkKind};
@@ -72,6 +73,13 @@ pub struct VaultSummary {
     pub activation: VaultActivationStatus,
     pub local_content: LocalContentStatus,
     pub search: VaultSearchStatus,
+    /// Where this Vault's indexing stands in the instance-wide indexing
+    /// queue: `running`, or `waiting` while it is queued behind another
+    /// Vault's or paused part-way to let another Vault index. Independent of
+    /// `search`, which says what the Vault can answer meanwhile. Absent when
+    /// no indexing is queued or running for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_turn: Option<VaultIndexTurn>,
     pub git: VaultGitStatus,
     /// When this Vault's last interval-arming Git turn finished, RFC 3339
     /// UTC — whether it succeeded or failed. A failed check is still a check,
@@ -98,6 +106,21 @@ pub struct VaultSummary {
     pub git_error: Option<VaultRuntimeError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_error: Option<VaultRuntimeError>,
+    /// The outcome of the latest request to publish this Vault's side of a
+    /// sync conflict to its recovery branch (ADR-30). Absent until one is
+    /// made, once the conflict clears, and on a read that withholds operator
+    /// detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_branch: Option<RecoveryBranchStatus>,
+    /// The form this Vault writes new note links and embeds in (ADR-33), read
+    /// from the Vault on every listing. Absent when the Vault cannot be read,
+    /// on a read-only demo, and on a mutation response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_style: Option<LinkStyle>,
+    /// The path form a Markdown link takes in this Vault. Present whenever
+    /// `link_style` is, whichever style that is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_path_form: Option<LinkPathForm>,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
@@ -141,6 +164,9 @@ impl From<&crate::vault_migration::LegacyMigrationRecovery> for LegacyMigrationR
 pub struct VaultDiscoveryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_revision: Option<u64>,
+    /// Counts Vault collection status changes, not note content: a note
+    /// write does not advance it, so it cannot say whether a collection read
+    /// includes a write. That read's participants can.
     pub collection_revision: u64,
     pub vaults: Vec<VaultSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +188,9 @@ pub struct VaultMutationResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<VaultSummary>,
     pub registry_revision: u64,
+    /// Counts Vault collection status changes, not note content: a note
+    /// write does not advance it, so it cannot say whether a collection read
+    /// includes a write. That read's participants can.
     pub collection_revision: u64,
 }
 
@@ -312,6 +341,7 @@ pub(crate) const MANAGEMENT_ERROR_CODES: &[&str] = &[
     "capability_unavailable",
     "vault_registry_recovery_required",
     "legacy_environment_cleanup_required",
+    "legacy_migration_required",
     "vault_unavailable",
     "registry_revision_exhausted",
     "internal_error",
@@ -424,6 +454,7 @@ fn unreconciled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapsho
         activation: VaultActivationStatus::Unavailable,
         local_content: LocalContentStatus::Unavailable,
         search: VaultSearchStatus::Unavailable,
+        index_turn: None,
         git: VaultGitStatus::Disabled,
         watcher: VaultWatcherStatus::Disabled,
         capabilities: VaultCapabilities::default(),
@@ -438,6 +469,7 @@ fn unreconciled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapsho
         search_error: None,
         git_error: None,
         watcher_error: None,
+        recovery_branch: None,
     }
 }
 
@@ -458,6 +490,7 @@ fn vault_summary(
         activation: snapshot.activation,
         local_content: snapshot.local_content,
         search: snapshot.search,
+        index_turn: snapshot.index_turn,
         git: snapshot.git,
         last_checked_at: clock
             .and_then(|clock| clock.last_checked_at)
@@ -469,6 +502,9 @@ fn vault_summary(
         search_error: snapshot.search_error.clone(),
         git_error: snapshot.git_error.clone(),
         watcher_error: snapshot.watcher_error.clone(),
+        recovery_branch: snapshot.recovery_branch.clone(),
+        link_style: None,
+        link_path_form: None,
     }
 }
 
@@ -511,6 +547,7 @@ fn public_vault_summary(
         activation: snapshot.activation,
         local_content: snapshot.local_content,
         search: snapshot.search,
+        index_turn: snapshot.index_turn,
         git: snapshot.git,
         last_checked_at: None,
         next_attempt_at: None,
@@ -520,6 +557,9 @@ fn public_vault_summary(
         search_error: None,
         git_error: None,
         watcher_error: None,
+        recovery_branch: None,
+        link_style: None,
+        link_path_form: None,
     }
 }
 
@@ -595,11 +635,16 @@ impl<'a> VaultCollectionManagement<'a> {
                             if demo_mode {
                                 public_vault_summary(&definition, &runtime_snapshot)
                             } else {
-                                vault_summary(
+                                let mut summary = vault_summary(
                                     &definition,
                                     &runtime_snapshot,
                                     self.state.managed_git.polling_clock(definition.vault_id()),
-                                )
+                                );
+                                if let Some(style) = self.link_style(definition.vault_id()) {
+                                    summary.link_style = Some(style.style);
+                                    summary.link_path_form = Some(style.path_form);
+                                }
+                                summary
                             }
                         })
                         .collect()
@@ -625,6 +670,22 @@ impl<'a> VaultCollectionManagement<'a> {
         }
     }
 
+    /// One active Vault's link style, read from its directory now (ADR-33).
+    /// Without Obsidian settings it walks the Vault and reads every note
+    /// changed since the last listing, so this blocks on disk and the callers
+    /// of [`Self::list`] run it off the async runtime.
+    fn link_style(&self, vault_id: VaultId) -> Option<crate::vault::VaultLinkStyle> {
+        let control = self.state.vaults.runtime(vault_id)?;
+        let root = control.vault_path();
+        crate::vault::vault_link_style(root, || {
+            let catalog = control.authoritative_catalog().ok()?;
+            Some(crate::vault::count_link_forms(
+                root,
+                catalog.by_slug.values().map(|note| note.path.as_path()),
+            ))
+        })
+    }
+
     /// Create a new Vault definition, seeding it when it qualifies.
     pub async fn create(
         &self,
@@ -639,6 +700,25 @@ impl<'a> VaultCollectionManagement<'a> {
         // reaches this diff) — a future change to that CAS contract would
         // need to preserve this guarantee or expose the generated ID
         // directly.
+        //
+        // Refused while startup recovery is pending (#325): a created Vault
+        // would give the registry real state that `start_with_no_vaults`
+        // (which always commits from revision 0) could never clear the flag
+        // over, and discovery would keep hiding it behind that flag.
+        if let Some(recovery) = self
+            .state
+            .legacy_migration_recovery
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            return Err(VaultOperationError::new(
+                recovery.code(),
+                recovery.message(),
+                None,
+                false,
+            ));
+        }
         let before_ids: BTreeSet<VaultId> = match self.state.vault_registry.load() {
             Ok(VaultRegistryState::Ready(snapshot)) => snapshot.vault_ids().collect(),
             Ok(VaultRegistryState::Recovery(recovery)) => return Err(recovery_error(&recovery)),
@@ -783,6 +863,39 @@ impl<'a> VaultCollectionManagement<'a> {
     /// named entry point (mirrors `ManagedGitScheduler::retry_now`).
     pub fn retry(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
         self.managed_git_control(vault_id, true)
+    }
+
+    /// Admit a request to publish this Vault's side of a sync conflict to its
+    /// recovery branch (ADR-30). Only a Two-way Vault whose Git status
+    /// reports a conflict is eligible, which is exactly its
+    /// `publish_recovery` capability. The publish runs later, as a Git turn
+    /// of its own under the Vault's mutation lock, and reports on the Vault's
+    /// `recovery_branch` status rather than here.
+    pub fn publish_recovery(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultScheduleResponse, VaultOperationError> {
+        self.enabled_definition(vault_id)?;
+        let eligible = self
+            .state
+            .vaults
+            .runtime(vault_id)
+            .is_some_and(|runtime| runtime.snapshot().capabilities.publish_recovery);
+        if !eligible {
+            return Err(VaultOperationError::new(
+                "capability_unavailable",
+                "A recovery branch can only be published for a Two-way Vault whose sync \
+                 stopped on a conflict",
+                Some(vault_id),
+                false,
+            ));
+        }
+        schedule_response(
+            vault_id,
+            self.state
+                .vault_work
+                .request(vault_id, VaultWorkKind::Recovery),
+        )
     }
 
     /// Admit one manual Git operation, choosing it from what this Vault
@@ -1032,7 +1145,14 @@ impl<'a> VaultCollectionManagement<'a> {
         snapshot: &VaultRegistrySnapshot,
         vault_id: VaultId,
     ) {
-        let Some(definition) = snapshot.definition(vault_id) else {
+        // A disabled Vault has no scheduler entry, and must not gain one here:
+        // `retry_now` self-registers, and disconnect only deactivates entries
+        // for Vaults that were active (#325). Enabling it later schedules its
+        // Git turn through the ordinary activation path.
+        let Some(definition) = snapshot
+            .definition(vault_id)
+            .filter(VaultDefinition::enabled)
+        else {
             return;
         };
         if let Some(poll_interval) = definition.source().managed_git_poll_interval() {
@@ -1137,6 +1257,8 @@ pub(crate) mod test_support {
             demo_mode: false,
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
+            transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
         (state, worker, directory)
     }
@@ -1356,6 +1478,8 @@ mod tests {
         indexing_runtime
             .set_search_status(VaultSearchStatus::Indexing, None)
             .expect("publish search status");
+        // Queued behind another Vault's indexing (ADR-35 decision 5).
+        indexing_runtime.refresh_index_turn(|| Some(VaultIndexTurn::Waiting));
 
         let authenticated = VaultCollectionManagement::new(&state)
             .list()
@@ -1388,6 +1512,7 @@ mod tests {
                 retry: true,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "the authenticated projection keeps reporting the derived capabilities"
         );
@@ -1402,6 +1527,7 @@ mod tests {
                 retry: true,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "an unavailable Vault browses nowhere but is worth retrying"
         );
@@ -1416,8 +1542,18 @@ mod tests {
                 retry: false,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "a Vault mid-index browses but does not search"
+        );
+        let waiting = serde_json::to_value(named(&authenticated.vaults, "Indexing"))
+            .expect("serialize the waiting Vault");
+        assert_eq!(waiting["index_turn"], "waiting");
+        let idle = serde_json::to_value(named(&authenticated.vaults, "Published"))
+            .expect("serialize the idle Vault");
+        assert!(
+            idle.get("index_turn").is_none(),
+            "a Vault with no indexing queued or running omits index_turn"
         );
 
         state.demo_mode = true;
@@ -1459,6 +1595,7 @@ mod tests {
                 retry: false,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "a demo reports what an unauthenticated visitor may do"
         );
@@ -1481,8 +1618,14 @@ mod tests {
                 retry: false,
                 commit: false,
                 sync: false,
+                publish_recovery: false,
             },
             "a demo passes browse and search through untouched"
+        );
+        assert_eq!(
+            named(&demo.vaults, "Indexing").index_turn,
+            Some(VaultIndexTurn::Waiting),
+            "waiting is status, not deployment detail, so a demo keeps it"
         );
         // Its derived `retry: true` names the one Vault-control route a demo
         // also refuses, so the demo form drops it with the rest.
@@ -1565,6 +1708,100 @@ mod tests {
             .expect("discovery");
         assert!(discovery.legacy_migration_recovery.is_none());
         assert_eq!(discovery.registry_revision, Some(1));
+    }
+
+    /// #325: a Vault created while a failed legacy import awaits recovery gave
+    /// the registry real state that `start_with_no_vaults` (always committing
+    /// from revision 0) could never clear the flag over, while discovery kept
+    /// hiding the Vault behind that flag. Creation is refused instead, with
+    /// the pending recovery's own code, and the registry stays untouched.
+    #[tokio::test]
+    async fn create_is_refused_while_legacy_migration_recovery_is_pending() {
+        let (state, _worker, directory) = test_state();
+        let vault_path = directory.path().join("notes");
+        std::fs::create_dir(&vault_path).expect("vault dir");
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") = Some(
+            crate::vault_migration::LegacyMigrationRecovery::for_test("legacy import failed"),
+        );
+
+        let refused = VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Notes",
+                VaultSource::Local { path: vault_path },
+            ))
+            .await
+            .expect_err("creation must wait for the recovery decision");
+        assert_eq!(refused.code, "legacy_migration_required");
+        assert_eq!(ready_snapshot(&state).revision(), 0);
+
+        // The recovery action still works afterwards: the flag is not wedged.
+        VaultCollectionManagement::new(&state)
+            .start_with_no_vaults(true)
+            .await
+            .expect("start with no Vaults");
+        assert!(
+            state
+                .legacy_migration_recovery
+                .read()
+                .expect("recovery lock")
+                .is_none()
+        );
+    }
+
+    /// #325: replacing credentials on a *disabled* remote-backed Vault used to
+    /// self-register it with the Git scheduler through `retry_now`, an entry
+    /// disconnect never removes because it only deactivates active Vaults.
+    #[tokio::test]
+    async fn credential_replacement_on_a_disabled_vault_registers_no_git_schedule() {
+        let (state, _worker, _directory) = test_state();
+
+        VaultCollectionManagement::new(&state)
+            .create(CreateVaultRequest {
+                enabled: false,
+                https_credentials: Some(HttpsCredentialsInput {
+                    username: Some("git-user".to_string()),
+                    token: "old-token".to_string(),
+                }),
+                ..create_request(
+                    "Remote notes",
+                    managed_git_source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+                )
+            })
+            .await
+            .expect("create the disabled Vault");
+        let snapshot = ready_snapshot(&state);
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+        assert_eq!(state.managed_git.poll_interval_for_test(vault_id), None);
+
+        VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                EditVaultRequest {
+                    expected_registry_revision: snapshot.revision(),
+                    name: "Remote notes".to_string(),
+                    source: managed_git_source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+                    exclude_patterns: Vec::new(),
+                    https_credentials: HttpsCredentialsPatch::Replace {
+                        username: Some("git-user".to_string()),
+                        token: "new-token".to_string(),
+                    },
+                    confirm_identity_change: false,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .await
+            .expect("replace the disabled Vault's credentials");
+
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            None,
+            "a disabled Vault must not gain a Git schedule entry"
+        );
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Git));
     }
 
     /// Closes issue #97's reopening finding 3: replacing a Vault's HTTPS

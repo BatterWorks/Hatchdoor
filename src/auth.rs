@@ -94,15 +94,18 @@ fn request_is_authorized(request: &Request, expected: &[u8]) -> bool {
     false
 }
 
-/// Rewrite the `access_token` value in a query string to `REDACTED`. The web
-/// token can ride in the query for `<img>`/download navigations, and the request
-/// trace span logs the full URI (at debug level), so the raw token must never
-/// reach the span. Other query parameters are preserved.
+/// Rewrite every credential in a query string to `REDACTED`: the web token's
+/// `access_token`, which rides in the query for `<img>`/download navigations,
+/// and a transfer link's `signature` (ADR-27). The request trace span logs the
+/// full URI (at debug level), so neither may reach the span. Other query
+/// parameters are preserved.
 pub fn redact_query_token(query: &str) -> String {
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some(("access_token", _)) => "access_token=REDACTED".to_string(),
+            Some((key @ ("access_token" | crate::transfer_link::SIGNATURE_PARAM), _)) => {
+                format!("{key}=REDACTED")
+            }
             _ => pair.to_string(),
         })
         .collect::<Vec<_>>()
@@ -128,11 +131,21 @@ pub(crate) struct WebOrLiveMcpToken {
 /// enabled. This keeps runtime disablement as an immediate revocation of that
 /// credential's attachment-write capability. A matching web bearer token is
 /// independent of MCP write mode.
+///
+/// A deployment with no web token configured serves the route openly, exactly
+/// as the rest of the web API and the asset *read* route do (#327). The MCP
+/// credential can only ever add access to a gated route, never start demanding
+/// one: the browser's paste-to-upload flow has no MCP token to send, so letting
+/// a live MCP token turn this gate on would break it the moment an operator set
+/// MCP up.
 pub(crate) async fn require_web_or_live_mcp_token(
     State(tokens): State<WebOrLiveMcpToken>,
     request: Request,
     next: Next,
 ) -> Response {
+    if tokens.web.is_none() {
+        return next.run(request).await;
+    }
     let presented = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -145,7 +158,6 @@ pub(crate) async fn require_web_or_live_mcp_token(
         // into an unauthenticated attachment route.
         Err(_) => return unauthorized(),
     };
-    let configured = tokens.web.is_some() || mcp.bearer_token.is_some();
     let matches_web = presented.is_some_and(|presented| {
         tokens
             .web
@@ -160,7 +172,7 @@ pub(crate) async fn require_web_or_live_mcp_token(
                 .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
     });
 
-    if !configured || matches_web || (matches_mcp && mcp.write_enabled) {
+    if matches_web || (matches_mcp && mcp.write_enabled) {
         next.run(request).await
     } else if matches_mcp {
         forbidden()
@@ -253,31 +265,21 @@ pub(crate) async fn require_web_or_live_mcp_read_token(
         return next.run(request).await;
     }
 
-    // Same order the `/mcp` transport uses: a concurrency rejection must not
-    // also spend quota on a request that never reached the handler.
     let token = crate::mcp::subscriptions::McpBearerToken(Arc::from(
         presented.expect("an MCP match presented a token"),
     ));
-    let guard = match tokens
-        .limiter
-        .try_acquire(crate::mcp::limits::RequestClass::ToolCall)
-        .await
-    {
+    let guard = match tokens.limiter.admit_tool_call(&token).await {
         Ok(guard) => guard,
         Err(retry_in) => return too_many_requests(retry_in),
     };
-    if let Err(retry_in) = tokens
-        .limiter
-        .check_quota(&token, std::time::Instant::now())
-    {
-        return too_many_requests(retry_in);
-    }
     let response = next.run(request).await;
     drop(guard);
     response
 }
 
-fn too_many_requests(retry_in: std::time::Duration) -> Response {
+/// `429` with `Retry-After`, for a request refused by the MCP tool budget
+/// outside `/mcp` (this route, and transfer-link downloads).
+pub(crate) fn too_many_requests(retry_in: std::time::Duration) -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(
@@ -423,6 +425,14 @@ mod tests {
         assert_eq!(
             redact_query_token("access_token=x"),
             "access_token=REDACTED"
+        );
+    }
+
+    #[test]
+    fn redact_query_token_hides_a_transfer_link_signature() {
+        assert_eq!(
+            redact_query_token("expires=1&replace=false&nonce=n&signature=s3cr3t"),
+            "expires=1&replace=false&nonce=n&signature=REDACTED"
         );
     }
 

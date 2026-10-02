@@ -73,6 +73,7 @@ describe("writeApi", () => {
       jsonResponse({
         vault_id: VAULT_ID,
         enabled: true,
+        atomic_compare_and_swap: true,
         warnings: ["read-only mode off"],
       }),
     );
@@ -80,6 +81,7 @@ describe("writeApi", () => {
     await expect(getWriteCapabilities(VAULT_ID)).resolves.toEqual({
       vault_id: VAULT_ID,
       enabled: true,
+      atomic_compare_and_swap: true,
       warnings: ["read-only mode off"],
     });
 
@@ -206,6 +208,20 @@ describe("writeApi", () => {
     const [, init] = mockedApiFetch.mock.calls[0] ?? [];
     expect(init?.timeoutMs).toBe(MUTATION_FETCH_TIMEOUT_MS);
     expect(MUTATION_FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
+  });
+
+  // An ordinary fetch issued while the page is being torn down is cancelled
+  // with the document; `keepalive` is what lets the last save finish (#330).
+  it("forwards keepalive on an unload save and leaves it off otherwise", async () => {
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote(VAULT_ID, "home", "# Updated", "hash-1", {
+      keepalive: true,
+    });
+    expect(mockedApiFetch.mock.calls[0]?.[1]?.keepalive).toBe(true);
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote(VAULT_ID, "home", "# Updated", "hash-1");
+    expect(mockedApiFetch.mock.calls[1]?.[1]?.keepalive).toBeUndefined();
   });
 
   it("summarizes write outcome side effects", () => {

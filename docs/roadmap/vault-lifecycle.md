@@ -336,7 +336,9 @@ stage. They do not need to block agreement on the overall direction.
 
 - Which authentication methods are essential for the first managed-Git release?
 - What conflict-recovery actions belong in the UI, and which should initially be
-  handled outside Hatchdoor?
+  handled outside Hatchdoor? Settled in v2.7.0 by ADR-30: the UI and MCP
+  publish Hatchdoor's side to a recovery branch, and the merge happens on the
+  Git host.
 - How should read-only shared vaults communicate that their remote repository is
   authoritative?
 

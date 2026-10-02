@@ -8,13 +8,13 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 use super::assets::asset_move_plan;
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::{
-    MutationJournal, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
+    MutationJournal, atomic_create, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
 };
 use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
 };
-use super::rewrites::{MovedTo, backlink_rewrite_plan, merge_rewrites};
+use super::rewrites::{MovedTo, backlink_rewrite_plan, merge_rewrites, refuse_unrewritable};
 use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
 use crate::cache::parse::frontmatter_span;
 
@@ -29,20 +29,42 @@ pub enum SectionMode {
     After,
 }
 
-struct PreparedNoteContent {
+/// Text a write is about to put on disk, and the quality warnings that
+/// describe what preparing it changed.
+struct PreparedText {
     content: String,
     warnings: Vec<String>,
 }
 
-fn prepare_note_content(content: &str) -> Result<PreparedNoteContent, WriteError> {
+fn reject_nul(content: &str) -> Result<(), WriteError> {
     if content.contains('\0') {
         return Err(WriteError::InvalidInput(
             "note content cannot contain NUL bytes".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// `content` with every CRLF and lone CR turned into LF.
+fn to_lf(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Whether `content` ends in a line break. A lone CR counts, as it does in
+/// CommonMark, so a separator is never added after one.
+fn ends_with_line_break(content: &str) -> bool {
+    content.ends_with(['\n', '\r'])
+}
+
+/// Normalise the content of a whole-content write (`create_note`,
+/// `update_note`): CRLF and CR become LF and a final newline is added. ADR-22
+/// allows this only for a write that replaces the whole note; the partial
+/// writes use `prepare_inserted_text` instead.
+fn prepare_note_content(content: &str) -> Result<PreparedText, WriteError> {
+    reject_nul(content)?;
 
     let mut warnings = Vec::new();
-    let mut normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut normalized = to_lf(content);
     if normalized != content {
         warnings.push("normalized CRLF/CR line endings to LF".to_string());
     }
@@ -52,10 +74,78 @@ fn prepare_note_content(content: &str) -> Result<PreparedNoteContent, WriteError
     }
     warnings.extend(frontmatter_warnings(&normalized));
 
-    Ok(PreparedNoteContent {
+    Ok(PreparedText {
         content: normalized,
         warnings,
     })
+}
+
+const BREAK_BEFORE_WARNING: &str = "added a line break before the supplied text";
+const BREAK_AFTER_WARNING: &str = "added a line break after the supplied text";
+
+/// The line ending a partial write gives the text it inserts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+}
+
+impl LineEnding {
+    /// Whichever of CRLF and lone LF `content` uses more often, and LF on a
+    /// tie or when it has no line breaks. The frontend's `detectLineEnding`
+    /// applies the same rule.
+    fn of(content: &str) -> Self {
+        let crlf = content.matches("\r\n").count();
+        let lone_lf = content.matches('\n').count() - crlf;
+        if crlf > lone_lf { Self::Crlf } else { Self::Lf }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lf => "LF",
+            Self::Crlf => "CRLF",
+        }
+    }
+}
+
+/// Prepare the text a partial write inserts into an existing note (ADR-22).
+/// Only the caller's text is touched: its line breaks, in whatever form they
+/// arrived, are written in the note's own `line_ending`. The note itself is
+/// never normalised, so the warnings describe the supplied text alone.
+fn prepare_inserted_text(text: &str, line_ending: LineEnding) -> Result<PreparedText, WriteError> {
+    reject_nul(text)?;
+    let conformed = match line_ending {
+        LineEnding::Lf => to_lf(text),
+        other => to_lf(text).replace('\n', other.as_str()),
+    };
+    let mut warnings = Vec::new();
+    if conformed != text {
+        warnings.push(format!(
+            "converted line endings in the supplied text to {} to match the note",
+            line_ending.name()
+        ));
+    }
+    Ok(PreparedText {
+        content: conformed,
+        warnings,
+    })
+}
+
+/// The frontmatter quality warnings for a note a partial write produced. The
+/// check reads an LF view so a CRLF note is checked like any other; the note
+/// on disk is not changed by it.
+fn partial_write_frontmatter_warnings(content: &str) -> Vec<String> {
+    if !content.contains('\r') {
+        return frontmatter_warnings(content);
+    }
+    frontmatter_warnings(&to_lf(content))
 }
 
 fn frontmatter_warnings(content: &str) -> Vec<String> {
@@ -176,18 +266,26 @@ pub fn create_note(
     catalog: &VaultIndex,
 ) -> Result<WriteOutcome, WriteError> {
     let path = resolve_new_note_path(vault_root, relative_path)?;
+    let normalized = normalize_note_relative_path(relative_path)?;
+    let already_exists = || WriteError::Conflict(format!("Note already exists: {normalized}"));
     if path.exists() && !overwrite {
-        return Err(WriteError::Conflict(format!(
-            "Note already exists: {}",
-            normalize_note_relative_path(relative_path)?
-        )));
+        return Err(already_exists());
     }
 
     create_parent_dir_inside_root(vault_root, &path, "note")?;
 
     let prepared = prepare_note_content(content)?;
-    atomic_write(&path, &prepared.content)?;
-    let normalized = normalize_note_relative_path(relative_path)?;
+    if overwrite {
+        atomic_write(&path, &prepared.content)?;
+    } else {
+        // The check above is only a fast answer: a file created at this path
+        // since then, by anything outside Hatchdoor, is refused at the commit
+        // itself rather than replaced.
+        atomic_create(&path, &prepared.content).map_err(|error| match error {
+            WriteError::Conflict(_) => already_exists(),
+            other => other,
+        })?;
+    }
     let relative_without_ext = strip_md_extension(&normalized).to_string();
     let slug = slug_for_relative_path(catalog, &relative_without_ext, &path, None);
     Ok(WriteOutcome {
@@ -200,6 +298,41 @@ pub fn create_note(
         trashed_path: None,
         affected_paths: vec![path.clone()],
     })
+}
+
+/// Where a note write addressed by path lands, checked the way `create_note`
+/// checks it: the Vault-relative path without `.md`, and whether a file is
+/// already there. An uploaded note arrives with a path rather than a slug, so
+/// this is how it finds out before the bytes do whether it would create a
+/// note or collide with one (#303).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteTarget {
+    pub relative_path: String,
+    pub exists: bool,
+    /// The path as `create_note` writes it, `.md` included.
+    normalized: String,
+}
+
+pub fn note_target(vault_root: &Path, relative_path: &str) -> Result<NoteTarget, WriteError> {
+    let path = resolve_new_note_path(vault_root, relative_path)?;
+    let normalized = normalize_note_relative_path(relative_path)?;
+    Ok(NoteTarget {
+        relative_path: strip_md_extension(&normalized).to_string(),
+        exists: path.exists(),
+        normalized,
+    })
+}
+
+/// The refusal `create_note` gives a note that already exists, for a caller
+/// that found it with [`note_target`] before writing anything.
+pub fn note_exists_conflict(target: &NoteTarget) -> WriteError {
+    WriteError::Conflict(format!("Note already exists: {}", target.normalized))
+}
+
+/// `update_note`'s hash check alone, for a caller that wants its refusal
+/// before it has the new content.
+pub fn check_note_content_hash(entry: &NoteEntry, expected: &str) -> Result<(), WriteError> {
+    ensure_content_hash(entry, expected)
 }
 
 pub fn update_note(
@@ -320,29 +453,33 @@ pub fn update_note_frontmatter(
     })
 }
 
+/// Append text to a note. The existing bytes are kept as they are; the
+/// appended text uses the note's own line ending, is separated from a last
+/// line that has no line break, and ends with a line break (ADR-22).
 pub fn append_note(
     entry: &NoteEntry,
     content: &str,
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
-    let mut current = fs::read_to_string(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}': {error}",
-            entry.relative_path
-        ))
-    })?;
-    if !current.ends_with('\n') {
-        current.push('\n');
-    }
-    current.push_str(content);
-    let prepared = prepare_note_content(&current)?;
-    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
+    let current = read_note(entry)?;
+    let line_ending = LineEnding::of(&current);
+    let appended = prepare_inserted_text(content, line_ending)?;
+    let mut warnings = appended.warnings;
+    // Appended text always ends with a line break, whatever the note did.
+    let splice = Splice {
+        block: &appended.content,
+        line_ending,
+        end_with_break: true,
+    };
+    let updated = splice.join(&current, "", &mut warnings);
+    warnings.extend(partial_write_frontmatter_warnings(&updated));
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&prepared.content)),
-        quality_warnings: prepared.warnings,
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -380,18 +517,22 @@ pub fn edit_note(
         }
         _ => {}
     }
+    // Only the matched text changes (ADR-22): the replacement takes the
+    // note's line ending, and nothing else in the note is normalised.
+    let replacement = prepare_inserted_text(new_string, LineEnding::of(&current))?;
     let updated = if replace_all {
-        current.replace(old_string, new_string)
+        current.replace(old_string, &replacement.content)
     } else {
-        current.replacen(old_string, new_string, 1)
+        current.replacen(old_string, &replacement.content, 1)
     };
-    let prepared = prepare_note_content(&updated)?;
-    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
+    let mut warnings = replacement.warnings;
+    warnings.extend(partial_write_frontmatter_warnings(&updated));
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&prepared.content)),
-        quality_warnings: prepared.warnings,
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -415,18 +556,26 @@ pub fn replace_section(
     }
     let current = read_note(entry)?;
     let (start, end) = section_span(&current, requested, &entry.relative_path)?;
-    let updated = match mode {
-        SectionMode::Replace => splice(&current[..start], content, &current[end..]),
-        SectionMode::Before => splice(&current[..start], content, &current[start..]),
-        SectionMode::After => splice(&current[..end], content, &current[end..]),
+    let line_ending = LineEnding::of(&current);
+    let block = prepare_inserted_text(content, line_ending)?;
+    let mut warnings = block.warnings;
+    let splice = Splice {
+        block: &block.content,
+        line_ending,
+        end_with_break: ends_with_line_break(&current),
     };
-    let prepared = prepare_note_content(&updated)?;
-    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
+    let updated = match mode {
+        SectionMode::Replace => splice.join(&current[..start], &current[end..], &mut warnings),
+        SectionMode::Before => splice.join(&current[..start], &current[start..], &mut warnings),
+        SectionMode::After => splice.join(&current[..end], &current[end..], &mut warnings),
+    };
+    warnings.extend(partial_write_frontmatter_warnings(&updated));
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&prepared.content)),
-        quality_warnings: prepared.warnings,
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -511,20 +660,41 @@ fn section_span(
     }
 }
 
-/// Join `prefix + block + suffix`, guaranteeing newline separation so an
-/// inserted block never glues onto adjacent lines.
-fn splice(prefix: &str, block: &str, suffix: &str) -> String {
-    let mut out = String::with_capacity(prefix.len() + block.len() + suffix.len() + 2);
-    out.push_str(prefix);
-    if !prefix.is_empty() && !prefix.ends_with('\n') {
-        out.push('\n');
+/// A block of supplied text `replace_section` or `append_note` places between
+/// two untouched parts of a note.
+struct Splice<'a> {
+    block: &'a str,
+    line_ending: LineEnding,
+    /// Whether a block that ends the note must end with a line break.
+    end_with_break: bool,
+}
+
+impl Splice<'_> {
+    /// Join `prefix + block + suffix`, adding a line break in the note's own
+    /// line ending wherever the block would otherwise glue onto an adjacent
+    /// line, and reporting each one. A block that ends the note ends with a
+    /// line break only when `end_with_break` says so. An empty block removes
+    /// text and adds nothing. The block has been through
+    /// `prepare_inserted_text`, so it never ends in a lone CR and checking for
+    /// `\n` is enough.
+    fn join(&self, prefix: &str, suffix: &str, warnings: &mut Vec<String>) -> String {
+        let mut out = String::with_capacity(prefix.len() + self.block.len() + suffix.len() + 4);
+        out.push_str(prefix);
+        if !self.block.is_empty() {
+            if !prefix.is_empty() && !ends_with_line_break(prefix) {
+                out.push_str(self.line_ending.as_str());
+                warnings.push(BREAK_BEFORE_WARNING.to_string());
+            }
+            out.push_str(self.block);
+            let needs_break = !suffix.is_empty() || self.end_with_break;
+            if needs_break && !self.block.ends_with('\n') {
+                out.push_str(self.line_ending.as_str());
+                warnings.push(BREAK_AFTER_WARNING.to_string());
+            }
+        }
+        out.push_str(suffix);
+        out
     }
-    out.push_str(block);
-    if !suffix.is_empty() && !block.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(suffix);
-    out
 }
 
 pub fn move_or_rename_note(
@@ -563,6 +733,7 @@ fn move_or_rename_note_with_hook(
     let target_without_ext =
         strip_md_extension(&normalize_note_relative_path(target_relative_path)?).to_string();
     let slug = slug_for_relative_path(index, &target_without_ext, &target_path, Some(&entry.slug));
+    let mut unrewritable = Vec::new();
     let backlink_rewrites = backlink_rewrite_plan(
         index,
         &entry.slug,
@@ -570,7 +741,8 @@ fn move_or_rename_note_with_hook(
             new_target: &target_without_ext,
             destination: target_path.as_path(),
         }),
-    )?;
+        &mut unrewritable,
+    );
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
         index,
@@ -578,12 +750,13 @@ fn move_or_rename_note_with_hook(
         &target_path,
         false,
         &backlink_rewrites,
+        &mut unrewritable,
     )?;
+    refuse_unrewritable(unrewritable)?;
     // Created after planning, so a plan the planner refuses outright leaves no
-    // empty destination folder behind. A plan that carries assets still creates
-    // folders while planning them; the pre-existing empty-folder-after-rollback
-    // case is unchanged and tracked separately.
-    create_parent_dir_inside_root(vault_root, &target_path, "destination")?;
+    // empty destination folder behind. The pre-existing
+    // empty-folder-after-rollback case is unchanged and tracked separately.
+    create_destination_dirs(vault_root, &target_path, "destination", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
         entry,
@@ -695,7 +868,8 @@ fn delete_note_with_hook(
     // No destination: the link is removed from every other note, and the
     // trashed body's link to itself is left as written, since the note is gone
     // from the Vault and the link is moot in the trash (#254).
-    let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, None)?;
+    let mut unrewritable = Vec::new();
+    let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, None, &mut unrewritable);
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
         index,
@@ -703,8 +877,10 @@ fn delete_note_with_hook(
         &trash_path,
         true,
         &backlink_rewrites,
+        &mut unrewritable,
     )?;
-    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
+    refuse_unrewritable(unrewritable)?;
+    create_destination_dirs(vault_root, &trash_path, "trash", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
         entry,
@@ -736,6 +912,21 @@ fn delete_note_with_hook(
         trashed_path: Some(trash_relative),
         affected_paths,
     })
+}
+
+/// Create the folders a planned note mutation lands in, once nothing refused
+/// it: the note's own, under `note_label`, and each travelling asset's.
+fn create_destination_dirs(
+    vault_root: &Path,
+    note_path: &Path,
+    note_label: &str,
+    asset_moves: &[AssetMove],
+) -> Result<(), WriteError> {
+    create_parent_dir_inside_root(vault_root, note_path, note_label)?;
+    for asset in asset_moves {
+        create_parent_dir_inside_root(vault_root, &asset.destination, "asset")?;
+    }
+    Ok(())
 }
 
 struct CompletedNoteMutation {

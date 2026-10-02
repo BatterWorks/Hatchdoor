@@ -10,8 +10,11 @@
 //! properties — is already in the published snapshot rows, so a Vault whose
 //! generation carries no vectors answers a query in full.
 
+use std::borrow::Cow;
+
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -168,15 +171,77 @@ pub(crate) struct CompiledQuery {
     pub(crate) limit: usize,
 }
 
-#[derive(Debug)]
-enum CompiledCondition {
+/// One compiled test. The flat `query_notes` request only ever produces the
+/// first three kinds, ANDed at the top; a saved query's Bases filters (#275)
+/// compile into the same tree and add the boolean combinators, so both
+/// surfaces answer "does this Note qualify" with one engine rather than two.
+#[derive(Debug, Clone)]
+pub(super) enum CompiledCondition {
     Tag(String),
     PathPrefix(String),
-    Property {
-        name: String,
+    Compare {
+        subject: Subject,
         operator: PropertyOperator,
         value: Option<Value>,
     },
+    /// Every inner condition holds. Empty holds for every Note, which only a
+    /// saved query with no filters can produce.
+    All(Vec<CompiledCondition>),
+    /// At least one inner condition holds.
+    Any(Vec<CompiledCondition>),
+    Not(Box<CompiledCondition>),
+}
+
+/// What a comparison reads from a Note: a frontmatter property, or one of the
+/// file facts every Note has whatever its frontmatter says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Subject {
+    Property(String),
+    /// The file's name with its extension, `Netflix.md`.
+    FileName,
+    /// The file's name without its extension, `Netflix`.
+    FileBasename,
+    /// The Vault-relative path of the file, `subscriptions/Netflix.md`.
+    FilePath,
+    /// The Vault-relative folder holding the file, `""` at the Vault root.
+    FileFolder,
+}
+
+impl Subject {
+    /// The file fact a `file.<member>` reference names, or `None` for a member
+    /// that is not one of them.
+    pub(super) fn file_member(member: &str) -> Option<Self> {
+        match member {
+            "name" => Some(Self::FileName),
+            "basename" => Some(Self::FileBasename),
+            "path" => Some(Self::FilePath),
+            "folder" => Some(Self::FileFolder),
+            _ => None,
+        }
+    }
+
+    /// This subject's value on one Note, or `None` when the Note does not carry
+    /// it. Only a property can be absent: every Note has a name and a path.
+    ///
+    /// A snapshot row's `relative_path` drops the `.md` every Note file has,
+    /// so the name and path put it back: they describe the file, the way
+    /// Obsidian's `file.name` and `file.path` do.
+    pub(super) fn value<'a>(&self, note: &'a VaultSnapshotNote) -> Option<Cow<'a, Value>> {
+        let (folder, stem) = match note.relative_path.rsplit_once('/') {
+            Some((folder, stem)) => (folder, stem),
+            None => ("", note.relative_path.as_str()),
+        };
+        match self {
+            Self::Property(name) => property(note, name).map(Cow::Borrowed),
+            Self::FileName => Some(Cow::Owned(Value::from(format!("{stem}.md")))),
+            Self::FileBasename => Some(Cow::Owned(Value::from(stem))),
+            Self::FilePath => Some(Cow::Owned(Value::from(format!(
+                "{}.md",
+                note.relative_path
+            )))),
+            Self::FileFolder => Some(Cow::Owned(Value::from(folder))),
+        }
+    }
 }
 
 impl CompiledQuery {
@@ -214,24 +279,45 @@ impl CompiledQuery {
         })
     }
 
-    /// The rows one Vault's published snapshot contributes. Unsorted and
-    /// unlimited: ordering and the limit are decided once across every
-    /// participating Vault, so an `all` query cannot depend on which Vault a
-    /// Note happens to live in.
+    /// The rows one Vault's published snapshot contributes, sorted, and at
+    /// most `limit + 1` of them: the first `limit` in [`sort_rows`] order,
+    /// plus one more when more qualified, so the caller can still say the
+    /// answer was truncated. Ordering and the limit are decided once more
+    /// across every participating Vault, so an `all` query cannot depend on
+    /// which Vault a Note happens to live in. Keeping only that many while
+    /// scanning holds a broad query's working set to the size of its answer
+    /// rather than to the size of the collection.
     pub(crate) fn rows_for(
         &self,
         vault_id: VaultId,
         notes: &[VaultSnapshotNote],
     ) -> Vec<NoteQueryRow> {
-        notes
-            .iter()
-            .filter(|note| self.selects(note))
-            .map(|note| NoteQueryRow {
-                vault_id,
-                title: note.title.clone(),
-                slug: note.slug.clone(),
-                relative_path: note.relative_path.clone(),
-                properties: self.project(note),
+        let keep = self.limit.saturating_add(1);
+        // A max-heap on the sort key: once it holds `keep` Notes, each new
+        // match either displaces the current last one or is dropped. Within
+        // one Vault the key is the path then the slug, which is what
+        // `sort_rows` orders one Vault's rows by.
+        let mut kept: BinaryHeap<(&str, &str, usize)> = BinaryHeap::with_capacity(keep + 1);
+        for (position, note) in notes.iter().enumerate() {
+            if !self.selects(note) {
+                continue;
+            }
+            kept.push((note.relative_path.as_str(), note.slug.as_str(), position));
+            if kept.len() > keep {
+                kept.pop();
+            }
+        }
+        kept.into_sorted_vec()
+            .into_iter()
+            .map(|(_, _, position)| {
+                let note = &notes[position];
+                NoteQueryRow {
+                    vault_id,
+                    title: note.title.clone(),
+                    slug: note.slug.clone(),
+                    relative_path: note.relative_path.clone(),
+                    properties: self.project(note),
+                }
             })
             .collect()
     }
@@ -263,7 +349,7 @@ impl CompiledQuery {
 }
 
 impl CompiledCondition {
-    fn matches(&self, note: &VaultSnapshotNote) -> bool {
+    pub(super) fn matches(&self, note: &VaultSnapshotNote) -> bool {
         match self {
             Self::Tag(wanted) => note
                 .metadata
@@ -271,12 +357,27 @@ impl CompiledCondition {
                 .iter()
                 .any(|candidate| tag_matches(candidate, wanted)),
             Self::PathPrefix(prefix) => path_under(&note.relative_path, prefix),
-            Self::Property {
-                name,
+            Self::Compare {
+                subject,
                 operator,
                 value,
-            } => property_matches(property(note, name), *operator, value.as_ref()),
+            } => property_matches(subject.value(note).as_deref(), *operator, value.as_ref()),
+            Self::All(conditions) => conditions.iter().all(|condition| condition.matches(note)),
+            Self::Any(conditions) => conditions.iter().any(|condition| condition.matches(note)),
+            Self::Not(condition) => !condition.matches(note),
         }
+    }
+
+    /// A tag condition, normalised the way the indexer stored the tag, or
+    /// `None` when nothing is left once the decoration is stripped.
+    pub(super) fn tag(raw: &str) -> Option<Self> {
+        normalize_tag_path(raw).map(Self::Tag)
+    }
+
+    /// A folder condition, segment-aware and case-insensitive, or `None` when
+    /// the folder names nothing.
+    pub(super) fn folder(raw: &str) -> Option<Self> {
+        normalize_path_prefix(raw).map(Self::PathPrefix)
     }
 }
 
@@ -303,20 +404,7 @@ fn compile_condition(condition: &NoteQueryCondition) -> Result<CompiledCondition
             if name.trim().is_empty() {
                 return Err(invalid_query("a property condition needs a name"));
             }
-            // The frontmatter parser lifts `tags` and `aliases` out of the
-            // property map into their own parsed lists, so a property
-            // condition naming either would find nothing and answer `missing`
-            // for every Note in the Vault — a wrong answer that looks like a
-            // real one. Refuse instead, and say where the tag axis lives.
-            if let Some(refusal) = match name.as_str() {
-                "tags" => Some(
-                    "tags is not a frontmatter property here; select by tag with a tag condition",
-                ),
-                "aliases" => Some(
-                    "aliases is not a frontmatter property here; it can be projected but not queried",
-                ),
-                _ => None,
-            } {
+            if let Some(refusal) = lifted_property_refusal(name) {
                 return Err(invalid_query(refusal));
             }
             match (operator.takes_value(), value) {
@@ -328,13 +416,30 @@ fn compile_condition(condition: &NoteQueryCondition) -> Result<CompiledCondition
                     "the {} operator takes no value",
                     operator.wire_name()
                 ))),
-                _ => Ok(CompiledCondition::Property {
-                    name: name.clone(),
+                _ => Ok(CompiledCondition::Compare {
+                    subject: Subject::Property(name.clone()),
                     operator: *operator,
                     value: value.clone(),
                 }),
             }
         }
+    }
+}
+
+/// Why a property condition may not name `tags` or `aliases`. The frontmatter
+/// parser lifts both out of the property map into their own parsed lists, so a
+/// condition naming either would find nothing and answer `missing` for every
+/// Note in the Vault — a wrong answer that looks like a real one. Refuse
+/// instead, and say where the tag axis lives.
+fn lifted_property_refusal(name: &str) -> Option<&'static str> {
+    match name {
+        "tags" => {
+            Some("tags is not a frontmatter property here; select by tag with a tag condition")
+        }
+        "aliases" => {
+            Some("aliases is not a frontmatter property here; it can be projected but not queried")
+        }
+        _ => None,
     }
 }
 
@@ -373,7 +478,7 @@ fn path_under(relative_path: &str, prefix: &str) -> bool {
             .is_some_and(|tail| tail.starts_with('/'))
 }
 
-fn property<'a>(note: &'a VaultSnapshotNote, name: &str) -> Option<&'a Value> {
+pub(super) fn property<'a>(note: &'a VaultSnapshotNote, name: &str) -> Option<&'a Value> {
     note.metadata.properties.as_object()?.get(name)
 }
 
@@ -448,16 +553,46 @@ fn ordered(actual: &Value, expected: Option<&Value>, accept: impl Fn(Ordering) -
         .is_some_and(accept)
 }
 
-/// Numbers compare numerically, strings byte-wise — which orders ISO-8601 dates
-/// and timestamps correctly, the form YAML frontmatter dates are stored in.
-/// Anything else has no order.
+/// Numbers compare numerically. Two strings that both read as a date or a
+/// date and time compare as instants, so `2026-09-18 10:00`, `2026-09-18T09:00`
+/// and `2026-09-18T08:00:00Z` order the way a reader means them, and a bare
+/// date is the start of its day; any other pair of strings compares
+/// byte-wise. Anything else has no order.
 fn compare(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => left.as_f64()?.partial_cmp(&right.as_f64()?),
-        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        (Value::String(left), Value::String(right)) => {
+            Some(match (parse_instant(left), parse_instant(right)) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                _ => left.cmp(right),
+            })
+        }
         (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
         _ => None,
     }
+}
+
+/// A frontmatter date or date-time as a local instant, or `None` for text that
+/// is not one. A value carrying a zone (`Z`, `+02:00`) is moved into the
+/// server's local time, which is the time `now()` is read in.
+fn parse_instant(text: &str) -> Option<NaiveDateTime> {
+    let text = text.trim();
+    if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        return date.and_hms_opt(0, 0, 0);
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(instant) = NaiveDateTime::parse_from_str(text, format) {
+            return Some(instant);
+        }
+    }
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|instant| instant.with_timezone(&Local).naive_local())
 }
 
 /// The one order a query's results come back in, across every participating
@@ -737,6 +872,44 @@ mod tests {
     }
 
     #[test]
+    fn dates_and_times_written_differently_compare_as_instants() {
+        let later_today = json!("2026-09-18 10:00");
+        assert!(property_matches(
+            Some(&later_today),
+            PropertyOperator::Gt,
+            Some(&json!("2026-09-18T09:30:00"))
+        ));
+        assert!(property_matches(
+            Some(&json!("2026-09-18")),
+            PropertyOperator::Lt,
+            Some(&json!("2026-09-18T00:00:01"))
+        ));
+        assert!(property_matches(
+            Some(&json!("2026-09-18")),
+            PropertyOperator::Eq,
+            Some(&json!("2026-09-18T00:00:00"))
+        ));
+        let zoned = json!("2026-09-18T09:00:00Z");
+        let local = chrono::DateTime::parse_from_rfc3339("2026-09-18T09:00:00Z")
+            .expect("instant")
+            .with_timezone(&chrono::Local)
+            .naive_local()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        assert!(property_matches(
+            Some(&zoned),
+            PropertyOperator::Eq,
+            Some(&json!(local))
+        ));
+        // Text that is not a date still compares byte-wise.
+        assert!(property_matches(
+            Some(&json!("apple")),
+            PropertyOperator::Lt,
+            Some(&json!("banana"))
+        ));
+    }
+
+    #[test]
     fn numbers_and_booleans_order_the_way_a_reader_expects() {
         assert!(property_matches(
             Some(&json!(3)),
@@ -771,6 +944,58 @@ mod tests {
         assert_eq!(compiled(Some(0)), 1);
         assert_eq!(compiled(Some(10_000)), 200);
         assert_eq!(compiled(Some(7)), 7);
+    }
+
+    #[test]
+    fn one_vault_contributes_at_most_one_row_past_the_limit_in_answer_order() {
+        let compiled = CompiledQuery::compile(&NoteQuery {
+            limit: Some(2),
+            ..query(vec![tag("topic")])
+        })
+        .expect("compile");
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let note = |path: &str, tags: &[&str]| VaultSnapshotNote {
+            title: path.to_string(),
+            slug: path.to_lowercase(),
+            relative_path: path.to_string(),
+            size_bytes: 0,
+            mtime_ns: 0,
+            layer: None,
+            metadata: crate::vault::NoteMetadata {
+                tags: tags.iter().map(|tag| tag.to_string()).collect(),
+                aliases: Vec::new(),
+                properties: json!({}),
+            },
+        };
+        // Deliberately out of order, with a non-match among them.
+        let notes = [
+            note("e", &["topic"]),
+            note("b", &["topic"]),
+            note("skip", &["other"]),
+            note("d", &["topic"]),
+            note("a", &["topic"]),
+            note("c", &["topic"]),
+        ];
+
+        let rows = compiled.rows_for(vault_id, &notes);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "the limit's rows in answer order, plus one to show there were more"
+        );
+
+        let few = [note("z", &["topic"]), note("y", &["topic"])];
+        assert_eq!(
+            compiled
+                .rows_for(vault_id, &few)
+                .iter()
+                .map(|row| row.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["y", "z"],
+            "a Vault with no more matches than the limit contributes all of them"
+        );
     }
 
     #[test]

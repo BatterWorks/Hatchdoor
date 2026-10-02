@@ -17,11 +17,12 @@ export function missingVaultNames(participants: VaultParticipant[]): string[] {
 }
 
 /**
- * The Vaults that answered from current rows but have no vectors yet, so they
- * contributed nothing to a *semantic* search. Kept apart from
- * `missingVaultNames` on purpose: saying one "did not answer" is exactly the
- * confusion the `not_searchable` state exists to remove — its Notes are
- * present and browsable, they are simply not embedded yet.
+ * The Vaults where a *semantic* search could not reach some or all of the
+ * notes it selected, because those notes have no vectors: not embedded yet,
+ * or on a demoted layer with layer embedding switched off (#328). Kept apart
+ * from `missingVaultNames` on purpose: saying one "did not answer" is exactly
+ * the confusion the `not_searchable` state exists to remove — its Notes are
+ * present and browsable, and Keyword search reaches them.
  */
 export function notSearchableVaultNames(
   participants: VaultParticipant[],
@@ -31,9 +32,10 @@ export function notSearchableVaultNames(
     .map((participant) => participant.vault_name);
 }
 
-/** "X is still building search." / "X and Y are still building search." */
+/** "Semantic search could not reach some notes in X. Keyword search can." —
+ * true whether the notes are still being embedded or will never be. */
 export function describeNotSearchableVaults(names: string[]): string {
-  return `${joinWithAnd(names)} ${names.length === 1 ? "is" : "are"} still building search.`;
+  return `Semantic search could not reach some notes in ${joinWithAnd(names)}. Keyword search can.`;
 }
 
 /** "X did not answer." / "X and Y did not answer." / "X, Y, and Z did not
@@ -55,7 +57,10 @@ export function describeVaultsNotDrawn(missing: string[]): string {
   return `${joinWithAnd(missing)} could not be drawn.`;
 }
 
-function joinWithAnd(names: string[]): string {
+/** "X" / "X and Y" / "X, Y, and Z": the Vault-name list every sentence here
+ * is built on, exported so a feature can phrase its own sentence around the
+ * same list. */
+export function joinWithAnd(names: string[]): string {
   if (names.length <= 1) {
     return names[0] ?? "";
   }

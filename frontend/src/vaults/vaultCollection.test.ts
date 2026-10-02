@@ -134,6 +134,90 @@ describe("the Vault collection client's list", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.vaults).toEqual([]);
     expect(result.current.error).toBe("boom");
+    // Nothing is known about the collection: not the same as none (#333).
+    expect(result.current.readState).toBe("error");
+  });
+
+  it("names an unreachable server rather than the browser's own wording (#333)", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+
+    const { result } = renderHook(() => useVaultCollection());
+
+    await waitFor(() => expect(result.current.readState).toBe("error"));
+    expect(result.current.error).toBe("Could not reach the Hatchdoor server.");
+  });
+
+  it("recovers from a failed discovery on the next refresh (#333)", async () => {
+    const alpha = healthyVault("Alpha");
+    let online = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        if (!online) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return Promise.resolve(
+            jsonResponse(discoveryResponse([alpha], false)),
+          );
+        }
+        return Promise.resolve(jsonResponse(statsFor([alpha], [4])));
+      },
+    );
+
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.readState).toBe("error"));
+
+    online = true;
+    await act(async () => {
+      await refreshVaultCollection();
+    });
+
+    expect(result.current.readState).toBe("ready");
+    expect(result.current.error).toBeNull();
+    expect(result.current.vaults).toEqual([alpha]);
+  });
+
+  it("reads a discovery with no enabled Vaults as empty, not as an error", async () => {
+    mockCollection([]);
+
+    const { result } = renderHook(() => useVaultCollection());
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.readState).toBe("empty");
+  });
+
+  it("keeps the last known list when a later refresh fails", async () => {
+    const alpha = healthyVault("Alpha");
+    let online = true;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        if (!online) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return Promise.resolve(
+            jsonResponse(discoveryResponse([alpha], false)),
+          );
+        }
+        return Promise.resolve(jsonResponse(statsFor([alpha], [4])));
+      },
+    );
+
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.readState).toBe("ready"));
+
+    online = false;
+    await act(async () => {
+      await refreshVaultCollection();
+    });
+
+    expect(result.current.vaults).toEqual([alpha]);
+    expect(result.current.error).toBe("Could not reach the Hatchdoor server.");
+    expect(result.current.readState).not.toBe("error");
   });
 
   it("keeps an unreadable registry distinct from a failed legacy upgrade", async () => {
@@ -236,6 +320,98 @@ describe("the Vault collection client's note counts", () => {
     });
 
     expect(result.current.noteCounts).toEqual({ [alpha.vault_id]: 4 });
+    expect(result.current.readState).toBe("partial");
+  });
+
+  it("keeps a Vault's last known count when a partial read leaves it out (#333)", async () => {
+    const alpha = healthyVault("Alpha");
+    const beta = healthyVault("Beta");
+    let partial = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return Promise.resolve(
+            jsonResponse(discoveryResponse([alpha, beta], false)),
+          );
+        }
+        if (!partial) {
+          return Promise.resolve(jsonResponse(statsFor([alpha, beta], [4, 7])));
+        }
+        // Beta's snapshot read failed: the server lists it as a participant
+        // and leaves it out of `data`.
+        const envelope = statsFor([alpha], [5]);
+        return Promise.resolve(
+          jsonResponse({
+            ...envelope,
+            partial: true,
+            participants: [
+              participantFor(alpha),
+              participantFor(beta, "unavailable"),
+            ],
+          }),
+        );
+      },
+    );
+
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.readState).toBe("ready"));
+    expect(result.current.noteCounts).toEqual({
+      [alpha.vault_id]: 4,
+      [beta.vault_id]: 7,
+    });
+
+    partial = true;
+    await act(async () => {
+      await refreshVaultCollection();
+    });
+
+    expect(result.current.noteCounts).toEqual({
+      [alpha.vault_id]: 5,
+      [beta.vault_id]: 7,
+    });
+    expect(result.current.readState).toBe("partial");
+  });
+
+  it("leaves a Vault a partial read never counted unknown, not 0 (#333)", async () => {
+    const alpha = healthyVault("Alpha");
+    const beta = healthyVault("Beta");
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return Promise.resolve(
+            jsonResponse(discoveryResponse([alpha, beta], false)),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({
+            ...statsFor([alpha], [4]),
+            partial: true,
+            participants: [
+              participantFor(alpha),
+              participantFor(beta, "unavailable"),
+            ],
+          }),
+        );
+      },
+    );
+
+    const { result } = renderHook(() => ({
+      collection: useVaultCollection(),
+      projection: useVaultProjection(),
+    }));
+    await waitFor(() =>
+      expect(result.current.collection.readState).toBe("partial"),
+    );
+
+    expect(result.current.collection.noteCounts).toEqual({
+      [alpha.vault_id]: 4,
+    });
+    expect(result.current.projection.slotFor(beta)).toEqual({
+      kind: "count",
+      count: null,
+    });
   });
 });
 

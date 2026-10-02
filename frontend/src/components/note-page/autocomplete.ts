@@ -33,16 +33,17 @@ export function getWikilinkTrigger(
 }
 
 /**
- * Replace the open wikilink token with `[[title]]` and report the new caret
- * position (just after the inserted token).
+ * Replace the open wikilink token with the link to the chosen note and report
+ * the new caret position (just after the inserted link). `inserted` is the
+ * link in the Vault's link style; it defaults to `[[title]]`.
  */
 export function applyWikilinkSelection(
   text: string,
   caret: number,
   start: number,
   title: string,
+  inserted = `[[${title}]]`,
 ): { text: string; caret: number } {
-  const inserted = `[[${title}]]`;
   return {
     text: text.slice(0, start) + inserted + text.slice(caret),
     caret: start + inserted.length,

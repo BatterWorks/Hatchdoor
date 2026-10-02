@@ -76,6 +76,21 @@ export type VaultCapabilities = {
    * console offering **Sync now** from one that can only offer **Commit
    * now**. */
   sync: boolean;
+  /** Whether this Vault's side of a sync conflict can be published to its
+   * recovery branch now: a Two-way Vault whose Git status reports
+   * `managed_git_conflict` (ADR-30). */
+  publish_recovery: boolean;
+};
+
+/** The outcome of the latest request to publish a Vault's side of a sync
+ * conflict to its recovery branch (ADR-30). A refusal keeps the earlier
+ * publication's fields, since that branch still stands on the remote. */
+export type RecoveryBranchStatus = {
+  branch?: string;
+  published_commit?: string;
+  conflicting_commit?: string;
+  published_at?: string;
+  error?: VaultRuntimeError;
 };
 
 /** How a git-backed Vault's history is kept: local commits only, or synced
@@ -122,6 +137,11 @@ export type VaultSummary = {
   activation: "active" | "disabled" | "unavailable";
   local_content: "read_write" | "read_only" | "unavailable";
   search: "unavailable" | "indexing" | "browsable" | "ready" | "stale";
+  /** Where this Vault's indexing stands in the instance-wide queue (ADR-35):
+   * `running`, or `waiting` while it is queued behind another Vault's or
+   * paused part-way to let one through. Independent of `search`, which says
+   * what the Vault answers meanwhile. Absent when nothing is queued. */
+  index_turn?: "running" | "waiting";
   git: "disabled" | "pending" | "ready" | "unavailable";
   /** When this Vault's last scheduled or manual Git turn finished, RFC 3339
    * UTC — whether it succeeded or failed, so read it with `git` rather than
@@ -139,7 +159,19 @@ export type VaultSummary = {
   search_error?: VaultRuntimeError;
   git_error?: VaultRuntimeError;
   watcher_error?: VaultRuntimeError;
+  /** Absent until a recovery branch is requested, once the conflict clears,
+   * and on the read-only demo. */
+  recovery_branch?: RecoveryBranchStatus;
+  /** The form this Vault writes new note links and embeds in (ADR-33), read
+   * from the Vault on every listing. Absent when the Vault cannot be read and
+   * on the read-only demo; treat absent as `"wikilink"`. */
+  link_style?: LinkStyle;
+  /** The path form a Markdown link takes in this Vault. */
+  link_path_form?: LinkPathForm;
 };
+
+export type LinkStyle = "wikilink" | "markdown";
+export type LinkPathForm = "relative" | "absolute" | "shortest";
 
 export type VaultRegistryRecovery = {
   code: "vault_registry_recovery_required";
@@ -237,6 +269,15 @@ export type NoteMetadata = {
 export type VaultQualifiedNote = {
   vault_id: VaultId;
   note: Note;
+  /** The note's saved queries by name, never evaluated (#277). The page
+   * fetches rows from `.../saved-queries` instead. */
+  saved_queries: SavedQuerySummary[];
+};
+
+/** One fenced `base` block in a note; `name` is null when it has no usable
+ * `hatchdoor-query` marker. */
+export type SavedQuerySummary = {
+  name: string | null;
 };
 
 export type NoteLink = {
@@ -271,6 +312,11 @@ export type NoteLinks = {
 export type WriteCapabilities = {
   vault_id: VaultId;
   enabled: boolean;
+  /** Whether this Vault's filesystem can commit a note save as one atomic
+   * swap. `false` means saves work but through a check-then-replace path an
+   * outside editor can race; `null` means the filesystem could not be asked.
+   * It answers for the filesystem, not for whether this Vault is writable. */
+  atomic_compare_and_swap: boolean | null;
   warnings: string[];
 };
 
@@ -351,13 +397,35 @@ export type VaultResolveBatchResponse = {
     target: string;
     path: string | null;
   }>;
+  // Slugs for the request's `note_link_targets`, Markdown note links resolved
+  // by path from the note's folder (ADR-28). Optional so a response from an
+  // older server parses, leaving those links on the missing-link affordance.
+  note_link_results?: Array<{
+    target: string;
+    slug: string | null;
+    archived: boolean;
+  }>;
 };
 
 export type TagStat = { tag: string; note_count: number };
 export type NoteRef = { title: string; slug: string };
 export type NoteWordRef = NoteRef & { word_count: number };
 export type LinkedNoteRef = NoteRef & { backlink_count: number };
-export type MonthActivity = { month: string; modified_count: number };
+/**
+ * One calendar month of the "Notes created" window: how many notes have their
+ * created date in it (#300). `activity_by_month` carries exactly six of these,
+ * oldest first, one per calendar month ending at the current UTC month,
+ * zero-filled where nobody started a note (#298). Average over the window, not
+ * over the entries received.
+ */
+export type MonthActivity = { month: string; created_count: number };
+/**
+ * Whether every created date behind the chart came from where it should have.
+ * `estimated`: a Git-backed Vault's history is shallow or unreadable, so some
+ * notes were dated by their files. `reading`: the history is still being read
+ * and asking again shortly will do better.
+ */
+export type CreatedDateStatus = "complete" | "estimated" | "reading";
 export type FolderStat = { folder: string; note_count: number };
 export type NoteList = { count: number; notes: NoteRef[] };
 
@@ -394,6 +462,7 @@ export type VaultStats = {
   top_tags: TagStat[];
   most_linked: LinkedNoteRef[];
   activity_by_month: MonthActivity[];
+  created_date_status: CreatedDateStatus;
   notes_per_folder: FolderStat[];
   longest_notes: NoteWordRef[];
   shortest_notes: NoteWordRef[];

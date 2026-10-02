@@ -446,9 +446,9 @@ describe("SearchDialog's own Vault filter — never the browsing scope (#144)", 
   });
 
   it("falls back to All results when the browsing scope names a Vault that is gone", () => {
-    // `useVaultScope` reads the scope straight out of localStorage and never
-    // reconciles it, so a Vault disabled since it was last browsed leaves an
-    // id behind that no row can match.
+    // `useVaultScope` reconciles the scope only once discovery has answered,
+    // so a Vault disabled since it was last browsed can still hand the dialog
+    // an id that no row can match.
     renderDialog({
       results: FACET_RESULTS,
       participants: FACET_PARTICIPANTS,
@@ -668,9 +668,103 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
     expect(props.onRetryModelSetup).toHaveBeenCalledTimes(1);
   });
 
+  it("gives a demo visitor a neutral sentence and no retry for a failed model (#339)", () => {
+    const operatorCopy =
+      "The search model could not be downloaded or loaded. Check the Hatchdoor logs, then retry setup.";
+    renderDialog({
+      query: "plan",
+      demoMode: true,
+      startupStatus: { state: "failed", message: operatorCopy },
+    });
+
+    expect(
+      screen.getByText("Search is unavailable on this demo right now."),
+    ).toBeVisible();
+    expect(screen.queryByText(operatorCopy)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry setup" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+  });
+
+  it("says the model is downloading rather than 'No matching notes' (#339)", () => {
+    renderDialog({
+      query: "plan",
+      startupStatus: { state: "downloading", percent: 55 },
+    });
+
+    expect(
+      screen.getByText(/Downloading the search model \(55%\)/),
+    ).toBeVisible();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+  });
+
+  it("says a model choice is pending rather than 'No matching notes' (#339)", () => {
+    renderDialog({ query: "plan", startupStatus: { state: "terms_required" } });
+
+    expect(
+      screen.getByText(/waiting for a search model to be chosen/),
+    ).toBeVisible();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+  });
+
   it("does not show a work-in-flight or failed block once the gate has stepped aside", () => {
     renderDialog({ startupStatus: { state: "ready" } });
 
     expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
+  });
+});
+
+describe("SearchDialog keeps keyboard focus and its filter honest (#334)", () => {
+  afterEach(() => {
+    cleanup();
+    document.getElementById("search-dialog-test-css")?.remove();
+  });
+
+  it("wraps Tab from the last visible control back to the first when the result list is empty at one Vault", () => {
+    // The desktop stylesheet hides the phone field strip; its Mode select is
+    // still in the DOM and used to be taken as the last stop.
+    const style = document.createElement("style");
+    style.id = "search-dialog-test-css";
+    style.textContent = ".search-field-strip { display: none; }";
+    document.head.appendChild(style);
+
+    renderDialog({ vaults: [ALPHA], results: [], query: "plan" });
+
+    const checkbox = screen.getByRole("checkbox", { name: /Keyword mode/ });
+    checkbox.focus();
+    fireEvent.keyDown(checkbox, { key: "Tab" });
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Close" }),
+    );
+
+    screen.getByRole("button", { name: "Close" }).focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(checkbox);
+  });
+
+  it("drops a filter on a Vault that has left the collection since the dialog opened", () => {
+    const withBeta: SearchResult[] = [
+      ...FACET_RESULTS,
+      resultFor(BETA.vault_id, { note_slug: "three", note_title: "Three" }),
+    ];
+    const { props, rerender } = renderDialog({
+      results: withBeta,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: BETA.vault_id,
+    });
+    expect(screen.queryByText("One")).not.toBeInTheDocument();
+
+    rerender(<SearchDialog {...props} vaults={[ALPHA, GAMMA]} />);
+
+    expect(screen.getByRole("button", { name: /All results/ })).toHaveClass(
+      "is-selected",
+    );
+    expect((screen.getByLabelText("Scope") as HTMLSelectElement).value).toBe(
+      "all",
+    );
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.queryByText(/No results in/)).not.toBeInTheDocument();
   });
 });

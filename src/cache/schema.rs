@@ -229,6 +229,7 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         DROP TABLE IF EXISTS vault_notes;
         DROP TABLE IF EXISTS vault_snapshot_metadata;
         DROP TABLE IF EXISTS vault_snapshots;
+        DROP TABLE IF EXISTS vault_embedding_progress;
         DROP TRIGGER IF EXISTS chunk_fts_au;
         DROP TRIGGER IF EXISTS chunk_fts_ad;
         DROP TRIGGER IF EXISTS chunk_fts_ai;
@@ -519,6 +520,25 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             embedding FLOAT[{dim}],
             layer TEXT PARTITION KEY,
             vault_id TEXT AUXILIARY
+        );
+
+        -- Vectors an Index turn has embedded but not yet published (ADR-35),
+        -- saved as the turn goes so an interrupted turn resumes instead of
+        -- re-embedding from zero. Never searched: search reads only the
+        -- published `vault_chunk_vectors` tables. Keyed by the hash of the
+        -- embedded input, the same key published vectors are reused by. No
+        -- foreign key to `vault_snapshots`, because every publication deletes
+        -- and re-inserts that row and a cascade would take the progress with
+        -- it. Created with IF NOT EXISTS, so an existing cache gains it
+        -- without a schema bump and the full re-embed that would cost.
+        CREATE TABLE IF NOT EXISTS vault_embedding_progress (
+            vault_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            embedder_id TEXT NOT NULL,
+            embed_layers INTEGER NOT NULL CHECK (embed_layers IN (0, 1)),
+            embedding BLOB NOT NULL,
+            embedding_millis INTEGER NOT NULL,
+            PRIMARY KEY (vault_id, content_hash)
         );
 
         INSERT INTO metadata(key, value)

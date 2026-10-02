@@ -15,6 +15,7 @@ use super::paths::{
     resolve_existing_attachment_path, resolve_new_attachment_path,
     unique_trash_attachment_relative_path, vault_relative_file_path,
 };
+use super::rewrites::refuse_unrewritable;
 use super::types::{AttachmentInfo, AttachmentOutcome, MutationPhase, WriteError};
 
 pub fn list_note_attachments(
@@ -64,12 +65,7 @@ pub fn import_attachment_bytes(
             "attachment exceeds max size: {size} > {max_bytes}",
         )));
     }
-    if target_path.exists() && !overwrite {
-        return Err(WriteError::Conflict(format!(
-            "Attachment already exists: {}",
-            normalize_attachment_relative_path(target_relative_path)?
-        )));
-    }
+    ensure_import_target_free(&target_path, target_relative_path, overwrite)?;
 
     // Resolve markers before mutating the filesystem. A malformed marker must
     // fail this request atomically rather than leaving a persisted attachment
@@ -87,6 +83,35 @@ pub fn import_attachment_bytes(
         cleanup_warning: None,
         affected_paths: vec![target_path],
     })
+}
+
+/// The refusals [`import_attachment_bytes`] can make before it has the bytes:
+/// an invalid or escaping target, a disallowed extension, and an existing
+/// file that may not be replaced. Writes nothing, so an upload link can be
+/// refused when it is minted rather than after the agent has sent the file.
+/// The import itself checks again, since the Vault may change in between.
+pub fn check_attachment_import_target(
+    vault_root: &Path,
+    target_relative_path: &str,
+    overwrite: bool,
+) -> Result<(), WriteError> {
+    let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
+    ensure_uploadable_attachment_path(&target_path)?;
+    ensure_import_target_free(&target_path, target_relative_path, overwrite)
+}
+
+fn ensure_import_target_free(
+    target_path: &Path,
+    target_relative_path: &str,
+    overwrite: bool,
+) -> Result<(), WriteError> {
+    if target_path.exists() && !overwrite {
+        return Err(WriteError::Conflict(format!(
+            "Attachment already exists: {}",
+            normalize_attachment_relative_path(target_relative_path)?
+        )));
+    }
+    Ok(())
 }
 
 pub fn move_attachment(
@@ -147,8 +172,9 @@ pub fn delete_attachment(
     // creates a trash folder for a file that is not going there.
     ensure_movable_attachment_path(vault_root, &source_path)?;
     let trash_relative = unique_trash_attachment_relative_path(vault_root, source_relative_path)?;
+    // The trash folder is created by the move once its plan stands, so a
+    // refused delete leaves none behind either (#360).
     let trash_path = vault_root.join(&trash_relative);
-    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
     move_attachment_by_paths_with_hook(
         vault_root,
         index,
@@ -180,9 +206,18 @@ fn move_attachment_by_paths_with_hook(
     ensure_existing_path_inside_root(vault_root, source_path)?;
     ensure_movable_attachment_path(vault_root, source_path)?;
     ensure_movable_attachment_path(vault_root, target_path)?;
+    let mut unrewritable = Vec::new();
+    let rewrites = asset_reference_rewrite_plan(
+        vault_root,
+        index,
+        "",
+        source_path,
+        target_path,
+        &[],
+        &mut unrewritable,
+    );
+    refuse_unrewritable(unrewritable)?;
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
-    let rewrites =
-        asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
     let mut journal = MutationJournal::new(vault_root);
     if let Err(error) = journal.move_file(MutationPhase::Asset, source_path, target_path) {
         return Err(journal.rollback(error));

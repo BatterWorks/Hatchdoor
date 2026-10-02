@@ -164,6 +164,7 @@ fn management_error_response(error: VaultOperationError) -> Response {
         // Retry-after-operator-action, or retry-after-the-runtime-settles.
         "vault_registry_recovery_required"
         | "legacy_environment_cleanup_required"
+        | "legacy_migration_required"
         | "vault_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         // `internal_error` and `registry_revision_exhausted`.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -188,9 +189,15 @@ fn schedule_response(response: VaultScheduleResponse) -> Response {
 /// credentials, only `credential_configured`. Reachable unauthenticated in
 /// demo mode (#109), where the core answers with its public projection.
 pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
-    match VaultCollectionManagement::new(&state).list() {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
+    // Off the async runtime: a Vault's link style can mean reading every note.
+    let listing =
+        tokio::task::spawn_blocking(move || VaultCollectionManagement::new(&state).list()).await;
+    match listing {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(error)) => management_error_response(error),
+        Err(join_error) => {
+            internal_error_response(format!("background task panicked: {join_error}"), None)
+        }
     }
 }
 
@@ -346,6 +353,22 @@ pub async fn retry_vault_handler(
     }
 }
 
+/// `POST /api/v1/vaults/{vault_id}/recovery-branch` — ask for this Vault's
+/// side of a sync conflict to be published to its recovery branch (ADR-30).
+/// Admits the turn and returns; the outcome lands on the Vault's
+/// `recovery_branch` status.
+pub async fn publish_recovery_branch_handler(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Response {
+    match parse_vault_id(&raw_id)
+        .and_then(|vault_id| VaultCollectionManagement::new(&state).publish_recovery(vault_id))
+    {
+        Ok(response) => schedule_response(response),
+        Err(error) => management_error_response(error),
+    }
+}
+
 /// `POST /api/v1/vaults/{vault_id}/refresh` — request one Vault's next Index
 /// turn. The route only admits work to the shared FIFO; the runtime worker
 /// performs the authoritative Markdown scan and atomic snapshot publication.
@@ -391,12 +414,26 @@ fn collection_revision_event(event: &VaultCollectionRevisionEvent) -> Event {
 /// IDs, and a broad change category; carries no Note content. A subscriber
 /// that misses an intermediate advance (the channel keeps only the latest
 /// value) still learns the current revision and should refetch broadly.
+///
+/// The stream ends when the server starts shutting down. Nothing else ends it,
+/// and graceful shutdown waits for it, so without that one open browser tab
+/// kept the process alive until the supervisor killed it (#353). The browser's
+/// `EventSource` reconnects on its own once the server is back.
 pub async fn vault_collection_events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream = WatchStream::new(VaultCollectionManagement::new(&state).subscribe_revisions())
-        .map(|event| Ok(collection_revision_event(&event)));
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let revisions = WatchStream::new(VaultCollectionManagement::new(&state).subscribe_revisions())
+        .map(|event| Some(Ok(collection_revision_event(&event))));
+    let shutdown = state.shutdown.clone();
+    let shutting_down = tokio_stream::once(()).then(move |()| {
+        let shutdown = shutdown.clone();
+        async move {
+            shutdown.wait().await;
+            None
+        }
+    });
+    Sse::new(revisions.merge(shutting_down).map_while(|event| event))
+        .keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]
@@ -445,6 +482,7 @@ mod tests {
                 "legacy_environment_cleanup_required",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
+            ("legacy_migration_required", StatusCode::SERVICE_UNAVAILABLE),
             ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
             (
                 "registry_revision_exhausted",
@@ -522,6 +560,83 @@ mod tests {
         assert!(vaults[0]["capabilities"].is_object());
     }
 
+    async fn create_local_vault(state: &AppState, name: &str, path: std::path::PathBuf) {
+        let expected_registry_revision = VaultCollectionManagement::new(state)
+            .list()
+            .expect("list")
+            .registry_revision
+            .expect("registry revision");
+        VaultCollectionManagement::new(state)
+            .create(CreateVaultRequest {
+                expected_registry_revision,
+                name: name.to_string(),
+                enabled: true,
+                source: VaultSource::Local { path },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })
+            .await
+            .expect("create the Vault");
+    }
+
+    async fn listed_vaults(state: &AppState) -> Vec<serde_json::Value> {
+        let response = list_vaults_handler(State(state.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("discovery body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("discovery JSON");
+        body["vaults"].as_array().expect("vaults array").clone()
+    }
+
+    fn named<'a>(vaults: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+        vaults
+            .iter()
+            .find(|vault| vault["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+    }
+
+    /// ADR-33 on the wire: each Vault reports the style it is read to have,
+    /// re-read on every listing, and a Vault that cannot be read is still
+    /// listed, just without one.
+    #[tokio::test]
+    async fn discovery_reports_each_vaults_link_style_from_its_own_files() {
+        let (state, _worker, directory) = test_state();
+        let obsidian = directory.path().join("obsidian");
+        std::fs::create_dir_all(obsidian.join(".obsidian")).expect("obsidian dir");
+        let app_json = obsidian.join(".obsidian/app.json");
+        std::fs::write(
+            &app_json,
+            r#"{"useMarkdownLinks":true,"newLinkFormat":"absolute"}"#,
+        )
+        .expect("app.json");
+        let counted = directory.path().join("counted");
+        std::fs::create_dir_all(&counted).expect("counted dir");
+        std::fs::write(counted.join("A.md"), "[b](B.md) [c](C.md) [[B]]").expect("note");
+        std::fs::write(counted.join("B.md"), "plain").expect("note");
+        let gone = directory.path().join("gone");
+        std::fs::create_dir_all(&gone).expect("gone dir");
+        create_local_vault(&state, "Obsidian", obsidian).await;
+        create_local_vault(&state, "Counted", counted).await;
+        create_local_vault(&state, "Gone", gone.clone()).await;
+        std::fs::remove_dir_all(&gone).expect("remove the Vault directory");
+
+        let vaults = listed_vaults(&state).await;
+        assert_eq!(named(&vaults, "Obsidian")["link_style"], "markdown");
+        assert_eq!(named(&vaults, "Obsidian")["link_path_form"], "absolute");
+        assert_eq!(named(&vaults, "Counted")["link_style"], "markdown");
+        assert_eq!(named(&vaults, "Counted")["link_path_form"], "relative");
+        assert!(named(&vaults, "Gone").get("link_style").is_none());
+        assert!(named(&vaults, "Gone").get("link_path_form").is_none());
+
+        std::fs::write(&app_json, r#"{"useMarkdownLinks":false}"#).expect("flip the switch");
+        let vaults = listed_vaults(&state).await;
+        assert_eq!(named(&vaults, "Obsidian")["link_style"], "wikilink");
+        assert_eq!(named(&vaults, "Obsidian")["link_path_form"], "shortest");
+    }
+
     /// The two statuses this adapter adds on top of the core's typed
     /// responses: `201` for a creation, `202` for admitted background work.
     #[tokio::test]
@@ -563,5 +678,169 @@ mod tests {
 
         let sync = sync_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
         assert_eq!(sync.status(), StatusCode::ACCEPTED);
+    }
+
+    /// `POST .../recovery-branch` admits a publish only while a Two-way
+    /// Vault's sync is stopped on a conflict (ADR-30), and says so with the
+    /// same `409 capability_unavailable` every other ineligible control uses.
+    #[tokio::test]
+    async fn a_recovery_branch_is_admitted_only_for_a_two_way_vault_in_conflict() {
+        let (state, _worker, directory) = test_state();
+        let repository_path = directory.path().join("existing-two-way-repo");
+        std::fs::create_dir_all(&repository_path).expect("create repo directory");
+        git2::Repository::init(&repository_path).expect("init git repo");
+        let created = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Two way".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: Some("https://example.test/owner/notes.git".to_string()),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        let refused =
+            publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(refused.into_body(), usize::MAX)
+                .await
+                .expect("refusal body"),
+        )
+        .expect("refusal JSON");
+        assert_eq!(body["code"], "capability_unavailable");
+
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("active runtime")
+            .set_git_status(
+                crate::vault_runtime::VaultGitStatus::Unavailable,
+                Some(crate::vault_runtime::VaultRuntimeError {
+                    code: "managed_git_conflict".to_string(),
+                    message: "managed checkout merge conflict: Home.md".to_string(),
+                    retryable: false,
+                    detail: None,
+                }),
+            )
+            .expect("publish the conflict");
+
+        let listed = list_vaults_handler(State(state.clone())).await;
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(listed.into_body(), usize::MAX)
+                .await
+                .expect("discovery body"),
+        )
+        .expect("discovery JSON");
+        assert_eq!(body["vaults"][0]["capabilities"]["publish_recovery"], true);
+
+        let admitted =
+            publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(admitted.into_body(), usize::MAX)
+                .await
+                .expect("schedule body"),
+        )
+        .expect("schedule JSON");
+        assert_eq!(body["schedule"], "queued");
+
+        let again =
+            publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(again.into_body(), usize::MAX)
+                .await
+                .expect("schedule body"),
+        )
+        .expect("schedule JSON");
+        assert_eq!(
+            body["schedule"], "coalesced",
+            "a second request joins the pending publish"
+        );
+    }
+
+    /// Only Two-way has a recovery branch: a Pull-only or Local-history Vault
+    /// is refused even while its status names a conflict (ADR-30).
+    #[tokio::test]
+    async fn a_recovery_branch_is_refused_for_pull_only_and_local_history_vaults() {
+        for (name, mode, url) in [
+            (
+                "Pull only",
+                VaultGitMode::PullOnly,
+                Some("https://example.test/owner/pull.git".to_string()),
+            ),
+            ("Local history", VaultGitMode::LocalHistory, None),
+        ] {
+            let (state, _worker, directory) = test_state();
+            let repository_path = directory.path().join("repo");
+            std::fs::create_dir_all(&repository_path).expect("create repo directory");
+            git2::Repository::init(&repository_path).expect("init git repo");
+            let created = create_vault_handler(
+                State(state.clone()),
+                Ok(Json(CreateVaultRequest {
+                    expected_registry_revision: 0,
+                    name: name.to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path,
+                        repository_url: url,
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode,
+                        poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                })),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::CREATED, "{name}");
+            let VaultRegistryState::Ready(snapshot) =
+                state.vault_registry.load().expect("load registry")
+            else {
+                panic!("registry entered recovery");
+            };
+            let vault_id = snapshot.vault_ids().next().expect("one Vault");
+            state
+                .vaults
+                .runtime(vault_id)
+                .expect("active runtime")
+                .set_git_status(
+                    crate::vault_runtime::VaultGitStatus::Unavailable,
+                    Some(crate::vault_runtime::VaultRuntimeError {
+                        code: "managed_git_conflict".to_string(),
+                        message: "conflict".to_string(),
+                        retryable: false,
+                        detail: None,
+                    }),
+                )
+                .expect("publish the conflict");
+
+            let refused =
+                publish_recovery_branch_handler(State(state.clone()), Path(vault_id.to_string()))
+                    .await;
+            assert_eq!(refused.status(), StatusCode::CONFLICT, "{name}");
+        }
     }
 }

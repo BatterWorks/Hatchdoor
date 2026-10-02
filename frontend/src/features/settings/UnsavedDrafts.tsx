@@ -44,6 +44,18 @@ function draftPreview(content: string): string {
   return flat.length > 160 ? `${flat.slice(0, 160)}…` : flat || "(empty)";
 }
 
+/** Why a Vault cannot take a draft right now, in the words the Vault index
+ * uses, or null when it can. A draft is rescued by writing it, so a Vault
+ * that cannot be written is not a destination (#338). */
+function destinationBlocker(vault: VaultSummary): string | null {
+  if (!vault.enabled) return "paused";
+  if (vault.activation === "unavailable") return "unavailable";
+  if (vault.capabilities.mutate) return null;
+  if (vault.local_content === "read_only") return "read-only";
+  if (vault.local_content === "unavailable") return "unavailable";
+  return "cannot be written";
+}
+
 function DraftRow({
   draft,
   vaults,
@@ -56,8 +68,9 @@ function DraftRow({
   onDiscard: (id: string) => void;
 }) {
   const navigate = useNavigate();
+  const writable = vaults.filter((vault) => destinationBlocker(vault) === null);
   const [destination, setDestination] = useState<VaultId | "">(
-    vaults.length === 1 ? vaults[0].vault_id : "",
+    writable.length === 1 ? writable[0].vault_id : "",
   );
   const [restoring, setRestoring] = useState(false);
   const [noSuchNote, setNoSuchNote] = useState(false);
@@ -102,6 +115,12 @@ function DraftRow({
       );
       if (res.status === 404) {
         setNoSuchNote(true);
+        return;
+      }
+      if (res.status === 503) {
+        setMessage(
+          "This Vault is not answering right now. Choose a different Vault, or try again once it is back.",
+        );
         return;
       }
       if (!res.ok) {
@@ -165,11 +184,18 @@ function DraftRow({
           }}
         >
           <option value="">Choose a Vault…</option>
-          {vaults.map((vault) => (
-            <option key={vault.vault_id} value={vault.vault_id}>
-              {vault.name}
-            </option>
-          ))}
+          {vaults.map((vault) => {
+            const blocker = destinationBlocker(vault);
+            return (
+              <option
+                key={vault.vault_id}
+                value={vault.vault_id}
+                disabled={blocker !== null}
+              >
+                {blocker ? `${vault.name} (${blocker})` : vault.name}
+              </option>
+            );
+          })}
         </select>
       </div>
       {noSuchNote ? (

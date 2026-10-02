@@ -679,6 +679,10 @@ struct StoredVaultRegistry {
 pub struct VaultRegistryStore {
     path: PathBuf,
     write_lock: Arc<Mutex<()>>,
+    /// Instance-owned directories no user-supplied Vault root may contain or
+    /// sit inside, beyond this store's own state directory (which is always
+    /// fenced): the cache and settings directories runtime composition names.
+    reserved_directories: Arc<[PathBuf]>,
 }
 
 impl VaultRegistryStore {
@@ -695,7 +699,21 @@ impl VaultRegistryStore {
         Self {
             write_lock: write_lock_for(&path),
             path,
+            reserved_directories: Arc::from(Vec::new()),
         }
+    }
+
+    /// Fence further instance-owned directories off user-supplied Vault
+    /// roots, alongside the registry's own state directory. A Vault whose
+    /// root contained (or sat inside) one of them would expose instance files
+    /// such as the registry's plaintext credentials through the attachment
+    /// read and write paths.
+    pub fn with_reserved_directories(
+        mut self,
+        directories: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        self.reserved_directories = directories.into_iter().collect();
+        self
     }
 
     pub fn load(&self) -> Result<VaultRegistryState, VaultRegistryError> {
@@ -729,6 +747,7 @@ impl VaultRegistryStore {
             ));
         }
         let source = normalize_source(definition.source)?;
+        self.ensure_outside_instance_state(&source)?;
         let vault_id = loop {
             let candidate = VaultId::generate().map_err(|error| {
                 VaultRegistryError::Storage(format!("could not generate Vault ID: {error}"))
@@ -796,6 +815,7 @@ impl VaultRegistryStore {
         } else {
             normalize_source(source)?
         };
+        self.ensure_outside_instance_state(&source)?;
         let identity_changed = !same_source_identity(&existing.source, &source);
         if identity_changed && existing.enabled {
             return Err(VaultRegistryError::InvalidDefinition(
@@ -905,7 +925,8 @@ impl VaultRegistryStore {
             });
         }
         if enabled {
-            normalize_source(existing.source.clone())?;
+            let source = normalize_source(existing.source.clone())?;
+            self.ensure_outside_instance_state(&source)?;
         }
         let record = vaults
             .get_mut(&vault_id)
@@ -915,16 +936,22 @@ impl VaultRegistryStore {
     }
 
     fn load_unlocked(&self) -> Result<VaultRegistryState, VaultRegistryError> {
-        if !self.path.exists() {
-            return Ok(VaultRegistryState::Ready(VaultRegistrySnapshot::empty()));
-        }
-
-        let encoded = fs::read(&self.path).map_err(|error| {
-            VaultRegistryError::Storage(format!(
-                "could not read Vault registry '{}': {error}",
-                self.path.display()
-            ))
-        })?;
+        // Only a definite `NotFound` means "never initialized". Any other
+        // failure (permission drift, I/O error, a symlink loop) is reported,
+        // never read as an empty revision-0 registry a mutation could commit
+        // over the real one.
+        let encoded = match fs::read(&self.path) {
+            Ok(encoded) => encoded,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(VaultRegistryState::Ready(VaultRegistrySnapshot::empty()));
+            }
+            Err(error) => {
+                return Err(VaultRegistryError::Storage(format!(
+                    "could not read Vault registry '{}': {error}",
+                    self.path.display()
+                )));
+            }
+        };
         let value: serde_json::Value = match serde_json::from_slice(&encoded) {
             Ok(value) => value,
             Err(_) => {
@@ -1164,6 +1191,45 @@ impl VaultRegistryStore {
                     })
             }
         }
+    }
+
+    /// Refuse a user-supplied Vault root that contains, or sits inside, an
+    /// instance-owned directory: this store's state directory (the registry
+    /// with its plaintext credentials, runtime state, and managed checkouts)
+    /// or any directory named through [`Self::with_reserved_directories`].
+    /// A managed-Git source is exempt: its checkout lives under the state
+    /// directory by design, at a location this store alone chooses.
+    fn ensure_outside_instance_state(
+        &self,
+        source: &VaultSource,
+    ) -> Result<(), VaultRegistryError> {
+        let roots = match source {
+            VaultSource::Local { path } => vec![path.as_path()],
+            VaultSource::ExistingGit {
+                repository_path, ..
+            } => vec![repository_path.as_path()],
+            VaultSource::ManagedGit { .. } => return Ok(()),
+        };
+        let state_directory = match self.path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let reserved = std::iter::once(state_directory)
+            .chain(self.reserved_directories.iter().map(PathBuf::as_path))
+            .map(canonical_or_normalized)
+            .collect::<Vec<_>>();
+        for root in roots {
+            let root = canonical_or_normalized(root);
+            if reserved
+                .iter()
+                .any(|directory| paths_overlap(&root, directory))
+            {
+                return Err(invalid_source(
+                    "Vault path overlaps a directory Hatchdoor keeps its own instance state in (Vault registry, cache, or settings); choose a location outside it",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn corrupt(&self, detail: impl fmt::Display) -> VaultRegistryRecovery {

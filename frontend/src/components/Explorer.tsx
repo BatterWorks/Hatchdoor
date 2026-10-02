@@ -1,11 +1,10 @@
 import { NavLink } from "react-router-dom";
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import type {
   ExplorerFolder,
   ExplorerNote,
   RecentNote,
-  VaultScope,
   VaultSummary,
 } from "../types";
 import { AddIcon } from "./icons";
@@ -78,14 +77,12 @@ export function RecentNotesList({
   collapsed,
   onToggleCollapsed,
   vaults,
-  scope,
 }: {
   notes: RecentNote[];
   onNavigate: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   vaults: VaultSummary[];
-  scope: VaultScope;
 }) {
   // A note whose Vault has left the collection cannot be opened — its link
   // resolves to "Vault definition was not found" — and it has no name to show
@@ -102,8 +99,11 @@ export function RecentNotesList({
     return null;
   }
   const recent = known.slice(0, 5);
-  // Provenance only where the list can actually span Vaults (#140).
-  const showVaultPrefix = scope === "all" && vaults.length > 1;
+  // This is a viewing history, not a collection read: it spans Vaults
+  // whatever the browsing scope is, so provenance follows the Vault count
+  // alone. Keying it to `scope === "all"` stripped the prefix at a narrowed
+  // scope while other Vaults' rows stayed listed (#334).
+  const showVaultPrefix = vaults.length > 1;
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
@@ -118,7 +118,8 @@ export function RecentNotesList({
       {collapsed ? null : (
         <ul id="recent-notes-list" className="tree root-tree">
           {recent.map((note, index) => (
-            <li key={note.slug} className="note-item">
+            // A slug is unique only within its Vault (#137).
+            <li key={`${note.vaultId}-${note.slug}`} className="note-item">
               {/* No active-note class here. The highlight is canonical in the
                   tree only; applying it in several lists at once is the bug
                   issue #12 reported. */}
@@ -149,6 +150,26 @@ export function RecentNotesList({
   );
 }
 
+/** A change to the folder-open record, applied by its owner to the latest
+ * state. Two folders toggling in one batch each get the other's write, which
+ * a whole next record built from a render's snapshot would drop (#305). */
+export type ExpandedFoldersUpdate = (
+  previous: Record<string, boolean>,
+) => Record<string, boolean>;
+
+const NO_FOLDERS: ReadonlySet<string> = new Set();
+
+type ClosedByReader = { currentPath: string; paths: ReadonlySet<string> };
+
+/** The folders the reader closed while `currentPath` was the open note. A
+ * record kept for another note no longer counts. */
+function closedFor(
+  closed: ClosedByReader,
+  currentPath: string,
+): ReadonlySet<string> {
+  return closed.currentPath === currentPath ? closed.paths : NO_FOLDERS;
+}
+
 export function FolderTree({
   root,
   currentPath,
@@ -160,15 +181,52 @@ export function FolderTree({
   root: ExplorerFolder;
   currentPath: string;
   expandedFolders: Record<string, boolean>;
-  onExpandedFoldersChange: (expanded: Record<string, boolean>) => void;
+  onExpandedFoldersChange: (update: ExpandedFoldersUpdate) => void;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
 }) {
-  const current = pathToNoteIdentity(currentPath);
+  // Keyed on the pathname, not on the parsed identity: `pathToNoteIdentity`
+  // returns a fresh object every call, so a dependency on it changed on every
+  // render and this walked the whole tree each time instead of never.
   const activePathFolders = useMemo(
-    () => collectAncestorFolderPaths(root, current),
-    [current, root],
+    () => collectAncestorFolderPaths(root, pathToNoteIdentity(currentPath)),
+    [currentPath, root],
   );
+  // Folders above the open note that the reader closed while it was open.
+  // Showing a note's folders is temporary and never saved (#365), so this
+  // lives here rather than in the record, and belongs to one open note: when
+  // the note changes it is empty again, and a folder holding the new note
+  // opens to show it.
+  const [closedByReader, setClosedByReader] = useState<ClosedByReader>(() => ({
+    currentPath,
+    paths: NO_FOLDERS,
+  }));
+  // Forget them as soon as the note changes, not merely while it differs:
+  // returning to a note later is opening it again, and must show its folders.
+  if (closedByReader.currentPath !== currentPath) {
+    setClosedByReader({ currentPath, paths: NO_FOLDERS });
+  }
+  const closedForThisNote = closedFor(closedByReader, currentPath);
+  const foldersShownForNote = useMemo(
+    () =>
+      new Set(
+        [...activePathFolders].filter((path) => !closedForThisNote.has(path)),
+      ),
+    [activePathFolders, closedForThisNote],
+  );
+
+  const onToggleFolder = (path: string, open: boolean) => {
+    setClosedByReader((previous) => {
+      const paths = new Set(closedFor(previous, currentPath));
+      if (open) {
+        paths.delete(path);
+      } else if (activePathFolders.has(path)) {
+        paths.add(path);
+      }
+      return { currentPath, paths };
+    });
+    onExpandedFoldersChange((previous) => ({ ...previous, [path]: open }));
+  };
 
   return (
     <ul className="tree root-tree">
@@ -179,12 +237,10 @@ export function FolderTree({
           currentPath={currentPath}
           folderPath={folder.name}
           expandedFolders={expandedFolders}
-          activePathFolders={activePathFolders}
+          foldersShownForNote={foldersShownForNote}
           writeEnabled={writeEnabled}
           onCreateNoteInFolder={onCreateNoteInFolder}
-          onToggleFolder={(path, open) =>
-            onExpandedFoldersChange({ ...expandedFolders, [path]: open })
-          }
+          onToggleFolder={onToggleFolder}
         />
       ))}
       {root.notes.map((note, index) => (
@@ -204,7 +260,7 @@ function FolderNode({
   currentPath,
   folderPath,
   expandedFolders,
-  activePathFolders,
+  foldersShownForNote,
   writeEnabled,
   onCreateNoteInFolder,
   onToggleFolder,
@@ -213,24 +269,43 @@ function FolderNode({
   currentPath: string;
   folderPath: string;
   expandedFolders: Record<string, boolean>;
-  activePathFolders: Set<string>;
+  foldersShownForNote: ReadonlySet<string>;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
   onToggleFolder: (path: string, open: boolean) => void;
 }) {
   const shouldOpen =
-    activePathFolders.has(folderPath) || expandedFolders[folderPath] === true;
+    foldersShownForNote.has(folderPath) || expandedFolders[folderPath] === true;
+  // What the element itself last reported. The browser opens a <details>
+  // before any state hears about it, so the children follow this as well as
+  // `shouldOpen`: a folder the reader sees open always has its contents
+  // mounted, even if the record never caught up (#305).
+  const [elementOpen, setElementOpen] = useState(shouldOpen);
+  const showChildren = shouldOpen || elementOpen;
 
   return (
     <li className="folder-item">
       <details
         open={shouldOpen}
-        onToggle={(event) =>
-          onToggleFolder(
-            folderPath,
-            (event.currentTarget as HTMLDetailsElement).open,
-          )
-        }
+        onToggle={(event) => {
+          // React dispatches `toggle` through every ancestor with an
+          // `onToggle`, so an enclosing folder sees its descendants' toggles
+          // too. Only this folder's own element speaks for this folder.
+          if (event.target !== event.currentTarget) {
+            return;
+          }
+          const open = event.currentTarget.open;
+          setElementOpen(open);
+          // The browser fires `toggle` when `open` changes for any reason,
+          // and does not say why. When the element now matches what this
+          // render asked for, React set it: the folder mounted open, or the
+          // open note moved. Only the reader's own toggle disagrees with the
+          // prop, and only that is saved (#365).
+          if (open === shouldOpen) {
+            return;
+          }
+          onToggleFolder(folderPath, open);
+        }}
       >
         <summary title={folderPath}>
           <span className="folder-label">{folder.name}</span>
@@ -250,28 +325,38 @@ function FolderNode({
             </button>
           ) : null}
         </summary>
+        {/* A closed folder renders nothing inside it. The browser hides a
+            collapsed <details>' content either way, so mounting it bought
+            nothing but DOM — on a whole Vault that is the difference between
+            a handful of rows and one per note. The cost is that find-in-page
+            no longer reaches a note in a collapsed folder on the browsers
+            that looked inside one; the in-app search does. */}
         <ul className="tree">
-          {folder.folders.map((child) => (
-            <FolderNode
-              key={`${folder.name}-${child.name}`}
-              folder={child}
-              currentPath={currentPath}
-              folderPath={`${folderPath}/${child.name}`}
-              expandedFolders={expandedFolders}
-              activePathFolders={activePathFolders}
-              writeEnabled={writeEnabled}
-              onCreateNoteInFolder={onCreateNoteInFolder}
-              onToggleFolder={onToggleFolder}
-            />
-          ))}
-          {folder.notes.map((note, index) => (
-            <NoteNode
-              key={note.slug}
-              note={note}
-              currentPath={currentPath}
-              index={index}
-            />
-          ))}
+          {showChildren ? (
+            <>
+              {folder.folders.map((child) => (
+                <FolderNode
+                  key={`${folder.name}-${child.name}`}
+                  folder={child}
+                  currentPath={currentPath}
+                  folderPath={`${folderPath}/${child.name}`}
+                  expandedFolders={expandedFolders}
+                  foldersShownForNote={foldersShownForNote}
+                  writeEnabled={writeEnabled}
+                  onCreateNoteInFolder={onCreateNoteInFolder}
+                  onToggleFolder={onToggleFolder}
+                />
+              ))}
+              {folder.notes.map((note, index) => (
+                <NoteNode
+                  key={note.slug}
+                  note={note}
+                  currentPath={currentPath}
+                  index={index}
+                />
+              ))}
+            </>
+          ) : null}
         </ul>
       </details>
     </li>

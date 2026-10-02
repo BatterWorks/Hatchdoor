@@ -5,18 +5,24 @@ mod fs_ops;
 mod notes;
 mod paths;
 mod rewrites;
+mod tags;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
 pub use attachments::{
-    delete_attachment, import_attachment_bytes, list_note_attachments, move_attachment,
-    rename_attachment,
+    check_attachment_import_target, delete_attachment, import_attachment_bytes,
+    list_note_attachments, move_attachment, rename_attachment,
 };
 pub use notes::{
-    SectionMode, append_note, archive_note, create_note, delete_note, edit_note,
-    move_or_rename_note, replace_section, update_note, update_note_frontmatter,
+    NoteTarget, SectionMode, append_note, archive_note, check_note_content_hash, create_note,
+    delete_note, edit_note, move_or_rename_note, note_exists_conflict, note_target,
+    replace_section, update_note, update_note_frontmatter,
 };
 pub use paths::allowed_attachment_extensions;
-pub use types::{AttachmentInfo, AttachmentOutcome, WriteError, WriteOutcome};
+pub use tags::{
+    NestedTag, TagDelete, TagDeleteError, TagDeleteNote, TagRename, TagRenameError, TagRenameNote,
+    UnsupportedTagNote, delete_tag, rename_tag,
+};
+pub use types::{AttachmentInfo, AttachmentOutcome, UnrewritableNote, WriteError, WriteOutcome};

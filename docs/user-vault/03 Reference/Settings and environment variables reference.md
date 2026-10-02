@@ -56,16 +56,17 @@ These live in `settings.json`, not `.env` — leave them unset in `.env` to mana
 | --- | --- | --- | --- |
 | `HATCHDOOR_MCP_ENABLED` | `false` | instant | Turns `/mcp` on or off. Off, the endpoint returns `404` rather than refusing — it isn't advertised as existing. |
 | `HATCHDOOR_MCP_WRITE_ENABLED` | `false` | instant | Separately gates every content- and Vault-mutating MCP tool. An agent can read with MCP enabled and this still off. Toggling it changes which tools Hatchdoor advertises, so connected agents are told to refresh their tool list — no reconnection needed. |
-| `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | `true` | instant | Layered resource protection on `/mcp`: at most 120 tool calls per minute per token, eight tool calls running at once (two of them expensive searches), with over-limit requests answered `429 Retry-After`. Protocol, discovery, and list handling are always exempt. Off removes the caps entirely. |
+| `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | `true` | instant | Layered resource protection on `/mcp`: at most 120 tool calls per minute per token, eight tool calls running at once (two of them expensive searches), with over-limit requests answered `429 Retry-After`. Each `search_notes` item inside a `batch` counts as one call. Protocol, discovery, and list handling are always exempt. Off removes the caps entirely. |
 | `HATCHDOOR_MCP_BEARER_TOKEN` | unset | instant | The MCP password, required even for read-only access — see [[The security model]]. Enabling `HATCHDOOR_MCP_ENABLED` without this set is a startup validation error if pinned in `.env`. |
 | `HATCHDOOR_MCP_ALLOWED_ORIGINS` | `http://127.0.0.1,http://localhost` | instant | Origin allow-list checked on every MCP request, as a defense against DNS-rebinding attacks. Mainly relevant to a browser-based MCP client, not a CLI agent. |
+| `HATCHDOOR_PUBLIC_URL` | unset | instant | The address people and agents reach this server at, such as `https://notes.example.com`, shown in Settings as **Public address**. Transfer links, which let an agent download or upload a file with no token, are built on it (see [[The security model#Transfer links]]). When set it always wins. Unset, links use the address the agent reached the server on, as a proxy reports it in `Forwarded` or `X-Forwarded-Proto`/`X-Forwarded-Host`, else the request's own `http://` and `Host`. Set it when a proxy sends none of those headers or serves Hatchdoor under a path. Must be an absolute `http://` or `https://` address without a query; a trailing slash is dropped. |
 
 **Uploads**
 
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
-| `HATCHDOOR_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | instant | Size limit for an attachment uploaded through the Web UI or `POST /api/v1/vaults/{vault_id}/attachments`. |
-| `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for MCP's base64 fallback path, in both directions — `import_attachment` on the way in and `get_attachment` with `encoding: "base64"` on the way out — for clients that can't make an out-of-band HTTP request. |
+| `HATCHDOOR_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | instant | Size limit for an attachment uploaded through the Web UI, an agent's upload link, or `POST /api/v1/vaults/{vault_id}/attachments`. |
+| `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for what an agent moves through MCP's own allowance: `import_attachment` on the way in, and every download on the way out, whether `get_attachment` returns the bytes as base64 or as a download link. |
 
 **Legacy — single-Vault import only**
 

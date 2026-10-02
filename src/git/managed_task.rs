@@ -27,8 +27,9 @@ use super::managed_checkout::{
     acquire_or_reuse, reuse_existing_checkout,
 };
 use super::managed_sync::{
-    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome,
-    commit_managed_checkout, synchronize_managed_checkout,
+    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome, RecoveryPublication,
+    commit_managed_checkout, publish_recovery_branch, recovery_branch_name,
+    synchronize_managed_checkout,
 };
 use super::message::WriteLedger;
 
@@ -372,12 +373,15 @@ pub fn run_existing_git_remote_turn(
     let branch = match branch {
         Some(branch) => branch,
         None => resolve_checked_out_branch(&repository_path).map_err(|_| {
+            // The path is for the operator's log only: the message below
+            // reaches every client through the Vault's status (#323).
+            warn!(
+                repository_path = %repository_path.display(),
+                "cannot determine the checked-out branch of an existing Git checkout"
+            );
             VaultWorkError::new(
                 "existing_git_branch_unresolved",
-                format!(
-                    "cannot determine the currently checked-out branch of '{}'",
-                    repository_path.display()
-                ),
+                "cannot determine the currently checked-out branch of this Vault's Git checkout",
                 false,
             )
         })?,
@@ -404,6 +408,145 @@ pub fn run_existing_git_remote_turn(
         ManagedSyncOutcome::PullOnlyFastForwarded
         | ManagedSyncOutcome::TwoWaySynchronized { .. } => ManagedGitOutcome::Synchronized,
     })
+}
+
+/// Why a recovery-branch publish published nothing, with the branch it was
+/// for when the turn got far enough to know it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryFailure {
+    pub branch: Option<String>,
+    pub error: VaultWorkError,
+}
+
+impl From<VaultWorkError> for RecoveryFailure {
+    fn from(error: VaultWorkError) -> Self {
+        Self {
+            branch: None,
+            error,
+        }
+    }
+}
+
+/// One recovery-branch publish, as the executor publishes it (ADR-30).
+pub type RecoveryResult = Result<RecoveryPublication, RecoveryFailure>;
+
+/// Publish a managed-Git Vault's side of a sync conflict to its recovery
+/// branch (ADR-30).
+///
+/// Reuses the checkout that is already there, like
+/// [`run_managed_git_commit_turn`], and never clones: a Vault that reached a
+/// conflict has one. Carries the Vault's credentials, unlike a commit,
+/// because the push talks to the remote.
+///
+/// Must run from `spawn_blocking`.
+pub fn run_managed_recovery_turn(
+    config: &ManagedGitTurnConfig,
+    lease: &ManagedCheckoutLease,
+    ledger: &WriteLedger,
+) -> RecoveryResult {
+    if config.mode != VaultGitMode::TwoWay {
+        return Err(recovery_mode_error().into());
+    }
+    let credentials = config
+        .credentials
+        .as_ref()
+        .map(|credentials| ManagedHttpsCredentials {
+            username: credentials.username.clone(),
+            token: credentials.token.clone(),
+        });
+    let request = ManagedCheckoutRequest {
+        state_directory: config.state_directory.clone(),
+        vault_id: config.vault_id,
+        repository_url: config.repository_url.clone(),
+        branch: config.branch.clone(),
+        vault_subdirectory: config.vault_subdirectory.clone(),
+        credentials: credentials.clone(),
+    };
+    let checkout = reuse_existing_checkout(lease, &request)
+        .map_err(classify_checkout_error)?
+        .ok_or_else(|| classify_sync_error(ManagedSyncError::Validation))?;
+    publish(
+        &ManagedSyncConfig {
+            repository_path: checkout.repository_path,
+            vault_path: checkout.vault_path,
+            repository_url: config.repository_url.clone(),
+            branch: checkout.resolved_branch,
+            mode: ManagedSyncMode::TwoWay,
+            credentials,
+            author_name: config.author_name.clone(),
+            author_email: config.author_email.clone(),
+        },
+        config.vault_id,
+        ledger,
+    )
+}
+
+/// Publish an `ExistingGit` Two-way Vault's side of a sync conflict to its
+/// recovery branch (ADR-30). The branch is resolved the way
+/// [`run_existing_git_remote_turn`] resolves it, so the recovery branch is
+/// named after the same branch the sync that conflicted used.
+///
+/// Must run from `spawn_blocking`.
+#[allow(clippy::too_many_arguments)] // The remote turn's inputs plus the Vault ID.
+pub fn run_existing_git_recovery_turn(
+    repository_path: PathBuf,
+    vault_path: PathBuf,
+    repository_url: Option<String>,
+    branch: Option<String>,
+    credentials: Option<HttpsCredentials>,
+    author_name: String,
+    author_email: String,
+    vault_id: VaultId,
+    ledger: &WriteLedger,
+) -> RecoveryResult {
+    let Some(repository_url) = repository_url else {
+        return Err(classify_sync_error(ManagedSyncError::Validation).into());
+    };
+    let branch = match branch {
+        Some(branch) => branch,
+        None => resolve_checked_out_branch(&repository_path).map_err(|_| {
+            VaultWorkError::new(
+                "existing_git_branch_unresolved",
+                "cannot determine the currently checked-out branch of this Vault's Git checkout",
+                false,
+            )
+        })?,
+    };
+    publish(
+        &ManagedSyncConfig {
+            repository_path,
+            vault_path,
+            repository_url,
+            branch,
+            mode: ManagedSyncMode::TwoWay,
+            credentials: credentials.map(|credentials| ManagedHttpsCredentials {
+                username: credentials.username,
+                token: credentials.token,
+            }),
+            author_name,
+            author_email,
+        },
+        vault_id,
+        ledger,
+    )
+}
+
+fn publish(config: &ManagedSyncConfig, vault_id: VaultId, ledger: &WriteLedger) -> RecoveryResult {
+    publish_recovery_branch(config, vault_id, ledger).map_err(|error| RecoveryFailure {
+        branch: Some(recovery_branch_name(&config.branch, vault_id)),
+        error: classify_sync_error(error),
+    })
+}
+
+/// The failure [`run_managed_recovery_turn`] reports when handed a mode that
+/// has no recovery branch. A caller bug: admission requires a Two-way Vault,
+/// and the existing-checkout turn is only ever planned for one.
+fn recovery_mode_error() -> VaultWorkError {
+    VaultWorkError::new(
+        "vault_recovery_mode_has_no_branch",
+        "recovery branch requested for a Vault that is not in Two-way mode",
+        false,
+    )
 }
 
 /// The branch currently checked out at `repository_path`, used by
@@ -442,16 +585,22 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
         OwnershipUnavailable => ("managed_git_checkout_busy", true),
         UnsafeRepositoryUrl => ("managed_git_unsafe_url", false),
         // A preserved-and-rejected structural mismatch (unknown directory,
-        // escaping symlink, interrupted acquisition) — needs a human, not a
-        // blind retry.
+        // escaping symlink, or leftovers the next acquisition could not
+        // delete) — needs a human, not a blind retry. An ordinary
+        // interrupted acquisition never reaches here: the next attempt
+        // discards its own leftovers and clones again (#322).
         DestinationInvalid => ("managed_git_destination_invalid", false),
         CloneFailed => ("managed_git_remote_unreachable", true),
         AuthenticationFailed => ("managed_git_authentication_failed", false),
         ValidationFailed => ("managed_git_validation_failed", false),
-        AtomicInstallFailed => ("managed_git_install_failed", false),
+        AtomicInstallFailed(_) => ("managed_git_install_failed", false),
     };
     VaultWorkError::new(code, error.to_string(), retryable)
 }
+
+/// The Git status code a sync that hit a merge conflict reports, and the one
+/// state a recovery branch can be published from (ADR-30).
+pub const CONFLICT_CODE: &str = "managed_git_conflict";
 
 /// Classify a synchronization failure. See [`classify_checkout_error`] for
 /// the retryable/non-retryable split rationale.
@@ -476,7 +625,7 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
             Some(VaultWorkErrorDetail::LocalCommitsAhead(ahead)),
         ),
         Conflict { files } => (
-            "managed_git_conflict",
+            CONFLICT_CODE,
             false,
             Some(VaultWorkErrorDetail::AffectedPaths(files)),
         ),
@@ -486,6 +635,19 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
         // which is exactly the kind of transient condition backoff exists
         // for.
         PushRace => ("managed_git_push_race_exhausted", true, None),
+        // A protected branch or a hook says no on every attempt until
+        // someone changes the remote's rules, so retrying is pointless.
+        PushRejected { .. } => ("managed_git_push_rejected", false, None),
+        OperationInProgress { files } => (
+            "managed_git_operation_in_progress",
+            false,
+            (!files.is_empty()).then_some(VaultWorkErrorDetail::AffectedPaths(files)),
+        ),
+        // Both come only from a recovery-branch publish (ADR-30), which
+        // reports them on the Vault's recovery status, never as its Git
+        // status: the conflict they are about stays the Vault's failure.
+        RecoveryDiverged => ("managed_git_recovery_diverged", false, None),
+        RecoveryRejected { .. } => ("managed_git_recovery_push_rejected", false, None),
         Authentication => ("managed_git_authentication_failed", false, None),
         Remote => ("managed_git_remote_unreachable", true, None),
     };
@@ -494,6 +656,25 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
         Some(detail) => work_error.with_detail(detail),
         None => work_error,
     }
+}
+
+/// True for a published Git failure that only a turn talking to the remote
+/// can clear: a successful commit turn proves the local checkout is healthy,
+/// and says nothing about a conflict with the remote, a refused push, or a
+/// remote that cannot be reached. The executor keeps such a failure
+/// published across commit turns so it stays visible until a sync resolves
+/// it (#323). Every code here is produced only by [`classify_sync_error`] or
+/// [`classify_checkout_error`] for a remote operation, never by a commit turn.
+pub(crate) fn is_remote_only_failure(code: &str) -> bool {
+    matches!(
+        code,
+        "managed_git_conflict"
+            | "managed_git_push_rejected"
+            | "managed_git_push_race_exhausted"
+            | "managed_git_remote_unreachable"
+            | "managed_git_authentication_failed"
+            | "managed_git_pull_only_local_commits"
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1420,7 +1601,7 @@ mod tests {
             ManagedCheckoutError::DestinationInvalid,
             ManagedCheckoutError::AuthenticationFailed,
             ManagedCheckoutError::ValidationFailed,
-            ManagedCheckoutError::AtomicInstallFailed,
+            ManagedCheckoutError::AtomicInstallFailed("install refused".to_string()),
         ];
         for error in non_retryable {
             assert!(
@@ -1513,6 +1694,98 @@ mod tests {
                 "{error:?} should carry no structured detail"
             );
         }
+    }
+
+    /// #323: the two failures this issue added are both non-retryable and
+    /// structured, and only the remote-side ones outlive a commit turn.
+    #[test]
+    fn push_rejections_and_unfinished_operations_are_classified_for_a_human() {
+        let rejected = classify_sync_error(ManagedSyncError::PushRejected {
+            reason: "protected branch hook declined".to_string(),
+        });
+        assert_eq!(rejected.code(), "managed_git_push_rejected");
+        assert!(!rejected.retryable());
+        assert!(
+            rejected
+                .message()
+                .contains("protected branch hook declined")
+        );
+        assert!(is_remote_only_failure(rejected.code()));
+
+        let stranded = classify_sync_error(ManagedSyncError::OperationInProgress {
+            files: vec!["vault/Home.md".to_string()],
+        });
+        assert_eq!(stranded.code(), "managed_git_operation_in_progress");
+        assert!(!stranded.retryable());
+        assert_eq!(
+            stranded.detail(),
+            Some(&VaultWorkErrorDetail::AffectedPaths(vec![
+                "vault/Home.md".to_string()
+            ]))
+        );
+        assert!(
+            !is_remote_only_failure(stranded.code()),
+            "a commit turn refuses the same state, so its success disproves it"
+        );
+        assert_eq!(
+            classify_sync_error(ManagedSyncError::OperationInProgress { files: Vec::new() })
+                .detail(),
+            None
+        );
+
+        assert!(is_remote_only_failure("managed_git_conflict"));
+        for commit_code in [
+            "managed_git_dirty_working_copy",
+            "managed_git_validation_failed",
+            "existing_git_local_history_validation_failed",
+            "vault_commit_mode_does_not_commit",
+        ] {
+            assert!(!is_remote_only_failure(commit_code), "{commit_code}");
+        }
+    }
+
+    /// #323: this message reaches every client through the Vault's status,
+    /// and used to embed the checkout's absolute host path.
+    #[test]
+    fn an_unresolvable_branch_is_reported_without_the_host_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let repository_path = root.path().join("detached-checkout");
+        let repository = git2::Repository::init(&repository_path).expect("repository");
+        std::fs::create_dir(repository_path.join("vault")).expect("vault directory");
+        std::fs::write(repository_path.join("vault/Home.md"), "# Home\n").expect("note");
+        let mut index = repository.index().expect("index");
+        index
+            .add_path(Path::new("vault/Home.md"))
+            .expect("stage note");
+        let tree = repository
+            .find_tree(index.write_tree().expect("tree id"))
+            .expect("tree");
+        let signature = git2::Signature::now("Test", "test@example.test").expect("signature");
+        let commit = repository
+            .commit(None, &signature, &signature, "initial", &tree, &[])
+            .expect("commit");
+        repository.set_head_detached(commit).expect("detach HEAD");
+
+        let error = run_existing_git_remote_turn(
+            repository_path.clone(),
+            repository_path.join("vault"),
+            Some("https://example.test/vault.git".to_string()),
+            None,
+            VaultGitMode::TwoWay,
+            None,
+            "Hatchdoor".to_string(),
+            "hatchdoor@example.test".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("detached HEAD has no branch");
+
+        assert_eq!(error.code(), "existing_git_branch_unresolved");
+        let root_text = root.path().to_string_lossy().into_owned();
+        assert!(
+            !error.message().contains(&root_text) && !error.message().contains('/'),
+            "client-visible message leaks a host path: {}",
+            error.message()
+        );
     }
 
     /// A test-only stand-in for a Vault's configured poll interval. Shorter

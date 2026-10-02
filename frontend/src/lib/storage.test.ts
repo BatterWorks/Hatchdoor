@@ -13,6 +13,9 @@ import {
   isEditableTarget,
   pruneStoredLastNotesByVault,
   rememberLastNoteForVault,
+  safeGetItem,
+  safeRemoveItem,
+  safeSetItem,
   setStoredScope,
 } from "./storage";
 
@@ -153,5 +156,29 @@ describe("storage helpers", () => {
     const span = document.createElement("span");
     expect(isEditableTarget(span)).toBe(false);
     expect(isEditableTarget(null)).toBe(false);
+  });
+});
+
+describe("storage helpers with site data blocked (#339)", () => {
+  it("fall back to defaults instead of throwing when the accessor itself throws", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("The operation is insecure.", "SecurityError");
+      },
+    });
+    try {
+      expect(safeGetItem("anything")).toBeNull();
+      expect(() => safeSetItem("anything", "1")).not.toThrow();
+      expect(() => safeRemoveItem("anything")).not.toThrow();
+      expect(getStoredNumber("width", 268, 220, 420)).toBe(268);
+      expect(getStoredString("anything")).toBeNull();
+      expect(getStoredScope()).toBe("all");
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(window, "localStorage", descriptor);
+      }
+    }
   });
 });

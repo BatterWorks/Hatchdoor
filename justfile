@@ -134,18 +134,64 @@ dev-status:
 dev-clean: _prepare-cargo
     cargo clean
 
-# Exits non-zero so the review cannot be skipped silently. Pass a different
-# base with `just docs-freshness main`.
+# The checks to run before a pull request: formatting, lints for both the
+# shipped and the all-features build, the backend tests once, and the frontend.
+# Skips the tests that load real model weights. See CONTRIBUTING.md.
 #
-# Before merging into development: which user-vault notes need a re-read?
+# The test lines drop HATCHDOOR_VAULT_REGISTRY_PATH, which this file exports
+# for the dev server: the tests must see the deployed default, not .dev/.
+check: _check-static && _check-frontend
+    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
+
+# Everything `check` covers, plus the backend tests in the exact configuration
+# a deployment ships and the tests that load real model weights (the first run
+# downloads them from Hugging Face).
+check-full: _check-static && _check-frontend
+    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all
+    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --all-features
+
+_check-static: _prepare-cargo
+    cargo fmt --all -- --check
+    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings
+
+_check-frontend:
+    cd frontend && npm run format:check
+    cd frontend && npm run lint
+    cd frontend && npm run typecheck
+    cd frontend && npm test
+    cd frontend && npm run build
+
+# Exits non-zero so the review cannot be skipped silently. Pass a different
+# base with `just docs-freshness main`. Also fails when shipped code changed
+# with no CHANGELOG.md edit and no `Changelog: none, <reason>` trailer.
+#
+# Before merging into development: are the user-vault notes and changelog fresh?
 docs-freshness base="development":
     node scripts/check-docs-freshness.mjs --base '{{base}}'
 
-# Only run this after actually reading the notes it named.
+# Only run this after actually reading the notes it named. It does not waive
+# a missing changelog entry.
 #
 # Record that the documentation freshness review happened.
 docs-freshness-ack base="development":
     node scripts/check-docs-freshness.mjs --base '{{base}}' --acknowledge
+
+# Opens pull requests and a draft release; never merges. Re-run it after the
+# version-bump pull request merges to open the release pull request. See
+# ADR-36.
+#
+# Prepare a release: bump the version, then open the release pull request.
+release-prepare version:
+    node scripts/release-prepare.mjs '{{version}}'
+
+# Run only after the maintainer approved the release title and notes in this
+# session. Needs HATCHDOOR_RELEASE_HOOK; re-run it to resume after a failure.
+# See ADR-36.
+#
+# Publish a release: merge, tag, build images, publish, deploy.
+release-publish version:
+    node scripts/release-publish.mjs '{{version}}'
 
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.

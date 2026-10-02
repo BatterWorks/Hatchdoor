@@ -6,23 +6,38 @@
 const TOKEN_KEY = "hatchdoor_web_token";
 export const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 
+// The token for this page only, held when the browser refuses to store it.
+// WebKit with site data blocked throws from every localStorage access, and
+// without this an Unlock would forget the token at once and every request
+// would stay on 401 (#339). It wins over storage, which may still hold an
+// older token it would not let this one replace. Null whenever storage
+// accepted the token, so a sign-out in another tab still applies here.
+let unstoredToken: string | null = null;
+
 export function getToken(): string | null {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    return unstoredToken ?? localStorage.getItem(TOKEN_KEY);
   } catch {
-    return null;
+    return unstoredToken;
   }
 }
 
-export function setToken(token: string): void {
+/** Remember the web token. Returns false when the browser refused to store
+ * it: the token then lasts only as long as this page, so a caller must not
+ * reload to apply it. */
+export function setToken(token: string): boolean {
   try {
     localStorage.setItem(TOKEN_KEY, token);
+    unstoredToken = null;
+    return true;
   } catch {
-    // Ignore storage failures (private mode, disabled storage).
+    unstoredToken = token;
+    return false;
   }
 }
 
 export function clearToken(): void {
+  unstoredToken = null;
   try {
     localStorage.removeItem(TOKEN_KEY);
   } catch {
@@ -87,7 +102,10 @@ export async function apiFetch(
       ...finalInit,
       signal: timeoutController.signal,
     });
-    if (res.status === 401) {
+    // A 401 for a request sent with a token that has since changed says
+    // nothing about the new one. An Unlock applied in place (#339) would
+    // otherwise be locked again by the answers still in flight from before it.
+    if (res.status === 401 && getToken() === token) {
       unauthorizedHandler?.();
     }
     return res;

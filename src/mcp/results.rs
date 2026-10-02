@@ -30,8 +30,8 @@ use crate::vault_management::{
     VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
 };
 use crate::vault_read::{
-    NoteQueryResponse, VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote,
-    VaultResolveResponse, VaultStatistics, VaultTree,
+    NoteQueryResponse, SavedQueryEvaluation, VaultGraph, VaultQualifiedLinks, VaultReadProjection,
+    VaultRecentNote, VaultResolveResponse, VaultStatistics, VaultTree,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ use crate::vault_read::{
 
 pub type ListVaultsResult = VaultDiscoveryResponse;
 pub type SearchNotesResult = VaultReadProjection<VaultSearchResponse>;
+
 pub type GetNoteResult = crate::vault_read::VaultQualifiedNote;
 pub type GetNoteLinksResult = VaultQualifiedLinks;
 pub type ResolveWikilinkResult = VaultResolveResponse;
@@ -58,6 +59,7 @@ pub struct StampedStatsResult {
 pub type GetGraphResult = VaultReadProjection<Vec<VaultGraph>>;
 pub type RecentlyModifiedResult = VaultReadProjection<Vec<VaultRecentNote>>;
 pub type QueryNotesResult = VaultReadProjection<NoteQueryResponse>;
+pub type EvaluateSavedQueryResult = VaultReadProjection<SavedQueryEvaluation>;
 pub type CreateVaultResult = VaultMutationResponse;
 pub type EditVaultResult = VaultMutationResponse;
 pub type EnableVaultResult = VaultMutationResponse;
@@ -65,6 +67,7 @@ pub type DisableVaultResult = VaultMutationResponse;
 pub type DisconnectVaultResult = VaultMutationResponse;
 pub type SyncVaultResult = VaultScheduleResponse;
 pub type RetryVaultResult = VaultScheduleResponse;
+pub type PublishRecoveryBranchResult = VaultScheduleResponse;
 pub type RefreshVaultResult = VaultScheduleResponse;
 
 // ---------------------------------------------------------------------------
@@ -109,13 +112,26 @@ pub struct ModelChoiceResult {
 // Capability report and write receipts owned by the MCP surface
 // ---------------------------------------------------------------------------
 
-/// One way an agent may upload an attachment into a Vault. The two variants
-/// carry different fields (an HTTP endpoint has a path and auth story; the
-/// base64 fallback names its tool), so they are internally tagged on `id`,
-/// which is also the discriminator a caller sees on the wire today.
+/// One way an agent may upload an attachment into a Vault. The variants carry
+/// different fields (a transfer link names the tool that mints it; an HTTP
+/// endpoint has a path and auth story; the base64 fallback names its tool), so
+/// they are internally tagged on `id`, which is also the discriminator a
+/// caller sees on the wire today.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(tag = "id")]
 pub enum AttachmentImportMethod {
+    /// The recommended route (ADR-27): mint an upload link with `tool`, then
+    /// send the file to it. Needs no token and no server address.
+    #[serde(rename = "transfer_link")]
+    TransferLink {
+        tool: &'static str,
+        role: &'static str,
+        method: &'static str,
+        max_bytes: u64,
+        recommended_for: &'static str,
+        requires: &'static str,
+        usage: &'static str,
+    },
     #[serde(rename = "http_multipart")]
     HttpMultipart {
         role: &'static str,
@@ -171,7 +187,10 @@ pub struct NoteAttachmentsResult {
 pub enum AttachmentContent {
     #[serde(rename = "url")]
     Url {
+        /// A transfer link (ADR-27): absolute, and carrying its own credential.
         download_url: String,
+        /// Unix time in seconds after which `download_url` stops working.
+        expires_at: u64,
         path_note: &'static str,
         auth: &'static str,
     },
@@ -190,6 +209,35 @@ pub struct GetAttachmentResult {
     pub content: AttachmentContent,
 }
 
+/// `create_upload_link`'s answer: an upload transfer link (ADR-27, ADR-32)
+/// for one target, good once, until `expires_at`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UploadLinkResult {
+    pub vault_id: String,
+    pub target_relative_path: String,
+    /// What the upload writes: a `.md` target is a note, anything else an
+    /// attachment.
+    pub upload_kind: UploadKind,
+    pub overwrite: bool,
+    /// The hash a replacing note upload requires the note to still have;
+    /// `null` for every other link.
+    pub expected_content_hash: Option<String>,
+    pub upload_url: String,
+    pub method: &'static str,
+    /// Unix time in seconds after which `upload_url` stops working.
+    pub expires_at: u64,
+    pub max_bytes: u64,
+    pub usage: &'static str,
+}
+
+/// Whether an upload link writes a note or an attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadKind {
+    Note,
+    Attachment,
+}
+
 /// The receipt every note-mutation tool returns (`create_note` through
 /// `delete_note`). `layer` reports the resulting surface of the written note
 /// (`null` = default surface); it is always `null` after a delete, which
@@ -206,6 +254,60 @@ pub struct NoteWriteResult {
     pub rewritten_notes: usize,
     pub moved_assets: usize,
     pub trashed_path: Option<String>,
+}
+
+/// `rename_tag`'s answer, for a plan and for an applied rename alike.
+/// `applied` says which. `plan_hash` is the fingerprint to send back as
+/// `expected_plan_hash`; it is absent when no note would change.
+/// `frontmatter_notes` and `body_notes` count the notes each form of the tag
+/// changes in, so they can add up to more than `notes_affected`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RenameTagResult {
+    pub vault_id: String,
+    pub ok: bool,
+    pub applied: bool,
+    pub old_tag: String,
+    pub new_tag: String,
+    pub notes_affected: usize,
+    pub frontmatter_notes: usize,
+    pub body_notes: usize,
+    pub already_tagged_notes: usize,
+    pub plan_hash: Option<String>,
+    pub notes: Vec<RenameTagNote>,
+}
+
+/// One note a tag rename changes. `content_hash` is the note's hash as it
+/// stands after the call: unchanged for a plan, rewritten once applied.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RenameTagNote {
+    pub slug: String,
+    pub relative_path: String,
+    pub frontmatter: bool,
+    pub body: bool,
+    pub content_hash: String,
+}
+
+/// `delete_tag`'s answer, for a plan and for an applied delete alike.
+/// `applied` says which. `plan_hash` is the fingerprint to send back as
+/// `expected_plan_hash`; it is absent when no note carries the tag.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DeleteTagResult {
+    pub vault_id: String,
+    pub ok: bool,
+    pub applied: bool,
+    pub tag: String,
+    pub notes_affected: usize,
+    pub plan_hash: Option<String>,
+    pub notes: Vec<DeleteTagNote>,
+}
+
+/// One note a tag delete changes. `content_hash` is the note's hash as it
+/// stands after the call: unchanged for a plan, rewritten once applied.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DeleteTagNote {
+    pub slug: String,
+    pub relative_path: String,
+    pub content_hash: String,
 }
 
 /// `get_frontmatter`'s answer: the note's frontmatter projection — tags,
@@ -311,6 +413,7 @@ output_schemas! {
     "get_graph" => GetGraphResult,
     "recently_modified" => RecentlyModifiedResult,
     "query_notes" => QueryNotesResult,
+    "evaluate_saved_query" => EvaluateSavedQueryResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
     "get_attachment" => GetAttachmentResult,
@@ -324,6 +427,7 @@ output_schemas! {
     "disconnect_vault" => DisconnectVaultResult,
     "sync_vault" => SyncVaultResult,
     "retry_vault" => RetryVaultResult,
+    "publish_recovery_branch" => PublishRecoveryBranchResult,
     "refresh_vault" => RefreshVaultResult,
     // Note/attachment write tools
     "create_note" => NoteWriteResult,
@@ -338,9 +442,12 @@ output_schemas! {
     "archive_note" => NoteWriteResult,
     "delete_note" => NoteWriteResult,
     "import_attachment" => AttachmentWriteResult,
+    "create_upload_link" => UploadLinkResult,
     "move_attachment" => AttachmentWriteResult,
     "rename_attachment" => AttachmentWriteResult,
     "delete_attachment" => AttachmentWriteResult,
+    "rename_tag" => RenameTagResult,
+    "delete_tag" => DeleteTagResult,
 }
 
 /// Serializes a typed tool result into the value embedded in a tool success
@@ -377,6 +484,8 @@ mod schema_tests {
             bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![],
             rate_limits_enabled: true,
+            public_url: None,
+            request_origin: None,
         };
         let mut names: Vec<String> = crate::mcp::tools::setup_tools_list()
             .into_iter()
@@ -390,12 +499,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 41,
-            "3 setup + 14 read + 1 batch + 8 management + 15 write tools"
+            total, 46,
+            "3 setup + 15 read + 1 batch + 9 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 41, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 46, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
@@ -466,6 +575,15 @@ mod schema_tests {
             vault_accepts_mutation: true,
             allowed_extensions: allowed_extension_samples(),
             methods: vec![
+                AttachmentImportMethod::TransferLink {
+                    tool: "create_upload_link",
+                    role: "default",
+                    method: "POST",
+                    max_bytes: 100_000_000,
+                    recommended_for: "any client that can make an HTTP request",
+                    requires: "HTTP",
+                    usage: "call create_upload_link, then POST the file",
+                },
                 AttachmentImportMethod::HttpMultipart {
                     role: "default",
                     method: "POST",
@@ -496,8 +614,9 @@ mod schema_tests {
             );
         }
         // The tag discriminator survives serialization.
-        assert_eq!(enabled["methods"][0]["id"], "http_multipart");
-        assert_eq!(enabled["methods"][1]["id"], "mcp_base64");
+        assert_eq!(enabled["methods"][0]["id"], "transfer_link");
+        assert_eq!(enabled["methods"][1]["id"], "http_multipart");
+        assert_eq!(enabled["methods"][2]["id"], "mcp_base64");
 
         let disabled = serde_json::to_value(AttachmentImportConfigResult {
             vault_id: enabled["vault_id"].as_str().unwrap().to_string(),
@@ -529,9 +648,10 @@ mod schema_tests {
             size_bytes: 1234,
             content_type: "image/png".to_string(),
             content: AttachmentContent::Url {
-                download_url: "/api/v1/vaults/x/assets/Sources/diagram.png".to_string(),
-                path_note: "resolve against this MCP endpoint",
-                auth: "requires the web bearer token",
+                download_url: "http://127.0.0.1:42824/api/v1/vaults/x/transfers/Sources/diagram.png?expires=1&signature=s".to_string(),
+                expires_at: 1,
+                path_note: "fetch it as it is",
+                auth: "none needed",
             },
         })
         .expect("serialize");
@@ -599,7 +719,7 @@ mod schema_tests {
                 "search": "ready",
                 "git": "disabled",
                 "watcher": "running",
-                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false, "commit": false, "sync": false}
+                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false, "commit": false, "sync": false, "publish_recovery": false}
             },
             "registry_revision": 3,
             "collection_revision": 9

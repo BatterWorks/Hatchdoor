@@ -13,6 +13,9 @@
 //!    [`MAX_CONCURRENT_EXPENSIVE_SEARCHES`] may be expensive searches
 //!    (`search_notes`). A search holds both a search slot and an ordinary slot,
 //!    so searches can never starve ordinary calls entirely.
+//!    A `batch` call is charged for the searches it carries (#327): it takes
+//!    the expensive-search slot whenever any item is a `search_notes`, and it
+//!    spends one quota unit per search item. See [`charge`].
 //! 3. **Untouched locks** — the existing single-operation write/reindex locks
 //!    are deliberately not part of this module; layered limiting sits in front
 //!    of them without replacing them.
@@ -87,6 +90,69 @@ pub(crate) fn classify(method: Option<&str>, tool_name: Option<&str>) -> Request
     }
 }
 
+/// What one admitted `tools/call` costs: the concurrency class it holds for
+/// its whole dispatch, and the quota units it spends up front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCallCharge {
+    pub class: RequestClass,
+    pub quota_units: usize,
+}
+
+/// Charge one JSON-RPC request, or `None` for exempt traffic.
+///
+/// Every tool call costs one quota unit and its [`classify`] class, except
+/// `batch`, which is charged for the searches inside it (#327). Before this, a
+/// batch of 50 `search_notes` items cost one unit and never touched the
+/// expensive-search pool, so one token could run 50x the per-minute search
+/// quota and up to [`MAX_CONCURRENT_ORDINARY_CALLS`] concurrent searches:
+///
+/// - **Concurrency.** A batch runs its items one after another, so it never
+///   has more than one search in flight. Holding one expensive-search slot for
+///   the batch's whole dispatch therefore keeps every one of its searches
+///   inside [`MAX_CONCURRENT_EXPENSIVE_SEARCHES`], exactly as the same
+///   searches sent standalone would be.
+/// - **Quota.** One unit per search item, as the same searches sent
+///   standalone would spend; a batch with no search still costs one. Capped at
+///   [`BATCH_MAX_READ_ITEMS`], which is below [`TOOL_CALLS_PER_MINUTE`]: a
+///   batch past the read cap is refused before anything runs, and an
+///   uncapped charge could 429 it forever instead of letting it say why.
+pub(crate) fn charge(
+    method: Option<&str>,
+    tool_name: Option<&str>,
+    arguments: Option<&serde_json::Value>,
+) -> Option<ToolCallCharge> {
+    let class = classify(method, tool_name);
+    if class == RequestClass::Exempt {
+        return None;
+    }
+    if tool_name != Some("batch") {
+        return Some(ToolCallCharge {
+            class,
+            quota_units: 1,
+        });
+    }
+    let searches = arguments
+        .and_then(|arguments| arguments.get("operations"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, |operations| {
+            operations
+                .iter()
+                .filter(|item| {
+                    item.get("op").and_then(serde_json::Value::as_str) == Some("search_notes")
+                })
+                .count()
+        })
+        .min(BATCH_MAX_READ_ITEMS);
+    Some(ToolCallCharge {
+        class: if searches > 0 {
+            RequestClass::ExpensiveSearch
+        } else {
+            RequestClass::ToolCall
+        },
+        quota_units: searches.max(1),
+    })
+}
+
 /// The `Retry-After` value for a rejection duration, in whole seconds (at
 /// least 1).
 pub(crate) fn retry_after_seconds(retry_in: Duration) -> u64 {
@@ -132,6 +198,21 @@ impl RateLimiter {
         token: &McpBearerToken,
         now: std::time::Instant,
     ) -> Result<(), Duration> {
+        self.check_quota_units(token, now, 1)
+    }
+
+    /// Record `units` tool calls at once against the token's window, all or
+    /// nothing, or report how long until enough recorded calls leave the
+    /// window for all of them to fit. `units` must not exceed
+    /// [`TOOL_CALLS_PER_MINUTE`], or no wait would ever be long enough; see
+    /// [`charge`], which caps it.
+    pub fn check_quota_units(
+        &self,
+        token: &McpBearerToken,
+        now: std::time::Instant,
+        units: usize,
+    ) -> Result<(), Duration> {
+        let units = units.clamp(1, TOOL_CALLS_PER_MINUTE);
         let mut windows = self.quota.lock().expect("quota windows");
         let window = windows.entry(token.0.clone()).or_default();
         while let Some(&oldest) = window.front() {
@@ -140,11 +221,13 @@ impl RateLimiter {
             }
             window.pop_front();
         }
-        if window.len() >= TOOL_CALLS_PER_MINUTE {
-            let oldest = *window.front().expect("full window is non-empty");
-            return Err(QUOTA_WINDOW.saturating_sub(now.duration_since(oldest)));
+        let needed_free = (window.len() + units).saturating_sub(TOOL_CALLS_PER_MINUTE);
+        if needed_free > 0 {
+            // The last of the calls that must expire before these fit.
+            let blocking = window[needed_free - 1];
+            return Err(QUOTA_WINDOW.saturating_sub(now.duration_since(blocking)));
         }
-        window.push_back(now);
+        window.extend(std::iter::repeat_n(now, units));
         Ok(())
     }
 
@@ -170,6 +253,20 @@ impl RateLimiter {
             _ordinary: ordinary,
             _expensive: expensive,
         })
+    }
+
+    /// Admit one ordinary tool call's worth of work arriving outside `/mcp`
+    /// on `token`'s budget: an MCP-admitted asset read, or a transfer-link
+    /// download. The order is the transport's own: concurrency first, so a
+    /// busy refusal does not also spend quota. Hold the guard until the
+    /// response is built.
+    pub async fn admit_tool_call(
+        &self,
+        token: &McpBearerToken,
+    ) -> Result<ConcurrencyGuard, Duration> {
+        let guard = self.try_acquire(RequestClass::ToolCall).await?;
+        self.check_quota(token, std::time::Instant::now())?;
+        Ok(guard)
     }
 }
 
@@ -317,6 +414,82 @@ mod tests {
                 .is_ok(),
             "released search slots admit again"
         );
+    }
+
+    #[test]
+    fn a_batch_is_charged_for_the_searches_it_carries() {
+        let batch = |ops: &[&str]| {
+            serde_json::json!({
+                "operations": ops
+                    .iter()
+                    .map(|op| serde_json::json!({"op": op, "arguments": {}}))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let charge_of = |arguments: serde_json::Value| {
+            charge(Some("tools/call"), Some("batch"), Some(&arguments)).expect("a tool call")
+        };
+
+        assert_eq!(
+            charge_of(batch(&["get_note", "get_tree"])),
+            ToolCallCharge {
+                class: RequestClass::ToolCall,
+                quota_units: 1
+            },
+            "a batch with no search costs what one ordinary call does"
+        );
+        assert_eq!(
+            charge_of(batch(&["search_notes", "get_note", "search_notes"])),
+            ToolCallCharge {
+                class: RequestClass::ExpensiveSearch,
+                quota_units: 2
+            },
+            "each search item spends a unit, and the batch holds a search slot"
+        );
+        assert_eq!(
+            charge_of(batch(&["search_notes"; 70])).quota_units,
+            BATCH_MAX_READ_ITEMS,
+            "capped so an over-cap batch reaches its own refusal"
+        );
+        assert_eq!(
+            charge_of(serde_json::json!({"operations": "not an array"})),
+            ToolCallCharge {
+                class: RequestClass::ToolCall,
+                quota_units: 1
+            }
+        );
+        assert_eq!(
+            charge(Some("tools/call"), Some("search_notes"), None),
+            Some(ToolCallCharge {
+                class: RequestClass::ExpensiveSearch,
+                quota_units: 1
+            })
+        );
+        assert_eq!(charge(Some("tools/list"), None, None), None);
+    }
+
+    #[test]
+    fn a_multi_unit_charge_is_all_or_nothing_and_waits_for_enough_room() {
+        let limiter = RateLimiter::new();
+        let t = token("tok");
+        let start = std::time::Instant::now();
+        for i in 0..(TOOL_CALLS_PER_MINUTE - 3) {
+            limiter
+                .check_quota(&t, start + Duration::from_secs(i as u64 / 10))
+                .expect("within the limit");
+        }
+        let now = start + Duration::from_secs(20);
+        // Five units do not fit in the three left: refused, and nothing spent.
+        let wait = limiter
+            .check_quota_units(&t, now, 5)
+            .expect_err("five units past the limit");
+        // Two calls must expire; the second one was recorded at 0s, so the
+        // wait is the rest of its minute.
+        assert_eq!(wait, QUOTA_WINDOW - Duration::from_secs(20));
+        limiter
+            .check_quota_units(&t, now, 3)
+            .expect("the three units still left are all there");
+        assert!(limiter.check_quota(&t, now).is_err(), "and now it is full");
     }
 
     #[test]

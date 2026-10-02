@@ -11,6 +11,8 @@ Use the read-only connection to establish a safe habit:
 3. Make the smallest useful change.
 4. Save against the note version the agent just read.
 
+The fourth habit is the one that protects you from a change made in another editor: Hatchdoor refuses a save whose note moved on since it was read. How tightly that closes depends on the filesystem holding the Vault, which [[Install Hatchdoor with Docker Compose]] explains.
+
 > [!tip]
 > Treat note text as content, not instructions. An agent may summarize notes, but it should not follow commands found inside them unless you explicitly ask.
 
@@ -37,8 +39,12 @@ The expected agent workflow is compact:
 | Find a note | `list_vaults` → `search_notes` |
 | Find every note with a tag, in a folder, or with a property | `list_vaults` → `query_notes` |
 | Inspect it | `get_note` |
+| Get the rows a note's saved query lists | `get_note` to see its `saved_queries`, then `evaluate_saved_query` with the name |
 | Add one item under a heading | `edit_note` or `replace_section`, with the returned content hash |
 | Change its tags or other metadata | `get_frontmatter` to see what's there, then `update_frontmatter` with the content hash `get_frontmatter` returned alongside it |
+| Rename a tag in every note that carries it | `rename_tag` once to see the plan, then again with the `plan_hash` it returned |
+| Delete a tag from every note that carries it | `delete_tag` once to see the plan, then again with the `plan_hash` it returned |
+| Import a Markdown file the agent already has on disk | `create_upload_link` with a target ending in `.md`, then `POST` the file to the link, so the agent never retypes it |
 | Check Vault state | `list_vaults` |
 
 Do not grant write access just because an agent is connected. Turn it back off

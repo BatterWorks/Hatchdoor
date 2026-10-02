@@ -156,14 +156,20 @@ impl SqliteCache {
     /// Globally rank keyword hits across the given already-participating Vault
     /// snapshots. The caller owns snapshot status; this method keeps the FTS
     /// BM25 window global rather than merging per-Vault result windows.
+    ///
+    /// At most `k` rows come back, and the bound is in the SQL. The query
+    /// tokens are joined with `OR`, so one common word matches most of a
+    /// corpus; without the `LIMIT` a single request would carry every
+    /// matching chunk's text out of SQLite while holding a reader slot.
     pub(crate) fn vault_fts_search_chunks(
         &self,
         conn: &Connection,
         vault_ids: &[VaultId],
         query: &str,
         selection: &LayerSelection,
+        k: usize,
     ) -> Result<Vec<VaultChunkFtsHit>, String> {
-        if vault_ids.is_empty() {
+        if vault_ids.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
         let Some(fts_q) = build_fts_query(query) else {
@@ -184,6 +190,7 @@ impl SqliteCache {
               AND c.vault_id IN ({ids})
               AND {layer}
             ORDER BY bm25(vault_chunk_fts), c.vault_id, c.note_slug, c.id
+            LIMIT ?2
             "#,
             layer = selection.sql_filter("n.layer"),
         );
@@ -191,17 +198,20 @@ impl SqliteCache {
             .prepare(&sql)
             .map_err(|error| format!("prepare Vault FTS search: {error}"))?;
         let rows = statement
-            .query_map(params![fts_q], |row| {
-                let vault_id = row.get::<_, String>(0)?;
-                Ok((
-                    vault_id,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, f64>(5)? as f32,
-                ))
-            })
+            .query_map(
+                params![fts_q, i64::try_from(k).unwrap_or(i64::MAX)],
+                |row| {
+                    let vault_id = row.get::<_, String>(0)?;
+                    Ok((
+                        vault_id,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, f64>(5)? as f32,
+                    ))
+                },
+            )
             .map_err(|error| format!("query Vault FTS search: {error}"))?;
         let mut hits = Vec::new();
         for row in rows {
@@ -461,6 +471,51 @@ mod semantic_search_tests {
             vec!["clip".to_string(), "home".to_string()],
             "layers=all must return the demoted chunk alongside the default surface"
         );
+    }
+
+    /// The Vault-qualified rewrite dropped the `LIMIT` the legacy keyword query
+    /// carried, so one common word returned every matching chunk in every
+    /// participating Vault. The bound belongs in the SQL, where it stops
+    /// SQLite from materialising the rows at all.
+    #[test]
+    fn vault_keyword_search_returns_at_most_k_best_ranked_chunks() {
+        use crate::search::LayerSelection;
+        use crate::vault_registry::VaultId;
+
+        let dir = vault_with(&[
+            ("a.md", "# A\n\ncommon"),
+            ("b.md", "# B\n\ncommon common"),
+            ("c.md", "# C\n\ncommon"),
+            ("d.md", "# D\n\ncommon"),
+            ("e.md", "# E\n\ncommon"),
+        ]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder = StubEmbedder::new(384);
+        let vault_id: VaultId = "12345678-1234-4567-89ab-1234567890ab"
+            .parse()
+            .expect("vault id");
+        cache
+            .replace_vault_snapshot(
+                vault_id,
+                &VaultIndex::build(dir.path()).expect("build"),
+                &embedder,
+            )
+            .expect("publish snapshot");
+        let conn = cache.read().expect("read conn");
+        let search = |k: usize| {
+            cache
+                .vault_fts_search_chunks(&conn, &[vault_id], "common", &LayerSelection::All, k)
+                .expect("keyword search")
+        };
+
+        assert_eq!(search(100).len(), 5, "every note matches the common word");
+        let bounded = search(2);
+        assert_eq!(bounded.len(), 2, "the query returns no more than k rows");
+        assert_eq!(
+            bounded[0].note_slug, "b",
+            "the bound keeps the best-ranked rows, not an arbitrary two"
+        );
+        assert!(search(0).is_empty());
     }
 
     #[test]

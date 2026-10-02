@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearToken } from "../api/api";
-import { useStartupStatus } from "./useStartupStatus";
+import { startupPollDelay, useStartupStatus } from "./useStartupStatus";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -111,5 +111,94 @@ describe("useStartupStatus", () => {
     await waitFor(() =>
       expect(result.current.status).toEqual({ state: "ready" }),
     );
+  });
+
+  it("backs off while the status route is unreachable and returns to 1s once it answers (#304)", async () => {
+    vi.useFakeTimers();
+    let online = false;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => {
+        if (!online) {
+          throw new TypeError("Failed to fetch");
+        }
+        return statusResponse({ state: "indexing", percent: 10 });
+      });
+    const calls = () => fetchMock.mock.calls.length;
+
+    const { result } = renderHook(() => useStartupStatus());
+    await act(async () => {});
+    expect(calls()).toBe(1);
+    expect(result.current.connectionIssue).toBe(true);
+
+    // One failure: the next poll waits 2s, not 1s.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(calls()).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(calls()).toBe(2);
+
+    // Two failures: 4s.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_999);
+    });
+    expect(calls()).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(calls()).toBe(3);
+
+    // A minute offline asks a handful of times, not sixty.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(calls()).toBeLessThanOrEqual(7);
+
+    // Back online: the next scheduled poll succeeds, and from then on the
+    // interval is the normal 1s.
+    online = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(result.current.connectionIssue).toBe(false);
+    const afterRecovery = calls();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(calls()).toBe(afterRecovery + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(calls()).toBe(afterRecovery + 2);
+  });
+
+  it("treats a non-2xx status answer as a failure to back off from", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("bad gateway", { status: 502 }));
+
+    renderHook(() => useStartupStatus());
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("doubles the delay per failure up to a 30s ceiling", () => {
+    expect(startupPollDelay(0)).toBe(1_000);
+    expect(startupPollDelay(1)).toBe(2_000);
+    expect(startupPollDelay(2)).toBe(4_000);
+    expect(startupPollDelay(4)).toBe(16_000);
+    expect(startupPollDelay(5)).toBe(30_000);
+    expect(startupPollDelay(50)).toBe(30_000);
   });
 });

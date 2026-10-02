@@ -34,8 +34,8 @@ use crate::handlers::vaults::{
     query_rejection_response,
 };
 use crate::vault_read::{
-    AssetPathError, AssetReadError, OffloadedReadError, VaultReadError, VaultReads,
-    VaultResolveResponse,
+    AssetPathError, AssetReadError, OffloadedReadError, ResolvedVaultNote, VaultReadError,
+    VaultReads, VaultResolveResponse,
 };
 use crate::vault_registry::VaultId;
 
@@ -50,6 +50,8 @@ pub struct VaultResolveBatchResponse {
     /// Empty unless the request carried `asset_targets` (#158), so a client
     /// resolving note links only sees exactly what it saw before.
     pub asset_results: Vec<ResolveAssetResult>,
+    /// Empty unless the request carried `note_link_targets` (ADR-28).
+    pub note_link_results: Vec<ResolveTargetResult>,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +168,30 @@ pub async fn vault_scoped_note_links_handler(
     }
 }
 
+/// `GET /api/v1/vaults/{vault_id}/notes/{slug}/saved-queries` — every saved
+/// query in the Note, evaluated against its own Vault now (#275). A separate
+/// read from the Note itself on purpose: the Note read returns the
+/// authoritative Markdown and its content hash, and pairing that hash with
+/// computed rows would let a writer commit them into the file (ADR-21).
+pub async fn vault_scoped_note_saved_queries_handler(
+    State(state): State<AppState>,
+    Path((raw_vault_id, slug)): Path<(String, String)>,
+) -> Response {
+    let vault_id = match parse_vault_id(&raw_vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(error) => return bad_request(error),
+    };
+    let lookup_slug = slug.clone();
+    let result = VaultReads::new(&state)
+        .read(move |core| core.saved_queries(vault_id, &lookup_slug))
+        .await;
+    match result {
+        Ok(Some(saved)) => (StatusCode::OK, Json(saved)).into_response(),
+        Ok(None) => note_not_found_response(vault_id, &slug),
+        Err(error) => read_error_response(error),
+    }
+}
+
 /// `GET /api/v1/vaults/{vault_id}/stats/detail` — the rich, exact single-Vault
 /// statistics report `handlers/vault_collection_reads.rs`'s lean
 /// `{scope}/stats` collection projection cannot back. Never `all`: a distinct
@@ -213,11 +239,14 @@ pub async fn vault_scoped_note_download_handler(
             // *replacement* control block rather than mutating the current one
             // in place, so two independent lookups could otherwise pair this
             // note's content with a different Vault generation's directory.
-            let Some((note, vault_root)) = core.exact_note_for_download(vault_id, &lookup_slug)?
-            else {
+            let Some(download) = core.exact_note_for_download(vault_id, &lookup_slug)? else {
                 return Ok(DownloadOutcome::NotFound);
             };
-            Ok(match build_note_export(&vault_root, &note.note) {
+            // A demo zip carries only what the asset route would serve (#342).
+            let export = build_note_export(&download.vault_root, &download.note.note, |path| {
+                download.assets.admits(path)
+            });
+            Ok(match export {
                 Ok(export) => DownloadOutcome::Export(export),
                 Err(ExportError::TooLarge) => DownloadOutcome::TooLarge,
                 Err(ExportError::Failed(message)) => DownloadOutcome::ExportError(message),
@@ -288,7 +317,9 @@ pub async fn vault_scoped_resolve_batch_handler(
         Ok(payload) => payload,
         Err(error) => return json_rejection_response(error),
     };
-    if payload.targets.len() + payload.asset_targets.len() > MAX_RESOLVE_BATCH {
+    if payload.targets.len() + payload.asset_targets.len() + payload.note_link_targets.len()
+        > MAX_RESOLVE_BATCH
+    {
         return VaultApiError::new(
             "resolve_batch_too_large",
             format!("Too many targets (max {MAX_RESOLVE_BATCH})"),
@@ -321,10 +352,11 @@ pub async fn vault_scoped_resolve_batch_handler(
                 .as_deref()
                 .map(note_parent_dir)
                 .unwrap_or_default();
-            let (resolved, resolved_assets) = core.resolve_batch(
+            let (resolved, resolved_assets, resolved_note_links) = core.resolve_batch(
                 vault_id,
                 &payload.targets,
                 &payload.asset_targets,
+                &payload.note_link_targets,
                 &note_dir,
             )?;
             let asset_results = payload
@@ -333,11 +365,8 @@ pub async fn vault_scoped_resolve_batch_handler(
                 .zip(resolved_assets)
                 .map(|(target, path)| ResolveAssetResult { target, path })
                 .collect::<Vec<_>>();
-            let results = payload
-                .targets
-                .into_iter()
-                .zip(resolved)
-                .map(|(target, resolved)| match resolved {
+            let note_result =
+                |(target, resolved): (String, Option<ResolvedVaultNote>)| match resolved {
                     Some(resolved) => ResolveTargetResult {
                         target,
                         slug: Some(resolved.slug),
@@ -348,19 +377,31 @@ pub async fn vault_scoped_resolve_batch_handler(
                         slug: None,
                         archived: false,
                     },
-                })
+                };
+            let results = payload
+                .targets
+                .into_iter()
+                .zip(resolved)
+                .map(note_result)
                 .collect::<Vec<_>>();
-            Ok((results, asset_results))
+            let note_link_results = payload
+                .note_link_targets
+                .into_iter()
+                .zip(resolved_note_links)
+                .map(note_result)
+                .collect::<Vec<_>>();
+            Ok((results, asset_results, note_link_results))
         })
         .await;
 
     match result {
-        Ok((results, asset_results)) => (
+        Ok((results, asset_results, note_link_results)) => (
             StatusCode::OK,
             Json(VaultResolveBatchResponse {
                 vault_id,
                 results,
                 asset_results,
+                note_link_results,
             }),
         )
             .into_response(),

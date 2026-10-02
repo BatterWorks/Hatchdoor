@@ -27,9 +27,11 @@ use crate::cache::SqliteCache;
 use crate::git::WriteRecord;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
-    AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, VaultIndex, WriteError,
-    WriteOutcome, append_note, archive_note, create_note, delete_attachment, delete_note,
-    edit_note, import_attachment_bytes, move_attachment, move_or_rename_note, rename_attachment,
+    AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagDelete, TagDeleteError,
+    TagRename, TagRenameError, VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
+    check_attachment_import_target, check_note_content_hash, create_note, delete_attachment,
+    delete_note, delete_tag, edit_note, import_attachment_bytes, move_attachment,
+    move_or_rename_note, note_exists_conflict, note_target, rename_attachment, rename_tag,
     replace_section, update_note, update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
@@ -92,6 +94,18 @@ impl NoteWriteOutcome {
 pub struct WriteCapabilities {
     pub mutate_capable: bool,
     pub vault_writable: bool,
+    /// Whether this Vault's filesystem can commit a conditional write as one
+    /// atomic exchange. `Some(false)` means writes still work but through the
+    /// weaker check-then-rename path, which an editor outside Hatchdoor can
+    /// race (ADR-26).
+    ///
+    /// This answers for the filesystem, not for the Vault's permissions, so a
+    /// read-only Vault on a capable filesystem still answers `Some(true)`.
+    /// `None` is for a filesystem that could not be asked at all, a missing
+    /// path being the case that occurs. What must never happen is a Vault
+    /// blamed on its filesystem for being unwritable for its own reasons
+    /// (#345).
+    pub atomic_compare_and_swap: Option<bool>,
 }
 
 impl WriteCapabilities {
@@ -168,6 +182,14 @@ impl<'a> VaultMutationCore<'a> {
             vault_writable: std::fs::metadata(&vault_path)
                 .map(|metadata| !metadata.permissions().readonly())
                 .unwrap_or(false),
+            atomic_compare_and_swap: match crate::rename_flags::support(
+                &vault_path,
+                crate::rename_flags::RenameFlag::Exchange,
+            ) {
+                crate::rename_flags::FlagSupport::Supported => Some(true),
+                crate::rename_flags::FlagSupport::Unsupported => Some(false),
+                crate::rename_flags::FlagSupport::Undetermined => None,
+            },
         })
     }
 
@@ -369,6 +391,63 @@ impl<'a> VaultMutationCore<'a> {
             .await
     }
 
+    /// Whether an import to `target_relative_path` would be refused before
+    /// its bytes arrive: the Vault gate, the marker and noise refusals, the
+    /// path and extension checks, and an existing file that may not be
+    /// replaced. Writes nothing and takes no lock, so the answer can be stale
+    /// by the time the import runs, which checks again.
+    pub async fn check_attachment_import(
+        &self,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        overwrite: bool,
+    ) -> Result<(), VaultOperationError> {
+        self.open(vault_id)?
+            .check_attachment_import(target_relative_path, overwrite)
+            .await
+    }
+
+    /// Whether a note upload to `target_relative_path` would be refused before
+    /// its bytes arrive (ADR-32): the Vault gate, the marker and noise
+    /// refusals, the path checks, and then, with no `expected_content_hash`,
+    /// a note already there, or with one, a note that is missing or no longer
+    /// has that hash. Writes nothing and takes no lock, so the upload checks
+    /// again when it lands.
+    pub async fn check_note_upload(
+        &self,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        expected_content_hash: Option<&str>,
+    ) -> Result<(), VaultOperationError> {
+        self.open(vault_id)?
+            .check_note_upload(target_relative_path, expected_content_hash)
+            .await
+    }
+
+    /// Write an uploaded Markdown file as a note (ADR-32): the note write
+    /// `create_note` performs with no `expected_content_hash`, and the one
+    /// `update_note` performs with one. `max_bytes` is the authoritative check
+    /// on the uploaded length, as for an attachment.
+    pub async fn upload_note(
+        &self,
+        vault_id: VaultId,
+        target_relative_path: &str,
+        bytes: Vec<u8>,
+        max_bytes: u64,
+        expected_content_hash: Option<&str>,
+    ) -> Result<NoteWriteOutcome, VaultOperationError> {
+        let target = self.open(vault_id)?;
+        let _guard = target.acquire_mutation().await?;
+        target
+            .upload_note(
+                target_relative_path,
+                bytes,
+                max_bytes,
+                expected_content_hash,
+            )
+            .await
+    }
+
     /// Move one attachment, rewriting every reference to it.
     pub async fn move_attachment(
         &self,
@@ -406,6 +485,34 @@ impl<'a> VaultMutationCore<'a> {
         let target = self.open(vault_id)?;
         let _guard = target.acquire_mutation().await?;
         target.delete_attachment(source_relative_path).await
+    }
+    /// Plan, or plan and apply, one Vault-wide tag rename. The lock is held
+    /// for the whole call, so an applied rename is one write in the ledger.
+    pub async fn rename_tag(
+        &self,
+        vault_id: VaultId,
+        old_tag: &str,
+        new_tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagRename, VaultOperationError> {
+        let target = self.open(vault_id)?;
+        let _guard = target.acquire_mutation().await?;
+        target
+            .rename_tag(old_tag, new_tag, expected_plan_hash)
+            .await
+    }
+
+    /// Plan, or plan and apply, one Vault-wide tag delete, under the same
+    /// whole-call lock as a rename.
+    pub async fn delete_tag(
+        &self,
+        vault_id: VaultId,
+        tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagDelete, VaultOperationError> {
+        let target = self.open(vault_id)?;
+        let _guard = target.acquire_mutation().await?;
+        target.delete_tag(tag, expected_plan_hash).await
     }
 }
 
@@ -445,6 +552,12 @@ pub fn ensure_mutable(
 /// of it.
 pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOperationError {
     if let Some(message) = error.recovery_message() {
+        // The failure that most needs a person is also the one an operator is
+        // least likely to have captured from their client (#345).
+        tracing::error!(
+            vault_id = %vault_id,
+            "Vault write needs manual recovery: {message}"
+        );
         return VaultOperationError::new(
             "write_recovery_required",
             message.to_string(),
@@ -455,7 +568,31 @@ pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOpera
     let (code, message, retryable) = match error {
         WriteError::Conflict(message) => ("write_conflict", message, true),
         WriteError::InvalidInput(message) => ("invalid_write_input", message, false),
-        WriteError::Io(message) => ("write_failed", message, false),
+        WriteError::Io(message) => {
+            // The only record of an I/O write failure used to be whatever the
+            // client happened to log, which is how a whole filesystem being
+            // unable to commit a write took an strace of a running container
+            // to find (#345). A conflict is an expected answer and stays
+            // quiet; this is not.
+            tracing::error!(
+                vault_id = %vault_id,
+                "Vault write failed: {message}"
+            );
+            ("write_failed", message, false)
+        }
+        WriteError::LinkRewriteUnsupported(notes) => {
+            let listed = notes
+                .iter()
+                .map(|note| format!("'{}' ({})", note.relative_path, note.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let message = format!(
+                "Nothing was written: {} note(s) link to what this operation moves or deletes, \
+                 and their links cannot be rewritten in place. Fix them in the vault, then try again: {listed}",
+                notes.len()
+            );
+            ("link_rewrite_unsupported", message, false)
+        }
     };
     VaultOperationError::new(code, message, Some(vault_id), retryable)
 }
@@ -504,6 +641,137 @@ impl RecordedWrite for AttachmentOutcome {
             return None;
         }
         Some(&self.attachment.relative_path)
+    }
+}
+
+impl RecordedWrite for TagRename {
+    fn affected_paths(&self) -> &[std::path::PathBuf] {
+        &self.affected_paths
+    }
+
+    fn written_path(&self) -> Option<&str> {
+        // A rename touches many notes and names none of them; the commit title
+        // carries the tags instead, from what the caller addressed.
+        None
+    }
+}
+
+impl RecordedWrite for TagDelete {
+    fn affected_paths(&self) -> &[std::path::PathBuf] {
+        &self.affected_paths
+    }
+
+    fn written_path(&self) -> Option<&str> {
+        // As with a rename, the commit title names the tag, not a note.
+        None
+    }
+}
+
+/// The structured error for a tag rename that did not run. A write failure
+/// takes the same mapping as every other mutation; the three refusals only a
+/// tag rename can give have codes of their own, so a caller can tell "fix
+/// your arguments", "fix these notes" and "plan again" apart without reading
+/// the message.
+pub fn tag_rename_error(vault_id: VaultId, error: TagRenameError) -> VaultOperationError {
+    match error {
+        TagRenameError::InvalidTagName(message) => {
+            VaultOperationError::new("invalid_tag_name", message, Some(vault_id), false)
+        }
+        TagRenameError::UnsupportedShape(notes) => {
+            let listed = notes
+                .iter()
+                .map(|note| format!("'{}' ({})", note.relative_path, note.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_shape_unsupported",
+                format!(
+                    "Nothing was renamed: {} note(s) carry the tag in a form this rename cannot edit in place. \
+                     Fix them in the vault, then plan again: {listed}",
+                    notes.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagRenameError::StalePlan => VaultOperationError::new(
+            "tag_rename_plan_stale",
+            "Nothing was renamed: the Vault changed since this plan was made, so \
+             expected_plan_hash no longer matches. Call rename_tag without it to see the current plan.",
+            Some(vault_id),
+            false,
+        ),
+        TagRenameError::Write(error) => write_operation_error(vault_id, error),
+    }
+}
+
+/// The structured error for a tag delete that did not run. Each refusal has
+/// its own code: a nested tag and an inline use are both "clear these first",
+/// but what to clear differs, and a caller branches on the code.
+pub fn tag_delete_error(vault_id: VaultId, error: TagDeleteError) -> VaultOperationError {
+    match error {
+        TagDeleteError::InvalidTagName(message) => {
+            VaultOperationError::new("invalid_tag_name", message, Some(vault_id), false)
+        }
+        TagDeleteError::NestedTags(nested) => {
+            let listed = nested
+                .iter()
+                .map(|nested| format!("'{}' ({} note(s))", nested.tag, nested.notes))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_has_nested_tags",
+                format!(
+                    "Nothing was deleted: {} tag(s) are nested under this one, and a search for it \
+                     would still find their notes. Delete or rename them first, deepest first: {listed}",
+                    nested.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagDeleteError::InlineUse(notes) => {
+            let listed = notes
+                .iter()
+                .map(|path| format!("'{path}'"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_used_inline",
+                format!(
+                    "Nothing was deleted: {} note(s) carry this tag inline in their body, which \
+                     delete_tag never edits. Remove it from their text first, then plan again: {listed}",
+                    notes.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagDeleteError::UnsupportedShape(notes) => {
+            let listed = notes
+                .iter()
+                .map(|note| format!("'{}' ({})", note.relative_path, note.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            VaultOperationError::new(
+                "tag_shape_unsupported",
+                format!(
+                    "Nothing was deleted: {} note(s) carry the tag in a form this delete cannot edit in place. \
+                     Fix them in the vault, then plan again: {listed}",
+                    notes.len()
+                ),
+                Some(vault_id),
+                false,
+            )
+        }
+        TagDeleteError::StalePlan => VaultOperationError::new(
+            "tag_delete_plan_stale",
+            "Nothing was deleted: the Vault changed since this plan was made, so \
+             expected_plan_hash no longer matches. Call delete_tag without it to see the current plan.",
+            Some(vault_id),
+            false,
+        ),
+        TagDeleteError::Write(error) => write_operation_error(vault_id, error),
     }
 }
 
@@ -607,10 +875,29 @@ impl VaultMutation {
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let index = self.authoritative_index().await?;
         let entry = self.note_entry(&index, slug)?;
-        let content = content.to_string();
+        self.replace_entry(
+            &index,
+            entry,
+            slug,
+            content.to_string(),
+            expected_content_hash,
+        )
+        .await
+    }
+
+    /// The whole-content replace `update_note` and a replacing note upload
+    /// share, once the note is resolved.
+    async fn replace_entry(
+        &self,
+        index: &VaultIndex,
+        entry: NoteEntry,
+        addressed: &str,
+        content: String,
+        expected_content_hash: &str,
+    ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write("update", slug, move || {
+            .run_write("update", addressed, move || {
                 update_note(&entry, &content, &expected_content_hash)
             })
             .await?;
@@ -876,6 +1163,89 @@ impl VaultMutation {
         .await
     }
 
+    /// [`VaultMutationCore::check_attachment_import`] on a Vault already
+    /// gated. Answers the same refusals `import_attachment` would, with the
+    /// same codes, and records nothing in the write ledger.
+    pub async fn check_attachment_import(
+        &self,
+        target_relative_path: &str,
+        overwrite: bool,
+    ) -> Result<(), VaultOperationError> {
+        self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(target_relative_path)?;
+        let vault_path = self.control.vault_path().to_path_buf();
+        let target_path = target_relative_path.to_string();
+        offload(move || check_attachment_import_target(&vault_path, &target_path, overwrite))
+            .await
+            .map_err(|error| write_operation_error(self.vault_id, error))
+    }
+
+    /// [`VaultMutationCore::check_note_upload`] on a Vault already gated.
+    pub async fn check_note_upload(
+        &self,
+        target_relative_path: &str,
+        expected_content_hash: Option<&str>,
+    ) -> Result<(), VaultOperationError> {
+        let target_relative_path = &note_upload_path(target_relative_path);
+        self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(target_relative_path)?;
+        let Some(expected_content_hash) = expected_content_hash else {
+            let target = self.note_target(target_relative_path).await?;
+            if target.exists {
+                return Err(write_operation_error(
+                    self.vault_id,
+                    note_exists_conflict(&target),
+                ));
+            }
+            return Ok(());
+        };
+        let catalog = self.authoritative_catalog().await?;
+        let entry = self.note_at_path(&catalog, target_relative_path).await?;
+        let expected_content_hash = expected_content_hash.to_string();
+        offload(move || check_note_content_hash(&entry, &expected_content_hash))
+            .await
+            .map_err(|error| write_operation_error(self.vault_id, error))
+    }
+
+    /// [`VaultMutationCore::upload_note`] on a Vault already gated.
+    pub async fn upload_note(
+        &self,
+        target_relative_path: &str,
+        bytes: Vec<u8>,
+        max_bytes: u64,
+        expected_content_hash: Option<&str>,
+    ) -> Result<NoteWriteOutcome, VaultOperationError> {
+        let invalid = |message: String| {
+            write_operation_error(self.vault_id, WriteError::InvalidInput(message))
+        };
+        let size = bytes.len() as u64;
+        if size > max_bytes {
+            return Err(invalid(format!(
+                "uploaded note exceeds max size: {size} > {max_bytes}"
+            )));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_| invalid("an uploaded note must be valid UTF-8 text".to_string()))?;
+        let target_relative_path = &note_upload_path(target_relative_path);
+        let Some(expected_content_hash) = expected_content_hash else {
+            return self
+                .create_note(target_relative_path, &content, false)
+                .await;
+        };
+        self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(target_relative_path)?;
+        let index = self.authoritative_index().await?;
+        let entry = self.note_at_path(&index, target_relative_path).await?;
+        self.replace_entry(
+            &index,
+            entry,
+            target_relative_path,
+            content,
+            expected_content_hash,
+        )
+        .await
+    }
+
     /// Move one attachment, rewriting every reference to it.
     pub async fn move_attachment(
         &self,
@@ -933,6 +1303,67 @@ impl VaultMutation {
         let source_path = source_relative_path.to_string();
         self.run_write("delete attachment", source_relative_path, move || {
             delete_attachment(&vault_path, &index, &source_path)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------
+    // Vault-wide mutations
+    // -----------------------------------------------------------------
+
+    /// Rename a tag across the whole Vault. Without `expected_plan_hash` this
+    /// only plans, writes nothing, and records nothing; with it, the plan is
+    /// made again and applied only if its fingerprint still matches.
+    pub async fn rename_tag(
+        &self,
+        old_tag: &str,
+        new_tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagRename, VaultOperationError> {
+        let catalog = self.authoritative_catalog().await?;
+        let vault_path = self.control.vault_path().to_path_buf();
+        let old_tag = old_tag.to_string();
+        let new_tag = new_tag.to_string();
+        let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
+            return offload(move || rename_tag(&vault_path, &catalog, &old_tag, &new_tag, None))
+                .await
+                .map_err(|error| tag_rename_error(self.vault_id, error));
+        };
+        let addressed = format!(
+            "#{} -> #{}",
+            old_tag.trim_start_matches('#'),
+            new_tag.trim_start_matches('#')
+        );
+        self.run_recorded("rename tag", &addressed, tag_rename_error, move || {
+            rename_tag(
+                &vault_path,
+                &catalog,
+                &old_tag,
+                &new_tag,
+                Some(&expected_plan_hash),
+            )
+        })
+        .await
+    }
+
+    /// Delete one exact tag from every frontmatter `tags` value in the Vault.
+    /// Planning and applying work as they do for [`Self::rename_tag`].
+    pub async fn delete_tag(
+        &self,
+        tag: &str,
+        expected_plan_hash: Option<&str>,
+    ) -> Result<TagDelete, VaultOperationError> {
+        let catalog = self.authoritative_catalog().await?;
+        let vault_path = self.control.vault_path().to_path_buf();
+        let tag = tag.to_string();
+        let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
+            return offload(move || delete_tag(&vault_path, &catalog, &tag, None))
+                .await
+                .map_err(|error| tag_delete_error(self.vault_id, error));
+        };
+        let addressed = format!("#{}", tag.strip_prefix('#').unwrap_or(&tag).to_lowercase());
+        self.run_recorded("delete tag", &addressed, tag_delete_error, move || {
+            delete_tag(&vault_path, &catalog, &tag, Some(&expected_plan_hash))
         })
         .await
     }
@@ -999,6 +1430,34 @@ impl VaultMutation {
             .find_by_slug(slug)
             .cloned()
             .ok_or_else(|| self.note_not_found(slug))
+    }
+
+    /// Where a note write addressed by path would land, with `create_note`'s
+    /// path refusals.
+    async fn note_target(
+        &self,
+        relative_path: &str,
+    ) -> Result<crate::vault::NoteTarget, VaultOperationError> {
+        let vault_path = self.control.vault_path().to_path_buf();
+        let relative_path = relative_path.to_string();
+        offload(move || note_target(&vault_path, &relative_path))
+            .await
+            .map_err(|error| write_operation_error(self.vault_id, error))
+    }
+
+    /// The note an index holds at a Vault-relative path, for the writes that
+    /// address a note by path rather than slug.
+    async fn note_at_path(
+        &self,
+        index: &VaultIndex,
+        relative_path: &str,
+    ) -> Result<NoteEntry, VaultOperationError> {
+        let target = self.note_target(relative_path).await?;
+        index
+            .ordered_entries()
+            .into_iter()
+            .find(|entry| entry.relative_path == target.relative_path)
+            .ok_or_else(|| self.note_not_found(relative_path))
     }
 
     fn note_not_found(&self, slug: &str) -> VaultOperationError {
@@ -1076,31 +1535,99 @@ impl VaultMutation {
     /// mutation can be added without it: `label` names the operation for the
     /// commit title, `addressed` is what the caller named, and the outcome
     /// supplies the resulting path and the files actually touched. A write
-    /// that failed records nothing, because nothing changed on disk.
+    /// that failed records nothing, because nothing changed on disk. The same
+    /// goes for marking the Vault's snapshot stale and asking for its Index
+    /// and commit turns (#324).
     async fn run_write<T: RecordedWrite + Send + 'static>(
         &self,
         label: &'static str,
         addressed: &str,
         op: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
     ) -> Result<T, VaultOperationError> {
-        let result = tokio::task::spawn_blocking(op)
+        self.run_recorded(label, addressed, write_operation_error, op)
             .await
-            .unwrap_or_else(|join_error| {
-                Err(WriteError::Io(format!("write task panicked: {join_error}")))
-            });
-        let outcome = result.map_err(|error| write_operation_error(self.vault_id, error))?;
+    }
+
+    /// [`VaultMutation::run_write`] for a primitive with an error type of its
+    /// own, which `translate` maps onto the structured error. A panic still
+    /// reaches the caller as `write_failed`.
+    async fn run_recorded<
+        T: RecordedWrite + Send + 'static,
+        E: From<WriteError> + Send + 'static,
+    >(
+        &self,
+        label: &'static str,
+        addressed: &str,
+        translate: fn(VaultId, E) -> VaultOperationError,
+        op: impl FnOnce() -> Result<T, E> + Send + 'static,
+    ) -> Result<T, VaultOperationError> {
+        // The published snapshot is marked stale on the blocking pool, right
+        // after the write lands and still under the caller's mutation guard,
+        // which is what keeps an Index turn already building from publishing
+        // over it as fresh (#324).
+        let control = self.control.clone();
+        let outcome = offload(move || {
+            let outcome = op()?;
+            control.mark_snapshot_behind_write();
+            Ok(outcome)
+        })
+        .await
+        .map_err(|error| translate(self.vault_id, error))?;
         self.control.write_ledger().record(WriteRecord {
             op: label.to_string(),
             target: outcome.written_path().unwrap_or(addressed).to_string(),
             affected_paths: outcome.affected_paths().to_vec(),
             summary: self.commit_summary.clone(),
         });
+        // After the record, so the commit this asks for can name the write.
+        // The write path asks for its own Index and commit turns rather than
+        // leaving that to a watcher, which may never have started or may have
+        // lost the event (#324).
+        self.control.report_write();
         Ok(outcome)
     }
 
     fn internal(&self, message: impl Into<String>) -> VaultOperationError {
         VaultOperationError::new("internal_error", message, Some(self.vault_id), false)
     }
+}
+
+/// Whether an upload to `target_relative_path` is a note upload rather than
+/// an attachment one (ADR-32): its filename ends in `.md`, in any case. A path
+/// with no extension is not a note, though `create_note` would add one.
+pub fn is_note_upload_target(target_relative_path: &str) -> bool {
+    std::path::Path::new(target_relative_path.trim())
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// The path a note upload writes: the target with its `.md` extension in
+/// lower case, so a link for `Report.MD` writes `Report.md` rather than
+/// `create_note`'s `Report.MD.md`, and replaces the note the index knows
+/// there.
+fn note_upload_path(target_relative_path: &str) -> String {
+    let trimmed = target_relative_path.trim();
+    match trimmed.len().checked_sub(3) {
+        Some(stem)
+            if trimmed.is_char_boundary(stem) && trimmed[stem..].eq_ignore_ascii_case(".md") =>
+        {
+            format!("{}.md", &trimmed[..stem])
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Run a blocking `vault/write` call on the blocking pool, turning a panic
+/// into a `write_failed` rather than letting it unwind through the adapter.
+async fn offload<T: Send + 'static, E: From<WriteError> + Send + 'static>(
+    op: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E> {
+    tokio::task::spawn_blocking(op)
+        .await
+        .unwrap_or_else(|join_error| {
+            Err(WriteError::Io(format!("write task panicked: {join_error}")).into())
+        })
 }
 
 /// The filename of a Vault-relative path, or the whole path when it names no
@@ -1130,7 +1657,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{VaultMutationCore, VaultOperationError};
+    use super::{VaultMutationCore, VaultOperationError, is_note_upload_target, note_upload_path};
     use crate::cache::SqliteCache;
     use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
     use crate::vault::SectionMode;
@@ -1138,6 +1665,23 @@ mod tests {
         NewVaultDefinition, VaultGitMode, VaultId, VaultRegistryStore, VaultSource,
     };
     use crate::vault_runtime::VaultCollectionRuntime;
+
+    #[test]
+    fn a_note_upload_target_ends_in_md_in_any_case_and_nothing_else_is_one() {
+        for note in ["Report.md", "Imports/Report.md", " Notes/x.MD ", "a.b.Md"] {
+            assert!(is_note_upload_target(note), "{note}");
+        }
+        for other in ["Report", "Imports/scan.png", ".md", "a.mdx", "md"] {
+            assert!(!is_note_upload_target(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_note_upload_writes_its_target_with_a_lower_case_extension() {
+        assert_eq!(note_upload_path(" Imports/Report.MD "), "Imports/Report.md");
+        assert_eq!(note_upload_path("a.Md"), "a.md");
+        assert_eq!(note_upload_path("Imports/Report.md"), "Imports/Report.md");
+    }
 
     /// One Vault on a real filesystem, reconciled through the real registry
     /// and runtime, so a core test exercises the same gating, index build, and
@@ -2078,6 +2622,11 @@ mod tests {
         assert!(capabilities.mutate_capable);
         assert!(capabilities.vault_writable);
         assert!(capabilities.enabled());
+        assert_eq!(
+            capabilities.atomic_compare_and_swap,
+            Some(true),
+            "an ordinary filesystem commits a conditional write in one step"
+        );
     }
 
     #[tokio::test]
@@ -2090,6 +2639,67 @@ mod tests {
         assert!(capabilities.mutate_capable);
         assert!(!capabilities.vault_writable);
         assert!(!capabilities.enabled());
+        assert_ne!(
+            capabilities.atomic_compare_and_swap,
+            Some(false),
+            "a read-only Vault has its own reason to report and must never be \
+             blamed on its filesystem; the answer here is about the filesystem, \
+             which has not changed (#345)"
+        );
+    }
+
+    /// The report has to separate "writes work, with weaker protection" from
+    /// "writes do not work", because they call for different answers from the
+    /// operator (#345).
+    #[tokio::test]
+    async fn write_capabilities_report_a_filesystem_that_cannot_compare_and_swap() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        crate::rename_flags::force_unsupported_for_tests(&workspace.vault_path);
+
+        let capabilities = workspace
+            .core()
+            .write_capabilities(workspace.vault_id)
+            .expect("capabilities");
+
+        assert_eq!(capabilities.atomic_compare_and_swap, Some(false));
+        assert!(
+            capabilities.enabled(),
+            "the Vault is still writable, just without the atomic commit"
+        );
+    }
+
+    /// The bug as reported: on such a filesystem every edit of an existing
+    /// note failed with `write_failed: Invalid argument (os error 22)` while
+    /// creating one worked (#345).
+    #[tokio::test]
+    async fn note_writes_go_through_the_mutation_core_without_an_exchange() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        crate::rename_flags::force_unsupported_for_tests(&workspace.vault_path);
+        let core = workspace.core();
+
+        core.append_to_note(workspace.vault_id, "home", "appended\n", &hash("# Home\n"))
+            .await
+            .expect("append must work without an exchange");
+        assert!(workspace.read("Home.md").contains("appended"));
+
+        let current = hash(&workspace.read("Home.md"));
+        core.edit_note(
+            workspace.vault_id,
+            "home",
+            "appended",
+            "edited",
+            &current,
+            false,
+        )
+        .await
+        .expect("edit must work without an exchange");
+        assert!(workspace.read("Home.md").contains("edited"));
+
+        let stale = core
+            .append_to_note(workspace.vault_id, "home", "more\n", &hash("# Home\n"))
+            .await
+            .expect_err("a stale hash must still be refused");
+        assert_code(&stale, "write_conflict");
     }
 
     #[tokio::test]

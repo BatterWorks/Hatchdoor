@@ -36,11 +36,23 @@ pub struct AttachmentOutcome {
     pub affected_paths: Vec<std::path::PathBuf>,
 }
 
+/// A note that links to what an operation is moving, renaming or deleting,
+/// but whose link cannot be rewritten in place, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrewritableNote {
+    pub relative_path: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
     Conflict(String),
     InvalidInput(String),
     Io(String),
+    /// Every note, in path order, whose link to the subject of a move, rename
+    /// or delete would have to change but cannot be rewritten. Nothing was
+    /// written (#360).
+    LinkRewriteUnsupported(Vec<UnrewritableNote>),
 }
 
 impl WriteError {
@@ -63,6 +75,16 @@ impl WriteError {
 #[derive(Debug, Clone)]
 pub(super) struct TextRewrite {
     pub(super) path: PathBuf,
+    /// The content hash of what was on disk at `path` when the plan first
+    /// read it, which is the text `content` was derived from.
+    ///
+    /// It is the CAS expectation the rewrite commits against, so the check
+    /// covers the whole span from plan to commit rather than the microsecond
+    /// between the journal's own re-read and its rename. Without it a
+    /// concurrent manual save landing part-way through a multi-note apply
+    /// loop is read back as the "original" and silently replaced by text
+    /// derived from the stale copy (#321).
+    pub(super) original_hash: String,
     pub(super) content: String,
 }
 

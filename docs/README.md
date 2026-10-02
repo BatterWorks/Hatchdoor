@@ -37,8 +37,8 @@ historical records.
 
 - [`maintenance/dependency-update-plan.md`](maintenance/dependency-update-plan.md)
   — completed dependency-update plan and retained upgrade context.
-- [`maintenance/release-runbook.md`](maintenance/release-runbook.md) — release
-  PR merge procedure and pre-merge checklist.
+- [`maintenance/release-runbook.md`](maintenance/release-runbook.md) — cutting
+  a release with `just release-prepare` and `just release-publish`.
 
 ## Research
 

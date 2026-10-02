@@ -13,7 +13,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExplorerPane } from "./ExplorerPane";
 import { getStoredUnfoldedVault } from "./vaultAccordion";
 import {
+  conflictVault,
   EIGHT_VAULTS,
+  healthyVault,
+  staleVault,
+  syncFailedVault,
   THREE_VAULTS,
   unavailableVault,
 } from "../test/fixtures/vaults";
@@ -72,8 +76,12 @@ function defaultPaneProps(): Parameters<typeof ExplorerPane>[0] {
     modifiedNotes: MODIFIED,
     modifiedNotesPartial: false,
     modifiedNotesMissingVaults: [],
+    modifiedNotesError: null,
+    onRetryModifiedNotes: vi.fn(),
     loadingTree: false,
     treeError: null,
+    treePartial: false,
+    treeMissingVaults: [],
     tree: TREE,
     vaultTrees: [],
     expandedFolders: {},
@@ -260,6 +268,33 @@ describe("ExplorerPane", () => {
     expect(
       within(panel).getByRole("link", { name: "Finance" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows fifteen changed notes and counts the rest (#341)", () => {
+    const modifiedNotes: ModifiedNote[] = Array.from(
+      { length: 25 },
+      (_, index) => ({
+        vault_id: VAULT_ID,
+        title: `Changed ${index}`,
+        slug: `changed-${index}`,
+        relative_path: `changed-${index}`,
+        mtime_ns: 100 - index,
+      }),
+    );
+    renderPane({ modifiedNotes });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Recently changed notes" }),
+    );
+
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
+    expect(within(panel).getAllByRole("link")).toHaveLength(15);
+    expect(within(panel).getByText("Changed 14")).toBeInTheDocument();
+    expect(within(panel).queryByText("Changed 15")).not.toBeInTheDocument();
+    expect(within(panel).getByText("and 10 more")).toBeInTheDocument();
+    expect(within(panel).getByText("25")).toBeInTheDocument();
   });
 });
 
@@ -728,15 +763,47 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
     expect(within(recent).getByText("Beta note")).toBeInTheDocument();
   });
 
-  it("hides the Vault prefix on Recently viewed once scope is narrowed", () => {
+  it("keeps the Vault prefix on Recently viewed once scope is narrowed, since the history still spans Vaults (#334)", () => {
     renderPane({
       vaults: THREE_VAULTS,
-      scope: THREE_VAULTS[1].vault_id,
+      scope: THREE_VAULTS[0].vault_id,
       recentNotes: recentAcrossVaults,
     });
 
     const recent = screen.getByTestId("recent-notes");
-    expect(within(recent).queryByText("Beta")).not.toBeInTheDocument();
+    expect(within(recent).getByText("Beta")).toBeInTheDocument();
+  });
+
+  it("keys Recently viewed rows by Vault plus slug, so two Vaults' same-slug notes each keep their own row (#334)", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const twins: RecentNote[] = [THREE_VAULTS[0], THREE_VAULTS[1]].map(
+      (vault, index) => ({
+        vaultId: vault.vault_id,
+        title: `${vault.name} index`,
+        slug: "index",
+        relativePath: "index",
+        viewedAt: index,
+      }),
+    );
+
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[0].vault_id,
+      recentNotes: twins,
+    });
+
+    const links = within(screen.getByTestId("recent-notes")).getAllByRole(
+      "link",
+    );
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      `/v/${THREE_VAULTS[0].vault_id}/n/index`,
+      `/v/${THREE_VAULTS[1].vault_id}/n/index`,
+    ]);
+    expect(links[1]).toHaveTextContent("Beta");
+    expect(
+      errorSpy.mock.calls.some((call) => String(call[0]).includes("same key")),
+    ).toBe(false);
+    errorSpy.mockRestore();
   });
 
   it("hides the Vault prefix on Recently viewed at one enabled Vault", () => {
@@ -1081,6 +1148,145 @@ describe("ExplorerPane accordion (#142)", () => {
     ).toHaveAttribute("open");
   });
 
+  it("opens nested folders three deep inside an unfolded Vault and keeps them open across unfolding another Vault (#305)", async () => {
+    const vaultTrees = THREE_VAULTS.map((vault) => {
+      const entry = vaultTreeFor(vault);
+      entry.tree.folders[0].folders = [
+        {
+          name: "Hosts",
+          folders: [
+            {
+              name: "Rack",
+              folders: [],
+              notes: [
+                {
+                  vault_id: vault.vault_id,
+                  title: `${vault.name} rack`,
+                  slug: `${vault.vault_id}-rack`,
+                },
+              ],
+            },
+          ],
+          notes: [
+            {
+              vault_id: vault.vault_id,
+              title: `${vault.name} host`,
+              slug: `${vault.vault_id}-host`,
+            },
+          ],
+        },
+      ];
+      return entry;
+    });
+    renderStatefulPane({
+      vaults: THREE_VAULTS,
+      vaultTrees,
+      scope: "all",
+      locationPathname: `/v/${THREE_VAULTS[0].vault_id}/n/x`,
+    });
+
+    // Alpha starts unfolded. Folders open the way a click opens them: the
+    // element changes, and the browser (jsdom too) queues the `toggle` event
+    // React hands to FolderNode.
+    const openFolder = async (path: string) => {
+      const details = screen.getByTitle(path).closest("details");
+      if (!details) throw new Error(`No folder ${path}`);
+      details.open = true;
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    };
+    await openFolder("Journal");
+    await openFolder("Journal/Hosts");
+    await openFolder("Journal/Hosts/Rack");
+    expect(screen.getByText("Alpha host")).toBeInTheDocument();
+    expect(screen.getByText("Alpha rack")).toBeInTheDocument();
+
+    fireEvent.click(headFor("Gamma"));
+    fireEvent.click(headFor("Alpha"));
+
+    expect(
+      screen.getByTitle("Journal/Hosts").closest("details"),
+    ).toHaveAttribute("open");
+    expect(screen.getByText("Alpha rack")).toBeInTheDocument();
+  });
+
+  it("shows the open note's folders without saving them, and saves the reader's close under the Vault's key (#365)", async () => {
+    const alpha = THREE_VAULTS[0];
+    const vaultTrees = THREE_VAULTS.map((vault) => {
+      const entry = vaultTreeFor(vault);
+      entry.tree.folders[0].folders = [
+        {
+          name: "Hosts",
+          folders: [],
+          notes: [
+            {
+              vault_id: vault.vault_id,
+              title: `${vault.name} host`,
+              slug: `${vault.vault_id}-host`,
+            },
+          ],
+        },
+      ];
+      return entry;
+    });
+    let record: Record<string, boolean> = {};
+    function Wrapper({ path }: { path: string }) {
+      const [expandedFolders, setExpandedFolders] = useState<
+        Record<string, boolean>
+      >({});
+      record = expandedFolders;
+      return (
+        <ExplorerPane
+          {...defaultPaneProps()}
+          vaults={THREE_VAULTS}
+          vaultTrees={vaultTrees}
+          scope="all"
+          locationPathname={path}
+          expandedFolders={expandedFolders}
+          onExpandedFoldersChange={setExpandedFolders}
+        />
+      );
+    }
+    const at = (slug: string) => (
+      <MemoryRouter>
+        <Wrapper path={`/v/${alpha.vault_id}/n/${slug}`} />
+      </MemoryRouter>
+    );
+    const settle = () =>
+      act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    const details = (path: string) =>
+      screen.getByTitle(path).closest("details") as HTMLDetailsElement;
+
+    const { rerender } = render(at(`${alpha.vault_id}-host`));
+    // A browser fires `toggle` for each <details> that mounts open.
+    for (const element of document.querySelectorAll("details")) {
+      if (element.open) element.dispatchEvent(new Event("toggle"));
+    }
+    await settle();
+
+    expect(details("Journal").open).toBe(true);
+    expect(details("Journal/Hosts").open).toBe(true);
+    expect(record).toEqual({});
+
+    details("Journal/Hosts").open = false;
+    await settle();
+    rerender(at(`${alpha.vault_id}-host`));
+    await settle();
+
+    expect(details("Journal/Hosts").open).toBe(false);
+    expect(record).toEqual({
+      [`${alpha.vault_id}\u0001Journal/Hosts`]: false,
+    });
+
+    rerender(at(`${alpha.vault_id}-entry`));
+    await settle();
+
+    expect(details("Journal").open).toBe(true);
+    expect(details("Journal/Hosts").open).toBe(false);
+    expect(record).toEqual({
+      [`${alpha.vault_id}\u0001Journal/Hosts`]: false,
+    });
+  });
+
   it("narrowing to one Vault renders exactly today's explorer, with the count-or-condition slot on the Notes head", () => {
     renderPane({
       vaults: THREE_VAULTS,
@@ -1149,16 +1355,17 @@ describe("ExplorerPane scope-change motion (#147)", () => {
 
     rerenderWith({ loadingTree: true });
 
-    // "Finance" is unique to the folder tree — unlike "Home", which also
-    // appears in the always-rendered Recently viewed list.
-    expect(screen.getByText("Finance")).toBeInTheDocument();
+    // "10-topics" is unique to the folder tree — unlike "Home", which also
+    // appears in the always-rendered Recently viewed list. The folder rather
+    // than the note inside it: a collapsed folder renders no children.
+    expect(screen.getByText("10-topics")).toBeInTheDocument();
     expect(document.querySelector(".skeleton-list")).toBeNull();
 
     act(() => {
       vi.advanceTimersByTime(199);
     });
 
-    expect(screen.getByText("Finance")).toBeInTheDocument();
+    expect(screen.getByText("10-topics")).toBeInTheDocument();
     expect(document.querySelector(".skeleton-list")).toBeNull();
   });
 
@@ -1171,7 +1378,7 @@ describe("ExplorerPane scope-change motion (#147)", () => {
     });
 
     expect(document.querySelector(".skeleton-list")).not.toBeNull();
-    expect(screen.queryByText("Finance")).not.toBeInTheDocument();
+    expect(screen.queryByText("10-topics")).not.toBeInTheDocument();
   });
 
   it("swaps straight to the narrowed answer with no skeleton flash once it lands", () => {
@@ -1246,5 +1453,191 @@ describe("ExplorerPane scope-change motion (#147)", () => {
 
     expect(document.querySelector(".vault-accordion-head")).toBeNull();
     expect(accordionHeads()).toHaveLength(0);
+  });
+});
+
+describe("ExplorerPane folder subtrees", () => {
+  afterEach(cleanup);
+
+  /** "10-topics" holds "Finance"; the Vault root holds "Home". A folder opens
+   * when it is on the active note's path, so the route decides which of the
+   * two is expanded without reaching for the persisted expansion map. */
+  function renderAt(slug: string) {
+    render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/${slug}`]}>
+        <ExplorerPane
+          {...defaultPaneProps()}
+          tree={TREE}
+          locationPathname={`/v/${VAULT_ID}/n/${slug}`}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it("renders nothing inside a closed folder", () => {
+    renderAt("home");
+
+    expect(screen.getByText("10-topics")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Finance" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the notes of the folder holding the active note", () => {
+    renderAt("finance");
+
+    expect(screen.getByRole("link", { name: "Finance" })).toBeInTheDocument();
+  });
+});
+
+describe("Changed on disk tells a failed read apart from a quiet one (#334)", () => {
+  afterEach(cleanup);
+
+  it("renders a failed recent read as a failure with Retry, never as nothing has changed", () => {
+    const props = renderPane({
+      vaults: THREE_VAULTS,
+      modifiedNotes: [],
+      modifiedNotesError: "Request timed out",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Recently changed notes" }),
+    );
+
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
+    expect(
+      within(panel).queryByText("Nothing has changed on disk yet."),
+    ).not.toBeInTheDocument();
+    expect(within(panel).getByText("Could Not Load")).toBeInTheDocument();
+    expect(within(panel).getByText("Request timed out")).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: "Retry" }));
+    expect(props.onRetryModifiedNotes).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Explorer tree tells the truth about a partial read (#334)", () => {
+  afterEach(cleanup);
+
+  it("names the Vaults the tree read left out in a trailing line under a narrowed tree", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[0].vault_id,
+      tree: TREE,
+      treePartial: true,
+      treeMissingVaults: [THREE_VAULTS[0].name],
+    });
+
+    expect(
+      screen.getByText(`${THREE_VAULTS[0].name} did not answer.`),
+    ).toHaveClass("explorer-tree-partial");
+    // Still the tree, not a banner in its place.
+    expect(screen.getByText("Home")).toBeInTheDocument();
+  });
+
+  it("says an unfolded Vault the read left out did not answer, instead of an empty section", () => {
+    const vaultTrees = [THREE_VAULTS[0], THREE_VAULTS[2]].map((vault) =>
+      vaultTreeFor(vault),
+    );
+    renderPane({
+      vaults: THREE_VAULTS,
+      vaultTrees,
+      scope: "all",
+      tree: TREE,
+      treePartial: true,
+      treeMissingVaults: [THREE_VAULTS[1].name],
+      locationPathname: `/v/${THREE_VAULTS[1].vault_id}/n/home`,
+    });
+
+    expect(headFor(THREE_VAULTS[1].name)).toHaveAttribute("data-open", "true");
+    const lines = screen.getAllByText(
+      `${THREE_VAULTS[1].name} did not answer.`,
+    );
+    // One under the unfolded head, one trailing line for the whole read.
+    expect(lines).toHaveLength(2);
+  });
+
+  it("shows no trailing line for a fresh read", () => {
+    renderPane({ vaults: THREE_VAULTS, scope: THREE_VAULTS[0].vault_id });
+    expect(screen.queryByText(/did not answer/)).not.toBeInTheDocument();
+  });
+
+  it("replaces a blank pane with an error block and Retry when the read answered with no tree at all", () => {
+    const solo = healthyVault("Solo");
+    const props = renderPane({
+      vaults: [solo],
+      scope: "all",
+      tree: null,
+      vaultTrees: [],
+      treePartial: true,
+      treeMissingVaults: ["Solo"],
+    });
+
+    expect(screen.getByText("Nothing Found")).toBeInTheDocument();
+    expect(screen.getByText("Solo did not answer.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(props.onRefreshTree).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Single-Vault instances surface the Vault's health (#334)", () => {
+  afterEach(cleanup);
+
+  it.each([
+    ["conflict", conflictVault("Solo")],
+    ["sync failed", syncFailedVault("Solo")],
+    ["stale", staleVault("Solo")],
+  ])(
+    "shows %s on the Notes head at one enabled Vault under the default all scope",
+    (word, vault) => {
+      renderPane({ vaults: [vault], scope: "all", tree: TREE });
+
+      const notesHead = screen.getByText("Notes").closest(".side-head");
+      expect(notesHead).not.toBeNull();
+      expect(
+        within(notesHead as HTMLElement).getByText(word),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("shows the one Vault's note count on the Notes head when it is healthy", () => {
+    const solo = healthyVault("Solo");
+    renderPane({
+      vaults: [solo],
+      scope: "all",
+      tree: TREE,
+      vaultNoteCounts: { [solo.vault_id]: 42 },
+    });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).toHaveTextContent("42");
+  });
+
+  it("pins the Notes head while it carries the one Vault's condition", () => {
+    renderPane({ vaults: [conflictVault("Solo")], scope: "all", tree: TREE });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).toHaveClass("is-pinned");
+  });
+
+  it("leaves a healthy single-Vault Notes head unpinned", () => {
+    const solo = healthyVault("Solo");
+    renderPane({
+      vaults: [solo],
+      scope: "all",
+      tree: TREE,
+      vaultNoteCounts: { [solo.vault_id]: 42 },
+    });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).not.toHaveClass("is-pinned");
+  });
+
+  it("does not pin a narrowed head when more than one Vault is enabled", () => {
+    const vaults = [conflictVault("Solo"), healthyVault("Other")];
+    renderPane({ vaults, scope: vaults[0].vault_id, tree: TREE });
+
+    const notesHead = screen.getByText("Notes").closest(".side-head");
+    expect(notesHead).not.toHaveClass("is-pinned");
   });
 });

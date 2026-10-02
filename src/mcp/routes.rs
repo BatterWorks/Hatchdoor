@@ -25,7 +25,7 @@ use crate::app_state::AppState;
 use super::adapter::HatchdoorMcpHandler;
 use super::auth::{reject_unsupported_protocol_version, validate_mcp_request};
 use super::config::McpConfig;
-use super::limits::{self, RateLimiter, RequestClass};
+use super::limits::{self, RateLimiter, ToolCallCharge};
 use super::protocol::jsonrpc_error_response;
 use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
 
@@ -69,6 +69,19 @@ impl HatchdoorMcpTransport {
         // library default but is pinned here so the behavior is explicit and
         // survives an upstream default change.
         config.sse_keep_alive = Some(std::time::Duration::from_secs(15));
+        // A legacy session's standalone GET stream lasts as long as the agent
+        // stays connected, and graceful shutdown waits for it, so shutdown
+        // cancels rmcp's own token, which terminates every session (#353).
+        // `build_router` also runs in synchronous tests, where nothing serves
+        // and there is no runtime to watch from.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = config.cancellation_token.clone();
+            let shutdown = state.shutdown.clone();
+            runtime.spawn(async move {
+                shutdown.wait().await;
+                sessions.cancel();
+            });
+        }
         // The per-token live-subscription budget (#170) shared by every
         // handler instance this service constructs.
         let subscriptions = Arc::new(SubscriptionRegistry::new());
@@ -213,16 +226,18 @@ async fn authorize_mcp_transport(
         // happen here — before dispatch — so they carry HTTP 429 with a
         // Retry-After header instead of a JSON-RPC error.
         if config.rate_limits_enabled
-            && let Some(class) = classify_post_body(&body)
+            && let Some(charge) = classify_post_body(&body)
             && let Some(token) = parts.extensions.get::<McpBearerToken>()
         {
             // Concurrency first, so a busy-rejected call does not also spend
             // quota budget on a request that never dispatched.
-            let guard = match limiter.try_acquire(class).await {
+            let guard = match limiter.try_acquire(charge.class).await {
                 Ok(guard) => guard,
                 Err(retry_in) => return too_many_requests(limits::retry_after_seconds(retry_in)),
             };
-            if let Err(retry_in) = limiter.check_quota(token, std::time::Instant::now()) {
+            if let Err(retry_in) =
+                limiter.check_quota_units(token, std::time::Instant::now(), charge.quota_units)
+            {
                 return too_many_requests(limits::retry_after_seconds(retry_in));
             }
             // The guard is deliberately held across dispatch: its Drop is what
@@ -244,23 +259,25 @@ async fn authorize_mcp_transport(
 /// Classify a buffered POST body for layered limiting (#171): `None` for
 /// exempt traffic (protocol lifecycle, discovery, list handling, notifications,
 /// and anything unparseable — which downstream JSON-RPC framing rejects
-/// without ever reaching a tool). Only `tools/call` bodies yield a class.
+/// without ever reaching a tool). Only `tools/call` bodies yield a charge,
+/// and a `batch` is charged for the searches it carries (`limits::charge`,
+/// #327).
 /// The raw-byte scan is only used to *skip* work when it cannot hide a call:
 /// a body with no backslash decodes every character literally, so an absent
 /// marker there proves absence. Anything else falls back to parsing so an
 /// escaped method name (`"\\u0074ools/call"`) cannot slip past the quota.
-fn classify_post_body(body: &[u8]) -> Option<RequestClass> {
+fn classify_post_body(body: &[u8]) -> Option<ToolCallCharge> {
     const MARKER: &[u8] = b"tools/call";
     let marker_absent = !body.windows(MARKER.len()).any(|window| window == MARKER);
     if marker_absent && !body.contains(&b'\\') {
         return None;
     }
     let parsed: Value = serde_json::from_slice(body).ok()?;
-    let class = limits::classify(
+    limits::charge(
         parsed.get("method").and_then(Value::as_str),
         parsed["params"]["name"].as_str(),
-    );
-    (class != RequestClass::Exempt).then_some(class)
+        parsed["params"].get("arguments"),
+    )
 }
 
 /// The over-limit rejection (#171): HTTP 429 plus `Retry-After` in whole
@@ -345,6 +362,8 @@ mod tests {
             demo_mode: false,
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
+            transfer_links: Default::default(),
+            shutdown: Default::default(),
         }
     }
 
@@ -922,6 +941,7 @@ mod tests {
                 "get_attachment",
                 "get_attachment_import_config",
                 "query_notes",
+                "evaluate_saved_query",
                 "recently_modified",
                 "batch",
             ]
@@ -1555,8 +1575,8 @@ mod tests {
         let escaped =
             br#"{"jsonrpc":"2.0","id":1,"method":"\u0074ools/call","params":{"name":"get_note"}}"#;
         assert_eq!(
-            classify_post_body(escaped),
-            Some(RequestClass::ToolCall),
+            classify_post_body(escaped).map(|charge| charge.class),
+            Some(super::super::limits::RequestClass::ToolCall),
             "an escaped method name must not bypass the quota"
         );
         assert_eq!(
@@ -1583,6 +1603,102 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("429 carries Retry-After");
         assert!(retry_after.parse::<u64>().is_ok());
+    }
+
+    /// A modern-stateless `batch` call carrying `searches` `search_notes`
+    /// items and one `get_tree`.
+    async fn modern_batch_call(
+        app: Router,
+        state: &AppState,
+        id: u64,
+        searches: usize,
+    ) -> Response {
+        let vault_id = vault_id_of(state).to_string();
+        let mut operations: Vec<Value> = (0..searches)
+            .map(|_| json!({"op": "search_notes", "arguments": {"scope": vault_id, "query": "alpha"}}))
+            .collect();
+        operations.push(json!({"op": "get_tree", "arguments": {"scope": vault_id}}));
+        modern_post(
+            app,
+            "tools/call",
+            Some("batch"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"batch",
+                    "arguments":{"operations": operations}
+                }
+            }),
+        )
+        .await
+    }
+
+    /// #327: a batch used to cost one quota unit whatever it carried, so 50
+    /// searches rode on one unit. Each search item now spends its own.
+    #[tokio::test]
+    async fn batch_search_items_each_spend_a_quota_unit() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        for id in 1..=(TOOL_CALLS_PER_MINUTE as u64 - 3) {
+            let response = modern_cheap_tool_call(app.clone(), id).await;
+            assert_eq!(response.status(), StatusCode::OK, "call {id} admitted");
+        }
+        let over = modern_batch_call(app.clone(), &state, 500, 4).await;
+        assert_eq!(
+            over.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "four searches do not fit in the three units left"
+        );
+        assert!(over.headers().contains_key(axum::http::header::RETRY_AFTER));
+        let fits = modern_batch_call(app.clone(), &state, 501, 3).await;
+        assert_eq!(fits.status(), StatusCode::OK, "three searches fit exactly");
+        let body = response_message(fits).await;
+        assert_eq!(body["result"]["structuredContent"]["failed"], 0, "{body}");
+        let full = modern_cheap_tool_call(app, 502).await;
+        assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS, "quota spent");
+    }
+
+    /// #327: a batch's searches ran under an ordinary slot only, so up to
+    /// eight could run at once past the two-search cap. A batch carrying a
+    /// search now needs a search slot, like a standalone search does.
+    #[tokio::test]
+    async fn a_batch_carrying_a_search_needs_an_expensive_search_slot() {
+        let (state, _tmp) = test_state();
+        let transport_instance = HatchdoorMcpTransport::new(state.clone());
+        let limiter = transport_instance.limiter();
+        let app = transport_instance
+            .router(&state)
+            .layer(axum::extract::DefaultBodyLimit::max(
+                McpConfig::maximum_request_body_limit(),
+            ))
+            .with_state(state.clone());
+
+        let mut busy = Vec::new();
+        for _ in 0..super::super::limits::MAX_CONCURRENT_EXPENSIVE_SEARCHES {
+            busy.push(
+                limiter
+                    .try_acquire(super::super::limits::RequestClass::ExpensiveSearch)
+                    .await
+                    .expect("search slot"),
+            );
+        }
+        let refused = modern_batch_call(app.clone(), &state, 600, 1).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "every search slot is busy"
+        );
+        let no_search = modern_batch_call(app.clone(), &state, 601, 0).await;
+        assert_eq!(
+            no_search.status(),
+            StatusCode::OK,
+            "a batch with no search needs only an ordinary slot"
+        );
+        drop(busy);
+        let admitted = modern_batch_call(app, &state, 602, 1).await;
+        assert_eq!(admitted.status(), StatusCode::OK, "a freed slot admits it");
     }
 
     #[tokio::test]
@@ -1669,6 +1785,7 @@ mod tests {
             "edit_vault",
             "disable_vault",
             "sync_vault",
+            "publish_recovery_branch",
             "refresh_vault",
         ] {
             assert!(
@@ -1755,6 +1872,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["vault_id"],
             "refresh_vault takes vault_id and nothing else"
+        );
+    }
+
+    /// `publish_recovery_branch` (ADR-30) is a Vault control like
+    /// `sync_vault`: write mode only, one `vault_id`, not destructive (it only
+    /// ever fast-forwards its own branch) and idempotent (a repeat publishes
+    /// to the same branch).
+    #[tokio::test]
+    async fn publish_recovery_branch_is_advertised_as_a_write_mode_vault_control() {
+        let (state, _tmp) = write_state();
+        let tool = tool_named(&tools_list_result(&state).await, "publish_recovery_branch").clone();
+        assert_eq!(tool["annotations"]["readOnlyHint"], false, "{tool:#}");
+        assert_eq!(tool["annotations"]["destructiveHint"], false, "{tool:#}");
+        assert_eq!(tool["annotations"]["idempotentHint"], true, "{tool:#}");
+        assert_eq!(tool["inputSchema"]["required"], json!(["vault_id"]));
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert!(tool["outputSchema"].is_object());
+
+        let (read_only, _tmp) = test_state();
+        let body = tools_list_result(&read_only).await;
+        assert!(
+            !body["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "publish_recovery_branch")
+        );
+        let rejected = call_tool(&read_only, "publish_recovery_branch", json!({})).await;
+        assert_eq!(rejected["error"]["code"], -32602);
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("write tools are disabled")
+        );
+    }
+
+    /// A Vault whose sync is not stopped on a conflict has no side to
+    /// publish, and the refusal is the structured `capability_unavailable`
+    /// every other ineligible Vault control returns.
+    #[tokio::test]
+    async fn publish_recovery_branch_refuses_a_vault_that_is_not_in_conflict() {
+        let (state, _tmp) = write_state();
+        let body = call_tool(&state, "publish_recovery_branch", json!({})).await;
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(
+            body["result"]["structuredContent"]["code"], "capability_unavailable",
+            "{body:#}"
         );
     }
 
@@ -2235,6 +2400,343 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Saved queries reach an agent as data (#277)
+    // ---------------------------------------------------------------------------
+
+    const DASHBOARD: &str = "# Dashboard\n\n<!-- hatchdoor-query: topics -->\n```base\nfilters: 'file.hasTag(\"topic\")'\nviews:\n  - type: table\n    order: [file.name, status]\n```\n\n```base\nfilters: 'status == \"done\"'\n```\n\n<!-- hatchdoor-query: first -->\n```base\nfilters: 'file.hasTag(\"topic\")'\nviews:\n  - type: table\n    limit: 1\n```\n\n<!-- hatchdoor-query: nothing -->\n```base\nfilters: 'status == \"never\"'\n```\n\n<!-- hatchdoor-query: broken -->\n```base\nfilters: 'daysUntil(due) < 7'\n```\n\n<!-- hatchdoor-query: twice -->\n```base\nviews: []\n```\n\n<!-- hatchdoor-query: twice -->\n```base\nviews: []\n```\n";
+
+    fn saved_query_test_state() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        for (path, content) in [
+            ("Dashboard.md", DASHBOARD),
+            (
+                "Single.md",
+                "# Single\n\n```base\nfilters: 'file.hasTag(\"topic\")'\n```\n",
+            ),
+            ("Alpha.md", "---\ntags: [topic]\nstatus: open\n---\n# Alpha"),
+            ("Beta.md", "---\ntags: [topic]\nstatus: done\n---\n# Beta"),
+            ("Plain.md", "# Plain\n\nNo saved query here."),
+        ] {
+            std::fs::write(vault_root.join(path), content).expect("write fixture");
+        }
+        let state = base_state(&tmp);
+        (scoped_test_state(state, vault_root), tmp)
+    }
+
+    fn saved_query_error_code(body: &Value) -> &str {
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        body["result"]["structuredContent"]["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a structured error: {body:#}"))
+    }
+
+    #[tokio::test]
+    async fn get_note_returns_the_markdown_verbatim_and_lists_saved_queries_by_name() {
+        let (state, tmp) = saved_query_test_state();
+        let body = call_tool(&state, "get_note", json!({"slug": "dashboard"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(
+            content["note"]["content"].as_str(),
+            Some(DASHBOARD),
+            "every base block and marker survives untouched"
+        );
+        let on_disk = std::fs::read_to_string(tmp.path().join("vault/Dashboard.md")).unwrap();
+        assert_eq!(content["note"]["content"].as_str(), Some(on_disk.as_str()));
+        assert_eq!(
+            content["saved_queries"],
+            json!([
+                {"name": "topics"},
+                {"name": null},
+                {"name": "first"},
+                {"name": "nothing"},
+                {"name": "broken"},
+                {"name": "twice"},
+                {"name": "twice"},
+            ])
+        );
+        assert!(
+            content.get("rows").is_none() && content["note"].get("rows").is_none(),
+            "a note read carries no computed rows: {content:#}"
+        );
+
+        let plain = call_tool(&state, "get_note", json!({"slug": "plain"})).await;
+        assert_eq!(
+            plain["result"]["structuredContent"]["saved_queries"],
+            json!([])
+        );
+
+        // No argument turns a note read into a rendered one.
+        for extra in [json!({"render": true}), json!({"evaluate": true})] {
+            let mut arguments = json!({"slug": "dashboard"});
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let refused = call_tool(&state, "get_note", arguments).await;
+            assert_eq!(refused["error"]["code"], -32602, "{refused:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluate_saved_query_returns_structured_rows_that_validate_against_its_schema() {
+        let (state, _tmp) = saved_query_test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let body = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "topics"}),
+        )
+        .await;
+        assert_ne!(body["result"]["isError"], true, "{body:#}");
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["scope"], json!(vault_id));
+        assert!(content["participants"].is_array());
+        let data = &content["data"];
+        assert_eq!(data["status"], "populated");
+        assert_eq!(data["slug"], "dashboard");
+        assert_eq!(data["name"], "topics");
+        assert_eq!(
+            data["columns"],
+            json!([{"id": "file.name", "label": "name"}, {"id": "status", "label": "status"}])
+        );
+        let rows = data["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["vault_id"], json!(vault_id));
+        assert_eq!(rows[0]["slug"], "alpha");
+        assert_eq!(rows[0]["relative_path"], "Alpha");
+        assert_eq!(rows[0]["cells"], json!(["Alpha.md", "open"]));
+        assert!(data.get("truncated").is_none());
+
+        let schema = serde_json::to_value(
+            crate::mcp::results::output_schema_for("evaluate_saved_query").expect("schema"),
+        )
+        .expect("schema value");
+        let validator = jsonschema::validator_for(&schema).expect("valid schema");
+        assert!(validator.is_valid(content), "{content:#}");
+
+        // The view's own limit truncates, and says so rather than silently
+        // shortening the rows.
+        let first = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "first"}),
+        )
+        .await;
+        let data = &first["result"]["structuredContent"]["data"];
+        assert_eq!(data["rows"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            data["truncated"],
+            json!({"reason": "definition_limit", "shown": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_query_that_matches_nothing_is_empty_and_a_broken_one_is_an_error() {
+        let (state, _tmp) = saved_query_test_state();
+        let empty = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "nothing"}),
+        )
+        .await;
+        assert_ne!(empty["result"]["isError"], true, "{empty:#}");
+        let data = &empty["result"]["structuredContent"]["data"];
+        assert_eq!(data["status"], "empty");
+        assert!(data.get("rows").is_none(), "{data:#}");
+
+        let broken = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "broken"}),
+        )
+        .await;
+        assert_eq!(saved_query_error_code(&broken), "saved_query_refused");
+        let message = broken["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap();
+        assert!(message.contains("daysUntil()"), "{message}");
+        assert!(broken["result"]["structuredContent"].get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn evaluate_saved_query_addresses_by_name_and_never_by_position() {
+        let (state, _tmp) = saved_query_test_state();
+
+        let single = call_tool(&state, "evaluate_saved_query", json!({"slug": "single"})).await;
+        let data = &single["result"]["structuredContent"]["data"];
+        assert_eq!(data["status"], "populated", "{single:#}");
+        assert_eq!(data["name"], Value::Null);
+
+        let unnamed = call_tool(&state, "evaluate_saved_query", json!({"slug": "dashboard"})).await;
+        assert_eq!(
+            saved_query_error_code(&unnamed),
+            "saved_query_name_required"
+        );
+        let message = unnamed["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap();
+        for name in ["topics", "first", "nothing", "broken", "twice"] {
+            assert!(message.contains(&format!("\"{name}\"")), "{message}");
+        }
+
+        let unknown = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "topic"}),
+        )
+        .await;
+        assert_eq!(saved_query_error_code(&unknown), "saved_query_not_found");
+
+        let twice = call_tool(
+            &state,
+            "evaluate_saved_query",
+            json!({"slug": "dashboard", "name": "twice"}),
+        )
+        .await;
+        assert_eq!(saved_query_error_code(&twice), "saved_query_name_ambiguous");
+
+        let none = call_tool(&state, "evaluate_saved_query", json!({"slug": "plain"})).await;
+        assert_eq!(saved_query_error_code(&none), "no_saved_queries");
+
+        let missing = call_tool(&state, "evaluate_saved_query", json!({"slug": "absent"})).await;
+        assert_eq!(saved_query_error_code(&missing), "note_not_found");
+    }
+
+    /// `evaluate_saved_query` is a read op like any other, so `batch` carries
+    /// it, and a refusal inside a batch is that item's structured error.
+    #[tokio::test]
+    async fn batch_carries_evaluate_saved_query_and_its_refusals() {
+        let (state, _tmp) = saved_query_test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "evaluate_saved_query", "arguments": {"vault_id": vault_id, "slug": "dashboard", "name": "topics"}},
+                {"op": "evaluate_saved_query", "arguments": {"vault_id": vault_id, "slug": "dashboard", "name": "broken"}},
+            ]}),
+        )
+        .await;
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], true, "{body:#}");
+        assert_eq!(items[0]["result"]["data"]["status"], "populated");
+        assert_eq!(items[1]["ok"], false, "{body:#}");
+        assert_eq!(items[1]["error"]["code"], "saved_query_refused");
+    }
+
+    /// Hatchdoor's 500-row cap holds rows back whatever the definition asks,
+    /// and the answer says so rather than passing a short table off as whole.
+    #[tokio::test]
+    async fn evaluate_saved_query_reports_the_row_ceiling_rather_than_shortening_silently() {
+        let (state, tmp) = saved_query_test_state();
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_root.join("bulk")).expect("bulk folder");
+        for index in 0..501 {
+            std::fs::write(
+                vault_root.join(format!("bulk/Item {index:03}.md")),
+                format!("---\ntags: [bulk]\n---\n# Item {index:03}"),
+            )
+            .expect("write bulk note");
+        }
+        std::fs::write(
+            vault_root.join("Bulk.md"),
+            "# Bulk\n\n```base\nfilters: 'file.hasTag(\"bulk\")'\n```\n",
+        )
+        .expect("write bulk dashboard");
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let index = crate::vault::VaultIndex::build(&vault_root).expect("rebuild index");
+        state
+            .startup_sqlite
+            .replace_vault_snapshot(vault_id, &index, state.embedder.as_ref())
+            .expect("republish snapshot");
+
+        let body = call_tool(&state, "evaluate_saved_query", json!({"slug": "bulk"})).await;
+        let data = &body["result"]["structuredContent"]["data"];
+        assert_eq!(data["status"], "populated", "{body:#}");
+        assert_eq!(data["rows"].as_array().map(Vec::len), Some(500));
+        assert_eq!(
+            data["truncated"],
+            json!({"reason": "ceiling", "shown": 500})
+        );
+    }
+
+    /// A saved query reads its Note's own Vault whoever asks, so the tool has
+    /// no scope to widen or narrow: a caller supplying one is refused rather
+    /// than answered from a Vault it named.
+    #[tokio::test]
+    async fn evaluate_saved_query_takes_no_scope_from_the_caller() {
+        let (state, _tmp) = saved_query_test_state();
+        for scope in [
+            json!("all"),
+            json!(crate::vault_registry::VaultId::generate().unwrap()),
+        ] {
+            let body = call_tool(
+                &state,
+                "evaluate_saved_query",
+                json!({"slug": "single", "scope": scope}),
+            )
+            .await;
+            assert_eq!(body["error"]["code"], -32602, "{body:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_mcp_refuses_an_evaluate_saved_query_call() {
+        let (state, _tmp) = saved_query_test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        state
+            .runtime_config
+            .save([("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string())])
+            .expect("disable MCP");
+        let response = send(
+            transport(&state),
+            "POST",
+            [("content-type", "application/json".into())].to_vec(),
+            Some(
+                json!({
+                    "jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"evaluate_saved_query","arguments":{"vault_id":vault_id,"slug":"single"}}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn search_rejects_legacy_metadata_filters() {
         let (state, _tmp) = layered_test_state();
@@ -2325,7 +2827,7 @@ mod tests {
 
     /// `get_attachment` names the attachment back the way the caller asked for
     /// it, not by the canonicalised path resolution produces internally, so the
-    /// `relative_path` it echoes and the `download_url` it builds agree — and
+    /// `relative_path` it echoes and the transfer link it builds agree — and
     /// that URL escapes each segment, since a Vault names attachments with
     /// spaces and non-ASCII freely.
     #[tokio::test]
@@ -2347,7 +2849,7 @@ mod tests {
             result["content"]["download_url"]
                 .as_str()
                 .expect("download_url")
-                .ends_with("/assets/Media/a%20shot.png"),
+                .contains("/transfers/Media/a%20shot.png?"),
             "{result:#}"
         );
 
@@ -2423,13 +2925,18 @@ mod tests {
         assert_eq!(payload["enabled"], true);
 
         let methods = payload["methods"].as_array().expect("methods array");
-        assert_eq!(methods.len(), 2);
-        assert_eq!(methods[0]["id"], "http_multipart");
+        assert_eq!(methods.len(), 3);
+        // The transfer link is the recommended route (ADR-27).
+        assert_eq!(methods[0]["id"], "transfer_link");
+        assert_eq!(methods[0]["role"], "default");
+        assert_eq!(methods[0]["tool"], "create_upload_link");
+        assert_eq!(methods[1]["id"], "http_multipart");
+        assert_eq!(methods[1]["role"], "alternative");
         assert_eq!(
-            methods[0]["path"],
+            methods[1]["path"],
             format!("/api/v1/vaults/{vault_id}/attachments")
         );
-        assert_eq!(methods[1]["id"], "mcp_base64");
+        assert_eq!(methods[2]["id"], "mcp_base64");
         assert!(
             payload["allowed_extensions"]
                 .as_array()
@@ -2437,7 +2944,7 @@ mod tests {
                 .contains(&json!("png"))
         );
         assert!(
-            methods[0]["auth"]
+            methods[1]["auth"]
                 .as_str()
                 .expect("auth guidance")
                 .contains("MCP token is accepted only while MCP and MCP write mode are both currently enabled")
@@ -2452,8 +2959,11 @@ mod tests {
         assert!(body["result"]["structuredContent"]["attachments"].is_array());
     }
 
+    /// The default answer is a transfer link (ADR-27): absolute, built on the
+    /// host the MCP request arrived on, and carrying its own credential. The
+    /// link's redemption is covered end to end in `server.rs`.
     #[tokio::test]
-    async fn get_attachment_returns_a_working_download_url_by_default() {
+    async fn get_attachment_returns_a_transfer_link_by_default() {
         // get_attachment needs no write permission and no note context: the
         // attachment only has to exist on disk at relative_path.
         let (state, _tmp) = test_state();
@@ -2482,15 +2992,82 @@ mod tests {
         assert_eq!(content["size_bytes"], 9);
         assert_eq!(content["content_type"], "image/png");
         assert_eq!(content["content"]["encoding"], "url");
-        assert_eq!(
-            content["content"]["download_url"],
-            format!("/api/v1/vaults/{vault_id}/assets/Sources/diagram.png")
+        let url = content["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(
+            url.starts_with(&format!(
+                "http://localhost/api/v1/vaults/{vault_id}/transfers/Sources/diagram.png?expires="
+            )),
+            "{url}"
         );
+        assert!(url.contains("&signature="), "{url}");
+        assert!(content["content"]["expires_at"].as_u64().is_some());
         assert!(
             content["content"]["auth"]
                 .as_str()
                 .unwrap()
-                .contains("web bearer token")
+                .starts_with("None needed")
+        );
+    }
+
+    /// Behind a proxy the arriving host is not the one agents reach, so the
+    /// public-address setting wins whenever it is set.
+    #[tokio::test]
+    async fn get_attachment_builds_its_link_on_the_public_address_when_set() {
+        let (state, _tmp) = test_state();
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_PUBLIC_URL".to_string(),
+                "https://notes.example.com/".to_string(),
+            )])
+            .expect("public address");
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("clip.png"), b"png").expect("attachment");
+
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "clip.png"}),
+        )
+        .await;
+        let url = body["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        assert!(
+            url.starts_with("https://notes.example.com/api/v1/vaults/"),
+            "{url}"
+        );
+    }
+
+    /// A link is always absolute: with no public address and no host to fall
+    /// back on, the call is refused rather than answered with a link the agent
+    /// could not resolve.
+    #[tokio::test]
+    async fn a_link_is_refused_rather_than_minted_without_an_address() {
+        let (state, _tmp) = test_state();
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("clip.png"), b"png").expect("attachment");
+        let config = McpConfig {
+            enabled: true,
+            bearer_token: Some(TEST_TOKEN.to_string()),
+            ..McpConfig::disabled()
+        };
+        let failure = crate::mcp::tools::handle_tools_call(
+            state.clone(),
+            Some(json!({
+                "name": "get_attachment",
+                "arguments": {"vault_id": vault_id_of(&state), "relative_path": "clip.png"}
+            })),
+            &config,
+        )
+        .await
+        .expect_err("no address to build a link on");
+        assert!(
+            failure.message.contains("HATCHDOOR_PUBLIC_URL"),
+            "{}",
+            failure.message
         );
     }
 
@@ -2537,12 +3114,19 @@ mod tests {
             json!({"relative_path": "clip.png", "encoding": "base64"}),
         )
         .await;
-        assert_eq!(body["error"]["code"], -32602);
+        // #327: a structured tool error with a stable code, like the core's
+        // own too-large refusal, not a bare JSON-RPC -32602.
+        assert!(body.get("error").is_none(), "not a JSON-RPC error: {body}");
+        assert_eq!(body["result"]["isError"], true);
+        let error = &body["result"]["structuredContent"];
+        assert_eq!(error["code"], "attachment_too_large_for_base64");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["vault_id"], json!(vault_id_of(&state).to_string()));
         assert!(
-            body["error"]["message"]
+            error["message"]
                 .as_str()
                 .unwrap()
-                .contains("exceeds max size for base64 encoding")
+                .contains("encoding \"url\"")
         );
     }
 
@@ -2599,7 +3183,13 @@ mod tests {
             let result = crate::mcp::tools::handle_tools_call(
                 state,
                 Some(json!({"name": name, "arguments": arguments})),
-                &McpConfig::disabled(),
+                // The token and origin a live MCP call would carry, which a
+                // `get_attachment` download link is minted from.
+                &McpConfig {
+                    bearer_token: Some(TEST_TOKEN.to_string()),
+                    request_origin: Some("http://localhost".to_string()),
+                    ..McpConfig::disabled()
+                },
             )
             .await
             .expect("tool result");
@@ -2996,7 +3586,47 @@ mod tests {
         assert_eq!(edited["result"]["structuredContent"]["ok"], true);
         assert_eq!(
             std::fs::read_to_string(registered_vault_path(&state).join("Home.md"),).expect("read"),
-            "# Home\nALPHA token\n[[Plan]]\n"
+            "# Home\nALPHA token\n[[Plan]]",
+            "edit_note leaves the missing final newline alone (#316)"
+        );
+    }
+
+    /// #316: the text an agent appends reaches the note as it was sent, so a
+    /// trailing newline it supplied is not stripped and then reported as a
+    /// line break Hatchdoor added, and leading indentation survives.
+    #[tokio::test]
+    async fn append_to_note_keeps_the_supplied_text_as_sent() {
+        let (state, _tmp) = write_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let appended = call_tool(
+            &state,
+            "append_to_note",
+            json!({
+                "slug": "home",
+                "content": "    indented code\n",
+                "expected_content_hash": hash
+            }),
+        )
+        .await;
+        assert_eq!(appended["result"]["structuredContent"]["ok"], true);
+        assert_eq!(
+            appended["result"]["structuredContent"]["quality_warnings"],
+            json!(["added a line break before the supplied text"])
+        );
+        assert_eq!(
+            std::fs::read_to_string(registered_vault_path(&state).join("Home.md")).expect("read"),
+            "# Home\nalpha token\n[[Plan]]\n    indented code\n"
+        );
+
+        let blank = call_tool(
+            &state,
+            "append_to_note",
+            json!({"slug": "home", "content": " \n ", "expected_content_hash": "x"}),
+        )
+        .await;
+        assert!(
+            blank["error"].is_object(),
+            "whitespace-only content is still refused: {blank}"
         );
     }
 
@@ -3041,6 +3671,305 @@ mod tests {
         assert_eq!(batch[0].op, "edit");
         assert_eq!(batch[0].target, "Home");
         assert_eq!(batch[0].summary.as_deref(), Some("shout the token"));
+    }
+
+    /// Issue #242: the plan call writes nothing and records nothing; the
+    /// applying call rewrites every note and lands in the ledger as one write,
+    /// which is what makes a synced Vault commit it once.
+    #[tokio::test]
+    async fn rename_tag_plans_then_applies_as_one_recorded_write() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+        std::fs::write(
+            root.join("A.md"),
+            "---\ntags: [domain/x, keep]\n---\nBody #domain/y\n",
+        )
+        .expect("a");
+        std::fs::write(root.join("B.md"), "---\ntags:\n  - domain\n---\n").expect("b");
+
+        let plan = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "#domain", "new_tag": "topic"}),
+        )
+        .await;
+        let plan = &plan["result"]["structuredContent"];
+        assert_eq!(plan["ok"], true, "{plan}");
+        assert_eq!(plan["applied"], false);
+        assert_eq!(plan["old_tag"], "domain");
+        assert_eq!(plan["notes_affected"], 2);
+        assert_eq!(plan["frontmatter_notes"], 2);
+        assert_eq!(plan["body_notes"], 1);
+        assert_eq!(plan["already_tagged_notes"], 0);
+        assert_eq!(plan["notes"][0]["relative_path"], "A");
+        assert_eq!(plan["notes"][0]["body"], true);
+        let hash = plan["plan_hash"].as_str().expect("plan hash").to_string();
+        let runtime = state
+            .vaults
+            .runtime(vault_id_of(&state))
+            .expect("Vault runtime");
+        assert!(
+            runtime.write_ledger().take().is_empty(),
+            "a plan records nothing"
+        );
+
+        let applied = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "topic", "expected_plan_hash": hash, "commit_summary": "merge namespaces"}),
+        )
+        .await;
+        let applied = &applied["result"]["structuredContent"];
+        assert_eq!(applied["applied"], true, "{applied}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("A.md")).expect("a"),
+            "---\ntags: [topic/x, keep]\n---\nBody #topic/y\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("B.md")).expect("b"),
+            "---\ntags:\n  - topic\n---\n"
+        );
+        let records = runtime.write_ledger().take();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].op, "rename tag");
+        assert_eq!(records[0].target, "#domain -> #topic");
+        assert_eq!(records[0].affected_paths.len(), 2);
+        assert_eq!(records[0].summary.as_deref(), Some("merge namespaces"));
+
+        let stale = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "topic", "expected_plan_hash": hash}),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true);
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"],
+            "tag_rename_plan_stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_tag_refusals_carry_their_own_codes() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+        std::fs::write(root.join("Quoted.md"), "---\ntags: [\"domain/x\"]\n---\n").expect("note");
+
+        let invalid = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "Topic"}),
+        )
+        .await;
+        assert_eq!(invalid["result"]["isError"], true);
+        assert_eq!(
+            invalid["result"]["structuredContent"]["code"],
+            "invalid_tag_name"
+        );
+
+        let unsupported = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "domain", "new_tag": "topic"}),
+        )
+        .await;
+        let error = &unsupported["result"]["structuredContent"];
+        assert_eq!(error["code"], "tag_shape_unsupported", "{unsupported}");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("'Quoted'"),
+            "the refusal names the note: {error}"
+        );
+        assert_eq!(error["retryable"], false);
+        assert!(error.get("plan_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn rename_tag_waits_for_the_vaults_mutation_lock() {
+        let (state, _tmp) = write_state();
+        std::fs::write(
+            registered_vault_path(&state).join("A.md"),
+            "---\ntags: [a/b]\n---\n",
+        )
+        .expect("note");
+        let runtime = state
+            .vaults
+            .runtime(vault_id_of(&state))
+            .expect("Vault runtime");
+        let guard = runtime.acquire_mutation().await.expect("lock");
+        let call = call_tool(
+            &state,
+            "rename_tag",
+            json!({"old_tag": "a/b", "new_tag": "c/d"}),
+        );
+        tokio::pin!(call);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut call)
+                .await
+                .is_err(),
+            "rename_tag ran while another holder had the Vault's mutation lock"
+        );
+        drop(guard);
+        let plan = call.await;
+        assert_eq!(plan["result"]["structuredContent"]["notes_affected"], 1);
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_rename_tag_before_running_anything() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": "Should/Not.md", "content": "x"}},
+                {"op": "rename_tag", "arguments": {"vault_id": vault_id, "old_tag": "a", "new_tag": "b"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602, "{body:#}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("'rename_tag' is not allowed inside batch"),
+            "{body:#}"
+        );
+        assert!(!registered_vault_path(&state).join("Should/Not.md").exists());
+    }
+
+    /// Issue #258: a delete plans without recording, then applies as one
+    /// recorded write named after the tag.
+    #[tokio::test]
+    async fn delete_tag_plans_then_applies_as_one_recorded_write() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+        std::fs::write(root.join("A.md"), "---\ntags: [keep, Draft]\n---\nBody\n").expect("a");
+        std::fs::write(root.join("B.md"), "---\ntags: draft\ntitle: B\n---\n").expect("b");
+
+        let plan = call_tool(&state, "delete_tag", json!({"tag": "#Draft"})).await;
+        let plan = &plan["result"]["structuredContent"];
+        assert_eq!(plan["ok"], true, "{plan}");
+        assert_eq!(plan["applied"], false);
+        assert_eq!(plan["tag"], "draft");
+        assert_eq!(plan["notes_affected"], 2);
+        assert_eq!(plan["notes"][0]["relative_path"], "A");
+        let hash = plan["plan_hash"].as_str().expect("plan hash").to_string();
+        let runtime = state
+            .vaults
+            .runtime(vault_id_of(&state))
+            .expect("Vault runtime");
+        assert!(
+            runtime.write_ledger().take().is_empty(),
+            "a plan records nothing"
+        );
+
+        let applied = call_tool(
+            &state,
+            "delete_tag",
+            json!({"tag": "draft", "expected_plan_hash": hash, "commit_summary": "drop drafts"}),
+        )
+        .await;
+        let applied = &applied["result"]["structuredContent"];
+        assert_eq!(applied["applied"], true, "{applied}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("A.md")).expect("a"),
+            "---\ntags: [keep]\n---\nBody\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("B.md")).expect("b"),
+            "---\ntags: []\ntitle: B\n---\n"
+        );
+        let records = runtime.write_ledger().take();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].op, "delete tag");
+        assert_eq!(records[0].target, "#draft");
+        assert_eq!(records[0].affected_paths.len(), 2);
+        assert_eq!(records[0].summary.as_deref(), Some("drop drafts"));
+
+        let stale = call_tool(
+            &state,
+            "delete_tag",
+            json!({"tag": "draft", "expected_plan_hash": hash}),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true);
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"],
+            "tag_delete_plan_stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tag_refusals_carry_their_own_codes() {
+        let (state, _tmp) = write_state();
+        let root = registered_vault_path(&state);
+
+        let invalid = call_tool(&state, "delete_tag", json!({"tag": "a b"})).await;
+        assert_eq!(
+            invalid["result"]["structuredContent"]["code"],
+            "invalid_tag_name"
+        );
+
+        std::fs::write(
+            root.join("Parent.md"),
+            "---\ntags: [area, area/work]\n---\n",
+        )
+        .expect("n");
+        let nested = call_tool(&state, "delete_tag", json!({"tag": "area"})).await;
+        let error = &nested["result"]["structuredContent"];
+        assert_eq!(error["code"], "tag_has_nested_tags", "{nested}");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("'area/work' (1 note(s))"),
+            "the refusal names the nested tag and its count: {error}"
+        );
+
+        std::fs::write(root.join("Inline.md"), "Mentions #area/work in prose.\n").expect("i");
+        let inline = call_tool(&state, "delete_tag", json!({"tag": "area/work"})).await;
+        let error = &inline["result"]["structuredContent"];
+        assert_eq!(error["code"], "tag_used_inline", "{inline}");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("'Inline'"),
+            "the refusal names the note: {error}"
+        );
+        assert_eq!(error["retryable"], false);
+        assert_eq!(
+            std::fs::read_to_string(root.join("Parent.md")).expect("p"),
+            "---\ntags: [area, area/work]\n---\n",
+            "a refusal writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_delete_tag_before_running_anything() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": "Should/Not.md", "content": "x"}},
+                {"op": "delete_tag", "arguments": {"vault_id": vault_id, "tag": "a"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602, "{body:#}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("'delete_tag' is not allowed inside batch"),
+            "{body:#}"
+        );
+        assert!(!registered_vault_path(&state).join("Should/Not.md").exists());
     }
 
     #[tokio::test]
@@ -3173,6 +4102,20 @@ mod tests {
         }
     }
 
+    /// `tag` is a mode a search response reports, never one a caller can ask
+    /// for (#354).
+    #[tokio::test]
+    async fn search_notes_rejects_tag_as_a_requested_mode() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "#topic", "mode": "tag"}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
     #[tokio::test]
     async fn list_vaults_redacts_configured_credentials() {
         let (state, _tmp) = write_state();
@@ -3285,6 +4228,52 @@ mod tests {
         let event = next_message(&mut rx).await;
         assert_eq!(event["method"], "notifications/tools/list_changed");
         assert!(event["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"].is_number());
+    }
+
+    /// #353: an agent's open listen stream must not hold graceful shutdown,
+    /// which waits for every open response to end.
+    #[tokio::test]
+    async fn shutdown_ends_an_open_subscription_stream() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut rx = open_listen(&app, json!({"toolsListChanged": true})).await.0;
+        let ack = next_message(&mut rx).await;
+        assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+
+        state.shutdown.trigger();
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the listen stream must end on shutdown");
+    }
+
+    /// #353: a legacy session's standalone GET stream stays open for as long
+    /// as the agent is connected, so it must end on shutdown too.
+    #[tokio::test]
+    async fn shutdown_ends_an_open_legacy_session_stream() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-session-id", session.id));
+        headers.push(("accept", "text/event-stream".into()));
+        let response = send(app.clone(), "GET", headers, None).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "standalone stream opened"
+        );
+        let mut body = response.into_body().into_data_stream();
+
+        state.shutdown.trigger();
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while body.next().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the session stream must end on shutdown");
     }
 
     #[tokio::test]
@@ -3691,6 +4680,80 @@ mod tests {
         );
     }
 
+    /// The three attempts from #297, which each used to surface one wrong field
+    /// per round trip, and one call wrong at both levels. Each is refused once,
+    /// naming every unknown field and the accepted shape, before any item runs.
+    #[tokio::test]
+    async fn batch_names_every_unknown_field_in_one_refusal() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let create =
+            json!({"vault_id": vault_id, "relative_path": "Batch/Shape.md", "content": "x"});
+
+        let cases = [
+            (
+                json!({
+                    "vault_id": vault_id,
+                    "commit_summary": "two writes",
+                    "operations": [{"op": "create_note", "relative_path": "Batch/Shape.md", "content": "x"}]
+                }),
+                vec![
+                    "`commit_summary`",
+                    "`vault_id`",
+                    "`operations[0].relative_path`",
+                    "`operations[0].content`",
+                ],
+            ),
+            (
+                json!({
+                    "vault_id": vault_id,
+                    "operations": [{"op": "create_note", "arguments": create, "commit_summary": "one"}]
+                }),
+                vec!["`vault_id`", "`operations[0].commit_summary`"],
+            ),
+            (
+                json!({
+                    "vault_id": vault_id,
+                    "operations": [{"op": "create_note", "arguments": create}]
+                }),
+                vec!["`vault_id`"],
+            ),
+            (
+                json!({
+                    "commit_summary": "both levels",
+                    "operations": [
+                        {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}},
+                        {"op": "create_note", "arguments": create, "vault_id": vault_id, "slug": "shape"}
+                    ]
+                }),
+                vec![
+                    "`commit_summary`",
+                    "`operations[1].slug`",
+                    "`operations[1].vault_id`",
+                ],
+            ),
+        ];
+
+        for (arguments, unknown) in cases {
+            let body = call_tool(&state, "batch", arguments).await;
+            assert_eq!(body["error"]["code"], -32602, "{body:#}");
+            let message = body["error"]["message"].as_str().expect("message");
+            for field in &unknown {
+                assert!(message.contains(field), "{field} missing from: {message}");
+            }
+            assert!(
+                message.contains("batch takes only `operations`, an array of `{op, arguments}`"),
+                "the accepted shape is missing from: {message}"
+            );
+            assert!(
+                !registered_vault_path(&state)
+                    .join("Batch/Shape.md")
+                    .exists(),
+                "a refused batch must not run any item"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn batch_deletes_a_note_and_an_attachment_created_earlier_in_the_same_call() {
         let (state, _tmp) = write_state();
@@ -3781,7 +4844,7 @@ mod tests {
                 // construction, and must still succeed because the prior
                 // create in this same batch is chained into it.
                 {"op": "append_to_note", "arguments": {
-                    "vault_id": vault_id, "slug": "chained", "content": "\ntwo",
+                    "vault_id": vault_id, "slug": "chained", "content": "two",
                     "expected_content_hash": "fnv1a64:deliberately-stale"
                 }}
             ]}),
@@ -3832,6 +4895,384 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("write tools are disabled")
+        );
+    }
+
+    /// Every item error in a `batch` result: each must be a failure whose
+    /// `error.code` is a string and whose `retryable` is a boolean.
+    fn assert_every_item_error_is_structured(body: &Value) -> Vec<String> {
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body}"));
+        items
+            .iter()
+            .map(|item| {
+                assert_eq!(item["ok"], false, "item should fail: {item}");
+                let error = &item["error"];
+                assert!(error["code"].is_string(), "string code: {item}");
+                assert!(error["retryable"].is_boolean(), "boolean retryable: {item}");
+                assert!(error["message"].is_string(), "message: {item}");
+                error["code"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    /// #327 contract: agents are told to branch on `code`, never on message
+    /// text, so every refusal path a batch item can take must report a stable
+    /// string code. Before the fix, the write-disabled refusal, argument-parse
+    /// failures, a missing or malformed `vault_id`, and an unwritable target
+    /// path all reported the JSON-RPC integer -32602 instead.
+    #[tokio::test]
+    async fn every_batch_item_refusal_carries_a_stable_string_code() {
+        // Write mode off: the per-item gate, plus the read-side refusals.
+        let (state, _tmp) = layered_test_state();
+        let vault_id = vault_id_of(&state).to_string();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "wiki/New.md", "content": "x"
+                }},
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "missing-note"}},
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "bogus_field": true}},
+                {"op": "get_note", "arguments": {"vault_id": "not-a-vault", "slug": "x"}},
+            ]}),
+        )
+        .await;
+        let codes = assert_every_item_error_is_structured(&body);
+        assert_eq!(codes[0], "mcp_writes_disabled");
+        assert_eq!(codes[1], "note_not_found");
+        assert_eq!(codes[2], "invalid_arguments");
+        assert_eq!(codes[3], "invalid_vault_id");
+
+        // Write mode on: the write-side refusals.
+        let (state, _tmp) = layered_write_state();
+        let vault_id = vault_id_of(&state).to_string();
+        std::fs::write(
+            registered_vault_path(&state).join("big.png"),
+            b"more than four",
+        )
+        .expect("attachment");
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "4".to_string(),
+            )])
+            .expect("lower the base64 cap");
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "notes/scratch.tmp", "content": "x"
+                }},
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "wiki/.hatchdoor-layer", "content": "x"
+                }},
+                {"op": "create_note", "arguments": {"relative_path": "wiki/A.md", "content": "x"}},
+                {"op": "create_note", "arguments": {
+                    "vault_id": "not-a-vault", "relative_path": "wiki/A.md", "content": "x"
+                }},
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "wiki/A.md", "content": "x",
+                    "bogus_field": true
+                }},
+                {"op": "update_note", "arguments": {
+                    "vault_id": vault_id, "slug": "page", "content": "x",
+                    "expected_content_hash": "fnv1a64:0"
+                }},
+                {"op": "get_attachment", "arguments": {
+                    "vault_id": vault_id, "relative_path": "big.png", "encoding": "base64"
+                }},
+            ]}),
+        )
+        .await;
+        let codes = assert_every_item_error_is_structured(&body);
+        assert_eq!(codes[0], "noise_excluded_write");
+        assert_eq!(codes[1], "layer_marker_write");
+        assert_eq!(codes[2], "invalid_arguments");
+        assert_eq!(codes[3], "invalid_arguments");
+        assert_eq!(codes[4], "invalid_arguments");
+        assert_eq!(codes[5], "write_conflict");
+        assert_eq!(codes[6], "attachment_too_large_for_base64");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Per-Vault write exclusion across a whole batch call (#321)
+    // ---------------------------------------------------------------------------
+
+    use crate::vault_registry::VaultId;
+
+    /// A write-enabled state with two Local Vaults, returned with their IDs in
+    /// ascending order — which is the order `batch` acquires their mutation
+    /// locks in, whatever order a caller's items name them.
+    fn two_vault_write_state() -> (AppState, VaultId, VaultId, TempDir) {
+        use crate::vault_registry::{NewVaultDefinition, VaultRegistryState, VaultSource};
+
+        let tmp = TempDir::new().expect("temp dir");
+        let mut state = base_state(&tmp);
+        state.runtime_config = mcp_runtime_config(true);
+        let mut revision = 0;
+        for name in ["Vault one", "Vault two"] {
+            let root = tmp.path().join(name.replace(' ', "-"));
+            std::fs::create_dir_all(&root).expect("create vault");
+            std::fs::write(root.join("Home.md"), "# Home\n").expect("seed note");
+            let snapshot = state
+                .vault_registry
+                .add(
+                    revision,
+                    NewVaultDefinition {
+                        name: name.to_string(),
+                        enabled: true,
+                        source: VaultSource::Local { path: root },
+                        exclude_patterns: Vec::new(),
+                        https_credentials: None,
+                        archive_folder: None,
+                        commit_identity: None,
+                    },
+                )
+                .expect("register test Vault");
+            revision = snapshot.revision();
+        }
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            VaultRegistryState::Ready(snapshot) => snapshot,
+            VaultRegistryState::Recovery(_) => panic!("test registry recovery"),
+        };
+        state.vaults.reconcile(&state.vault_registry, &snapshot);
+        let mut ids: Vec<VaultId> = snapshot
+            .definitions()
+            .map(|definition| definition.vault_id())
+            .collect();
+        ids.sort();
+        assert_eq!(ids.len(), 2);
+        (state, ids[0], ids[1], tmp)
+    }
+
+    /// The one edit that reconciles a replacement control block for `vault_id`
+    /// while leaving it enabled at the same path: one added exclude pattern.
+    fn edit_vault_in_place(state: &AppState, vault_id: VaultId) {
+        use crate::vault_registry::{
+            HttpsCredentialUpdate, VaultDefinitionEdit, VaultRegistryState, VaultSource,
+        };
+
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            VaultRegistryState::Ready(snapshot) => snapshot,
+            VaultRegistryState::Recovery(_) => panic!("test registry recovery"),
+        };
+        let definition = snapshot.definition(vault_id).expect("registered Vault");
+        let VaultSource::Local { path } = definition.source().clone() else {
+            panic!("test Vault is not Local");
+        };
+        let edited = state
+            .vault_registry
+            .edit(
+                snapshot.revision(),
+                vault_id,
+                VaultDefinitionEdit {
+                    name: definition.name().to_string(),
+                    source: VaultSource::Local { path },
+                    exclude_patterns: vec!["ignored/**".to_string()],
+                    https_credentials: HttpsCredentialUpdate::Keep,
+                    confirm_identity_change: false,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("edit the Vault definition");
+        state.vaults.reconcile(&state.vault_registry, &edited);
+    }
+
+    fn batch_write_pair(first: VaultId, second: VaultId, tag: &str) -> Value {
+        json!({"operations": [
+            {"op": "create_note", "arguments": {
+                "vault_id": first.to_string(),
+                "relative_path": format!("{tag}-first.md"),
+                "content": "# first\n"
+            }},
+            {"op": "create_note", "arguments": {
+                "vault_id": second.to_string(),
+                "relative_path": format!("{tag}-second.md"),
+                "content": "# second\n"
+            }},
+        ]})
+    }
+
+    /// Issue #321, acceptance 1: two concurrent batches naming the same two
+    /// Vaults in opposite orders both complete.
+    ///
+    /// Locks used to be taken lazily in caller order and held to the end of
+    /// the call, so this interleaving wedged both Vaults' write paths until
+    /// the process restarted. The externally held guard on the higher Vault
+    /// is what makes the interleaving deterministic rather than a race: it
+    /// parks the first call where the second can overtake it.
+    #[tokio::test]
+    async fn two_opposed_batches_over_the_same_two_vaults_both_complete() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        let blocking = state
+            .vaults
+            .runtime(high)
+            .expect("higher Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the higher Vault");
+
+        let descending = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(high, low, "descending")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let ascending = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "ascending")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(blocking);
+
+        let (descending, ascending) =
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                (descending.await, ascending.await)
+            })
+            .await
+            .expect("neither batch may deadlock the other");
+
+        for body in [
+            descending.expect("descending batch task"),
+            ascending.expect("ascending batch task"),
+        ] {
+            let content = &body["result"]["structuredContent"];
+            assert_eq!(content["failed"], 0, "{body:#}");
+            assert_eq!(content["succeeded"], 2, "{body:#}");
+        }
+    }
+
+    /// Issue #321, acceptance 4: a Vault definition edit lands while a batch
+    /// holds that Vault's lock. The replacement control block inherits the
+    /// exclusion, so the item still runs under the lock the batch holds — on
+    /// the live block, not the revoked one.
+    #[tokio::test]
+    async fn a_batch_item_after_a_mid_batch_definition_edit_runs_on_the_live_block() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        let before = state.vaults.runtime(low).expect("lower Vault runtime");
+        let blocking = state
+            .vaults
+            .runtime(high)
+            .expect("higher Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the higher Vault");
+        let running = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "edited")).await }
+        });
+        // The batch has taken the lower Vault and is parked on the higher one.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        edit_vault_in_place(&state, low);
+        let after = state.vaults.runtime(low).expect("replacement runtime");
+        assert!(
+            before.write_exclusion().is_same(&after.write_exclusion()),
+            "the replacement block must inherit the exclusion the batch holds"
+        );
+        drop(blocking);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), running)
+            .await
+            .expect("the batch must finish")
+            .expect("batch task");
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["failed"], 0, "{body:#}");
+        assert_eq!(content["succeeded"], 2, "{body:#}");
+    }
+
+    /// The same edit, landing while the batch is still *queued* for the lock
+    /// rather than holding it. Acquisition learns its control block was
+    /// retired only once the lock is granted, so it has to resolve the
+    /// replacement and take that — otherwise an ordinary settings change made
+    /// while a batch waited behind a slow write failed the whole batch.
+    #[tokio::test]
+    async fn a_batch_edited_before_it_gets_the_lock_runs_on_the_replacement() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        // The lower Vault is the first this batch acquires, so holding it
+        // parks the batch inside acquisition rather than after it.
+        let blocking = state
+            .vaults
+            .runtime(low)
+            .expect("lower Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the lower Vault");
+        let running = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "queued")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        edit_vault_in_place(&state, low);
+        drop(blocking);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), running)
+            .await
+            .expect("the batch must finish")
+            .expect("batch task");
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["failed"], 0, "{body:#}");
+        assert_eq!(content["succeeded"], 2, "{body:#}");
+    }
+
+    /// The other half of acceptance 4: when the Vault does not come back with
+    /// the same exclusion — here because it was disabled mid-batch — the item
+    /// is refused with a structured error rather than written unlocked.
+    #[tokio::test]
+    async fn a_batch_item_whose_vault_is_retired_mid_batch_fails_structurally() {
+        let (state, low, high, _tmp) = two_vault_write_state();
+        let blocking = state
+            .vaults
+            .runtime(high)
+            .expect("higher Vault runtime")
+            .acquire_mutation()
+            .await
+            .expect("hold the higher Vault");
+        let running = tokio::spawn({
+            let state = state.clone();
+            async move { call_tool(&state, "batch", batch_write_pair(low, high, "retired")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => {
+                panic!("test registry recovery")
+            }
+        };
+        let disabled = state
+            .vault_registry
+            .disable(snapshot.revision(), low)
+            .expect("disable the lower Vault");
+        let vault_root = match snapshot.definition(low).expect("definition").source() {
+            crate::vault_registry::VaultSource::Local { path } => path.clone(),
+            other => panic!("test Vault is not Local: {other:?}"),
+        };
+        state.vaults.reconcile(&state.vault_registry, &disabled);
+        drop(blocking);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), running)
+            .await
+            .expect("the batch must finish")
+            .expect("batch task");
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], false, "{body:#}");
+        assert!(
+            items[0]["error"]["code"].is_string(),
+            "a structured error, not bare text: {body:#}"
+        );
+        assert_eq!(items[1]["ok"], true, "{body:#}");
+        assert!(
+            !vault_root.join("retired-first.md").exists(),
+            "nothing may be written to a Vault the batch no longer holds"
         );
     }
 }

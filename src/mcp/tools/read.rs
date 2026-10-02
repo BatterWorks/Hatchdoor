@@ -28,8 +28,8 @@ use crate::vault_management::{
 use crate::vault_read::{
     AssetPathError, AssetReadError, NoteQuery, NoteQueryCondition, OffloadedReadError,
     ResolvedAsset, TreeScope, VaultReadError, VaultReads, VaultResolveResponse, VaultScope,
-    asset_download_path, clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap,
-    clamp_tree_max_depth, note_not_found,
+    clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap, clamp_tree_max_depth,
+    note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -164,6 +164,18 @@ struct ExactSlugArgs {
     slug: String,
 }
 
+/// `evaluate_saved_query`'s arguments. There is deliberately no `scope`: a
+/// saved query reads its Note's own Vault whoever asks (ADR-21 part 2), so a
+/// caller sending one is refused like any other unknown argument.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedQueryArgs {
+    vault_id: String,
+    slug: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolveArgs {
@@ -264,6 +276,28 @@ pub(super) async fn get_note_tool(
         .await
     {
         Ok(Some(note)) => Ok(tool_result::<results::GetNoteResult>(&note)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn evaluate_saved_query_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: SavedQueryArgs = parse("evaluate_saved_query", arguments)?;
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.saved_query(vault_id, &slug, args.name.as_deref()))
+        .await
+    {
+        Ok(Some(evaluation)) => Ok(tool_result::<results::EvaluateSavedQueryResult>(
+            &evaluation,
+        )),
         Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
         Err(error) => read_failure(error),
     }
@@ -575,20 +609,38 @@ pub(super) async fn get_attachment_tool(
                 false,
             )));
         }
+        // A structured tool error like every other outcome of this tool
+        // (#327), so an agent can branch on the code and retry with
+        // `encoding: "url"` rather than meet a bare JSON-RPC error its
+        // harness may surface as a transport failure.
         Ok(Err(AttachmentFailure::TooLargeForBase64(size_bytes))) => {
-            return Err(JsonRpcFailure::invalid_params(format!(
-                "attachment exceeds max size for base64 encoding: {size_bytes} > {max_base64_bytes}; call get_attachment again with encoding \"url\" instead"
+            return Ok(structured_error(VaultOperationError::new(
+                "attachment_too_large_for_base64",
+                format!(
+                    "attachment exceeds max size for base64 encoding: {size_bytes} > {max_base64_bytes}; call get_attachment again with encoding \"url\" instead"
+                ),
+                Some(vault_id),
+                false,
             )));
         }
         Err(error) => return read_failure(error),
     };
 
     let content = match fetched.bytes {
-        None => results::AttachmentContent::Url {
-            download_url: asset_download_path(&vault_id.to_string(), &relative_path),
-            path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
-            auth: "Send this MCP session's own bearer token as an Authorization: Bearer header; the route accepts it for as long as MCP stays enabled. This deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) also works, as a header or an access_token query parameter. When neither token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
-        },
+        None => {
+            // A transfer link (ADR-27): the agent holds neither this session's
+            // token nor the server's address, so the link carries both.
+            let (key, base) = super::transfer_link_signer(&state, config)?;
+            let link = state
+                .transfer_links
+                .mint_download(&key, base, vault_id, &relative_path);
+            results::AttachmentContent::Url {
+                download_url: link.url,
+                expires_at: link.expires_at,
+                path_note: "Absolute URL; fetch it as it is, e.g. curl -o <file> '<download_url>'.",
+                auth: "None needed: the link carries its own credential for this one file. It works any number of times until expires_at, five minutes after it was issued, and stops sooner if the server restarts, its MCP token changes, or MCP is disabled; call get_attachment again for a fresh one. The download is limited to HATCHDOOR_MCP_MAX_BASE64_BYTES and counts against this session's tool quota. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
+            }
+        }
         Some(bytes) => {
             use base64::Engine as _;
             results::AttachmentContent::Base64 {
@@ -640,13 +692,22 @@ pub(super) async fn attachment_import_config_tool(
 
     let methods: Vec<results::AttachmentImportMethod> = if enabled {
         vec![
-            results::AttachmentImportMethod::HttpMultipart {
+            results::AttachmentImportMethod::TransferLink {
+                tool: "create_upload_link",
                 role: "default",
+                method: "POST",
+                max_bytes: config.max_attachment_bytes,
+                recommended_for: "the default for any file size; use whenever the client can make an out-of-band HTTP request. Needs no token and no server address.",
+                requires: "ability to make an HTTP request outside MCP (e.g. shell/curl)",
+                usage: "Call create_upload_link with this vault_id and a Vault-relative `target_relative_path`, then POST multipart/form-data with the file in a field named `file` to the upload_url it returns. The link works once and expires after five minutes. A target ending in .md imports the file as a note, written as create_note writes one, whatever the extension list below says; to replace an existing note, pass overwrite true and expected_content_hash, the note's current hash from get_frontmatter.",
+            },
+            results::AttachmentImportMethod::HttpMultipart {
+                role: "alternative",
                 method: "POST",
                 path: format!("/api/v1/vaults/{vault_id}/attachments"),
                 path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
                 max_bytes: config.max_attachment_bytes,
-                recommended_for: "the default for any file size; use unless the client cannot make an out-of-band HTTP request",
+                recommended_for: "clients that already hold a bearer token and the server's address; an agent inside an MCP client usually holds neither, so use create_upload_link instead",
                 auth: "Send `Authorization: Bearer <token>` with either the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) or this session's MCP token. The MCP token is accepted only while MCP and MCP write mode are both currently enabled, checked per request: if an operator disables either one, this credential loses upload access immediately even though the same token still reads. No token is required when neither is configured.",
                 requires: "ability to make an HTTP request outside MCP (e.g. shell/curl)",
                 usage: "POST multipart/form-data with fields `target_relative_path` and `file`.",
@@ -664,7 +725,7 @@ pub(super) async fn attachment_import_config_tool(
     };
 
     let usage = if enabled {
-        "Two upload methods are available for this Vault. Prefer the HTTP endpoint by default; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible."
+        "Upload methods are available for this Vault. Prefer create_upload_link and send the file to the link it returns; use the bearer-token HTTP endpoint only if this client holds the token itself; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible. To import an existing Markdown file as a note, use create_upload_link with a .md target: it is the only method that takes a note, and the file never passes through this conversation."
     } else if !config.write_enabled {
         "Attachment upload is disabled for this instance. An operator must set HATCHDOOR_MCP_WRITE_ENABLED; no other Vault will accept uploads either until they do."
     } else {
@@ -711,7 +772,14 @@ pub(super) async fn list_vaults_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let _: EmptyArgs = parse("list_vaults", arguments)?;
-    management_result::<results::ListVaultsResult>(VaultCollectionManagement::new(&state).list())
+    // Off the async runtime: a Vault's link style can mean reading every note.
+    let listing =
+        tokio::task::spawn_blocking(move || VaultCollectionManagement::new(&state).list())
+            .await
+            .map_err(|join_error| {
+                JsonRpcFailure::internal(format!("background task panicked: {join_error}"))
+            })?;
+    management_result::<results::ListVaultsResult>(listing)
 }
 
 /// Registry writes go straight to the Vault collection management core, the
@@ -821,6 +889,20 @@ pub(super) async fn retry_vault_tool(
     let core = VaultCollectionManagement::new(&state);
     management_result::<results::RetryVaultResult>(
         management_vault_id(&args.vault_id).and_then(|vault_id| core.retry(vault_id)),
+    )
+}
+
+/// Admits one recovery-branch publish (ADR-30); the outcome is read back
+/// from `list_vaults`' `recovery_branch`, the way `sync_vault`'s is read
+/// from `git`/`git_error`.
+pub(super) async fn publish_recovery_branch_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultIdArgs = parse("publish_recovery_branch", arguments)?;
+    let core = VaultCollectionManagement::new(&state);
+    management_result::<results::PublishRecoveryBranchResult>(
+        management_vault_id(&args.vault_id).and_then(|vault_id| core.publish_recovery(vault_id)),
     )
 }
 
@@ -1030,9 +1112,9 @@ fn exclude_patterns_schema() -> Value {
 
 pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
-        json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"search_notes", "description":"Search one Vault or all enabled Vaults. Results use the shared partial-participant envelope and every hit is Vault-qualified.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants. index_turn is running while a Vault indexes and waiting while its indexing is queued behind another Vault's or paused to let one through; search says what the Vault answers meanwhile.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         tree_tool(),
@@ -1046,10 +1128,11 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         ),
         json!({"name":"get_frontmatter", "description":"Read one exact Note's frontmatter metadata — tags, aliases, and properties — from its authoritative Vault Markdown directory, without returning the Markdown body. A note without a frontmatter block returns an empty/default projection rather than an error. Also returns the note's content_hash — the same string get_note reports — so a hash-protected write can be prepared without reading the body.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"list_note_attachments", "description":"List the existing attachments one Note references, without returning the Note's full content. Every non-Markdown file the Note points at counts, not only the types get_attachment can fetch back.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an HTTP download_url resolved against this MCP endpoint's scheme, host, and port; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an absolute HTTP download_url built on the server's configured public address if one is set, else on the address the client reached this MCP endpoint on, as reported by a reverse proxy's Forwarded or X-Forwarded-Proto/X-Forwarded-Host headers; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
-        json!({"name":"recently_modified", "description":"List recently modified Notes for one Vault or all enabled Vaults.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        evaluate_saved_query_tool_schema(),
+        json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
     ]
 }
 
@@ -1122,8 +1205,30 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         ),
         json!({"name":"sync_vault","description":"Request immediate managed-Git synchronization for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
-        json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified and search_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"publish_recovery_branch","description":"Publish exactly one Two-way Vault's side of a sync conflict to its recovery branch, hatchdoor-recovery/<branch>/<vault_id> on the Vault's remote, so the conflict can be resolved on the Git host or in another clone. Only allowed while the Vault's capabilities.publish_recovery is true, which means its git_error is managed_git_conflict. Pending saves are committed first. The push only ever fast-forwards the recovery branch: it never force-pushes, never touches the configured branch, and never deletes a branch. If someone added commits to the recovery branch, the publish is refused rather than overwriting them. Returns once admitted (schedule queued, or coalesced with a request already pending); read the outcome from list_vaults, whose recovery_branch names the branch and the published commit, or carries an error explaining a refusal. Once the configured branch contains the resolution, the Vault's next sync resumes on its own and recovery_branch clears; the branch itself stays on the remote.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified, search_notes and query_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
+}
+
+/// The description does the steering here. An agent that reads a definition
+/// and rebuilds it as a `query_notes` call can drop or reinterpret a
+/// condition, which is what this tool exists to prevent (#277).
+fn evaluate_saved_query_tool_schema() -> Value {
+    json!({
+        "name": "evaluate_saved_query",
+        "description": collection_description("Evaluate one saved query stored in a Note and return the Notes it selects as structured rows. Use this rather than reading the definition in get_note and rebuilding it as a query_notes call: the definition is evaluated exactly as its author wrote it. get_note's saved_queries lists what a Note holds and the names to pass. The saved query always reads the Vault its Note lives in; there is no scope argument. status is populated (rows holds at least one row) or empty (every Note was checked and none qualified). Each row carries the matched Note's vault_id, title, slug and relative_path, and cells, one value per entry in columns, in the same order; a property the Note does not carry is null. truncated is present when more Notes qualified than rows holds, with reason definition_limit (the view's own limit) or ceiling (Hatchdoor's cap of 500 rows). ignored names presentation instructions such as groupBy that were not carried out; the rows are complete without them. Every request that reaches no answer is a structured error, never an empty result: no_saved_queries (the Note holds none), saved_query_name_required (name omitted while the Note holds several; the message lists the names), saved_query_not_found (no saved query has that name), saved_query_name_ambiguous (several share it), saved_query_refused (the definition uses something Hatchdoor cannot evaluate; the message names it), saved_query_stopped (evaluating it would pass Hatchdoor's ceiling). The rows come from the Vault's published index, like a collection read's."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "slug": {"type": "string", "minLength": 1, "description": "The Note holding the saved query."},
+                "name": {"type": "string", "minLength": 1, "description": "The saved query's name, as get_note's saved_queries reports it. Omit it only when the Note holds exactly one saved query."}
+            },
+            "required": ["vault_id", "slug"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations(),
+    })
 }
 
 /// `query_notes` gets its own builder rather than a one-line entry: the tool is
@@ -1133,7 +1238,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
 fn query_notes_tool_schema() -> Value {
     json!({
         "name": "query_notes",
-        "description": "Select the Notes in one Vault, or all enabled Vaults, whose tags, path, or frontmatter properties satisfy stated conditions. This selects rather than searches: a Note either qualifies or it does not, results are unranked and in a stable order, and no embedding is involved, so a Vault that is still being indexed answers in full. Use it when the answer is decided by what a Note is - every note tagged project/active, everything under 40-reference, notes whose review-date is before today. Use search_notes when the answer is decided by what a Note says. Unlike search_notes this reads every layer, so it selects demoted Notes that a default search would not return, and it takes no layers argument.",
+        "description": collection_description("Select the Notes in one Vault, or all enabled Vaults, whose tags, path, or frontmatter properties satisfy stated conditions. This selects rather than searches: a Note either qualifies or it does not, results are unranked and in a stable order, and no embedding is involved, so a Vault that is still being indexed answers in full. Use it when the answer is decided by what a Note is - every note tagged project/active, everything under 40-reference, notes whose review-date is before today. Use search_notes when the answer is decided by what a Note says. Unlike search_notes this reads every layer, so it selects demoted Notes that a default search would not return, and it takes no layers argument."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1197,8 +1302,20 @@ fn query_notes_tool_schema() -> Value {
     })
 }
 
+/// Appended to every collection read's description (#259), so a caller
+/// reading any one of these tools learns from it alone whether a result is
+/// current and what to do when it is not. `refresh_vault`, which it points
+/// at, is not advertised in read-only mode, hence the reread advice beside
+/// it. The `collection_revision` sentence follows
+/// `VaultCollectionState::collection_revision`.
+const COLLECTION_FRESHNESS: &str = "Every result says whether it is current, in participants[].state, one entry per Vault read: fresh, stale, not_searchable (semantic search only: some or all of the notes searched in that Vault have no embeddings, because they are not embedded yet or sit in a demoted layer with layer embedding switched off; any hits it returned still count, and keyword search reaches every note) or unavailable (nothing read; see its error; under a one-Vault scope the read fails with that error instead). partial is true when any participant is not fresh. A stale participant is still answered, but its part may be behind its Markdown: usually it is a prior index generation served while a turn catches up. When a participant reports stale, call refresh_vault for that Vault (write mode only; read-only callers read again in a few seconds, since a turn is usually already queued). A write can take up to about five seconds to reach the index, so a read straight after one can report fresh without it. collection_revision does not answer any of this. It counts Vault collection status changes (a Vault added, edited, enabled, disabled or disconnected, or its index, Git, watcher or local-file status moving) and does not track note content: a note write does not advance it, and the index turn that follows moves it only through the Vault's index status.";
+
+fn collection_description(summary: &str) -> String {
+    format!("{summary} {COLLECTION_FRESHNESS}")
+}
+
 fn collection_tool(name: &str, description: &str) -> Value {
-    json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{"scope":scope_schema()},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()})
+    json!({"name":name,"description":collection_description(description),"inputSchema":{"type":"object","properties":{"scope":scope_schema()},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()})
 }
 
 /// `get_tree` no longer shares [`collection_tool`]'s scope-only schema: it takes
@@ -1211,7 +1328,7 @@ fn collection_tool(name: &str, description: &str) -> Value {
 fn tree_tool() -> Value {
     json!({
         "name": "get_tree",
-        "description": "Return grouped explorer trees for one Vault or all enabled Vaults. With no folder, max_depth or include_notes the entire Vault is returned, which is large. To see a Vault's shape cheaply, call with include_notes false: that returns every folder at every level with its note count and no notes. Use folder to read one subtree, and max_depth to stop descending. Every folder reports note_count, the notes directly inside it; a folder held back by max_depth is marked truncated.",
+        "description": collection_description("Return grouped explorer trees for one Vault or all enabled Vaults. With no folder, max_depth or include_notes the entire Vault is returned, which is large. To see a Vault's shape cheaply, call with include_notes false: that returns every folder at every level with its note count and no notes. Use folder to read one subtree, and max_depth to stop descending. Every folder reports note_count, the notes directly inside it; a folder held back by max_depth is marked truncated."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1331,6 +1448,78 @@ mod tests {
                 "{name} takes scope alone"
             );
         }
+    }
+
+    /// Every tool whose result is the shared envelope says, in its own
+    /// description, how to read the envelope's freshness (#259). The set is
+    /// discovered from the advertised output schemas, so a new collection
+    /// read without the paragraph fails here, and then pinned, so one that
+    /// stops returning the envelope is noticed too.
+    #[test]
+    fn every_collection_read_describes_its_own_freshness() {
+        let mut checked = Vec::new();
+        for tool in read_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            let schema = serde_json::to_value(
+                results::output_schema_for(name).unwrap_or_else(|| panic!("{name} has a schema")),
+            )
+            .expect("schema serializes");
+            if schema["properties"]["participants"].is_null() {
+                continue;
+            }
+            let description = tool["description"].as_str().expect("description");
+            assert!(
+                description.ends_with(COLLECTION_FRESHNESS),
+                "{name} must carry the freshness paragraph"
+            );
+            checked.push(name.to_owned());
+        }
+        checked.sort();
+        assert_eq!(
+            checked,
+            [
+                "evaluate_saved_query",
+                "get_graph",
+                "get_stats",
+                "get_tree",
+                "query_notes",
+                "recently_modified",
+                "search_notes",
+            ]
+        );
+    }
+
+    /// A caller arriving at `collection_revision` from `list_vaults` or from
+    /// an output schema meets the same statement as one reading a
+    /// collection read's description.
+    #[test]
+    fn collection_revision_is_described_wherever_a_caller_meets_it() {
+        let tools = read_tools_list();
+        let list_vaults = tools
+            .iter()
+            .find(|tool| tool["name"] == "list_vaults")
+            .expect("list_vaults is advertised");
+        assert!(
+            list_vaults["description"]
+                .as_str()
+                .expect("description")
+                .contains("does not advance on note writes")
+        );
+        for name in ["get_tree", "list_vaults"] {
+            let schema = serde_json::to_value(results::output_schema_for(name).expect("schema"))
+                .expect("schema serializes");
+            let described = schema["properties"]["collection_revision"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} describes collection_revision"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                described.contains("note write does not advance it"),
+                "{name}: {described}"
+            );
+        }
+        assert!(crate::mcp::config::SERVER_INSTRUCTIONS.contains("not note content"));
     }
 
     #[test]

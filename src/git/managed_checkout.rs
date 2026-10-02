@@ -80,7 +80,11 @@ pub enum ManagedCheckoutError {
     /// retry instead of retrying blindly on a schedule.
     AuthenticationFailed,
     ValidationFailed,
-    AtomicInstallFailed,
+    /// The checkout could not be installed at its final name. The string says
+    /// why, because the first report of this reached an operator as a bare
+    /// "install failed" with the errno thrown away, and the cause was a
+    /// filesystem that cannot do `RENAME_NOREPLACE` (#345).
+    AtomicInstallFailed(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +97,12 @@ struct CheckoutReceipt {
 
 impl std::fmt::Display for ManagedCheckoutError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::AtomicInstallFailed(reason) = self {
+            return write!(
+                formatter,
+                "managed checkout could not be installed: {reason}"
+            );
+        }
         let message = match self {
             Self::StateDirectoryUnavailable => "managed checkout state directory is unavailable",
             Self::OwnershipUnavailable => "managed checkout is already owned by another process",
@@ -101,7 +111,7 @@ impl std::fmt::Display for ManagedCheckoutError {
             Self::CloneFailed => "managed checkout clone failed",
             Self::AuthenticationFailed => "managed checkout authentication failed",
             Self::ValidationFailed => "managed checkout validation failed",
-            Self::AtomicInstallFailed => "managed checkout could not be installed atomically",
+            Self::AtomicInstallFailed(_) => unreachable!("handled above"),
         };
         formatter.write_str(message)
     }
@@ -151,11 +161,8 @@ pub fn acquire_or_reuse(
         }
         Ok(_) => reuse_checkout(&destination, &lease.vault_directory, request),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if has_interrupted_acquisition(&lease.vault_directory)? {
-                Err(ManagedCheckoutError::DestinationInvalid)
-            } else {
-                acquire_new_checkout(&destination, &lease.vault_directory, request)
-            }
+            discard_interrupted_acquisition(&lease.vault_directory)?;
+            acquire_new_checkout(&destination, &lease.vault_directory, request)
         }
         Err(_) => Err(ManagedCheckoutError::DestinationInvalid),
     }
@@ -200,23 +207,49 @@ fn acquire_new_checkout(
     request: &ManagedCheckoutRequest,
 ) -> Result<ManagedCheckout, ManagedCheckoutError> {
     let temporary = create_temporary_sibling(vault_directory)?;
-    clone_repository(request, &temporary)?;
+    let installed = clone_and_install(&temporary, destination, vault_directory, request);
+    if installed.is_err() {
+        // Nothing but this call ever wrote to `temporary`, and it was never
+        // installed, so it is evidence of nothing: leaving it would only make
+        // the next attempt clean it up instead (#322). After a successful
+        // install the name no longer exists and this is never reached.
+        let _ = remove_own_leftover(&temporary);
+    }
+    let resolved_branch = installed?;
+    validate_checkout(
+        destination,
+        vault_directory,
+        request,
+        Some(&resolved_branch),
+        false,
+    )
+}
+
+/// Clone into `temporary`, validate it, record the receipt, and only then move
+/// it to `destination`.
+///
+/// The receipt is written before the install so that the two can never be
+/// found in the order that used to wedge a Vault: an installed checkout with
+/// no receipt, which reuse must reject because it cannot tell it from an
+/// unknown directory. A receipt with nothing installed beside it is harmless;
+/// the next attempt clones again and rewrites it.
+fn clone_and_install(
+    temporary: &Path,
+    destination: &Path,
+    vault_directory: &Path,
+    request: &ManagedCheckoutRequest,
+) -> Result<String, ManagedCheckoutError> {
+    clone_repository(request, temporary)?;
     let checkout = validate_checkout(
-        &temporary,
+        temporary,
         vault_directory,
         request,
         request.branch.as_deref(),
         false,
     )?;
-    atomic_install(&temporary, destination)?;
     write_receipt(vault_directory, request, &checkout.resolved_branch)?;
-    validate_checkout(
-        destination,
-        vault_directory,
-        request,
-        Some(&checkout.resolved_branch),
-        false,
-    )
+    atomic_install(temporary, destination)?;
+    Ok(checkout.resolved_branch)
 }
 
 fn reuse_checkout(
@@ -247,6 +280,7 @@ fn clone_repository(
     request: &ManagedCheckoutRequest,
     temporary: &Path,
 ) -> Result<(), ManagedCheckoutError> {
+    super::bound_network_waits();
     let mut clone = git2::build::RepoBuilder::new();
     if let Some(branch) = &request.branch {
         clone.branch(branch);
@@ -345,27 +379,41 @@ fn write_receipt(
         resolved_branch: resolved_branch.to_string(),
         vault_subdirectory: request.vault_subdirectory.clone(),
     };
-    let encoded =
-        serde_json::to_vec(&receipt).map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
+    let encoded = serde_json::to_vec(&receipt).map_err(|error| {
+        ManagedCheckoutError::AtomicInstallFailed(format!(
+            "could not encode the checkout receipt: {error}"
+        ))
+    })?;
     let temporary = vault_directory.join(format!(
         "{RECEIPT_FILE}.acquiring-{}",
-        VaultId::generate().map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?
+        VaultId::generate().map_err(|error| {
+            ManagedCheckoutError::AtomicInstallFailed(format!(
+                "could not name a temporary receipt file: {error}"
+            ))
+        })?
     ));
     let result = (|| {
+        fn receipt_failure(
+            stage: &'static str,
+        ) -> impl FnOnce(std::io::Error) -> ManagedCheckoutError {
+            move |error| {
+                ManagedCheckoutError::AtomicInstallFailed(format!(
+                    "could not {stage} the checkout receipt: {error}"
+                ))
+            }
+        }
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-        file.write_all(&encoded)
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-        file.sync_all()
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
+            .map_err(receipt_failure("create"))?;
+        file.write_all(&encoded).map_err(receipt_failure("write"))?;
+        file.sync_all().map_err(receipt_failure("flush"))?;
         fs::rename(&temporary, vault_directory.join(RECEIPT_FILE))
-            .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)
+            .map_err(receipt_failure("install"))
     })();
-    // A failed receipt write is deliberately left in place as acquisition
-    // evidence; a later startup rejects it rather than deleting it.
+    // A failed receipt write leaves its temporary behind; the next attempt
+    // discards it along with the checkout temporary (#322).
     result
 }
 
@@ -475,46 +523,115 @@ fn create_temporary_sibling(vault_directory: &Path) -> Result<PathBuf, ManagedCh
     Err(ManagedCheckoutError::OwnershipUnavailable)
 }
 
-fn has_interrupted_acquisition(vault_directory: &Path) -> Result<bool, ManagedCheckoutError> {
+/// Remove what an interrupted acquisition left in this Vault's state
+/// directory, so the next turn can simply clone again (#322).
+///
+/// Only names this module itself generates are touched: a checkout temporary
+/// or a receipt temporary, each suffixed with a freshly generated ID. The
+/// caller holds the Vault's checkout lease, so no other acquisition can be
+/// using them, and one exists only because a clone, validation, receipt write
+/// or install was cut short, by an error or by the process being killed.
+/// Anything else in the directory is left exactly as it is.
+fn discard_interrupted_acquisition(vault_directory: &Path) -> Result<(), ManagedCheckoutError> {
+    let receipt_prefix = format!("{RECEIPT_FILE}.acquiring-");
     let entries =
         fs::read_dir(vault_directory).map_err(|_| ManagedCheckoutError::DestinationInvalid)?;
-    Ok(entries.flatten().any(|entry| {
+    for entry in entries {
+        let entry = entry.map_err(|_| ManagedCheckoutError::DestinationInvalid)?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        name.starts_with("repository.acquiring-")
-            || name.starts_with(&format!("{RECEIPT_FILE}.acquiring-"))
-    }))
+        let generated_suffix = name
+            .strip_prefix("repository.acquiring-")
+            .or_else(|| name.strip_prefix(receipt_prefix.as_str()));
+        if generated_suffix.is_some_and(|suffix| suffix.parse::<VaultId>().is_ok()) {
+            remove_own_leftover(&entry.path())
+                .map_err(|_| ManagedCheckoutError::DestinationInvalid)?;
+        }
+    }
+    Ok(())
 }
 
+/// Delete one application-owned temporary. A symlink is removed as a link and
+/// never followed, so a leftover can never take anything outside with it.
+fn remove_own_leftover(path: &Path) -> std::io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+/// Install the finished clone at its final name without ever replacing a
+/// checkout that appeared while it was being made.
+///
+/// `RENAME_NOREPLACE` does that in one step, and where the filesystem cannot
+/// do the flag at all the check moves in front of the rename instead: look,
+/// then move. That leaves a gap in which a competing checkout could appear and
+/// be overwritten, which matters far less here than it does for note content —
+/// the lease already keeps one process per Vault directory, and the
+/// alternative was refusing to provision the Vault at all (ADR-26, #345).
 #[cfg(target_os = "linux")]
 fn atomic_install(temporary: &Path, destination: &Path) -> Result<(), ManagedCheckoutError> {
+    use crate::rename_flags::{RenameFlag, flag_unavailable, rename_flagged_paths};
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let temporary = CString::new(temporary.as_os_str().as_bytes())
-        .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| ManagedCheckoutError::AtomicInstallFailed)?;
-    // SAFETY: both C strings are live and null-terminated for this call only.
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            temporary.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
+    let install_directory = destination.parent().unwrap_or(destination);
+    let encode = |path: &Path| {
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            ManagedCheckoutError::AtomicInstallFailed(
+                "a checkout path contains a NUL byte".to_string(),
+            )
+        })
     };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(ManagedCheckoutError::AtomicInstallFailed)
+    let temporary_name = encode(temporary)?;
+    let destination_name = encode(destination)?;
+
+    match rename_flagged_paths(&temporary_name, &destination_name, RenameFlag::NoReplace) {
+        Ok(()) => Ok(()),
+        Err(error) if flag_unavailable(install_directory, RenameFlag::NoReplace, &error) => {
+            install_without_noreplace(temporary, destination)
+        }
+        Err(error) => Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+            "renameat2 RENAME_NOREPLACE onto the checkout destination failed: {error}"
+        ))),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn atomic_install(_temporary: &Path, _destination: &Path) -> Result<(), ManagedCheckoutError> {
-    Err(ManagedCheckoutError::AtomicInstallFailed)
+    Err(ManagedCheckoutError::AtomicInstallFailed(
+        "installing the checkout needs renameat2, which this platform does not provide".to_string(),
+    ))
+}
+
+fn install_without_noreplace(
+    temporary: &Path,
+    destination: &Path,
+) -> Result<(), ManagedCheckoutError> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(ManagedCheckoutError::AtomicInstallFailed(
+                "the checkout destination already exists".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ManagedCheckoutError::AtomicInstallFailed(format!(
+                "could not inspect the checkout destination before installing it: {error}"
+            )));
+        }
+    }
+    fs::rename(temporary, destination).map_err(|error| {
+        ManagedCheckoutError::AtomicInstallFailed(format!(
+            "could not install the checkout at its destination: {error}"
+        ))
+    })
 }
 
 fn is_safe_managed_repository_url(url: &str) -> bool {
@@ -719,20 +836,26 @@ mod tests {
         assert!(checkout.repository_path.join("notes").is_symlink());
     }
 
+    fn acquisition_leftovers(vault_directory: &Path) -> Vec<String> {
+        fs::read_dir(vault_directory)
+            .expect("Vault state entries")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".acquiring-"))
+            .collect()
+    }
+
     #[test]
-    fn failed_clone_leaves_only_an_application_owned_temporary_sibling() {
+    fn a_failed_clone_removes_its_temporary_and_the_next_attempt_clones() {
         let root = tempdir().expect("temporary state");
         let vault_id = VaultId::generate().expect("Vault ID");
         let state_directory = root.path().join("state");
         fs::create_dir(&state_directory).expect("state directory");
+        let missing = root.path().join("late");
         let request = ManagedCheckoutRequest {
             state_directory: state_directory.clone(),
             vault_id,
-            repository_url: root
-                .path()
-                .join("missing.git")
-                .to_string_lossy()
-                .into_owned(),
+            repository_url: missing.join("remote.git").to_string_lossy().into_owned(),
             branch: None,
             vault_subdirectory: None,
             credentials: None,
@@ -742,30 +865,159 @@ mod tests {
         let error = acquire_or_reuse(&lease, &request).expect_err("missing remote cloned");
 
         assert_eq!(error, ManagedCheckoutError::CloneFailed);
-        let entries = fs::read_dir(&lease.vault_directory).expect("Vault state entries");
-        assert!(entries.flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("repository.acquiring-")
-        }));
+        assert_eq!(
+            acquisition_leftovers(&lease.vault_directory),
+            Vec::<String>::new()
+        );
         assert!(!lease.vault_directory.join("repository").exists());
 
-        let second = acquire_or_reuse(&lease, &request).expect_err("interrupted clone retried");
+        // The remote comes up (DNS ready, network back): the same request
+        // now succeeds without anyone touching the state directory.
+        fs::create_dir(&missing).expect("remote parent");
+        remote_with_default_branch(&missing, "trunk");
+        let checkout = acquire_or_reuse(&lease, &request).expect("retried clone");
 
-        assert_eq!(second, ManagedCheckoutError::DestinationInvalid);
+        assert_eq!(checkout.resolved_branch, "trunk");
+        assert!(checkout.repository_path.join("note.md").is_file());
+    }
+
+    #[test]
+    fn a_clone_killed_midway_is_discarded_and_the_next_turn_clones_again() {
+        let root = tempdir().expect("temporary state");
+        let remote = remote_with_default_branch(root.path(), "trunk");
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let state_directory = root.path().join("state");
+        fs::create_dir(&state_directory).expect("state directory");
+        let lease =
+            ManagedCheckoutLease::acquire(state_directory.clone(), vault_id).expect("lease");
+        let vault_directory = lease.vault_directory.clone();
+
+        // What a process killed mid-acquisition leaves: a half-written clone,
+        // a receipt temporary, and (killed after the receipt landed but
+        // before the install) a receipt with no checkout beside it.
+        let half_clone = vault_directory.join(format!(
+            "repository.acquiring-{}",
+            VaultId::generate().expect("ID")
+        ));
+        fs::create_dir_all(half_clone.join(".git/objects")).expect("half clone");
+        fs::write(half_clone.join(".git/HEAD"), "ref: refs/heads/tru").expect("torn HEAD");
+        fs::write(
+            vault_directory.join(format!(
+                "{RECEIPT_FILE}.acquiring-{}",
+                VaultId::generate().expect("ID")
+            )),
+            "{\"repository_url\":",
+        )
+        .expect("torn receipt temporary");
+        fs::write(
+            vault_directory.join(RECEIPT_FILE),
+            serde_json::to_vec(&CheckoutReceipt {
+                repository_url: remote.to_string_lossy().into_owned(),
+                resolved_branch: "trunk".to_string(),
+                vault_subdirectory: None,
+            })
+            .expect("receipt"),
+        )
+        .expect("receipt without checkout");
+        // A leftover-shaped symlink is removed as a link, never followed.
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        fs::write(outside.join("keep.md"), "keep").expect("outside file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            &outside,
+            vault_directory.join(format!(
+                "repository.acquiring-{}",
+                VaultId::generate().expect("ID")
+            )),
+        )
+        .expect("leftover symlink");
+        // Names this module never generates are not its to delete.
+        fs::write(vault_directory.join("operator-notes.txt"), "mine").expect("operator file");
+        fs::create_dir(vault_directory.join("repository.acquiring-by-hand"))
+            .expect("hand-named directory");
+
+        let request = request(state_directory, vault_id, &remote);
+        let checkout = acquire_or_reuse(&lease, &request).expect("recovered clone");
+
+        assert_eq!(checkout.resolved_branch, "trunk");
+        assert!(!checkout.reused);
+        assert!(checkout.repository_path.join("note.md").is_file());
         assert_eq!(
-            fs::read_dir(&lease.vault_directory)
-                .expect("Vault state entries")
-                .flatten()
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("repository.acquiring-")
-                })
-                .count(),
-            1
+            acquisition_leftovers(&vault_directory),
+            vec!["repository.acquiring-by-hand".to_string()]
+        );
+        assert_eq!(fs::read_to_string(outside.join("keep.md")).unwrap(), "keep");
+        assert_eq!(
+            fs::read_to_string(vault_directory.join("operator-notes.txt")).unwrap(),
+            "mine"
+        );
+        let reused = acquire_or_reuse(&lease, &request).expect("reuse after recovery");
+        assert!(reused.reused);
+    }
+
+    #[test]
+    fn a_failed_install_leaves_a_receipt_the_next_attempt_can_overwrite() {
+        let root = tempdir().expect("temporary state");
+        let remote = remote_with_default_branch(root.path(), "trunk");
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let state_directory = root.path().join("state");
+        fs::create_dir(&state_directory).expect("state directory");
+        let lease =
+            ManagedCheckoutLease::acquire(state_directory.clone(), vault_id).expect("lease");
+        let request = request(state_directory, vault_id, &remote);
+        let temporary = create_temporary_sibling(&lease.vault_directory).expect("temporary");
+        // Occupy the destination so the install step refuses, after the
+        // receipt has been written.
+        let destination = lease.vault_directory.join("repository");
+        fs::write(&destination, "occupied").expect("occupied destination");
+
+        let error = clone_and_install(&temporary, &destination, &lease.vault_directory, &request)
+            .expect_err("install into an occupied destination");
+
+        assert!(matches!(
+            error,
+            ManagedCheckoutError::AtomicInstallFailed(_)
+        ));
+        assert!(lease.vault_directory.join(RECEIPT_FILE).is_file());
+        fs::remove_file(&destination).expect("clear destination");
+        let checkout = acquire_or_reuse(&lease, &request).expect("clone after failed install");
+        assert_eq!(checkout.resolved_branch, "trunk");
+        assert_eq!(
+            acquisition_leftovers(&lease.vault_directory),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_clone_from_a_stalled_remote_fails_within_the_timeout_and_leaves_nothing() {
+        let root = tempdir().expect("temporary state");
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let state_directory = root.path().join("state");
+        fs::create_dir(&state_directory).expect("state directory");
+        let request = ManagedCheckoutRequest {
+            state_directory: state_directory.clone(),
+            vault_id,
+            repository_url: crate::git::stalled_https_remote(),
+            branch: None,
+            vault_subdirectory: None,
+            credentials: None,
+        };
+        let lease = ManagedCheckoutLease::acquire(state_directory, vault_id).expect("lease");
+        let vault_directory = lease.vault_directory.clone();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(acquire_or_reuse(&lease, &request));
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("clone from a stalled remote never returned");
+
+        assert_eq!(result, Err(ManagedCheckoutError::CloneFailed));
+        assert_eq!(
+            acquisition_leftovers(&vault_directory),
+            Vec::<String>::new()
         );
     }
 
@@ -781,7 +1033,10 @@ mod tests {
 
         let error = atomic_install(&temporary, &destination).expect_err("destination replaced");
 
-        assert_eq!(error, ManagedCheckoutError::AtomicInstallFailed);
+        assert!(
+            matches!(error, ManagedCheckoutError::AtomicInstallFailed(_)),
+            "expected an install failure, got {error:?}"
+        );
         assert_eq!(
             fs::read_to_string(destination.join("evidence")).unwrap(),
             "existing"
@@ -789,6 +1044,60 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temporary.join("candidate")).unwrap(),
             "new"
+        );
+    }
+
+    /// A filesystem that rejects `RENAME_NOREPLACE` used to make a managed Git
+    /// Vault impossible to provision, and said only "could not be installed
+    /// atomically" about it (#345).
+    #[test]
+    fn a_checkout_installs_where_the_filesystem_rejects_no_replace() {
+        let root = tempdir().expect("temporary directory");
+        crate::rename_flags::force_unsupported_for_tests(root.path());
+        let temporary = root.path().join("repository.acquiring");
+        let destination = root.path().join("repository");
+        fs::create_dir(&temporary).expect("temporary checkout");
+        fs::write(temporary.join("candidate"), "new").expect("candidate evidence");
+
+        atomic_install(&temporary, &destination).expect("install must fall back to a plain rename");
+
+        assert_eq!(
+            fs::read_to_string(destination.join("candidate")).unwrap(),
+            "new"
+        );
+        assert!(!temporary.exists(), "the temporary name must be gone");
+    }
+
+    #[test]
+    fn the_no_replace_fallback_still_refuses_an_occupied_destination_and_says_why() {
+        let root = tempdir().expect("temporary directory");
+        crate::rename_flags::force_unsupported_for_tests(root.path());
+        let temporary = root.path().join("repository.acquiring");
+        let destination = root.path().join("repository");
+        fs::create_dir(&temporary).expect("temporary checkout");
+        fs::create_dir(&destination).expect("competing checkout");
+        fs::write(destination.join("evidence"), "existing").expect("existing evidence");
+
+        let error = atomic_install(&temporary, &destination).expect_err("destination replaced");
+
+        let ManagedCheckoutError::AtomicInstallFailed(reason) = &error else {
+            panic!("expected an install failure, got {error:?}");
+        };
+        assert!(
+            reason.contains("already exists"),
+            "the failure must name its cause, got: {reason}"
+        );
+        assert!(
+            error.to_string().contains("already exists"),
+            "and must carry it to the operator, got: {error}"
+        );
+        assert!(
+            !error.to_string().contains('/'),
+            "without the host path, which reaches every client (#323): {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("evidence")).unwrap(),
+            "existing"
         );
     }
 

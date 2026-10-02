@@ -3,24 +3,24 @@ use std::fs;
 
 use crate::cache::parse::for_non_code_line;
 
+use super::link_style::LinkFormCounts;
+use super::markdown_links::{local_image_count, note_dir, note_link_destinations};
 use super::paths::{normalize_link_target, normalize_title, slugify, split_wikilink_note_body};
-use super::types::NoteEntry;
+use super::types::{NoteEntry, VaultIndex};
 
 pub fn build_link_graph(
-    by_slug: &HashMap<String, NoteEntry>,
-    by_title: &HashMap<String, String>,
-    by_path_title: &HashMap<String, String>,
-    ordered_slugs: &[String],
+    index: &VaultIndex,
 ) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
     let mut outgoing_by_slug: HashMap<String, Vec<String>> = HashMap::new();
     let mut backlinks_by_slug: HashMap<String, Vec<String>> = HashMap::new();
+    let by_slug = &index.by_slug;
 
-    for slug in ordered_slugs {
+    for slug in &index.ordered_slugs {
         outgoing_by_slug.insert(slug.clone(), Vec::new());
         backlinks_by_slug.insert(slug.clone(), Vec::new());
     }
 
-    for slug in ordered_slugs {
+    for slug in &index.ordered_slugs {
         let Some(note) = by_slug.get(slug) else {
             continue;
         };
@@ -32,13 +32,20 @@ pub fn build_link_graph(
         let mut seen = HashSet::new();
         let mut outgoing = Vec::new();
 
-        for target in extract_wikilink_targets(&content) {
-            let Some(resolved_slug) =
-                resolve_target_slug(&target, by_slug, by_title, by_path_title)
-            else {
-                continue;
-            };
+        // Both forms of note link count alike (ADR-28), each through its own
+        // resolver: a wikilink names a title, a Markdown link a path relative
+        // to the note it was written in.
+        let (wikilink_targets, _) = extract_wikilink_targets(&content);
+        let wikilinks = wikilink_targets.into_iter().filter_map(|target| {
+            resolve_target_slug(&target, by_slug, &index.by_title, &index.by_path_title)
+        });
+        let folder = note_dir(&note.relative_path);
+        let markdown_links = note_link_destinations(&content)
+            .into_iter()
+            .filter_map(|destination| index.resolve_note_link(destination, folder))
+            .map(|entry| entry.slug.clone());
 
+        for resolved_slug in wikilinks.chain(markdown_links) {
             if resolved_slug == note.slug || !seen.insert(resolved_slug.clone()) {
                 continue;
             }
@@ -65,6 +72,18 @@ pub fn build_link_graph(
     (outgoing_by_slug, backlinks_by_slug)
 }
 
+/// How many note links and attachment embeds one note writes in each form,
+/// for its Vault's link style (ADR-33). Reads them the way the link graph
+/// does: wikilinks and `![[...]]` embeds against Markdown note links and
+/// local `![](...)` images, none of them inside code.
+pub(crate) fn note_link_forms(content: &str) -> LinkFormCounts {
+    let (wikilink_targets, wikilink_embeds) = extract_wikilink_targets(content);
+    LinkFormCounts {
+        wikilinks: wikilink_targets.len() + wikilink_embeds,
+        markdown: note_link_destinations(content).len() + local_image_count(content),
+    }
+}
+
 fn sort_slug_links(links: &mut [String], by_slug: &HashMap<String, NoteEntry>) {
     links.sort_by(|left, right| {
         let left_path = by_slug
@@ -79,15 +98,17 @@ fn sort_slug_links(links: &mut [String], by_slug: &HashMap<String, NoteEntry>) {
     });
 }
 
-fn extract_wikilink_targets(content: &str) -> Vec<String> {
+/// Every note wikilink's target, and how many `![[...]]` embeds there are.
+fn extract_wikilink_targets(content: &str) -> (Vec<String>, usize) {
     let mut targets = Vec::new();
+    let mut embeds = 0;
     for_non_code_line(content, |line| {
-        extract_line_wikilink_targets(line, &mut targets);
+        extract_line_wikilink_targets(line, &mut targets, &mut embeds);
     });
-    targets
+    (targets, embeds)
 }
 
-fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>) {
+fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>, embeds: &mut usize) {
     let bytes = line.as_bytes();
     let mut idx = 0usize;
 
@@ -111,7 +132,9 @@ fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>) {
             break;
         }
 
-        if !is_embed {
+        if is_embed {
+            *embeds += 1;
+        } else {
             let body = &line[idx + 2..end];
             let (target, _) = split_wikilink_note_body(body);
             if !target.is_empty() {

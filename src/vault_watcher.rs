@@ -180,6 +180,17 @@ pub fn should_refresh_for_event(
     vault_path: &Path,
     exclude: &ExcludeMatcher,
 ) -> bool {
+    // The kernel dropped events it could not queue, so no path list can say
+    // what changed. An Index turn is already a full authoritative rescan,
+    // which is exactly the recovery this flag asks for (#324). It arrives as
+    // `EventKind::Other` with no paths, which the filters below would drop.
+    if event.need_rescan() {
+        warn!(
+            vault_path = %vault_path.display(),
+            "Vault watcher lost filesystem events (queue overflow); requesting a full reindex"
+        );
+        return true;
+    }
     if !refreshable_event_kind(event) {
         return false;
     }
@@ -484,6 +495,34 @@ mod tests {
         assert!(
             should_refresh_for_event(&content, &cache, dir.path(), &exclude),
             "a real content change must still trigger a reindex"
+        );
+    }
+
+    /// An inotify queue overflow reaches us as one `Other` event flagged
+    /// `Rescan`, with no paths (notify's `Q_OVERFLOW` handling). It means
+    /// events were lost, so it must ask for the full rescan an Index turn is,
+    /// not be discarded as noise (#324).
+    #[test]
+    fn should_refresh_for_event_accepts_a_rescan_flag() {
+        let dir = tempdir().expect("temp dir");
+        let cache = dir.path().join("cache.sqlite3");
+
+        for kind in [EventKind::Other, EventKind::Any] {
+            let overflow = Event::new(kind).set_flag(notify::event::Flag::Rescan);
+            assert!(
+                should_refresh_for_event(&overflow, &cache, dir.path(), &default_exclude()),
+                "{kind:?} flagged Rescan must trigger a reindex"
+            );
+        }
+
+        assert!(
+            !should_refresh_for_event(
+                &Event::new(EventKind::Other),
+                &cache,
+                dir.path(),
+                &default_exclude()
+            ),
+            "an unflagged Other event is still noise"
         );
     }
 

@@ -184,11 +184,15 @@ changed. Update the notes that drifted (wording, examples, tool and setting
 names, described behavior) as part of this branch, not later. A note reported
 as "edited on this branch" only means the file moved; check it like the rest.
 
+The same run checks the changelog. A branch that changes code Hatchdoor ships (`src/`, `frontend/src/`, `Cargo.toml`, the frontend's `package.json`, `index.html` and `public/`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `docs/starter-vault/`) must edit `CHANGELOG.md`, test files excepted. Write the entry under `## Unreleased` as part of the work, not when the check fails: one single-line paragraph under Added, Changed or Fixed, ending in `[#N]`, with the matching `[#N]:` link above the first release heading. Missing entries in recent commits are not a precedent. Only when nothing a user, operator or agent can notice changed (a test-only change, an internal refactor) put a `Changelog: none, <reason>` trailer on one of the branch's commits instead.
+
 Then record the review:
 
 ```bash
 just docs-freshness-ack
 ```
+
+Acknowledging covers the note review only. It never waives a missing changelog entry.
 
 Do not acknowledge a review you did not perform, and do not treat a clean
 `docs-freshness` run as permission to skip reading when you know a note is
@@ -202,3 +206,16 @@ After editing that table, or after renaming or moving a note under
 ```bash
 node scripts/check-docs-freshness.mjs --validate-table
 ```
+
+## Releases
+
+A release is cut with `just release-prepare <version>` and `just release-publish <version>`, following [`docs/maintenance/release-runbook.md`](docs/maintenance/release-runbook.md) (ADR-36).
+
+Only the maintainer approves a release. After working through the version-bump pull request's checklist, draft the GitHub Release title and notes on the draft release, give the maintainer that exact title and notes, and stop. Run `just release-publish` only after the maintainer replies "approved" to that draft in the current session. That approval also covers the deploy that `release-publish` runs.
+
+Ask again, and do not publish, when either holds:
+
+- This session cannot see the maintainer's "approved" in its own conversation, as when it was resumed or is a new session. A summary or note saying approval was given does not count.
+- The title or notes changed after the maintainer replied.
+
+No script checks this. `release-publish` publishes whatever the draft says when it runs.

@@ -24,6 +24,47 @@ use crate::app_state::AppState;
 pub(super) const WRITE_DISABLED_MESSAGE: &str =
     "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED";
 
+/// The stable code a `batch` item carries when write mode refuses it (#327).
+/// A standalone write tool still answers that refusal as a JSON-RPC
+/// invalid-params error; a batch item reports it as data, so it needs a code
+/// an agent can branch on rather than the JSON-RPC number.
+pub(super) const WRITE_DISABLED_CODE: &str = "mcp_writes_disabled";
+
+/// The environment-cleanup recovery refusal (#327), when one is pending.
+///
+/// While `.env` still carries retired per-Vault keys, the HTTP composition
+/// root refuses every state-changing request with this same code. `/mcp` is
+/// exempt from that method-based guard, because every MCP request, reads and
+/// the handshake included, is a POST: the MCP surface refuses its own
+/// state-changing tools here instead, so an agent still reaches `list_vaults`
+/// (which explains the recovery) and gets a structured code for the rest.
+/// A pending *legacy migration* recovery that may start with no Vaults is not
+/// refused here, matching the HTTP guard; its own cores refuse what they must.
+pub(super) fn environment_cleanup_refusal(
+    state: &AppState,
+) -> Option<crate::vault_error::VaultOperationError> {
+    let recovery = state
+        .legacy_migration_recovery
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()?;
+    (!recovery.can_start_with_no_vaults()).then(|| {
+        crate::vault_error::VaultOperationError::new(
+            crate::vault_migration::LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE,
+            recovery.message(),
+            None,
+            false,
+        )
+    })
+}
+
+/// Whether a tool may run while [`environment_cleanup_refusal`] is pending:
+/// the reads, collection discovery, and `batch` (which refuses its own write
+/// items). Everything else changes state.
+fn runs_during_environment_cleanup(name: &str) -> bool {
+    READ_OPS.contains(&name) || matches!(name, "list_vaults" | "batch")
+}
+
 pub async fn handle_tools_call(
     state: AppState,
     params: Option<Value>,
@@ -44,6 +85,14 @@ pub async fn handle_tools_call(
         return Ok(tool_success(crate::mcp::results::result_to_value(
             &model_setup_status_result(&state),
         )));
+    }
+
+    if !runs_during_environment_cleanup(name)
+        && let Some(refusal) = environment_cleanup_refusal(&state)
+    {
+        return Ok(tool_structured_error(
+            serde_json::to_value(&refusal).unwrap_or_else(|_| json!({ "code": refusal.code })),
+        ));
     }
 
     // While model setup is still pending, only the explicit model-setup calls
@@ -125,6 +174,9 @@ pub async fn handle_tools_call(
         }
         "sync_vault" if config.write_enabled => read::sync_vault_tool(state, arguments).await,
         "retry_vault" if config.write_enabled => read::retry_vault_tool(state, arguments).await,
+        "publish_recovery_branch" if config.write_enabled => {
+            read::publish_recovery_branch_tool(state, arguments).await
+        }
         "refresh_vault" if config.write_enabled => read::refresh_vault_tool(state, arguments).await,
         write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
             let vault = write::scoped_vault(&state, &arguments)?;
@@ -137,10 +189,15 @@ pub async fn handle_tools_call(
         write_op if write::WRITE_OPS.contains(&write_op) => {
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
         }
-        "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
-        | "sync_vault" | "retry_vault" | "refresh_vault" => {
-            Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
-        }
+        "create_vault"
+        | "edit_vault"
+        | "enable_vault"
+        | "disable_vault"
+        | "disconnect_vault"
+        | "sync_vault"
+        | "retry_vault"
+        | "publish_recovery_branch"
+        | "refresh_vault" => Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE)),
         other => Err(JsonRpcFailure::invalid_params(format!(
             "Unknown MCP tool: {other}"
         ))),
@@ -194,6 +251,7 @@ pub(super) const READ_OPS: &[&str] = &[
     "get_graph",
     "recently_modified",
     "query_notes",
+    "evaluate_saved_query",
     "get_attachment_import_config",
     "list_note_attachments",
     "get_attachment",
@@ -219,6 +277,7 @@ pub(super) async fn dispatch_read_tool(
         "get_graph" => read::get_graph_tool(state, arguments).await,
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "query_notes" => read::query_notes_tool(state, arguments).await,
+        "evaluate_saved_query" => read::evaluate_saved_query_tool(state, arguments).await,
         // Not gated on `write_enabled`: the tool reports the write posture
         // rather than exercising it, and an agent that cannot upload still
         // needs to be told so, with the reason.
@@ -342,7 +401,28 @@ fn is_collection_management_tool(name: &str) -> bool {
             | "disconnect_vault"
             | "sync_vault"
             | "retry_vault"
+            | "publish_recovery_branch"
     )
+}
+
+/// What a tool needs to mint a transfer link (ADR-27): the key this call's
+/// admitting token signs under, and the absolute origin the link is built on.
+/// A link is always absolute, so with no public address configured and no
+/// arriving host to fall back on, minting is refused rather than answered with
+/// a link the agent could not resolve.
+pub(super) fn transfer_link_signer<'a>(
+    state: &AppState,
+    config: &'a McpConfig,
+) -> Result<(crate::transfer_link::SigningKey, &'a str), JsonRpcFailure> {
+    let token = config.bearer_token.as_deref().ok_or_else(|| {
+        JsonRpcFailure::internal("MCP is running without a bearer token".to_string())
+    })?;
+    let base = config.link_base().ok_or_else(|| {
+        JsonRpcFailure::invalid_params(
+            "Hatchdoor cannot tell which address this request reached it on, so it cannot build a transfer link; an operator can set HATCHDOOR_PUBLIC_URL. For a download, call get_attachment again with encoding \"base64\".",
+        )
+    })?;
+    Ok((state.transfer_links.key(&state.runtime_config, token), base))
 }
 
 pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
@@ -416,6 +496,8 @@ mod tests {
             demo_mode: false,
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::terms_required(),
+            transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
         (state, tmp)
     }

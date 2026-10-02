@@ -8,18 +8,28 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize, Serializer};
 use std::str::FromStr;
 
-use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
+use crate::cache::{
+    SqliteCache,
+    vault_snapshots::{NoteBodies, VaultSnapshotRead},
+};
 use crate::search::LayerSelection;
 use crate::vault::{Note, NoteLink, NoteLinks};
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::VaultId;
-use crate::vault_runtime::{VaultCapabilities, VaultCollectionRuntime};
+use crate::vault_runtime::{IndexedAssets, VaultCapabilities, VaultCollectionRuntime};
 
 mod assets;
 mod query;
+mod saved_query;
 
-pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
+pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, encode_relative_path};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
+pub use saved_query::{
+    SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryEvaluation,
+    SavedQueryIgnored, SavedQueryMarkerProblem, SavedQueryOutcome, SavedQueryRefusal,
+    SavedQueryResult, SavedQueryRow, SavedQueryRows, SavedQuerySummary, SavedQueryTable,
+    SavedQueryTruncation, SavedQueryTruncationReason,
+};
 
 /// An explicit collection read target. There is deliberately no selected,
 /// default, or sole-Vault variant.
@@ -174,6 +184,14 @@ impl VaultReadError {
             | "note_not_found"
             | "note_unreadable"
             | "invalid_frontmatter"
+            // One addressed saved query (#277), reported by MCP's
+            // `evaluate_saved_query`; no HTTP route evaluates a single one.
+            | "no_saved_queries"
+            | "saved_query_name_required"
+            | "saved_query_not_found"
+            | "saved_query_name_ambiguous"
+            | "saved_query_refused"
+            | "saved_query_stopped"
             // `note_attachments` reads the Note through the write module's
             // attachment lister, whose only failure on a read is I/O.
             | "write_failed" => self.code.as_str(),
@@ -197,17 +215,28 @@ impl VaultReadError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultParticipantState {
+    /// Read from the Vault's latest published Index generation.
     Fresh,
+    /// Served, but possibly behind the Vault's Markdown: usually a prior
+    /// generation read while an Index turn catches up, sometimes the latest
+    /// one published while a write landed, or one left by a failed turn.
+    /// Writes since it was built may be missing.
     Stale,
-    /// The Vault's rows are current, but this generation carries no vectors,
-    /// so it contributed nothing to a semantic search. Only semantic search
-    /// reports it: browsing, keyword and tag search all read the same
-    /// structural rows and report `Fresh`.
+    /// Some or all of the notes a semantic search selected in this Vault have
+    /// no vectors, so the Vault's semantic answer is missing them. Either the
+    /// generation has no vectors at all yet (its embedding pass is pending or
+    /// failed, whatever its freshness), or it was built with
+    /// `HATCHDOOR_EMBED_LAYERS=false` and the selection reaches a demoted
+    /// layer, whose notes never get vectors; hits from its embedded notes
+    /// still count (#328). Only semantic search reports it: browsing, keyword
+    /// and tag search read the structural rows every note has.
     ///
     /// Distinct from `Unavailable`, which means there is nothing to read at
     /// all. Collapsing the two would tell a caller its Notes are missing when
     /// they are merely not yet embedded.
     NotSearchable,
+    /// Nothing could be read from this Vault; `error` says why. Under a
+    /// one-Vault scope the read fails with that error instead.
     Unavailable,
 }
 
@@ -224,16 +253,70 @@ pub struct VaultParticipant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultReadProjection<T> {
     pub scope: VaultScope,
+    /// Counts Vault collection status changes: Vaults added, edited, enabled,
+    /// disabled or disconnected, and each Vault's search, Git, watcher or
+    /// local-file status moving. It
+    /// does not track note content and a note write does not advance it, so
+    /// it cannot say whether this result is current. `participants` can.
     pub collection_revision: u64,
+    /// True when any participant's state is anything other than `fresh`.
     pub partial: bool,
+    /// One entry per Vault the scope selected, each saying whether its part
+    /// of `data` is current. `stale` means that Vault's part may be behind its
+    /// Markdown, usually a prior Index generation while a turn catches up.
     pub participants: Vec<VaultParticipant>,
     pub data: T,
+}
+
+impl<T> VaultReadProjection<T> {
+    /// The same envelope around `f(data)`, so a projection's freshness
+    /// travels with whatever its data becomes.
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> VaultReadProjection<U> {
+        VaultReadProjection {
+            scope: self.scope,
+            collection_revision: self.collection_revision,
+            partial: self.partial,
+            participants: self.participants,
+            data: f(self.data),
+        }
+    }
+
+    /// [`Self::map`] for a conversion that can refuse the data.
+    fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<VaultReadProjection<U>, E> {
+        Ok(VaultReadProjection {
+            scope: self.scope,
+            collection_revision: self.collection_revision,
+            partial: self.partial,
+            participants: self.participants,
+            data: f(self.data)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultQualifiedNote {
     pub vault_id: VaultId,
+    /// The Note exactly as its file holds it. `content` is the authoritative
+    /// Markdown, saved query definitions included, and never anything
+    /// computed from them.
     pub note: Note,
+    /// Every saved query (fenced `base` block) the Note holds, in document
+    /// order, with the name each is addressed by (#277). Nothing here is
+    /// evaluated: rows come only from [`VaultReadCore::saved_query`], so no
+    /// exact read pairs computed content with the `content_hash` a write
+    /// accepts (ADR-21 part 4).
+    #[serde(default)]
+    pub saved_queries: Vec<SavedQuerySummary>,
+}
+
+impl VaultQualifiedNote {
+    fn new(vault_id: VaultId, note: Note) -> Self {
+        Self {
+            vault_id,
+            saved_queries: saved_query::saved_query_summaries(&note.content),
+            note,
+        }
+    }
 }
 
 /// The rich, exact single-Vault statistics report — every field the legacy
@@ -260,10 +343,14 @@ pub struct VaultQualifiedLinks {
     pub backlinks: Vec<VaultQualifiedLink>,
 }
 
-/// One batch's resolutions, positionally matching the note targets and the
-/// asset targets that were asked for. Assets carry a Vault-relative path
-/// because they have no slug to name them by.
-pub type ResolvedVaultTargets = (Vec<Option<ResolvedVaultNote>>, Vec<Option<String>>);
+/// One batch's resolutions, positionally matching the note targets, the asset
+/// targets and the Markdown note-link targets that were asked for. Assets
+/// carry a Vault-relative path because they have no slug to name them by.
+pub type ResolvedVaultTargets = (
+    Vec<Option<ResolvedVaultNote>>,
+    Vec<Option<String>>,
+    Vec<Option<ResolvedVaultNote>>,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct ResolvedVaultNote {
@@ -490,7 +577,7 @@ impl BrowseSurface {
             notes,
             links,
             mut tags_by_note,
-            chunks,
+            mut note_bodies,
             ..
         } = read;
         let notes: Vec<_> = notes
@@ -505,13 +592,8 @@ impl BrowseSurface {
                     && visible.contains(link.target_slug.as_str())
             })
             .collect();
-        let chunks = chunks
-            .into_iter()
-            .filter(|chunk| {
-                !self.hides(chunk.layer.as_deref()) && visible.contains(chunk.note_slug.as_str())
-            })
-            .collect();
         tags_by_note.retain(|slug, _| visible.contains(slug.as_str()));
+        note_bodies.retain(|slug, _| visible.contains(slug.as_str()));
         // A restricted surface can select no layer, so it publishes no
         // catalogue: an empty catalogue is also what a Vault with no markers
         // reports, keeping the two indistinguishable.
@@ -519,10 +601,48 @@ impl BrowseSurface {
             notes,
             links,
             tags_by_note,
-            chunks,
+            note_bodies,
             layer_catalog: Vec::new(),
         }
     }
+}
+
+/// Which contained assets a [`BrowseSurface`] admits, captured from one
+/// catalog of its Vault. A caller checking many paths against one Vault holds
+/// this rather than calling [`VaultReadCore::asset_on_surface`] per path.
+pub struct AssetSurface {
+    surface: BrowseSurface,
+    assets: Arc<IndexedAssets>,
+}
+
+impl AssetSurface {
+    fn capture(surface: BrowseSurface, index: &crate::vault::VaultIndex) -> Self {
+        Self::over(surface, Arc::new(IndexedAssets::of(index)))
+    }
+
+    fn over(surface: BrowseSurface, assets: Arc<IndexedAssets>) -> Self {
+        Self { surface, assets }
+    }
+
+    /// Whether a contained, Vault-relative asset path is on this surface.
+    /// `Everything` admits every contained asset; `DefaultOnly` admits only
+    /// catalogued assets (so nothing excluded or noise) outside a demoted
+    /// layer, the same decision the asset route makes.
+    pub fn admits(&self, relative_path: &str) -> bool {
+        self.surface == BrowseSurface::Everything
+            || (self.assets.asset_paths.contains(relative_path)
+                && !self
+                    .surface
+                    .hides(self.assets.layers.layer_for(relative_path)))
+    }
+}
+
+/// An exact Note, the Markdown directory it was read from, and its Vault's
+/// asset surface, all from one control-block fetch and one index.
+pub struct NoteDownload {
+    pub note: VaultQualifiedNote,
+    pub vault_root: std::path::PathBuf,
+    pub assets: AssetSurface,
 }
 
 /// One Vault's resolution of a wikilink target: the Note it names, or nothing.
@@ -645,12 +765,12 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultQualifiedNote>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         index
             .read_note_by_slug(slug)
             .map(|note| {
                 note.filter(|note| !self.surface.hides(note.layer.as_deref()))
-                    .map(|note| VaultQualifiedNote { vault_id, note })
+                    .map(|note| VaultQualifiedNote::new(vault_id, note))
             })
             .map_err(|error| {
                 unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
@@ -662,7 +782,10 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultQualifiedLinks>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self
+            .control_block(vault_id)?
+            .linked_index()
+            .map_err(|error| runtime_error(vault_id, error))?;
         if self.hidden_slug(&index, slug) {
             return Ok(None);
         }
@@ -684,7 +807,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         raw_target: &str,
     ) -> Result<Option<ResolvedVaultNote>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         Ok(index
             .resolve_wikilink(raw_target)
             .filter(|note| !self.surface.hides(note.layer.as_deref()))
@@ -695,20 +818,20 @@ impl<'a> VaultReadCore<'a> {
             }))
     }
 
-    /// Resolve every target against one authoritative index build, for
-    /// batch-resolve adapters. `resolve_wikilink` builds a fresh index per
-    /// call, which is correct for one target but would otherwise cost a full
-    /// Vault scan per batch entry.
+    /// Resolve every target against one catalog build, for batch-resolve
+    /// adapters. `resolve_wikilink` builds a fresh catalog per call, which is
+    /// correct for one target but would otherwise walk the Vault once per
+    /// batch entry.
     pub fn resolve_wikilinks(
         &self,
         vault_id: VaultId,
         raw_targets: &[String],
     ) -> Result<Vec<Option<ResolvedVaultNote>>, VaultReadError> {
-        Ok(self.resolve_batch(vault_id, raw_targets, &[], "")?.0)
+        Ok(self.resolve_batch(vault_id, raw_targets, &[], &[], "")?.0)
     }
 
     /// Resolve a note's wikilink targets — notes and assets alike — against one
-    /// authoritative-index build.
+    /// catalog build.
     ///
     /// Assets resolve separately from notes because they are addressed
     /// differently: a note has a slug, an asset only ever has a path, and an
@@ -716,25 +839,40 @@ impl<'a> VaultReadCore<'a> {
     /// the Vault-relative directory of the note the targets were written in,
     /// which decides both the relative reading and which of several namesakes
     /// is nearest; `""` is the Vault root.
+    ///
+    /// `note_link_targets` are Markdown note-link destinations as written
+    /// (ADR-28). They name a note by path, so they resolve from `note_dir` by
+    /// the same ladder as assets, never by the wikilink title rule.
     pub fn resolve_batch(
         &self,
         vault_id: VaultId,
         note_targets: &[String],
         asset_targets: &[String],
+        note_link_targets: &[String],
         note_dir: &str,
     ) -> Result<ResolvedVaultTargets, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
+        let visible = |note: &crate::vault::NoteEntry| ResolvedVaultNote {
+            vault_id,
+            slug: note.slug.clone(),
+            relative_path: note.relative_path.clone(),
+        };
         let notes = note_targets
             .iter()
             .map(|raw_target| {
                 index
                     .resolve_wikilink(raw_target)
                     .filter(|note| !self.surface.hides(note.layer.as_deref()))
-                    .map(|note| ResolvedVaultNote {
-                        vault_id,
-                        slug: note.slug.clone(),
-                        relative_path: note.relative_path.clone(),
-                    })
+                    .map(visible)
+            })
+            .collect();
+        let note_links = note_link_targets
+            .iter()
+            .map(|raw_target| {
+                index
+                    .resolve_note_link(raw_target, note_dir)
+                    .filter(|note| !self.surface.hides(note.layer.as_deref()))
+                    .map(visible)
             })
             .collect();
         // Assets carry no layer, so the browse surface has nothing to hide
@@ -748,7 +886,7 @@ impl<'a> VaultReadCore<'a> {
                     .map(str::to_string)
             })
             .collect();
-        Ok((notes, assets))
+        Ok((notes, assets, note_links))
     }
 
     /// Whether this surface withholds `slug` entirely, so a caller answers the
@@ -777,13 +915,14 @@ impl<'a> VaultReadCore<'a> {
         scope: VaultScope,
         tree_scope: TreeScope,
     ) -> Result<VaultReadProjection<Vec<VaultTree>>, VaultReadError> {
-        let projection = self.try_collection(scope, |vault_id, vault_name, snapshot| {
-            Ok(VaultTree {
-                vault_id,
-                vault_name: vault_name.to_string(),
-                tree: tree_for(vault_id, snapshot, &tree_scope)?,
-            })
-        })?;
+        let projection =
+            self.try_collection(scope, NoteBodies::Omit, |vault_id, vault_name, snapshot| {
+                Ok(VaultTree {
+                    vault_id,
+                    vault_name: vault_name.to_string(),
+                    tree: tree_for(vault_id, snapshot, &tree_scope)?,
+                })
+            })?;
 
         // When no Vault has the folder, the caller asked for one thing and
         // would otherwise be handed an empty collection — the very blur the
@@ -911,6 +1050,100 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
+    /// Every saved query in one Note, each evaluated against that Note's own
+    /// Vault at this moment (#275, ADR-21).
+    ///
+    /// The definitions come from the Note's authoritative Markdown, like any
+    /// exact read, so an edit to one is honoured on the next read; the rows
+    /// come from the Vault's published snapshot, and the envelope reports
+    /// whether that snapshot is current. Nothing computed here is written
+    /// anywhere or reaches the index: a result is derived state, recomputed on
+    /// every call, and a filter comparing against the current time is why it
+    /// cannot be stored.
+    ///
+    /// The Vault is fixed by the Note. There is no scope argument, so neither
+    /// the definition nor the caller can widen what a saved query sees.
+    /// `Ok(None)` is a Note this surface does not have, indistinguishable from
+    /// an absent one as every other exact read is.
+    pub fn saved_queries(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<VaultReadProjection<saved_query::SavedQueriesResponse>>, VaultReadError>
+    {
+        let Some(note) = self.exact_note(vault_id, slug)? else {
+            return Ok(None);
+        };
+        let blocks = saved_query::saved_query_blocks(&note.note.content);
+        let clock = saved_query::EvaluationClock::current();
+        let projection = self.one_vault(vault_id, |vault_id, snapshot| {
+            saved_query::evaluate_saved_queries(
+                blocks.clone(),
+                vault_id,
+                &snapshot.notes,
+                &clock,
+                saved_query::SavedQueryCeiling::ENFORCED,
+            )
+        })?;
+        Ok(Some(projection.map(|evaluated| {
+            saved_query::SavedQueriesResponse {
+                vault_id,
+                slug: note.note.slug,
+                queries: evaluated.queries,
+                marker_problems: evaluated.marker_problems,
+            }
+        })))
+    }
+
+    /// One saved query in one Note, addressed by name and evaluated against
+    /// that Note's own Vault at this moment (#277, ADR-21).
+    ///
+    /// `name` may be `None` only when the Note holds exactly one saved query.
+    /// Every way a request can fail to reach an answer is an error with its
+    /// own code, never an empty row set: a Note with no saved query, a missing
+    /// name among several, a name matching none or more than one, a definition
+    /// Hatchdoor refuses, and one stopped at the ceiling. Only the addressed
+    /// saved query is evaluated, and like [`Self::saved_queries`] there is no
+    /// scope argument, so the Vault is always the Note's own. `Ok(None)` is a
+    /// Note this surface does not have.
+    pub fn saved_query(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+        name: Option<&str>,
+    ) -> Result<Option<VaultReadProjection<SavedQueryEvaluation>>, VaultReadError> {
+        let Some(note) = self.exact_note(vault_id, slug)? else {
+            return Ok(None);
+        };
+        let selected = saved_query::select_saved_query(
+            saved_query::saved_query_blocks(&note.note.content),
+            name,
+        )
+        .map_err(|refusal| saved_query_error(vault_id, refusal.code(), refusal.message()))?;
+        let clock = saved_query::EvaluationClock::current();
+        let projection = self.one_vault(vault_id, |vault_id, snapshot| {
+            selected.evaluate(
+                vault_id,
+                &snapshot.notes,
+                &clock,
+                saved_query::SavedQueryCeiling::ENFORCED,
+            )
+        })?;
+        projection
+            .try_map(|outcome| {
+                let rows = outcome.into_rows().map_err(|reason| {
+                    saved_query_error(vault_id, reason.code(), reason.message())
+                })?;
+                Ok(SavedQueryEvaluation {
+                    vault_id,
+                    slug: note.note.slug,
+                    name: selected.name,
+                    rows,
+                })
+            })
+            .map(Some)
+    }
+
     /// The rich per-Vault statistics report, scoped to exactly one Vault —
     /// never `all`. This is an exact read, like `exact_note`, not a `{scope}`
     /// collection projection: it returns the report directly rather than a
@@ -924,9 +1157,19 @@ impl<'a> VaultReadCore<'a> {
         &self,
         vault_id: VaultId,
     ) -> Result<VaultQualifiedStats, VaultReadError> {
-        let projection = self.collection(
+        // Read before the snapshot so a history walk this read starts runs
+        // while the snapshot loads. A Vault the gate below refuses gets no
+        // history read at all.
+        let dating = self.note_dating(vault_id);
+        // The one report that counts words rather than rows, so the one read
+        // that asks for Markdown text. Every other collection read projects
+        // structure alone and never pays for it.
+        let projection = self.collection_with(
             VaultScope::One(vault_id),
-            |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot),
+            NoteBodies::Load,
+            |_vault_id, _vault_name, snapshot| {
+                detailed_stats_for(snapshot, &dating, chrono::Utc::now())
+            },
         )?;
         let stats = projection
             .data
@@ -936,8 +1179,31 @@ impl<'a> VaultReadCore<'a> {
         Ok(VaultQualifiedStats { vault_id, stats })
     }
 
+    /// Where this Vault's notes get a created date when they state none
+    /// (#300, ADR-29): its Git history for a Git-backed Vault, the files alone
+    /// for a plain folder. A Vault the read gate would refuse answers `Files`
+    /// and is refused by that gate instead.
+    fn note_dating(&self, vault_id: VaultId) -> NoteDating {
+        use crate::vault_runtime::HistoryLocation;
+
+        let Ok(control) = self.control_block(vault_id) else {
+            return NoteDating::Files;
+        };
+        match control.history_location() {
+            HistoryLocation::None => NoteDating::Files,
+            HistoryLocation::Unresolvable => NoteDating::Git {
+                history: crate::git::HistoryRead::Unavailable,
+                prefix: None,
+            },
+            HistoryLocation::Repository { root, prefix } => NoteDating::Git {
+                history: control.note_history().read(&root, HISTORY_WAIT),
+                prefix,
+            },
+        }
+    }
+
     /// The requested Vault's resolved local Markdown directory, gated by the
-    /// same not-found/disabled/unavailable checks as `authoritative_index`,
+    /// same not-found/disabled/unavailable checks as `catalog`,
     /// without paying the cost of parsing every note. For adapters (contained
     /// asset/attachment/download serving) that only need the directory.
     ///
@@ -991,7 +1257,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultNoteFrontmatter>, VaultReadError> {
-        let index = self.authoritative_index(vault_id)?;
+        let index = self.catalog(vault_id)?;
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
@@ -1026,7 +1292,7 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<Vec<crate::vault::AttachmentInfo>>, VaultReadError> {
-        let (control, index) = self.control_and_index(vault_id)?;
+        let (control, index) = self.control_and_catalog(vault_id)?;
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
@@ -1085,11 +1351,17 @@ impl<'a> VaultReadCore<'a> {
 
     /// Whether a contained asset path belongs to this core's selected browse
     /// surface. An ordinary instance retains the legacy contained-asset
-    /// behavior. A demo accepts only an asset present in the authoritative
-    /// index's asset catalog, which has already applied the complete
-    /// exclusion/noise policy, and then applies the layer map to that path.
-    /// Assets do not carry a layer of their own, so this is the same
-    /// path-to-surface decision the index uses for Notes.
+    /// behavior. A demo accepts only an asset present in the Vault's asset
+    /// catalog, which has already applied the complete exclusion/noise
+    /// policy, and then applies the layer map to that path. Assets do not
+    /// carry a layer of their own, so this is the same path-to-surface
+    /// decision the index uses for Notes.
+    ///
+    /// The catalog is the one the Vault's latest Index turn scanned, so a
+    /// page of embeds does not walk the Vault once per image (#377); a file
+    /// added, removed or moved under a layer marker changes the answer when
+    /// the turn that follows it lands. Before the Vault's first turn has
+    /// scanned it, a one-off catalog build answers instead.
     pub fn asset_on_surface(
         &self,
         vault_id: VaultId,
@@ -1098,9 +1370,17 @@ impl<'a> VaultReadCore<'a> {
         if self.surface == BrowseSurface::Everything {
             return Ok(true);
         }
-        let index = self.authoritative_index(vault_id)?;
-        Ok(index.asset_paths.contains(relative_path)
-            && !self.surface.hides(index.layers.layer_for(relative_path)))
+        let control = self.control_block(vault_id)?;
+        let surface = match control.indexed_assets() {
+            Some(assets) => {
+                control
+                    .ensure_accepting_operations()
+                    .map_err(|error| runtime_error(vault_id, error))?;
+                AssetSurface::over(self.surface, assets)
+            }
+            None => AssetSurface::capture(self.surface, &self.catalog(vault_id)?),
+        };
+        Ok(surface.admits(relative_path))
     }
 
     /// The exact Note together with the local Markdown directory it was read
@@ -1110,32 +1390,33 @@ impl<'a> VaultReadCore<'a> {
     /// edit reconciles a *replacement* control block rather than mutating the
     /// current one in place, so two independent lookups could observe the
     /// note from one Vault path and resolve assets against another.
+    ///
+    /// The asset catalogue comes from the same index, so an export checks
+    /// each embedded asset against the browse surface without rebuilding the
+    /// index per asset (#342).
     pub fn exact_note_for_download(
         &self,
         vault_id: VaultId,
         slug: &str,
-    ) -> Result<Option<(VaultQualifiedNote, std::path::PathBuf)>, VaultReadError> {
-        let (control, index) = self.control_and_index(vault_id)?;
-        index
+    ) -> Result<Option<NoteDownload>, VaultReadError> {
+        let (control, index) = self.control_and_catalog(vault_id)?;
+        let note = index
             .read_note_by_slug(slug)
-            .map(|note| {
-                note.filter(|note| !self.surface.hides(note.layer.as_deref()))
-                    .map(|note| {
-                        (
-                            VaultQualifiedNote { vault_id, note },
-                            control.vault_path().to_path_buf(),
-                        )
-                    })
-            })
             .map_err(|error| {
                 unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
-            })
+            })?
+            .filter(|note| !self.surface.hides(note.layer.as_deref()));
+        Ok(note.map(|note| NoteDownload {
+            note: VaultQualifiedNote::new(vault_id, note),
+            vault_root: control.vault_path().to_path_buf(),
+            assets: AssetSurface::capture(self.surface, &index),
+        }))
     }
 
     /// The gated Vault control block: not-found, disabled, and no-runtime all
     /// resolve here, and callers that go on to build an index or read the
     /// filesystem must also apply an accepting-operations/existence check of
-    /// their own kind, since only `control_and_index` bundles the exact-read
+    /// their own kind, since only `control_and_catalog` bundles the exact-read
     /// gate and `vault_directory` bundles the directory-existence gate.
     ///
     /// Widened to `pub(crate)` for `handlers/vault_write.rs` (#101), the first
@@ -1173,11 +1454,16 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
-    /// The gated control block together with its freshly built authoritative
-    /// index, shared by every exact-read method that needs a parsed index
-    /// (`authoritative_index` discards the control block;
-    /// `exact_note_for_download` keeps it for `vault_path()`).
-    fn control_and_index(
+    /// The gated control block together with a freshly built catalog of its
+    /// Vault, shared by every exact-read method that needs one (`catalog`
+    /// discards the control block; `exact_note_for_download` keeps it for
+    /// `vault_path()`).
+    ///
+    /// A catalog walks the Vault's paths and reads no note's content, so a
+    /// read of one Note costs a directory walk and that Note's own file, never
+    /// a pass over every other Note (#361). Only `exact_note_links` needs the
+    /// link graph, and it asks the runtime for that by itself.
+    fn control_and_catalog(
         &self,
         vault_id: VaultId,
     ) -> Result<
@@ -1189,16 +1475,13 @@ impl<'a> VaultReadCore<'a> {
     > {
         let control = self.control_block(vault_id)?;
         let index = control
-            .authoritative_index()
+            .authoritative_catalog()
             .map_err(|error| runtime_error(vault_id, error))?;
         Ok((control, index))
     }
 
-    fn authoritative_index(
-        &self,
-        vault_id: VaultId,
-    ) -> Result<crate::vault::VaultIndex, VaultReadError> {
-        self.control_and_index(vault_id).map(|(_, index)| index)
+    fn catalog(&self, vault_id: VaultId) -> Result<crate::vault::VaultIndex, VaultReadError> {
+        self.control_and_catalog(vault_id).map(|(_, index)| index)
     }
 
     /// The shared one-or-all read: select the Vaults, project each one that has
@@ -1210,12 +1493,43 @@ impl<'a> VaultReadCore<'a> {
     /// [`Self::try_collection`], and keeping that the narrower door is what
     /// stops one projection's refusal from becoming every projection's
     /// concern.
+    /// [`Self::collection`] over exactly one Vault, whose one datum becomes
+    /// the envelope's `data`. For the exact reads that still report their
+    /// Vault's freshness, such as a Note's saved queries.
+    fn one_vault<T>(
+        &self,
+        vault_id: VaultId,
+        map: impl Fn(VaultId, &VaultSnapshotRead) -> T,
+    ) -> Result<VaultReadProjection<T>, VaultReadError> {
+        let projection = self.collection(VaultScope::One(vault_id), |vault_id, _, snapshot| {
+            map(vault_id, snapshot)
+        })?;
+        Ok(projection.map(|data| {
+            data.into_iter()
+                .next()
+                .expect("VaultScope::One yields exactly one participant on success")
+        }))
+    }
+
     fn collection<T>(
         &self,
         scope: VaultScope,
         map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> T,
     ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
-        self.try_collection(scope, |vault_id, vault_name, snapshot| {
+        self.collection_with(scope, NoteBodies::Omit, map)
+    }
+
+    /// [`Self::collection`] for a projection that reads Markdown text rather
+    /// than structure. Only the detailed stats report does, and it takes the
+    /// bodies from the same snapshot read as the note list so both describe
+    /// one published generation.
+    fn collection_with<T>(
+        &self,
+        scope: VaultScope,
+        bodies: NoteBodies,
+        map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> T,
+    ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
+        self.try_collection(scope, bodies, |vault_id, vault_name, snapshot| {
             Ok(map(vault_id, vault_name, snapshot))
         })
     }
@@ -1232,6 +1546,7 @@ impl<'a> VaultReadCore<'a> {
     fn try_collection<T>(
         &self,
         scope: VaultScope,
+        bodies: NoteBodies,
         map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> Result<T, VaultReadError>,
     ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
         let snapshot = self.vaults.snapshot();
@@ -1239,7 +1554,7 @@ impl<'a> VaultReadCore<'a> {
         let mut data = Vec::new();
         let mut participants = Vec::with_capacity(selected.len());
         for selected in selected {
-            let published = self.cache.read_vault_snapshot(selected.vault_id);
+            let published = self.cache.read_vault_snapshot(selected.vault_id, bodies);
             let participant = match published {
                 Ok(Some(published)) => {
                     let state = match published.status.freshness {
@@ -1354,6 +1669,17 @@ fn unavailable_participant(
         vault_name,
         state: VaultParticipantState::Unavailable,
         error: Some(unavailable(vault_id, "vault_unavailable", message, true)),
+    }
+}
+
+/// A request for one saved query that reached no answer. Retrying the same
+/// request against the same Note gives the same refusal.
+fn saved_query_error(vault_id: VaultId, code: &str, message: String) -> VaultReadError {
+    VaultReadError {
+        code: code.to_string(),
+        message,
+        vault_id: Some(vault_id),
+        retryable: false,
     }
 }
 
@@ -1598,10 +1924,17 @@ impl FolderBuilder {
 /// lean projection: every note in the published snapshot counts, consistent
 /// with what that already-shipped collection endpoint reports for the same
 /// Vault.
-fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultStatsResponse {
+/// Counts words and images in `snapshot.note_bodies`, which the same read that
+/// produced `snapshot.notes` supplied, so both describe one published
+/// generation. A withheld note has neither a row nor a body here, because
+/// `restrict` drops both together.
+fn detailed_stats_for(
+    snapshot: &VaultSnapshotRead,
+    dating: &NoteDating,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::api_types::VaultStatsResponse {
     use crate::api_types::{
-        FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
-        VaultStatsResponse,
+        FolderStat, LinkedNoteRef, NoteList, NoteRef, NoteWordRef, TagStat, VaultStatsResponse,
     };
 
     let note_count = snapshot.notes.len() as i64;
@@ -1611,9 +1944,14 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     let mut total_image_count = 0usize;
     let mut word_counts: Vec<(&str, &str, usize)> = Vec::with_capacity(snapshot.notes.len());
     for note in &snapshot.notes {
-        let word_count = word_count_for_content(&note.content);
+        let content = snapshot
+            .note_bodies
+            .get(&note.slug)
+            .map(String::as_str)
+            .unwrap_or("");
+        let word_count = word_count_for_content(content);
         total_word_count += word_count;
-        total_image_count += note.content.matches("![").count();
+        total_image_count += content.matches("![").count();
         word_counts.push((note.slug.as_str(), note.title.as_str(), word_count));
     }
     let avg_word_count = if note_count > 0 {
@@ -1693,19 +2031,23 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
     });
     most_linked.truncate(20);
 
-    let mut activity: BTreeMap<String, i64> = BTreeMap::new();
-    for note in &snapshot.notes {
-        *activity.entry(month_key(note.mtime_ns)).or_insert(0) += 1;
-    }
-    let mut activity_by_month: Vec<MonthActivity> = activity
-        .into_iter()
-        .map(|(month, modified_count)| MonthActivity {
-            month,
-            modified_count,
+    let mut created_date_status = crate::api_types::CreatedDateStatus::Complete;
+    let created_dates: Vec<i64> = snapshot
+        .notes
+        .iter()
+        .map(|note| {
+            let (created, shortfall) = created_date(note, dating);
+            if let Some(shortfall) = shortfall {
+                // A walk still running outranks a gap it cannot fill: the
+                // first is worth asking again about, the second is not.
+                if created_date_status != crate::api_types::CreatedDateStatus::Reading {
+                    created_date_status = shortfall;
+                }
+            }
+            created
         })
         .collect();
-    activity_by_month.sort_by(|a, b| b.month.cmp(&a.month));
-    activity_by_month.truncate(6);
+    let activity_by_month = activity_window(created_dates.into_iter(), now);
 
     let mut folder_counts: BTreeMap<String, i64> = BTreeMap::new();
     for note in &snapshot.notes {
@@ -1815,6 +2157,7 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
         top_tags,
         most_linked,
         activity_by_month,
+        created_date_status,
         notes_per_folder,
         longest_notes,
         shortest_notes,
@@ -1829,6 +2172,155 @@ fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultSt
             notes: month_notes,
         },
     }
+}
+
+/// How many calendar months the "Notes created" window spans, counting the
+/// month it ends in. The Stats page names this number in its heading.
+const ACTIVITY_WINDOW_MONTHS: i32 = 6;
+
+/// The `ACTIVITY_WINDOW_MONTHS` UTC calendar months ending at the month `now`
+/// falls in, oldest first, each carrying how many of `created_ns` land in it.
+///
+/// The window is generated from the calendar rather than harvested from the
+/// data, which is what makes the chart a timeline: a month nobody wrote in
+/// keeps its column with a count of zero instead of disappearing, and a Note
+/// older than the window is counted nowhere rather than folding into the
+/// oldest column. The result is always exactly `ACTIVITY_WINDOW_MONTHS`
+/// entries long, including for a Vault with no Notes at all, so a reader can
+/// divide by the window rather than by however many bars arrived.
+///
+/// Months are stepped through as `year * 12 + month`, which cannot fail the
+/// way subtracting months from a date near the proleptic year zero can, and
+/// the `YYYY-MM` keys sort chronologically, so collecting them into a
+/// `BTreeMap` puts the window in time order for free.
+fn activity_window(
+    created_ns: impl Iterator<Item = i64>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<crate::api_types::MonthActivity> {
+    use chrono::Datelike;
+
+    let last = now.year() * 12 + now.month0() as i32;
+    let mut counts: BTreeMap<String, i64> = (0..ACTIVITY_WINDOW_MONTHS)
+        .map(|months_back| {
+            let month = last - months_back;
+            let key = format!(
+                "{:04}-{:02}",
+                month.div_euclid(12),
+                month.rem_euclid(12) + 1
+            );
+            (key, 0)
+        })
+        .collect();
+    for created in created_ns {
+        if let Some(count) = counts.get_mut(&month_key(created)) {
+            *count += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(month, created_count)| crate::api_types::MonthActivity {
+            month,
+            created_count,
+        })
+        .collect()
+}
+
+/// How long a stats read waits for a Vault's history walk before answering
+/// with modification times and [`CreatedDateStatus::Reading`]. Long enough
+/// that an ordinary Vault's first read after a restart is exact, short enough
+/// that a very long history does not hold the page.
+///
+/// [`CreatedDateStatus::Reading`]: crate::api_types::CreatedDateStatus::Reading
+const HISTORY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Where one Vault's notes get a created date when they do not state one.
+enum NoteDating {
+    /// A plain folder: modification time is all there is.
+    Files,
+    /// A Git-backed Vault. `prefix` is the Vault's subdirectory inside the
+    /// repository, `/`-separated, which turns a note's Vault path into the
+    /// repository path its history is kept under.
+    Git {
+        history: crate::git::HistoryRead,
+        prefix: Option<String>,
+    },
+}
+
+/// A note's created date in nanoseconds since the Unix epoch (#300, ADR-29),
+/// and why it is only an estimate when it is one.
+///
+/// A `created` property that reads as a date wins, then the commit that first
+/// added the note, then its modification time. The shortfall is reported only
+/// when history should have dated the note and could not; a plain folder
+/// falling back to modification time, or a note nobody has committed yet, is
+/// the normal answer rather than a gap.
+fn created_date(
+    note: &crate::cache::vault_snapshots::VaultSnapshotNote,
+    dating: &NoteDating,
+) -> (i64, Option<crate::api_types::CreatedDateStatus>) {
+    use crate::api_types::CreatedDateStatus;
+    use crate::git::{FirstAdd, HistoryRead};
+
+    if let Some(stated) = note
+        .metadata
+        .properties
+        .get("created")
+        .and_then(serde_json::Value::as_str)
+        .and_then(stated_date)
+    {
+        return (stated, None);
+    }
+    let NoteDating::Git { history, prefix } = dating else {
+        return (note.mtime_ns, None);
+    };
+    match history {
+        HistoryRead::Ready(first_adds) => {
+            // A snapshot note's path is Vault-relative and drops the `.md`
+            // its file, and so its history, carries.
+            let path = match prefix {
+                Some(prefix) => format!("{prefix}/{}.md", note.relative_path),
+                None => format!("{}.md", note.relative_path),
+            };
+            match first_adds.lookup(&path) {
+                FirstAdd::Known(created) => (created, None),
+                FirstAdd::Uncommitted => (note.mtime_ns, None),
+                FirstAdd::Unknown => (note.mtime_ns, Some(CreatedDateStatus::Estimated)),
+            }
+        }
+        HistoryRead::Reading => (note.mtime_ns, Some(CreatedDateStatus::Reading)),
+        HistoryRead::Unavailable => (note.mtime_ns, Some(CreatedDateStatus::Estimated)),
+    }
+}
+
+/// A `created` property's date as nanoseconds since the Unix epoch, or `None`
+/// for text that is not a date.
+///
+/// The calendar day is kept as written, whatever zone the value names:
+/// `2026-03-01T00:30:00+01:00` is a note started on the first of March, which
+/// is what its author meant, even though it is still February in UTC.
+fn stated_date(text: &str) -> Option<i64> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
+
+    let text = text.trim();
+    let written = NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .or_else(|| {
+            [
+                "%Y-%m-%dT%H:%M:%S%.f",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S%.f",
+                "%Y-%m-%d %H:%M",
+            ]
+            .into_iter()
+            .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
+        })
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(text)
+                .ok()
+                .map(|instant| instant.naive_local())
+        })?;
+    written.and_utc().timestamp_nanos_opt()
 }
 
 /// The zero-padded `YYYY-MM` UTC month a nanosecond Unix timestamp falls in,
@@ -1938,6 +2430,60 @@ mod parsing_tests {
         }
     }
 
+    /// #109: a withheld Note's Markdown text must go the way its row does. The
+    /// detailed stats report is the one projection that reads bodies, and it
+    /// looks them up by slug, so a body left behind here would be text from a
+    /// demoted Note sitting in a snapshot the restricted surface produced.
+    #[test]
+    fn a_restricted_surface_withholds_a_demoted_notes_body_with_its_row() {
+        let read = VaultSnapshotRead {
+            notes: vec![
+                snapshot_note("wiki", None),
+                snapshot_note("clip", Some("sources")),
+            ],
+            links: Vec::new(),
+            tags_by_note: BTreeMap::new(),
+            note_bodies: [
+                ("wiki".to_string(), "public text".to_string()),
+                ("clip".to_string(), "demoted text".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            layer_catalog: Vec::new(),
+        };
+
+        let restricted = BrowseSurface::DefaultOnly.restrict(read);
+
+        assert_eq!(
+            restricted
+                .notes
+                .iter()
+                .map(|note| &note.slug)
+                .collect::<Vec<_>>(),
+            vec!["wiki"]
+        );
+        assert_eq!(
+            restricted.note_bodies.keys().collect::<Vec<_>>(),
+            vec!["wiki"],
+            "a demoted Note's text must not survive the row it belongs to"
+        );
+    }
+
+    fn snapshot_note(
+        slug: &str,
+        layer: Option<&str>,
+    ) -> crate::cache::vault_snapshots::VaultSnapshotNote {
+        crate::cache::vault_snapshots::VaultSnapshotNote {
+            title: slug.to_string(),
+            slug: slug.to_string(),
+            relative_path: slug.to_string(),
+            size_bytes: 0,
+            mtime_ns: 0,
+            layer: layer.map(str::to_string),
+            metadata: crate::vault::NoteMetadata::default(),
+        }
+    }
+
     /// A code neither surface knows must not leak as a novel one, and the
     /// core's internal spelling for a missing runtime must not either.
     #[test]
@@ -1959,6 +2505,274 @@ mod parsing_tests {
         let error = unavailable(vault_id, "vault_disabled", "off".to_string(), false);
         assert_eq!(error.into_operation_error().code, "vault_disabled");
     }
+
+    /// Noon UTC on a date, as the `DateTime` the activity window reads its
+    /// calendar from.
+    fn utc(year: i32, month: u32, day: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .and_then(|date| date.and_hms_opt(12, 0, 0))
+            .expect("valid test date")
+            .and_utc()
+    }
+
+    /// Noon UTC on a date, as a Note's nanosecond modification time.
+    fn mtime(year: i32, month: u32, day: u32) -> i64 {
+        utc(year, month, day)
+            .timestamp_nanos_opt()
+            .expect("test date inside the nanosecond range")
+    }
+
+    fn months(window: &[crate::api_types::MonthActivity]) -> Vec<(&str, i64)> {
+        window
+            .iter()
+            .map(|entry| (entry.month.as_str(), entry.created_count))
+            .collect()
+    }
+
+    /// The window is generated from the calendar, not harvested from the data
+    /// (#298). A month nobody wrote in keeps its column with a zero, and a Note
+    /// older than the window is counted nowhere rather than folding into the
+    /// oldest bar.
+    #[test]
+    fn activity_window_spans_six_calendar_months_oldest_first_with_zero_gaps() {
+        let mtimes = [
+            mtime(2026, 9, 18),
+            mtime(2026, 9, 1),
+            mtime(2026, 7, 30),
+            mtime(2026, 4, 1),
+            // Eighteen months before the window, which used to earn a bar of
+            // its own under a "last 6 months" heading.
+            mtime(2025, 2, 14),
+            mtime(2025, 2, 15),
+            // The day before the window opens.
+            mtime(2026, 3, 31),
+        ];
+
+        let window = activity_window(mtimes.into_iter(), utc(2026, 9, 18));
+
+        assert_eq!(
+            months(&window),
+            vec![
+                ("2026-04", 1),
+                ("2026-05", 0),
+                ("2026-06", 0),
+                ("2026-07", 1),
+                ("2026-08", 0),
+                ("2026-09", 2),
+            ]
+        );
+    }
+
+    /// The six keys walk backwards through the calendar, so the window's first
+    /// month is five months before its last across a year boundary too, and a
+    /// Vault untouched since before it renders six honest zeroes rather than
+    /// six old months wearing the heading.
+    #[test]
+    fn activity_window_crosses_a_year_boundary_and_zero_fills_an_untouched_vault() {
+        let mtimes = [mtime(2024, 11, 2), mtime(2025, 7, 31)];
+
+        let window = activity_window(mtimes.into_iter(), utc(2026, 1, 5));
+
+        assert_eq!(
+            months(&window),
+            vec![
+                ("2025-08", 0),
+                ("2025-09", 0),
+                ("2025-10", 0),
+                ("2025-11", 0),
+                ("2025-12", 0),
+                ("2026-01", 0),
+            ]
+        );
+    }
+
+    /// A snapshot note at `relative_path`, which like every snapshot path
+    /// leaves off the `.md`.
+    fn dated_note(
+        relative_path: &str,
+        mtime_ns: i64,
+        created: Option<&str>,
+    ) -> crate::cache::vault_snapshots::VaultSnapshotNote {
+        let mut note = snapshot_note(relative_path, None);
+        note.relative_path = relative_path.to_string();
+        note.mtime_ns = mtime_ns;
+        if let Some(created) = created {
+            note.metadata.properties = serde_json::json!({ "created": created });
+        }
+        note
+    }
+
+    fn git_dating(history: crate::git::HistoryRead, prefix: Option<&str>) -> NoteDating {
+        NoteDating::Git {
+            history,
+            prefix: prefix.map(str::to_string),
+        }
+    }
+
+    fn ready(dates: &[(&str, Option<i64>)]) -> crate::git::HistoryRead {
+        crate::git::HistoryRead::Ready(Arc::new(crate::git::FirstAdds::from_dates(
+            dates.iter().copied(),
+        )))
+    }
+
+    /// A `created` property the author wrote beats the history and the file,
+    /// in a plain folder and a Git-backed Vault alike (ADR-29).
+    #[test]
+    fn a_stated_created_date_wins_over_history_and_the_file() {
+        let note = dated_note("Idea", mtime(2026, 9, 18), Some("2024-05-03"));
+        let expected = mtime(2024, 5, 3) - 12 * 3_600 * 1_000_000_000;
+
+        assert_eq!(created_date(&note, &NoteDating::Files), (expected, None));
+        let git = git_dating(ready(&[("Idea.md", Some(mtime(2026, 2, 1)))]), None);
+        assert_eq!(created_date(&note, &git), (expected, None));
+    }
+
+    /// Text that is not a date is passed over rather than failing the note.
+    #[test]
+    fn an_unreadable_created_date_falls_through_to_the_next_source() {
+        let note = dated_note("Idea", mtime(2026, 9, 18), Some("not-a-date"));
+
+        assert_eq!(
+            created_date(&note, &NoteDating::Files),
+            (mtime(2026, 9, 18), None)
+        );
+        let git = git_dating(ready(&[("Idea.md", Some(mtime(2026, 2, 1)))]), None);
+        assert_eq!(created_date(&note, &git), (mtime(2026, 2, 1), None));
+    }
+
+    /// A Vault that is one folder of a bigger repository looks its notes up
+    /// under that folder.
+    #[test]
+    fn a_git_vault_dates_notes_from_history_under_its_subdirectory() {
+        let note = dated_note("ideas/Idea", mtime(2026, 9, 18), None);
+        let git = git_dating(
+            ready(&[("notes/ideas/Idea.md", Some(mtime(2026, 4, 2)))]),
+            Some("notes"),
+        );
+
+        assert_eq!(created_date(&note, &git), (mtime(2026, 4, 2), None));
+    }
+
+    /// Falling back to the file is only a shortfall when history should have
+    /// had the answer: never for a plain folder or a note not committed yet.
+    #[test]
+    fn only_missing_history_marks_a_fallback_as_an_estimate() {
+        use crate::api_types::CreatedDateStatus;
+        let note = dated_note("Idea", mtime(2026, 9, 18), None);
+        let file = mtime(2026, 9, 18);
+
+        assert_eq!(created_date(&note, &NoteDating::Files), (file, None));
+        assert_eq!(
+            created_date(&note, &git_dating(ready(&[]), None)),
+            (file, None),
+            "an uncommitted note is simply new"
+        );
+        assert_eq!(
+            created_date(&note, &git_dating(ready(&[("Idea.md", None)]), None)),
+            (file, Some(CreatedDateStatus::Estimated)),
+            "a note from a shallow clone's graft point"
+        );
+        assert_eq!(
+            created_date(
+                &note,
+                &git_dating(crate::git::HistoryRead::Unavailable, None)
+            ),
+            (file, Some(CreatedDateStatus::Estimated))
+        );
+        assert_eq!(
+            created_date(&note, &git_dating(crate::git::HistoryRead::Reading, None)),
+            (file, Some(CreatedDateStatus::Reading))
+        );
+    }
+
+    /// The report charts created dates, and says when some were estimated. A
+    /// walk still running outranks a gap, because asking again helps.
+    #[test]
+    fn the_report_charts_created_dates_and_reports_the_weakest_source() {
+        use crate::api_types::CreatedDateStatus;
+        let read =
+            |notes: Vec<crate::cache::vault_snapshots::VaultSnapshotNote>| VaultSnapshotRead {
+                notes,
+                links: Vec::new(),
+                tags_by_note: BTreeMap::new(),
+                note_bodies: BTreeMap::new(),
+                layer_catalog: Vec::new(),
+            };
+        let now = utc(2026, 9, 18);
+        // Every file was touched in September, the way a fresh clone leaves it.
+        let snapshot = read(vec![
+            dated_note("a", mtime(2026, 9, 10), None),
+            dated_note("b", mtime(2026, 9, 10), None),
+            dated_note("c", mtime(2026, 9, 10), Some("2026-06-15")),
+        ]);
+        let history = ready(&[
+            ("a.md", Some(mtime(2026, 4, 1))),
+            ("b.md", Some(mtime(2026, 4, 20))),
+        ]);
+
+        let stats = detailed_stats_for(&snapshot, &git_dating(history, None), now);
+
+        assert_eq!(
+            months(&stats.activity_by_month),
+            vec![
+                ("2026-04", 2),
+                ("2026-05", 0),
+                ("2026-06", 1),
+                ("2026-07", 0),
+                ("2026-08", 0),
+                ("2026-09", 0),
+            ]
+        );
+        assert_eq!(stats.created_date_status, CreatedDateStatus::Complete);
+        assert_eq!(
+            stats.modified_this_week.count, 0,
+            "the recent lists still follow modification time"
+        );
+
+        let estimated =
+            detailed_stats_for(&snapshot, &git_dating(ready(&[("a.md", None)]), None), now);
+        assert_eq!(estimated.created_date_status, CreatedDateStatus::Estimated);
+
+        let reading = detailed_stats_for(
+            &snapshot,
+            &git_dating(crate::git::HistoryRead::Reading, None),
+            now,
+        );
+        assert_eq!(reading.created_date_status, CreatedDateStatus::Reading);
+
+        let plain = detailed_stats_for(&snapshot, &NoteDating::Files, now);
+        assert_eq!(plain.created_date_status, CreatedDateStatus::Complete);
+    }
+
+    /// A stated date keeps the calendar day its author wrote, whatever zone it
+    /// names, in every shape the query language already accepts.
+    #[test]
+    fn a_stated_created_date_keeps_the_day_as_written() {
+        let midnight = |year, month, day| mtime(year, month, day) - 12 * 3_600 * 1_000_000_000;
+
+        assert_eq!(stated_date("2026-03-01"), Some(midnight(2026, 3, 1)));
+        assert_eq!(stated_date(" 2026-03-01 "), Some(midnight(2026, 3, 1)));
+        assert_eq!(stated_date("2026-03-01T12:00"), Some(mtime(2026, 3, 1)));
+        assert_eq!(stated_date("2026-03-01 12:00:00"), Some(mtime(2026, 3, 1)));
+        assert_eq!(
+            stated_date("2026-03-01T00:30:00+01:00").map(month_key),
+            Some("2026-03".to_string()),
+            "still February in UTC, but the author wrote March"
+        );
+        assert_eq!(stated_date("yesterday"), None);
+        assert_eq!(stated_date("2026-13-01"), None);
+    }
+
+    /// A Vault with nothing in it still has a calendar, so the chart still has
+    /// six columns to draw.
+    #[test]
+    fn activity_window_is_six_zero_entries_for_a_vault_with_no_notes() {
+        let window = activity_window(std::iter::empty(), utc(2026, 9, 18));
+
+        assert_eq!(window.len(), 6);
+        assert!(window.iter().all(|entry| entry.created_count == 0));
+        assert_eq!(window.last().expect("six entries").month, "2026-09");
+    }
 }
 
 #[cfg(test)]
@@ -1969,8 +2783,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        NoteQuery, NoteQueryCondition, PropertyOperator, TreeScope, VaultExplorerFolder,
-        VaultParticipantState, VaultReadCore, VaultScope, clamp_tree_max_depth,
+        NoteDownload, NoteQuery, NoteQueryCondition, PropertyOperator, TreeScope,
+        VaultExplorerFolder, VaultParticipantState, VaultReadCore, VaultScope,
+        clamp_tree_max_depth,
     };
     use crate::cache::SqliteCache;
     use crate::embed::StubEmbedder;
@@ -2705,11 +3520,12 @@ mod tests {
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         let first = workspace.vault_ids[0];
 
-        let (notes, assets) = reads
+        let (notes, assets, _) = reads
             .resolve_batch(
                 first,
                 &["Shared".to_string()],
                 &["Some document.pdf".to_string(), "Absent.png".to_string()],
+                &[],
                 "97_Notes",
             )
             .expect("resolve batch");
@@ -2796,14 +3612,16 @@ mod tests {
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         let first = workspace.vault_ids[0];
 
-        let (note, directory) = reads
+        let NoteDownload {
+            note, vault_root, ..
+        } = reads
             .exact_note_for_download(first, "home")
             .expect("lookup")
             .expect("home found");
         assert_eq!(note.vault_id, first);
         assert!(note.note.content.contains("first"));
         assert_eq!(
-            std::fs::canonicalize(&directory).expect("canonical directory"),
+            std::fs::canonicalize(&vault_root).expect("canonical directory"),
             std::fs::canonicalize(&workspace.vault_paths[0]).expect("canonical vault root")
         );
 
@@ -2811,6 +3629,103 @@ mod tests {
             .exact_note_for_download(first, "does-not-exist")
             .expect("lookup succeeds");
         assert!(missing.is_none());
+    }
+
+    /// Reading one Note must not read every other one (#361). The counter is
+    /// on the full build itself, so a read that went back to scanning the
+    /// Vault's content fails here however it got there.
+    #[test]
+    fn single_note_reads_never_read_the_content_of_other_notes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Home.md",
+                    "---\ntags: [alpha]\n---\n# Home\n\n[[Other]] ![[pic.png]]",
+                ),
+                ("Other.md", "# Other"),
+                ("pic.png", "png"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        let other = workspace.vault_paths[0].join("Other.md");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o000))
+            .expect("make the unrelated note unreadable");
+
+        let note = reads.exact_note(first, "home").expect("note read");
+        let frontmatter = reads
+            .exact_note_frontmatter(first, "home")
+            .expect("frontmatter read");
+        let resolved = reads.resolve_wikilink(first, "Other").expect("resolve");
+        let (notes, assets, _) = reads
+            .resolve_batch(
+                first,
+                &["Other".to_string()],
+                &["pic.png".to_string()],
+                &[],
+                "",
+            )
+            .expect("resolve batch");
+        let attachments = reads.note_attachments(first, "home").expect("attachments");
+        let download = reads
+            .exact_note_for_download(first, "home")
+            .expect("download");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the unrelated note");
+
+        assert!(note.expect("home").note.content.contains("[[Other]]"));
+        assert_eq!(frontmatter.expect("home").metadata.tags, ["alpha"]);
+        assert_eq!(resolved.expect("other").slug, "other");
+        assert_eq!(notes[0].as_ref().expect("other").slug, "other");
+        assert_eq!(assets[0].as_deref(), Some("pic.png"));
+        assert!(attachments.is_some());
+        assert!(download.is_some());
+        let control = reads.control_block(first).expect("control block");
+        assert_eq!(
+            control.full_index_builds(),
+            0,
+            "no single-note read may build the link graph"
+        );
+
+        reads
+            .exact_note_links(first, "home")
+            .expect("links")
+            .expect("home links");
+        assert_eq!(
+            control.full_index_builds(),
+            1,
+            "a links read needs the graph"
+        );
+    }
+
+    /// No note content is cached: what an outside process wrote a moment ago
+    /// is what the next read returns, hash included.
+    #[test]
+    fn a_note_read_returns_what_an_outside_process_just_wrote() {
+        let workspace = workspace(&[("First", &[("Home.md", "# Home\n\nbefore")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        let before = reads
+            .exact_note(first, "home")
+            .expect("first read")
+            .expect("home");
+
+        std::fs::write(workspace.vault_paths[0].join("Home.md"), "# Home\n\nafter")
+            .expect("outside write");
+        let after = reads
+            .exact_note(first, "home")
+            .expect("second read")
+            .expect("home");
+
+        assert!(after.note.content.ends_with("after"));
+        assert_eq!(
+            after.note.content_hash,
+            crate::cache::parse::content_hash("# Home\n\nafter")
+        );
+        assert_ne!(after.note.content_hash, before.note.content_hash);
     }
 
     #[test]
@@ -2882,6 +3797,220 @@ mod tests {
             .collect();
         assert_eq!(folder_counts.get(""), Some(&2));
         assert_eq!(folder_counts.get("Folder"), Some(&1));
+    }
+
+    /// Word and image counts are the one thing in the whole read surface that
+    /// looks at Markdown text rather than structure, and bodies reach the
+    /// report through their own read now that the published snapshot carries
+    /// structure alone. Counting from an empty body would silently report
+    /// zeroes rather than fail, so assert the numbers themselves.
+    #[test]
+    fn statistics_detail_counts_words_and_images_from_the_published_bodies() {
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Long.md",
+                    "---\ntags: [alpha]\n---\none two three four five\n\n![](a.png)\n",
+                ),
+                ("Short.md", "one two\n\n![](b.png)\n![](c.png)\n"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let stats = reads
+            .statistics_detail(workspace.vault_ids[0])
+            .expect("statistics detail succeeds")
+            .stats;
+
+        // "one two three four five" plus its image, and "one two" plus two.
+        assert_eq!(stats.word_count, 5 + 1 + 2 + 2);
+        assert_eq!(stats.image_count, 3);
+        assert_eq!(
+            stats
+                .longest_notes
+                .iter()
+                .map(|note| (note.slug.as_str(), note.word_count))
+                .collect::<Vec<_>>(),
+            vec![("long", 6), ("short", 4)]
+        );
+    }
+
+    /// The report's activity window is generated from the calendar, not
+    /// harvested from the Vault, so a freshly written Vault reports six
+    /// ascending months ending at the current UTC one with every Note in that
+    /// last bucket (#298).
+    #[test]
+    fn statistics_detail_reports_six_ascending_calendar_months_of_activity() {
+        let workspace = workspace(&[(
+            "First",
+            &[("Home.md", "# Home\n"), ("Second.md", "# Second\n")],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        // The report reads the clock itself, so bracket the call rather than
+        // comparing against a second reading that a month rollover could have
+        // moved past.
+        let before = chrono::Utc::now().format("%Y-%m").to_string();
+        let stats = reads
+            .statistics_detail(workspace.vault_ids[0])
+            .expect("statistics detail succeeds");
+        let after = chrono::Utc::now().format("%Y-%m").to_string();
+        let stats = stats.stats;
+
+        let window: Vec<(&str, i64)> = stats
+            .activity_by_month
+            .iter()
+            .map(|entry| (entry.month.as_str(), entry.created_count))
+            .collect();
+        assert_eq!(window.len(), 6);
+        let mut ascending: Vec<&str> = window.iter().map(|(month, _)| *month).collect();
+        ascending.sort_unstable();
+        assert_eq!(
+            ascending,
+            window.iter().map(|(month, _)| *month).collect::<Vec<_>>(),
+            "the chart reads left to right as time"
+        );
+        let last = window.last().expect("six entries").0;
+        assert!(
+            last == before || last == after,
+            "the window ends at the current month, got {last}"
+        );
+        // Both Notes were written moments ago, so they all land in that month
+        // and the five earlier columns are honest zeroes.
+        assert_eq!(window.last().expect("six entries").1, 2);
+        assert_eq!(window.iter().map(|(_, count)| count).sum::<i64>(), 2);
+    }
+
+    /// A Git-backed Vault charts its notes by the commit that first added
+    /// them, through a rename into the Vault's subdirectory, while a stated
+    /// `created` date still wins and an uncommitted note is dated by its file
+    /// (#300, ADR-29).
+    #[test]
+    fn statistics_detail_charts_a_git_vault_by_first_commit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("repository");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = std::fs::canonicalize(&root).expect("canonical repository");
+        let repository = git2::Repository::init(&root).expect("init");
+
+        let now = chrono::Utc::now();
+        let started = now - chrono::Duration::days(95);
+        let stated = (now - chrono::Duration::days(40)).date_naive();
+        let commit = |when: chrono::DateTime<chrono::Utc>| {
+            let mut index = repository.index().expect("index");
+            index
+                .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
+            index.update_all(["*"], None).expect("stage removals");
+            index.write().expect("write index");
+            let tree = repository
+                .find_tree(index.write_tree().expect("tree"))
+                .expect("find tree");
+            let signature =
+                git2::Signature::new("A", "a@example.com", &git2::Time::new(when.timestamp(), 0))
+                    .expect("signature");
+            let parent = repository
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+            let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+            repository
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "change",
+                    &tree,
+                    &parents,
+                )
+                .expect("commit");
+        };
+
+        write_files(
+            &root,
+            &[(
+                "inbox/Idea.md",
+                "# Idea\n\nA thought worth keeping, written down in full.\n",
+            )],
+        );
+        commit(started);
+        std::fs::create_dir_all(root.join("vault")).expect("vault directory");
+        std::fs::rename(root.join("inbox/Idea.md"), root.join("vault/Idea.md")).expect("move");
+        write_files(
+            &root,
+            &[(
+                "vault/Stated.md",
+                &format!("---\ncreated: {stated}\n---\n# Stated\n"),
+            )],
+        );
+        commit(now);
+        write_files(&root, &[("vault/Draft.md", "# Draft\n")]);
+
+        let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Git".to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path: root.clone(),
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: Some("vault".into()),
+                        mode: crate::vault_registry::VaultGitMode::LocalHistory,
+                        poll_interval_secs: 60,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault");
+        let vault_id = snapshot
+            .definitions()
+            .next()
+            .expect("definition")
+            .vault_id();
+        let vaults = VaultCollectionRuntime::new();
+        vaults.reconcile(&store, &snapshot);
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let index = VaultIndex::build(root.join("vault")).expect("index");
+        cache
+            .replace_vault_snapshot(vault_id, &index, &StubEmbedder::new(384))
+            .expect("publish snapshot");
+
+        let stats = VaultReadCore::new(&cache, &vaults)
+            .statistics_detail(vault_id)
+            .expect("statistics detail succeeds")
+            .stats;
+
+        let counts: BTreeMap<String, i64> = stats
+            .activity_by_month
+            .iter()
+            .map(|entry| (entry.month.clone(), entry.created_count))
+            .collect();
+        let month = |instant: chrono::DateTime<chrono::Utc>| instant.format("%Y-%m").to_string();
+        let mut expected: BTreeMap<String, i64> = BTreeMap::new();
+        *expected.entry(month(started)).or_default() += 1;
+        *expected
+            .entry(stated.format("%Y-%m").to_string())
+            .or_default() += 1;
+        *expected.entry(month(chrono::Utc::now())).or_default() += 1;
+        for (month, count) in &expected {
+            assert_eq!(
+                counts.get(month),
+                Some(count),
+                "month {month} in {counts:?}"
+            );
+        }
+        assert_eq!(counts.values().sum::<i64>(), 3);
+        assert_eq!(
+            stats.created_date_status,
+            crate::api_types::CreatedDateStatus::Complete
+        );
     }
 
     #[test]
@@ -3339,5 +4468,265 @@ mod tests {
         // root expanded and its children listed instead.
         assert_eq!(note_titles(&clamped), ["Home"]);
         assert!(child(&clamped, "40-reference").truncated);
+    }
+
+    // -----------------------------------------------------------------------
+    // Saved queries (#275)
+    // -----------------------------------------------------------------------
+
+    const SUBSCRIPTION_VAULT: &[(&str, &str)] = &[
+        (
+            "subscriptions/Netflix.md",
+            "---\ntags: [type/entity/subscription]\nprice: 13.99\nbilling_period: monthly\nnext_payment: 2026-10-01\n---\n# Netflix",
+        ),
+        (
+            "subscriptions/Gym.md",
+            "---\ntags: [type/entity/subscription]\nprice: 30\nbilling_period: zebraquarterly\nfinished: 2020-06-30\n---\n# Gym\n\nBilled zebraquarterly.",
+        ),
+        (
+            "subscriptions/Newspaper.md",
+            "---\ntags: [type/entity/subscription]\nprice: 8\nbilling_period: monthly\nfinished: 2999-01-01\n---\n# Newspaper",
+        ),
+        (
+            "Active subscriptions.md",
+            "---\ntags: [type/aggregator]\n---\n# Active subscriptions\n\nWhat I pay for now.\n\n<!-- hatchdoor-query: active-subscriptions -->\n```base\nfilters:\n  and:\n    - file.hasTag(\"type/entity/subscription\")\n    - 'finished == null || finished > now()'\nviews:\n  - type: table\n    name: Active subscriptions\n    order:\n      - file.name\n      - price\n      - billing_period\n      - next_payment\n      - finished\n```\n\nAnd the finished ones:\n\n```base\nfilters: 'finished < now()'\n```\n",
+        ),
+    ];
+
+    fn saved(reads: &VaultReadCore<'_>, vault_id: VaultId) -> super::SavedQueriesResponse {
+        reads
+            .saved_queries(vault_id, "active-subscriptions")
+            .expect("saved queries")
+            .expect("the aggregator note exists")
+            .data
+    }
+
+    fn table_titles(result: &super::SavedQueryResult) -> Vec<String> {
+        match &result.outcome {
+            super::SavedQueryOutcome::Populated(table) => {
+                table.rows.iter().map(|row| row.title.clone()).collect()
+            }
+            other => panic!("expected a table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_notes_saved_queries_evaluate_against_its_own_vault_in_document_order() {
+        let workspace = workspace(&[
+            ("Home", SUBSCRIPTION_VAULT),
+            // A second Vault holding a namesake subscription the saved query
+            // must never see: it is fixed to the Vault its note lives in.
+            (
+                "Elsewhere",
+                &[(
+                    "Spotify.md",
+                    "---\ntags: [type/entity/subscription]\nprice: 11\n---\n# Spotify",
+                )],
+            ),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+
+        let response = saved(&reads, vault_id);
+        assert_eq!(response.vault_id, vault_id);
+        assert_eq!(response.queries.len(), 2);
+
+        let active = &response.queries[0];
+        assert_eq!(active.name.as_deref(), Some("active-subscriptions"));
+        assert!(active.source.starts_with("filters:\n  and:"));
+        assert_eq!(table_titles(active), ["Netflix", "Newspaper"]);
+        let super::SavedQueryOutcome::Populated(table) = &active.outcome else {
+            unreachable!()
+        };
+        assert!(table.rows.iter().all(|row| row.vault_id == vault_id));
+        assert_eq!(table.rows[0].slug, "netflix");
+        assert_eq!(
+            table.rows[0].cells,
+            vec![
+                serde_json::json!("Netflix.md"),
+                serde_json::json!(13.99),
+                serde_json::json!("monthly"),
+                serde_json::json!("2026-10-01"),
+                serde_json::Value::Null,
+            ]
+        );
+
+        let finished = &response.queries[1];
+        assert_eq!(finished.name, None);
+        assert_eq!(table_titles(finished), ["Gym"]);
+    }
+
+    #[test]
+    fn evaluating_saved_queries_never_changes_the_note_or_what_the_index_holds() {
+        let workspace = workspace(&[("Home", SUBSCRIPTION_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+        let path = workspace.vault_paths[0].join("Active subscriptions.md");
+        let before = std::fs::read(&path).expect("read note");
+
+        let first = saved(&reads, vault_id);
+        for _ in 0..5 {
+            assert_eq!(
+                saved(&reads, vault_id),
+                first,
+                "identical state, identical answer"
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("read note"), before);
+
+        // The note read itself stays the authoritative Markdown.
+        let note = reads
+            .exact_note(vault_id, "active-subscriptions")
+            .expect("read")
+            .expect("note");
+        assert_eq!(note.note.content.as_bytes(), before.as_slice());
+
+        // "zebraquarterly" is Gym's billing period, and it reaches the
+        // aggregator only as a computed row. Search finds Gym, where the word
+        // is written, and never the note displaying it.
+        let embedder = StubEmbedder::new(384);
+        let search = crate::search::vault_scoped::VaultSearchCore::new(
+            &workspace.cache,
+            &workspace.vaults,
+            &embedder,
+        );
+        let hits = search
+            .search(crate::search::vault_scoped::VaultSearchRequest {
+                scope: VaultScope::One(vault_id),
+                query: "zebraquarterly".to_string(),
+                mode: crate::search::SearchMode::Keyword,
+                limit: 10,
+                per_note_cap: 2,
+                layers: crate::search::LayerSelection::All,
+            })
+            .expect("search")
+            .data
+            .results;
+        let slugs: BTreeSet<_> = hits.iter().map(|hit| hit.note_slug.as_str()).collect();
+        assert!(slugs.contains("gym"), "{slugs:?}");
+        assert!(!slugs.contains("active-subscriptions"), "{slugs:?}");
+
+        // The rows link to their notes on the page, but they are not links the
+        // index knows about: no backlink, no graph edge.
+        let links = reads
+            .exact_note_links(vault_id, "active-subscriptions")
+            .expect("links")
+            .expect("note");
+        assert!(links.outgoing.is_empty(), "{:?}", links.outgoing);
+        let netflix = reads
+            .exact_note_links(vault_id, "netflix")
+            .expect("links")
+            .expect("note");
+        assert!(netflix.backlinks.is_empty(), "{:?}", netflix.backlinks);
+        let graph = reads.graphs(VaultScope::One(vault_id)).expect("graph");
+        assert!(graph.data[0].edges.is_empty(), "{:?}", graph.data[0].edges);
+    }
+
+    #[test]
+    fn a_note_without_saved_queries_answers_an_empty_list_and_a_missing_note_answers_none() {
+        let workspace = workspace(&[("Home", SUBSCRIPTION_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+        let plain = reads
+            .saved_queries(vault_id, "netflix")
+            .expect("read")
+            .expect("note");
+        assert!(plain.data.queries.is_empty());
+        assert!(
+            reads
+                .saved_queries(vault_id, "no-such-note")
+                .expect("read")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_demoted_note_withholds_its_saved_queries_and_its_rows_on_the_demo_surface() {
+        let workspace = workspace(&[(
+            "Home",
+            &[
+                (
+                    "Dashboard.md",
+                    "# Dashboard\n\n```base\nfilters: 'file.hasTag(\"topic\")'\n```\n",
+                ),
+                ("Visible.md", "---\ntags: [topic]\n---\n# Visible"),
+                ("private/Hidden.md", "---\ntags: [topic]\n---\n# Hidden"),
+                ("private/.hatchdoor-layer", "private"),
+            ],
+        )]);
+        let vault_id = workspace.vault_ids[0];
+        let everything = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let demo = VaultReadCore::new(&workspace.cache, &workspace.vaults)
+            .on_surface(super::BrowseSurface::DefaultOnly);
+
+        let rows = |reads: &VaultReadCore<'_>| {
+            let response = reads
+                .saved_queries(vault_id, "dashboard")
+                .expect("read")
+                .expect("note")
+                .data;
+            table_titles(&response.queries[0])
+        };
+        assert_eq!(rows(&everything), ["Hidden", "Visible"]);
+        assert_eq!(rows(&demo), ["Visible"]);
+    }
+
+    #[test]
+    fn one_named_saved_query_evaluates_against_its_own_vault_alone() {
+        let workspace = workspace(&[
+            ("Home", SUBSCRIPTION_VAULT),
+            (
+                "Elsewhere",
+                &[(
+                    "Spotify.md",
+                    "---\ntags: [type/entity/subscription]\nprice: 11\n---\n# Spotify",
+                )],
+            ),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault_id = workspace.vault_ids[0];
+
+        let evaluation = reads
+            .saved_query(
+                vault_id,
+                "active-subscriptions",
+                Some("active-subscriptions"),
+            )
+            .expect("evaluated")
+            .expect("the aggregator note exists");
+        assert_eq!(evaluation.scope, VaultScope::One(vault_id));
+        assert_eq!(evaluation.data.vault_id, vault_id);
+        assert_eq!(evaluation.data.slug, "active-subscriptions");
+        assert_eq!(
+            evaluation.data.name.as_deref(),
+            Some("active-subscriptions")
+        );
+        let super::SavedQueryRows::Populated(table) = &evaluation.data.rows else {
+            panic!("expected rows, got {:?}", evaluation.data.rows);
+        };
+        let titles: Vec<_> = table.rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["Netflix", "Newspaper"]);
+        assert!(table.rows.iter().all(|row| row.vault_id == vault_id));
+
+        // The note holds two saved queries, so leaving the name out is refused
+        // rather than resolved to the first.
+        let error = reads
+            .saved_query(vault_id, "active-subscriptions", None)
+            .expect_err("two saved queries and no name");
+        assert_eq!(error.public_code(), "saved_query_name_required");
+        assert_eq!(error.vault_id, Some(vault_id));
+        assert!(!error.retryable);
+
+        let error = reads
+            .saved_query(vault_id, "netflix", None)
+            .expect_err("no saved query");
+        assert_eq!(error.public_code(), "no_saved_queries");
+
+        assert!(
+            reads
+                .saved_query(vault_id, "no-such-note", None)
+                .expect("read")
+                .is_none()
+        );
     }
 }

@@ -9,7 +9,12 @@ import {
 import { NavLink } from "react-router-dom";
 
 import { ChangesPanel } from "../components/ChangesPanel";
-import { FolderTree, RecentNotesList, SideHead } from "../components/Explorer";
+import {
+  FolderTree,
+  RecentNotesList,
+  SideHead,
+  type ExpandedFoldersUpdate,
+} from "../components/Explorer";
 import {
   BarChartIcon,
   Graph3Icon,
@@ -17,8 +22,13 @@ import {
   SettingsIcon,
 } from "../components/icons";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
+import { describeMissingVaults } from "../lib/vaultParticipants";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
-import { deriveVaultAggregate, scopeName } from "./vaultSlotLogic";
+import {
+  deriveVaultAggregate,
+  deriveVaultSlot,
+  scopeName,
+} from "./vaultSlotLogic";
 import {
   expandedFoldersForVault,
   getStoredUnfoldedVault,
@@ -26,7 +36,7 @@ import {
   resolveInitialUnfoldedVault,
   resolveLandingVaultId,
   setStoredUnfoldedVault,
-  withVaultFolderChange,
+  vaultFolderUpdate,
 } from "./vaultAccordion";
 import type {
   ExplorerFolder,
@@ -342,6 +352,7 @@ function VaultAccordion({
   onExpandedFoldersChange,
   writeEnabled,
   onCreateNoteInFolder,
+  treeAnswered,
   demoMode = false,
 }: {
   vaults: VaultSummary[];
@@ -351,9 +362,12 @@ function VaultAccordion({
   noteCounts: Record<VaultId, number | undefined>;
   currentPath: string;
   expandedFolders: Record<string, boolean>;
-  onExpandedFoldersChange: (next: Record<string, boolean>) => void;
+  onExpandedFoldersChange: (update: ExpandedFoldersUpdate) => void;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string, vaultId: VaultId) => void;
+  /** Whether a tree read has answered for this scope. Before it has, a
+   * Vault with no tree is simply not loaded yet; after, it did not answer. */
+  treeAnswered: boolean;
   demoMode?: boolean;
 }) {
   const treesByVault = new Map(
@@ -392,13 +406,9 @@ function VaultAccordion({
                   expandedFolders,
                   vault.vault_id,
                 )}
-                onExpandedFoldersChange={(next) =>
+                onExpandedFoldersChange={(update) =>
                   onExpandedFoldersChange(
-                    withVaultFolderChange(
-                      expandedFolders,
-                      vault.vault_id,
-                      next,
-                    ),
+                    vaultFolderUpdate(vault.vault_id, update),
                   )
                 }
                 writeEnabled={writeEnabled}
@@ -411,6 +421,12 @@ function VaultAccordion({
                   onCreateNoteInFolder(folderPath, vault.vault_id)
                 }
               />
+            ) : isOpen && treeAnswered ? (
+              // The read left this Vault out: it did not answer. An empty
+              // section here read as "this Vault has no notes" (#334).
+              <p className="explorer-tree-partial">
+                {describeMissingVaults([vault.name])}
+              </p>
             ) : null}
           </Fragment>
         );
@@ -495,14 +511,20 @@ type ExplorerPaneProps = {
   modifiedNotes: ModifiedNote[];
   modifiedNotesPartial: boolean;
   modifiedNotesMissingVaults: string[];
+  modifiedNotesError: string | null;
+  onRetryModifiedNotes: () => void;
   loadingTree: boolean;
   treeError: string | null;
+  /** The tree read's own partiality (#334): Vaults it asked that did not
+   * answer fresh, named in a trailing line like Changed on disk's. */
+  treePartial: boolean;
+  treeMissingVaults: string[];
   tree: ExplorerFolder | null;
   vaultTrees: VaultTree[];
   expandedFolders: Record<string, boolean>;
   recentCollapsed: boolean;
   onRecentCollapsedChange: (next: boolean) => void;
-  onExpandedFoldersChange: (next: Record<string, boolean>) => void;
+  onExpandedFoldersChange: (update: ExpandedFoldersUpdate) => void;
   onCloseDrawer: () => void;
   onRefreshTree: () => void;
   onScrollTopChange: (top: number) => void;
@@ -532,8 +554,12 @@ export function ExplorerPane({
   modifiedNotes,
   modifiedNotesPartial,
   modifiedNotesMissingVaults,
+  modifiedNotesError,
+  onRetryModifiedNotes,
   loadingTree,
   treeError,
+  treePartial,
+  treeMissingVaults,
   tree,
   vaultTrees,
   expandedFolders,
@@ -661,6 +687,27 @@ export function ExplorerPane({
     committedScope !== "all"
       ? vaults.find((vault) => vault.vault_id === committedScope)
       : undefined;
+  // The Vault whose condition the flat tree's head reports. At exactly one
+  // enabled Vault there is no Scope zone, no accordion and no mobile scope
+  // row, so without this the one Vault's conflict, stopped sync or failed
+  // index showed nowhere in the workspace (#334). Narrowing scope has
+  // nothing to offer there; reporting the Vault's health still does.
+  const headVault =
+    narrowedVault ?? (vaults.length === 1 ? vaults[0] : undefined);
+  // At one enabled Vault that head is the only desktop place the Vault's
+  // condition shows, so while it carries one it is pinned to the scrolling
+  // nav's top or bottom edge rather than scrolling out of view under a long
+  // tree or below Changed on disk and Recently viewed (#334).
+  const pinHead =
+    vaults.length === 1 &&
+    headVault !== undefined &&
+    deriveVaultSlot(headVault, vaultNoteCounts[headVault.vault_id], demoMode)
+      .kind === "condition";
+  // A settled read that produced no tree and no error: every Vault it asked
+  // left itself out. Without this the pane was blank, with nothing to click.
+  const treeAnswered = !loadingTree && !treeError;
+  const treeEmptyUnanswered =
+    !showAccordion && treeAnswered && tree === null && vaults.length > 0;
 
   return (
     <aside className="explorer-pane" data-open={drawerOpen}>
@@ -703,6 +750,8 @@ export function ExplorerPane({
             scope={scope}
             partial={modifiedNotesPartial}
             missingVaultNames={modifiedNotesMissingVaults}
+            error={modifiedNotesError}
+            onRetry={onRetryModifiedNotes}
           />
         ) : null}
 
@@ -712,7 +761,6 @@ export function ExplorerPane({
           collapsed={recentCollapsed}
           onToggleCollapsed={() => onRecentCollapsedChange(!recentCollapsed)}
           vaults={vaults}
-          scope={scope}
         />
 
         {showTreeSkeleton ? <ExplorerSkeleton /> : null}
@@ -736,23 +784,38 @@ export function ExplorerPane({
             onExpandedFoldersChange={onExpandedFoldersChange}
             writeEnabled={writeEnabled}
             onCreateNoteInFolder={onCreateNoteInFolder}
+            treeAnswered={treeAnswered}
             demoMode={demoMode}
           />
         ) : (
           <>
-            {tree ? (
+            {tree || (headVault && !loadingTree) ? (
               <SideHead
                 label="Notes"
-                count={narrowedVault ? undefined : countNotes(tree)}
+                className={pinHead ? "is-pinned" : undefined}
+                count={headVault || !tree ? undefined : countNotes(tree)}
                 slot={
-                  narrowedVault ? (
+                  headVault ? (
                     <VaultSlot
-                      vault={narrowedVault}
-                      noteCount={vaultNoteCounts[narrowedVault.vault_id]}
+                      vault={headVault}
+                      noteCount={vaultNoteCounts[headVault.vault_id]}
                       demoMode={demoMode}
                     />
                   ) : undefined
                 }
+              />
+            ) : null}
+            {treeEmptyUnanswered ? (
+              <StateBlock
+                tone="error"
+                title="Nothing Found"
+                description={
+                  treeMissingVaults.length > 0
+                    ? describeMissingVaults(treeMissingVaults)
+                    : "The note tree came back empty."
+                }
+                actionLabel="Retry"
+                onAction={onRefreshTree}
               />
             ) : null}
             {tree ? (
@@ -769,6 +832,18 @@ export function ExplorerPane({
             ) : null}
           </>
         )}
+        {/* Never a banner: the tree still renders what did answer, and this
+            trailing line names only the Vaults that did not (#334). The
+            empty case already says it in its error block. */}
+        {!showTreeSkeleton &&
+        treeAnswered &&
+        treePartial &&
+        treeMissingVaults.length > 0 &&
+        !treeEmptyUnanswered ? (
+          <p className="explorer-tree-partial">
+            {describeMissingVaults(treeMissingVaults)}
+          </p>
+        ) : null}
       </div>
 
       {/* One action only. A footer with three things in it becomes the next

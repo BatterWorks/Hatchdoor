@@ -14,8 +14,11 @@ import {
   buildSourceForBehavior,
   clampPollMinutes,
   describeGitFailure,
+  describeRecoveryFailure,
   isRecoveryPending,
   markRecoveryPending,
+  recoveryBranchName,
+  recoveryBranchUrl,
   sameSourceIdentity,
   withIdentityFields,
 } from "./vaultGitBehavior";
@@ -61,6 +64,7 @@ function baseVault(source: unknown, overrides: Record<string, unknown> = {}) {
       retry: false,
       commit: mode === "local_history" || mode === "two_way",
       sync: mode === "pull_only" || mode === "two_way",
+      publish_recovery: false,
     },
     ...overrides,
   };
@@ -261,12 +265,103 @@ describe("pure helpers", () => {
     });
     expect(withFiles.files).toEqual(["a.md", "b.md"]);
 
+    const rejected = describeGitFailure({
+      code: "managed_git_push_rejected",
+      message:
+        "managed checkout push was rejected by the remote: pre-receive hook declined",
+      retryable: false,
+    });
+    expect(rejected.label).toBe("push refused");
+    expect(rejected.tier).toBe("error");
+    expect(rejected.sentence).toContain("refused Hatchdoor's push");
+    expect(rejected.files).toBeUndefined();
+
+    const unfinished = describeGitFailure({
+      code: "managed_git_operation_in_progress",
+      message: "unfinished merge",
+      retryable: false,
+      detail: { kind: "affected_paths", paths: ["notes/Home.md"], total: 1 },
+    });
+    expect(unfinished.label).toBe("unfinished merge");
+    expect(unfinished.tier).toBe("error");
+    expect(unfinished.sentence).toContain("part-way through a merge");
+    expect(unfinished.files).toEqual(["notes/Home.md"]);
+
     const unknown = describeGitFailure({
       code: "managed_git_not_remote",
       message: "not a remote vault",
       retryable: false,
     });
     expect(unknown.sentence).toContain("not a remote vault");
+  });
+
+  it("names the recovery branch from the last publish, else from the configured branch", () => {
+    const source = {
+      type: "managed_git",
+      repository_url: "https://example.test/notes.git",
+      branch: "main",
+      mode: "two_way",
+      poll_interval_secs: 3600,
+    };
+    expect(recoveryBranchName(baseVault(source) as never)).toBe(
+      `hatchdoor-recovery/main/${VAULT_ID}`,
+    );
+    expect(
+      recoveryBranchName(
+        baseVault(
+          { ...source, branch: undefined },
+          {
+            recovery_branch: { branch: `hatchdoor-recovery/trunk/${VAULT_ID}` },
+          },
+        ) as never,
+      ),
+    ).toBe(`hatchdoor-recovery/trunk/${VAULT_ID}`);
+    expect(
+      recoveryBranchName(baseVault({ ...source, branch: undefined }) as never),
+    ).toBeNull();
+  });
+
+  it("links a recovery branch only on an HTTPS remote without credentials", () => {
+    const branch = `hatchdoor-recovery/main/${VAULT_ID}`;
+    const source = (repository_url: string) => ({
+      type: "managed_git" as const,
+      repository_url,
+      mode: "two_way" as const,
+      poll_interval_secs: 3600,
+    });
+    expect(
+      recoveryBranchUrl(source("https://github.com/owner/notes.git"), branch),
+    ).toBe(`https://github.com/owner/notes/tree/${branch}`);
+    expect(
+      recoveryBranchUrl(
+        source("https://git.example.test/owner/notes/"),
+        branch,
+      ),
+    ).toBe(`https://git.example.test/owner/notes/tree/${branch}`);
+    expect(
+      recoveryBranchUrl(source("http://git.example.test/notes.git"), branch),
+    ).toBeNull();
+    expect(
+      recoveryBranchUrl(source("https://me:secret@example.test/n.git"), branch),
+    ).toBeNull();
+    expect(recoveryBranchUrl({ type: "local", path: "/n" }, branch)).toBeNull();
+  });
+
+  it("says why a publish published nothing", () => {
+    expect(
+      describeRecoveryFailure({
+        code: "managed_git_recovery_diverged",
+        message: "diverged",
+        retryable: false,
+      }),
+    ).toMatch(/Someone added commits to this branch/);
+    expect(
+      describeRecoveryFailure({
+        code: "managed_git_recovery_push_rejected",
+        message: "the remote refused the recovery branch: protected",
+        retryable: false,
+      }),
+    ).toMatch(/refused the branch.*protected/);
   });
 
   it("persists a recovery marker across a reload", () => {
@@ -568,7 +663,8 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
     fireEvent.click(await screen.findByRole("button", { name: "Go ahead" }));
 
-    await screen.findByRole("alert");
+    // The failure notice and the red-line recovery state are both alerts.
+    expect(await screen.findAllByRole("alert")).toHaveLength(2);
     expect(isRecoveryPending(VAULT_ID)).toBe(true);
     expect(
       screen.getByRole("button", { name: "Try to bring this Vault back" }),
@@ -853,6 +949,183 @@ describe("VaultSettingsDetail — sync console", () => {
     expect(screen.getByText("notes/a.md")).toBeVisible();
     expect(screen.getByText("notes/b.md")).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+
+  const conflictedSource = {
+    type: "managed_git",
+    repository_url: "https://example.test/owner/notes.git",
+    branch: "main",
+    mode: "two_way",
+    poll_interval_secs: 3600,
+  };
+  const conflictError = {
+    code: "managed_git_conflict",
+    message: "conflict",
+    retryable: false,
+    detail: { kind: "affected_paths", paths: ["notes/a.md"], total: 1 },
+  };
+  function conflictedVault(overrides: Record<string, unknown> = {}) {
+    const vault = baseVault(conflictedSource, {
+      git: "unavailable",
+      git_error: conflictError,
+      ...overrides,
+    });
+    vault.capabilities = { ...vault.capabilities, publish_recovery: true };
+    return vault;
+  }
+
+  it("offers to publish a conflicted Vault's side to its recovery branch (ADR-30)", async () => {
+    let published = false;
+    mockDetail(conflictedVault(), {
+      extraRoutes: {
+        [`/api/v1/vaults/${VAULT_ID}/recovery-branch POST`]: () => {
+          published = true;
+          return json({ vault_id: VAULT_ID, schedule: "queued" });
+        },
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(
+      screen.getByText(`hatchdoor-recovery/main/${VAULT_ID}`),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeVisible();
+    expect(
+      screen.queryByRole("link", { name: "Open on the Git host" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Publish my side to a branch" }),
+    );
+    await vi.waitFor(() => expect(published).toBe(true));
+    expect(
+      await screen.findByText(/Publishing this Vault's side/),
+    ).toBeVisible();
+  });
+
+  it("shows the published commit and a link once the branch is on the remote", async () => {
+    mockDetail(
+      conflictedVault({
+        recovery_branch: {
+          branch: `hatchdoor-recovery/main/${VAULT_ID}`,
+          published_commit: "0123456789abcdef0123456789abcdef01234567",
+          conflicting_commit: "fedcba9876543210fedcba9876543210fedcba98",
+          published_at: new Date().toISOString(),
+        },
+      }),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(screen.getByText(/Published 0123456 just now/)).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "Open on the Git host" }),
+    ).toHaveAttribute(
+      "href",
+      `https://example.test/owner/notes/tree/hatchdoor-recovery/main/${VAULT_ID}`,
+    );
+    expect(screen.getByRole("button", { name: "Publish again" })).toBeVisible();
+  });
+
+  it("says why a publish was refused", async () => {
+    mockDetail(
+      conflictedVault({
+        recovery_branch: {
+          branch: `hatchdoor-recovery/main/${VAULT_ID}`,
+          error: {
+            code: "managed_git_recovery_diverged",
+            message: "diverged",
+            retryable: false,
+          },
+        },
+      }),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(
+      screen.getByText(/Someone added commits to this branch/),
+    ).toBeVisible();
+  });
+
+  it("offers no recovery branch for a failure that is not a conflict", async () => {
+    mockDetail(
+      baseVault(conflictedSource, {
+        git: "unavailable",
+        git_error: {
+          code: "managed_git_remote_unreachable",
+          message: "unreachable",
+          retryable: true,
+        },
+      }),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(
+      screen.queryByRole("button", { name: /Publish/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists the conflicted files of an unfinished merge the checkout was left in", async () => {
+    mockDetail(
+      baseVault(
+        {
+          type: "managed_git",
+          repository_url: "https://example.test/notes.git",
+          branch: "main",
+          mode: "two_way",
+          poll_interval_secs: 3600,
+        },
+        {
+          git: "unavailable",
+          git_error: {
+            code: "managed_git_operation_in_progress",
+            message:
+              "managed checkout has an unfinished merge with conflicts in: notes/Home.md",
+            retryable: false,
+            detail: {
+              kind: "affected_paths",
+              paths: ["notes/Home.md"],
+              total: 1,
+            },
+          },
+        },
+      ),
+    );
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(screen.getByText(/part-way through a merge/i)).toBeVisible();
+    expect(screen.getByText("notes/Home.md")).toBeVisible();
+    expect(
+      screen.queryByText(/Something unexpected stopped/i),
+    ).not.toBeInTheDocument();
   });
 
   it("calls the retry endpoint when retrying a failed Vault", async () => {
@@ -1240,5 +1513,328 @@ describe("VaultSettingsIndex — the creation flow entry point (#153)", () => {
         screen.queryByRole("dialog", { name: "Add a Vault" }),
       ).not.toBeInTheDocument(),
     );
+  });
+});
+
+describe("VaultSettingsDetail — the note count in the blurb (#333)", () => {
+  function mockStats(stats: () => Response) {
+    // The stats route is listed first: the discovery pattern is a prefix of it.
+    mockRoutes({
+      "/api/v1/vaults/all/stats": stats,
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [baseVault({ type: "local", path: "/notes" })],
+          demo_mode: false,
+        }),
+      [`/api/v1/vaults/${VAULT_ID}/recent?limit=1`]: () =>
+        json({ data: [{ mtime_ns: 0 }] }),
+    });
+  }
+
+  function renderDetail() {
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+  }
+
+  it("shows the count the stats read supplied", async () => {
+    mockStats(() => json({ data: [{ vault_id: VAULT_ID, note_count: 12 }] }));
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(await screen.findByText(/· 12 notes ·/)).toBeVisible();
+  });
+
+  it("marks the count unknown, never 0, when a partial read left this Vault out", async () => {
+    mockStats(() =>
+      json({
+        data: [],
+        partial: true,
+        participants: [{ vault_id: VAULT_ID, state: "unavailable" }],
+      }),
+    );
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+    await vi.waitFor(() =>
+      expect(mockedApiFetch).toHaveBeenCalledWith("/api/v1/vaults/all/stats"),
+    );
+    const marker = await screen.findByLabelText("Note count not known");
+    expect(marker).toHaveTextContent("–");
+    expect(marker.parentElement).toHaveTextContent(/– notes/);
+    expect(screen.queryByText(/\b0 notes\b/)).not.toBeInTheDocument();
+  });
+});
+
+describe("VaultSettingsDetail — a registry that moved elsewhere (#338)", () => {
+  const conflict = (expected: unknown, current: number) =>
+    new Response(
+      JSON.stringify({
+        code: "registry_revision_conflict",
+        message: `expected registry revision ${String(expected)}, current revision is ${current}`,
+        retryable: true,
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+
+  /** A registry whose revision a test can move, as another tab or an MCP
+   * agent would, with every guarded route refusing a stale revision the way
+   * `src/vault_management.rs` does. */
+  function mockMovingRegistry(
+    onPatch?: (body: Record<string, unknown>) => void,
+  ) {
+    const registry = { revision: 3 };
+    const vault = baseVault({ type: "local", path: "/notes" });
+    const expectedFrom = (init: RequestInit | undefined, url: string) =>
+      init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+            .expected_registry_revision
+        : Number(
+            new URL(url, "http://x").searchParams.get(
+              "expected_registry_revision",
+            ),
+          );
+    const calls: string[] = [];
+    mockedApiFetch.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${url}`);
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      if (url.startsWith(`/api/v1/vaults/${VAULT_ID}/recent`))
+        return json({ data: [] });
+      if (url === "/api/v1/vaults" && method === "GET")
+        return json({
+          registry_revision: registry.revision,
+          collection_revision: registry.revision,
+          vaults: [vault],
+          demo_mode: false,
+        });
+      if (url.startsWith(`/api/v1/vaults/${VAULT_ID}`) && method !== "GET") {
+        const expected = expectedFrom(init, url);
+        if (expected !== registry.revision)
+          return conflict(expected, registry.revision);
+        if (method === "PATCH")
+          onPatch?.(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        registry.revision += 1;
+        return json({
+          vault: {
+            ...vault,
+            enabled: !url.includes("/disable"),
+          },
+          registry_revision: registry.revision,
+          collection_revision: registry.revision,
+        });
+      }
+      throw new Error(`Unexpected API request: ${method} ${url}`);
+    });
+    return { registry, calls };
+  }
+
+  function renderDetail() {
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+  }
+
+  it("pauses against the revision current at the click, not the one the page opened with", async () => {
+    const { registry, calls } = mockMovingRegistry();
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    registry.revision = 7; // another tab edited a different Vault
+    fireEvent.click(screen.getByRole("button", { name: "Pause Vault" }));
+
+    await screen.findByText("Saved.");
+    expect(calls).toContain(
+      `POST /api/v1/vaults/${VAULT_ID}/disable?expected_registry_revision=7`,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("says a Save conflict in words, as an alert, and lets the next Save through", async () => {
+    let patched: Record<string, unknown> | undefined;
+    const { registry } = mockMovingRegistry((body) => (patched = body));
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    registry.revision = 7;
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/changed elsewhere/);
+    expect(alert).not.toHaveTextContent(/registry revision/);
+    expect(patched).toBeUndefined();
+    // The typed edit survives the refusal.
+    expect(screen.getByLabelText("Vault name")).toHaveValue("Renamed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+    await screen.findByText("Saved.");
+    expect(patched?.expected_registry_revision).toBe(7);
+    expect(patched?.name).toBe("Renamed");
+  });
+});
+
+describe("VaultSettingsDetail — a Git behaviour switch clears what leaves the screen (#338)", () => {
+  const twoWay = {
+    type: "existing_git",
+    repository_path: "/notes",
+    repository_url: "https://example.test/notes.git",
+    branch: "main",
+    mode: "two_way",
+    poll_interval_secs: 3600,
+  };
+
+  it("never sends a token typed for a remote behaviour once the choice has no remote", async () => {
+    let patched: Record<string, unknown> | undefined;
+    mockDetail(baseVault(twoWay, { credential_configured: true }), {
+      onPatch: (body) => (patched = body),
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.change(screen.getByLabelText("Repository access token"), {
+      target: { value: "s3cr3t" },
+    });
+    fireEvent.change(screen.getByLabelText("Sync schedule in minutes"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    expect(
+      screen.queryByLabelText("Repository access token"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+
+    await screen.findByText("Saved.");
+    expect(patched?.https_credentials).toEqual({ action: "remove" });
+    expect(JSON.stringify(patched)).not.toContain("s3cr3t");
+    expect(
+      (patched?.source as { poll_interval_secs?: number }).poll_interval_secs,
+    ).toBe(3600);
+  });
+
+  it("brings the saved sign-in back, with an empty token field, when the choice returns to a remote", async () => {
+    mockDetail(baseVault(twoWay, { credential_configured: true }));
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.change(screen.getByLabelText("Repository access token"), {
+      target: { value: "s3cr3t" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    fireEvent.click(screen.getByRole("button", { name: "Two-way" }));
+
+    expect(screen.getByLabelText("Repository access token")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "Access token" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("VaultSettingsDetail — the last change in the blurb (#338)", () => {
+  it("never prints the previous Vault's date under a Vault whose read was refused", async () => {
+    const OTHER_ID = "00000000-0000-4000-8000-000000000002";
+    const first = baseVault({ type: "local", path: "/notes" });
+    const second = {
+      ...baseVault({ type: "local", path: "/other" }),
+      vault_id: OTHER_ID,
+      name: "Other notes",
+      search: "indexing",
+    };
+    mockedApiFetch.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      if (url === `/api/v1/vaults/${VAULT_ID}/recent?limit=1`)
+        return json({ data: [{ mtime_ns: Date.UTC(2020, 0, 15) * 1e6 }] });
+      if (url === `/api/v1/vaults/${OTHER_ID}/recent?limit=1`)
+        return new Response("{}", { status: 503 });
+      if (url === "/api/v1/vaults")
+        return json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [first, second],
+          demo_mode: false,
+        });
+      throw new Error(`Unexpected API request: ${url}`);
+    });
+
+    const { rerender } = render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByText(/changed \d/);
+
+    rerender(
+      <VaultSettingsDetail
+        vaultId={OTHER_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByText(/last change unavailable/);
+    expect(screen.queryByText(/changed \d/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Settings modals (#338)", () => {
+  it("focuses the confirmation, keeps Tab inside it, and closes it on Escape", async () => {
+    mockDetail(baseVault({ type: "local", path: "/notes" }));
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    const save = screen.getByRole("button", { name: "Save Vault" });
+    save.focus();
+    fireEvent.click(save);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Before this is saved",
+    });
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    const goAhead = within(dialog).getByRole("button", { name: "Go ahead" });
+    expect(cancel).toHaveFocus();
+
+    goAhead.focus();
+    fireEvent.keyDown(goAhead, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: "Tab", shiftKey: true });
+    expect(goAhead).toHaveFocus();
+
+    fireEvent.keyDown(goAhead, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: "Before this is saved" }),
+    ).not.toBeInTheDocument();
+    expect(save).toHaveFocus();
   });
 });

@@ -1,12 +1,19 @@
 import type { VaultId, VaultScope, VaultSummary } from "../types";
 
+/** `count` is `null` when the note count is not known: the stats read has not
+ * answered yet, failed, or left this Vault out of a partial answer. Unknown is
+ * never rendered or announced as 0 (#333). */
 export type VaultSlotState =
-  | { kind: "count"; count: number }
+  | { kind: "count"; count: number | null }
   | { kind: "indexing" }
   /** Browsable but not yet searchable: a real note count, plus a marker that
    * search is still building. Its own kind rather than a `condition` because
    * nothing is wrong — the Vault is usable, just not by search yet. */
-  | { kind: "count-pending-search"; count: number; sentence: string }
+  | { kind: "count-pending-search"; count: number | null; sentence: string }
+  /** Indexing is queued behind another Vault's, or paused to let one
+   * through (ADR-35). Nothing is wrong and nothing is moving, so it is a
+   * still word, not a condition and not a shimmer. */
+  | { kind: "waiting"; sentence: string }
   | {
       kind: "condition";
       word: string;
@@ -52,13 +59,21 @@ function slotTier(demoMode: boolean, tier: "warn" | "error"): "warn" | "error" {
   return demoMode ? "warn" : tier;
 }
 
+// The Git status codes the server sends for a sync halted on a merge conflict
+// (ADR-30) and for one halted on files changed by hand where the sync cannot
+// reconcile them (`src/git/managed_task.rs`).
+const SYNC_CONFLICT_CODE = "managed_git_conflict";
+const DIRTY_WORKING_COPY_CODE = "managed_git_dirty_working_copy";
+
 /**
  * Each Vault's single trailing slot: its note count when healthy, a
  * shimmering placeholder while indexing, or one condition word otherwise —
  * never a count and a condition together (#116, amended by #117).
  *
  * Priority (worst first): `unavailable` outranks every Git condition, which
- * outranks `stale`, which outranks indexing. A Vault that has never
+ * outranks `stale`, which outranks indexing. A Vault waiting its turn to
+ * index behind another Vault (ADR-35) shows `waiting` in place of anything
+ * below the Git conditions, unless it is ready or a failure rides along. A Vault that has never
  * published a snapshot reports the same `search: "unavailable"` the API uses
  * for a vanished directory, but only the latter also turns `activation`
  * `"unavailable"` (`activation_snapshot` in `src/vault_runtime.rs`: a Vault
@@ -89,7 +104,7 @@ export function deriveVaultSlot(
     };
   }
   if (vault.git === "unavailable") {
-    if (vault.git_error?.code === "git_content_conflict") {
+    if (vault.git_error?.code === SYNC_CONFLICT_CODE) {
       return {
         kind: "condition",
         word: "conflict",
@@ -101,7 +116,7 @@ export function deriveVaultSlot(
         ),
       };
     }
-    if (vault.git_error?.code === "dirty_working_copy") {
+    if (vault.git_error?.code === DIRTY_WORKING_COPY_CODE) {
       return {
         kind: "condition",
         word: "sync stopped",
@@ -109,7 +124,7 @@ export function deriveVaultSlot(
         sentence: slotSentence(
           demoMode,
           vault.git_error.message,
-          "Local edits in this Vault halted Git sync.",
+          "Files changed by hand in this Vault's repository halted Git sync.",
         ),
       };
     }
@@ -123,6 +138,18 @@ export function deriveVaultSlot(
         "The last Git sync for this Vault did not succeed.",
       ),
     };
+  }
+  // Waiting stands in wherever the Vault would otherwise show indexing:
+  // building, browsable while search builds, or stale only because a rebuild
+  // has not finished. A Vault that is ready already shows its count, and a
+  // failure keeps its condition, so a routine reindex queued behind another
+  // Vault changes nothing on screen.
+  if (
+    vault.index_turn === "waiting" &&
+    vault.search !== "ready" &&
+    !vault.search_error
+  ) {
+    return { kind: "waiting", sentence: waitingSentence(vault) };
   }
   if (vault.search === "stale") {
     return {
@@ -158,21 +185,31 @@ export function deriveVaultSlot(
     }
     return {
       kind: "count-pending-search",
-      count: noteCount ?? 0,
+      count: noteCount ?? null,
       sentence: "Browsing is ready. Search for this Vault is still building.",
     };
   }
   if (vault.search === "indexing" || vault.search === "unavailable") {
     return { kind: "indexing" };
   }
-  return { kind: "count", count: noteCount ?? 0 };
+  return { kind: "count", count: noteCount ?? null };
+}
+
+function waitingSentence(vault: VaultSummary): string {
+  if (vault.search === "browsable") {
+    return "Browsing is ready. Search for this Vault waits its turn to index behind another Vault.";
+  }
+  if (vault.search === "stale") {
+    return "Search answers from this Vault's previous index while it waits its turn to index behind another Vault.";
+  }
+  return "This Vault waits its turn to index behind another Vault.";
 }
 
 /**
  * The current scope's count-or-condition, in the same words §27's slot
  * renders, for the shell's polite live region (#146). `null` means not yet
- * known (an indexing Vault) — the live region must never announce a value it
- * does not have.
+ * known (an indexing Vault, or a count the stats read has not supplied) — the
+ * live region must never announce a value it does not have.
  */
 export function describeScopeSlot(
   scope: VaultScope,
@@ -197,6 +234,14 @@ export function describeScopeSlot(
   }
   if (slot.kind === "condition") {
     return slot.word;
+  }
+  if (slot.kind === "waiting") {
+    return "waiting";
+  }
+  if (slot.count === null) {
+    return slot.kind === "count-pending-search"
+      ? "Search still building"
+      : null;
   }
   const notes = `${slot.count} note${slot.count === 1 ? "" : "s"}`;
   return slot.kind === "count-pending-search"
@@ -235,4 +280,27 @@ export function deriveVaultAggregate(
     total: vaults.length,
     tier: worstTier,
   };
+}
+
+/** Whether the note at `relativePath` (Vault-relative and without `.md`, as
+ * note reads report it) is one of the files the Vault's current sync conflict
+ * lists (ADR-30). The conflict names repository-relative file paths, so the
+ * note's path gets its extension back and, for a Vault kept in a folder of
+ * its repository, that folder in front. A conflict listing more files than it
+ * names can only match the ones it names. */
+export function noteInSyncConflict(
+  vault: VaultSummary | undefined,
+  relativePath: string | undefined,
+): boolean {
+  if (!vault || !relativePath) return false;
+  const error = vault.git_error;
+  if (error?.code !== SYNC_CONFLICT_CODE) return false;
+  if (error.detail?.kind !== "affected_paths") return false;
+  const subdirectory =
+    vault.source?.type === "local"
+      ? undefined
+      : vault.source?.vault_subdirectory?.replace(/^\/+|\/+$/g, "");
+  const file = `${relativePath}.md`;
+  const repositoryPath = subdirectory ? `${subdirectory}/${file}` : file;
+  return error.detail.paths.includes(repositoryPath);
 }

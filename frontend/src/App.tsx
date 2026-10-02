@@ -42,6 +42,8 @@ import {
   isEditableTarget,
   pruneStoredLastNotesByVault,
   rememberLastNoteForVault,
+  safeGetItem,
+  safeSetItem,
 } from "./lib/storage";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useTheme } from "./hooks/useTheme";
@@ -79,7 +81,7 @@ function VaultWorkspace({
   onRetryModelSetup: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
-    return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
+    return safeGetItem(DRAWER_OPEN_KEY) === "1";
   });
   const [sidebarWidth, setSidebarWidth] = useState<number>(() =>
     getStoredNumber(SIDEBAR_WIDTH_KEY, 268, 220, 420),
@@ -109,14 +111,17 @@ function VaultWorkspace({
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
-  const [scope, setScope] = useVaultScope();
+  const [scope, setScope, scopeFallbackNotice] = useVaultScope();
   const {
     vaults,
     demoMode,
     loading: vaultsLoading,
+    readState: collectionReadState,
+    error: collectionError,
     recovery: registryRecovery,
     legacyMigrationRecovery,
     noteCounts: vaultNoteCounts,
+    revision: collectionRevision,
     refresh: loadVaults,
   } = useVaultCollection();
   const vaultProjection = useVaultProjection();
@@ -130,9 +135,12 @@ function VaultWorkspace({
     vaultTrees,
     loadingTree,
     treeError,
+    treePartial,
+    treeMissingVaults,
     modifiedNotes,
     modifiedNotesPartial,
     modifiedNotesMissingVaults,
+    modifiedNotesError,
     vaultRevision,
     folderPathsByVault,
     noteCandidates,
@@ -159,7 +167,19 @@ function VaultWorkspace({
     setWriteWarnings,
     writeNotice,
     setWriteNotice,
-  } = useWriteMode(primaryVaultId);
+    recheck: recheckWriteMode,
+  } = useWriteMode(primaryVaultId, {
+    demoMode,
+    revision: collectionRevision,
+  });
+  // A stored scope whose Vault left the browsing list has already been put
+  // back to All Vaults by `useVaultScope` (#335); the shared notice strip says
+  // why, so the explorer widening on its own is not a mystery.
+  useEffect(() => {
+    if (scopeFallbackNotice) {
+      setWriteNotice(scopeFallbackNotice.message);
+    }
+  }, [scopeFallbackNotice, setWriteNotice]);
   // `demoMode` defaults to `false` until Vault discovery's fetch resolves
   // (#152) — the same gap the "/settings" route itself guards below.
   // Without `!vaultsLoading` here, the sidebar footer's Settings link would
@@ -167,13 +187,13 @@ function VaultWorkspace({
   const settingsEnabled = !vaultsLoading && !demoMode;
   // A demo_read_only refusal is the one write error rendered in the app's
   // own words rather than the server's (#152). `writeEnabled` already stays
-  // false in demo mode — `write-capabilities` itself 403s under the same
-  // `demo_guard` every mutation route carries — so every write affordance
-  // this flag gates (New note, Edit, attachment drop) is already absent.
-  // This handler is the defense-in-depth backstop for any write attempt
-  // that reaches the server anyway: one sentence in the shared notice
-  // strip, no retry, and a fresh discovery fetch — "the app re-asks the
-  // server what it is permitted to do."
+  // false once the collection knows it is on a demo instance, and re-derives
+  // when the backend flips into demo mode (#339), so every write affordance
+  // this flag gates (New note, Edit, attachment drop) disappears on its own.
+  // This handler is the backstop for a write that reaches the server before
+  // the shell has noticed: one sentence in the shared notice strip, no retry,
+  // and the app re-asks the server what it is permitted to do — both the
+  // collection (which carries `demo_mode`) and `write-capabilities` itself.
   const handleDemoRefusal = useCallback(
     (error: unknown): boolean => {
       if (!isDemoReadOnlyError(error)) {
@@ -183,9 +203,10 @@ function VaultWorkspace({
         "This is a public read-only demo, so that change was not saved.",
       );
       void loadVaults();
+      recheckWriteMode();
       return true;
     },
-    [loadVaults, setWriteNotice],
+    [loadVaults, recheckWriteMode, setWriteNotice],
   );
   const {
     searchOpen,
@@ -234,12 +255,12 @@ function VaultWorkspace({
   // Recently viewed remembers whether it is folded away; the design is
   // explicit that leaving it closed is a fine way to use the sidebar.
   const [recentCollapsed, setRecentCollapsed] = useState<boolean>(
-    () => window.localStorage.getItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
+    () => safeGetItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
   );
   // The Scope zone remembers whether it is folded away, same as Recently
   // viewed; default expanded per the design spec.
   const [scopeZoneCollapsed, setScopeZoneCollapsed] = useState<boolean>(
-    () => window.localStorage.getItem(SCOPE_ZONE_COLLAPSED_KEY) === "1",
+    () => safeGetItem(SCOPE_ZONE_COLLAPSED_KEY) === "1",
   );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
@@ -260,25 +281,19 @@ function VaultWorkspace({
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      DRAWER_OPEN_KEY,
-      drawerOpen && isMobile ? "1" : "0",
-    );
+    safeSetItem(DRAWER_OPEN_KEY, drawerOpen && isMobile ? "1" : "0");
   }, [drawerOpen, isMobile]);
 
   useEffect(() => {
-    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    safeSetItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
 
   useEffect(() => {
-    window.localStorage.setItem(RECENT_NOTES_KEY, JSON.stringify(recentNotes));
+    safeSetItem(RECENT_NOTES_KEY, JSON.stringify(recentNotes));
   }, [recentNotes]);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      EXPANDED_FOLDERS_KEY,
-      JSON.stringify(expandedFolders),
-    );
+    safeSetItem(EXPANDED_FOLDERS_KEY, JSON.stringify(expandedFolders));
   }, [expandedFolders]);
 
   useEffect(() => {
@@ -387,7 +402,7 @@ function VaultWorkspace({
     if (!activeNote) {
       return;
     }
-    window.localStorage.setItem(
+    safeSetItem(
       LAST_NOTE_KEY,
       JSON.stringify({ vaultId: activeNote.vaultId, slug: activeNote.slug }),
     );
@@ -402,8 +417,15 @@ function VaultWorkspace({
     }
     // Discovery still in flight means `vaults` is a temporary `[]`, which
     // would read as "the stored Vault is gone" for every stored note. Wait for
-    // the real list before judging it.
-    if (vaultsLoading) {
+    // the real list before judging it. A failed discovery leaves the same
+    // `[]` behind it, and judging that would forget the note over a network
+    // error (#333): wait for a discovery that actually answered, which the
+    // Try again action or the revision stream's reconnect delivers.
+    if (
+      vaultsLoading ||
+      collectionReadState === "loading" ||
+      collectionReadState === "error"
+    ) {
       return;
     }
     restoredLastNoteRef.current = true;
@@ -425,7 +447,7 @@ function VaultWorkspace({
       `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
       { replace: true },
     );
-  }, [location.pathname, navigate, vaults, vaultsLoading]);
+  }, [collectionReadState, location.pathname, navigate, vaults, vaultsLoading]);
 
   useEffect(() => {
     // A departed Vault's remembered note is unusable for the same reason the
@@ -435,11 +457,16 @@ function VaultWorkspace({
     // evidence of that — a broken registry and a paused-everything
     // collection both produce one — so it forgets nothing at all rather than
     // everything.
-    if (vaultsLoading || hasRegistryRecovery || vaults.length === 0) {
+    if (
+      vaultsLoading ||
+      collectionReadState === "error" ||
+      hasRegistryRecovery ||
+      vaults.length === 0
+    ) {
       return;
     }
     pruneStoredLastNotesByVault(vaults.map((vault) => vault.vault_id));
-  }, [hasRegistryRecovery, vaults, vaultsLoading]);
+  }, [collectionReadState, hasRegistryRecovery, vaults, vaultsLoading]);
 
   // Narrowing the browsing scope to one Vault carries the reader with it: the
   // note that Vault was last left on comes back, the same restore the landing
@@ -478,7 +505,7 @@ function VaultWorkspace({
 
   const handleScopeZoneCollapsedChange = useCallback((next: boolean) => {
     setScopeZoneCollapsed(next);
-    window.localStorage.setItem(SCOPE_ZONE_COLLAPSED_KEY, next ? "1" : "0");
+    safeSetItem(SCOPE_ZONE_COLLAPSED_KEY, next ? "1" : "0");
   }, []);
 
   // Give focus back to wherever `v` was pressed (#146) — read once, then
@@ -804,18 +831,21 @@ function VaultWorkspace({
           modifiedNotes={modifiedNotes}
           modifiedNotesPartial={modifiedNotesPartial}
           modifiedNotesMissingVaults={modifiedNotesMissingVaults}
+          modifiedNotesError={modifiedNotesError}
+          onRetryModifiedNotes={() => {
+            void loadModifiedNotes();
+          }}
           loadingTree={loadingTree}
           treeError={treeError}
+          treePartial={treePartial}
+          treeMissingVaults={treeMissingVaults}
           tree={tree}
           vaultTrees={vaultTrees}
           expandedFolders={expandedFolders}
           recentCollapsed={recentCollapsed}
           onRecentCollapsedChange={(next) => {
             setRecentCollapsed(next);
-            window.localStorage.setItem(
-              RECENT_NOTES_COLLAPSED_KEY,
-              next ? "1" : "0",
-            );
+            safeSetItem(RECENT_NOTES_COLLAPSED_KEY, next ? "1" : "0");
           }}
           vaults={vaults}
           scope={scope}
@@ -834,10 +864,7 @@ function VaultWorkspace({
             void loadModifiedNotes();
           }}
           onScrollTopChange={(current) => {
-            window.localStorage.setItem(
-              EXPLORER_SCROLL_TOP_KEY,
-              String(current),
-            );
+            safeSetItem(EXPLORER_SCROLL_TOP_KEY, String(current));
           }}
           demoMode={demoMode}
         />
@@ -885,7 +912,18 @@ function VaultWorkspace({
             <Route
               path="/"
               element={
-                vaultsLoading ? null : registryRecovery ? (
+                vaultsLoading ||
+                collectionReadState ===
+                  "loading" ? null : collectionReadState === "error" ? (
+                  // Discovery failed and nothing is known about the
+                  // collection: never the zero-Vault state, which would tell
+                  // the reader their Vaults are gone (#333).
+                  <BrokenStartState
+                    title="Vaults Unavailable"
+                    message={collectionError ?? "Could not load your Vaults."}
+                    onTryAgain={() => void loadVaults()}
+                  />
+                ) : registryRecovery ? (
                   <BrokenStartState
                     message={registryRecovery.message}
                     onTryAgain={() => void loadVaults()}
@@ -1010,6 +1048,13 @@ function VaultWorkspace({
                 )
               }
             />
+            {/* Any other address — a stale bookmark, a pre-#137 `/n/:slug`
+                link, a typo — says so rather than leaving the pane empty
+                (#339). */}
+            <Route
+              path="*"
+              element={<NotFoundState onGoHome={() => navigate("/")} />}
+            />
           </Routes>
         </main>
       </div>
@@ -1038,6 +1083,7 @@ function VaultWorkspace({
           inputRef={searchInputRef}
           startupStatus={startupStatus}
           onRetryModelSetup={onRetryModelSetup}
+          demoMode={demoMode}
           onClose={() => setSearchOpen(false)}
           onQueryChange={setSearchQuery}
           onIncludeContentChange={setSearchIncludeContent}
@@ -1111,11 +1157,24 @@ export function VaultApp({
 }
 
 /** The Scope zone's own reading of the shrunk startup gate's progress
- * (#150): `null` outside `scanning`/`indexing`, since every other state
- * already renders the ordinary aggregate slot. */
+ * (#150): `undefined` outside `downloading`/`scanning`/`indexing`, since every
+ * other state already renders the ordinary aggregate slot. `downloading` only
+ * reaches here once the gate has stepped aside, which is a model re-download
+ * (a retry after a failed setup): without this slot it ran invisibly (#339). */
 function deriveStartupProgress(
   status: StartupStatus | null,
 ): StartupProgress | undefined {
+  if (status?.state === "downloading") {
+    const percent = status.percent ?? null;
+    return {
+      label:
+        percent === null
+          ? "Downloading search model"
+          : `Downloading search model ${percent}%`,
+      percent,
+      eta: null,
+    };
+  }
   if (status?.state === "scanning") {
     return { label: "Scanning", percent: null, eta: null };
   }
@@ -1150,16 +1209,31 @@ function formatEtaSeconds(seconds: number | undefined): string | null {
 }
 
 export function App() {
+  // Bumped to remount the whole app in place. Unlock does that instead of a
+  // page reload when the browser refused to store the token (#339): a reload
+  // would forget it, and the remount drops every cached 401 all the same,
+  // since the collection store starts over once its last subscriber leaves.
+  const [session, setSession] = useState(0);
+  return (
+    <AppSession
+      key={session}
+      onUnlockInPlace={() => setSession((current) => current + 1)}
+    />
+  );
+}
+
+function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
   const [authRequired, setAuthRequired] = useState(false);
   const collection = useVaultCollection();
   const hasRegistryRecovery = Boolean(
     collection.recovery || collection.legacyMigrationRecovery,
   );
+  // Only a discovery that answered can say there are no Vaults; a failed one
+  // (`readState` "error") knows nothing either way.
   const hasNoVaults =
     !collection.loading &&
-    !collection.error &&
-    !hasRegistryRecovery &&
-    collection.vaults.length === 0;
+    collection.readState === "empty" &&
+    !hasRegistryRecovery;
   // The startup route is neither useful nor permitted to poll while the
   // workspace is a zero-Vault or broken-registry recovery surface (#150).
   // Resolve the collection first so either condition can win before a model
@@ -1178,9 +1252,12 @@ export function App() {
       {authRequired ? (
         <TokenPrompt
           onSubmit={(token) => {
-            setToken(token);
             setAuthRequired(false);
-            window.location.reload();
+            if (setToken(token)) {
+              window.location.reload();
+            } else {
+              onUnlockInPlace();
+            }
           }}
         />
       ) : null}
@@ -1191,6 +1268,7 @@ export function App() {
         discoveryLoading={collection.loading}
         hasRegistryRecovery={hasRegistryRecovery}
         hasNoVaults={hasNoVaults}
+        demoMode={collection.demoMode}
         onAcceptGemma={() => void startup.acceptGemma()}
         onDeclineGemma={() => void startup.declineGemma()}
       >
@@ -1200,6 +1278,19 @@ export function App() {
         />
       </StartupGate>
     </>
+  );
+}
+
+/** An address that matches no route (#339). The shell around it still works,
+ * and the action takes the reader back to the landing route. */
+function NotFoundState({ onGoHome }: { onGoHome: () => void }) {
+  return (
+    <StateBlock
+      title="Page Not Found"
+      description="Nothing lives at this address. The link may be out of date."
+      actionLabel="Go to notes"
+      onAction={onGoHome}
+    />
   );
 }
 

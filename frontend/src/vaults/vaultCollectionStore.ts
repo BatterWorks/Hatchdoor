@@ -24,10 +24,39 @@ import type {
  * legacy import still needs recovery) are mutually exclusive broken-start
  * conditions (#150): both leave the lists empty, but only one is ever set.
  *
- * `revision` is the collection revision the SSE stream last reported; it starts
- * at 0, meaning "nothing has changed since load".
+ * `revision` is the collection revision the state reflects: seeded from the
+ * discovery response and advanced by the SSE stream. `null` until a discovery
+ * lands, which is a different fact from a server sitting at revision 0 — the
+ * two shared the `0` sentinel until a freshly restarted server was found to
+ * spend its first genuine change being mistaken for "nothing known yet".
+ *
+ * `readState` is the one answer to "what do we know about the collection",
+ * derived from the fields above so no consumer has to reassemble it (#333):
+ *
+ * - `loading`: no discovery has answered yet.
+ * - `error`: discovery failed and none has ever succeeded. The lists are empty
+ *   because nothing is known, not because the registry is empty, so this must
+ *   never render as the zero-Vault state or be taken as evidence that a stored
+ *   Vault has left the collection.
+ * - `empty`: discovery succeeded with no enabled Vaults (a broken registry is
+ *   also `empty`; `recovery`/`legacyMigrationRecovery` say which).
+ * - `partial`: the Vault list is known but the note counts are not all
+ *   current: the stats read failed, or answered without some Vault.
+ * - `ready`: everything answered.
+ *
+ * A refresh that fails after a discovery has succeeded keeps the last known
+ * list and sets the `error` field, but `readState` stays `empty`, `partial` or
+ * `ready` rather than dropping back to `"error"`: the list it shows is still
+ * the best answer there is.
+ *
+ * `noteCounts` holds only counts actually read. A Vault with no entry has an
+ * unknown count, which the slot renders as unknown, never as 0.
  */
+export type VaultCollectionReadState =
+  "loading" | "error" | "empty" | "partial" | "ready";
+
 export type VaultCollectionState = {
+  readState: VaultCollectionReadState;
   vaults: VaultSummary[];
   allVaults: VaultSummary[];
   demoMode: boolean;
@@ -36,11 +65,13 @@ export type VaultCollectionState = {
   recovery: VaultRegistryRecovery | null;
   legacyMigrationRecovery: LegacyMigrationRecovery | null;
   registryRevision: number | null;
-  revision: number;
+  revision: number | null;
   noteCounts: Record<VaultId, number>;
+  noteCountsPartial: boolean;
 };
 
 const EMPTY_STATE: VaultCollectionState = {
+  readState: "loading",
   vaults: [],
   allVaults: [],
   demoMode: false,
@@ -49,8 +80,9 @@ const EMPTY_STATE: VaultCollectionState = {
   recovery: null,
   legacyMigrationRecovery: null,
   registryRevision: null,
-  revision: 0,
+  revision: null,
   noteCounts: {},
+  noteCountsPartial: false,
 };
 
 type Listener = () => void;
@@ -62,6 +94,19 @@ let stream: EventSource | null = null;
 /** Bumped by every reset so a fetch still in flight over the old collection
  * cannot write its answer into the new one. */
 let generation = 0;
+/** Whether any discovery has answered for the current generation. Kept apart
+ * from `revision`, which the SSE stream can seed before discovery lands. */
+let discovered = false;
+
+function deriveReadState(next: VaultCollectionState): VaultCollectionReadState {
+  if (!discovered) {
+    return next.error ? "error" : "loading";
+  }
+  if (next.vaults.length === 0) {
+    return "empty";
+  }
+  return next.noteCountsPartial ? "partial" : "ready";
+}
 
 /** A refresh that finds nothing new must not hand React a new object: the
  * collection revision bumps on every note write, and a fresh-but-identical
@@ -74,8 +119,9 @@ function reuseIfUnchanged<T>(previous: T, next: T): T {
 }
 
 function publish(patch: Partial<VaultCollectionState>) {
-  const next = { ...state, ...patch };
-  const changed = (Object.keys(patch) as (keyof VaultCollectionState)[]).some(
+  const merged = { ...state, ...patch };
+  const next = { ...merged, readState: deriveReadState(merged) };
+  const changed = (Object.keys(next) as (keyof VaultCollectionState)[]).some(
     (key) => !Object.is(state[key], next[key]),
   );
   if (!changed) {
@@ -96,7 +142,11 @@ export function getVaultCollectionSnapshot(): VaultCollectionState {
 async function loadNoteCounts(forGeneration: number): Promise<void> {
   try {
     const res = await apiFetch("/api/v1/vaults/all/stats");
-    if (!res.ok || forGeneration !== generation) {
+    if (forGeneration !== generation) {
+      return;
+    }
+    if (!res.ok) {
+      publish({ noteCountsPartial: true });
       return;
     }
     const projection = (await res.json()) as VaultReadProjection<
@@ -105,20 +155,42 @@ async function loadNoteCounts(forGeneration: number): Promise<void> {
     if (forGeneration !== generation) {
       return;
     }
-    const next: Record<VaultId, number> = {};
-    for (const entry of projection.data) {
+    // Merge rather than rebuild: under `all` the server leaves a Vault whose
+    // snapshot could not be read out of `data` and lists it only as a
+    // participant. Rebuilding from `data` alone dropped its last known count,
+    // and the slot then read the gap as "0 notes". A Vault that did not
+    // answer keeps what was last known, or stays unknown if nothing was.
+    const next: Record<VaultId, number> = { ...state.noteCounts };
+    const answered = new Set<VaultId>();
+    for (const entry of projection.data ?? []) {
       next[entry.vault_id] = entry.note_count;
+      answered.add(entry.vault_id);
     }
-    publish({ noteCounts: reuseIfUnchanged(state.noteCounts, next) });
+    const missing = state.vaults.some((vault) => !answered.has(vault.vault_id));
+    publish({
+      noteCounts: reuseIfUnchanged(state.noteCounts, next),
+      noteCountsPartial: Boolean(projection.partial) || missing,
+    });
   } catch {
+    if (forGeneration !== generation) {
+      return;
+    }
     // Leave prior counts in place; the slot treats a missing entry as unknown.
+    publish({ noteCountsPartial: true });
   }
 }
 
 /** The one `GET /api/v1/vaults` read in the app. Throws the server's own
  * message on a refusal, so each caller decides what to do with it. */
 async function readDiscovery(): Promise<VaultDiscoveryResponse> {
-  const res = await apiFetch("/api/v1/vaults");
+  let res: Response;
+  try {
+    res = await apiFetch("/api/v1/vaults");
+  } catch {
+    // Offline, a server mid-restart, or a timed-out request: the browser's
+    // own wording ("Failed to fetch", "Load failed") names none of them.
+    throw new Error("Could not reach the Hatchdoor server.");
+  }
   if (!res.ok) {
     throw new Error(await readErrorMessage(res, "Failed loading Vaults"));
   }
@@ -140,6 +212,7 @@ async function loadCollection(forGeneration: number): Promise<void> {
       allVaults.filter((vault) => vault.enabled),
     );
     const recovery = discovery.recovery ?? null;
+    discovered = true;
     publish({
       allVaults,
       vaults: enabled,
@@ -150,6 +223,22 @@ async function loadCollection(forGeneration: number): Promise<void> {
         discovery.legacy_migration_recovery ?? null,
       ),
       registryRevision: discovery.registry_revision ?? null,
+      // Seed the baseline, once, from the read the vaults themselves came
+      // from. The stream reports the server's current revision the moment it
+      // connects rather than a delta, so against a starting `revision` of 0
+      // that first event always read as an invalidation and every consumer
+      // keyed on it reloaded: the explorer tree and the recent list were each
+      // fetched twice on every page load. Only the baseline is taken here.
+      // Once a revision is known the stream alone moves it, which is what
+      // keeps a revision counting from zero again after a server restart a
+      // change this client follows rather than one a later discovery undoes.
+      // The narrow race stays honest either way: a collection that genuinely
+      // changed between this response and the stream connecting reports a
+      // different revision, and that one still invalidates.
+      revision:
+        state.revision === null
+          ? discovery.collection_revision
+          : state.revision,
       error: null,
     });
     // A broken registry has no collection to count, and the stats read would
@@ -157,6 +246,7 @@ async function loadCollection(forGeneration: number): Promise<void> {
     // browsing list: the `all` scope those counts come from covers enabled
     // Vaults, and every reader of them renders one.
     if (recovery || enabled.length === 0) {
+      publish({ noteCountsPartial: false });
       return;
     }
     await loadNoteCounts(forGeneration);
@@ -271,6 +361,7 @@ export function subscribeVaultCollection(listener: Listener): () => void {
  */
 export function resetVaultCollection(): void {
   generation += 1;
+  discovered = false;
   started = false;
   stream?.close();
   stream = null;

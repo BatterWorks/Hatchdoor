@@ -540,7 +540,8 @@
   margin: 0;
 }
 
-.note-body th {
+.note-body th,
+.saved-query-head {
   text-align: left;
   font-family: var(--font-sans);
   font-weight: 600;
@@ -549,6 +550,9 @@
   text-transform: uppercase;
   color: var(--muted);
   border-bottom: 1px solid var(--rule-strong);
+}
+
+.note-body th {
   padding: 0.55rem 0.7rem 0.55rem 0;
   overflow-wrap: normal;
   white-space: nowrap;
@@ -578,6 +582,60 @@
 .note-body td:first-child {
   color: var(--muted);
 }
+
+/* Saved query (#275): a table the server computed for a `base` block. The
+   frame is the Table's .table-wrap; the caption shares the th rule above and
+   the notes reuse the td type, so the drawn result reads as the table it is,
+   not as a new surface. */
+.saved-query-head {
+  padding: 0.55rem 0.7rem;
+}
+
+.note-body .saved-query-note,
+.note-body .saved-query-orphan {
+  font-family: var(--font-sans);
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.note-body .saved-query-note {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+}
+
+.note-body table + .saved-query-note,
+.note-body .saved-query-note + .saved-query-note {
+  border-top: 1px solid var(--rule);
+}
+
+/* #276: a heading re-sorts its own table on screen. The button carries the
+   th type unchanged, so a sortable heading looks like every other heading
+   until it is pointed at or sorted. */
+.note-body .saved-query-sort {
+  all: inherit;
+  display: inline-flex;
+  gap: 0.35em;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+}
+
+.note-body .saved-query-sort:hover {
+  color: var(--ink);
+}
+
+.note-body .saved-query-sort:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+
+.note-body th[aria-sort="ascending"],
+.note-body th[aria-sort="descending"] {
+  color: var(--ink);
+}
+
+/* A `hatchdoor-query` marker naming no block shows the server's notice where
+   the marker sits, in the saved query note type above. */
 
 /* Images */
 .note-body img {

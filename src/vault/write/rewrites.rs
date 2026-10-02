@@ -1,12 +1,66 @@
 use std::fs;
-use std::io;
 use std::path::Path;
 
-use crate::cache::parse::parse_fence_marker;
-use crate::vault::paths::{normalize_link_target, normalize_title, split_wikilink_note_body};
+use crate::cache::parse::{content_hash, parse_fence_marker};
+use crate::vault::markdown_links::{
+    NoteLinkEdit, NotePaths, note_dir, relative_note_path, rewrite_note_links,
+};
+use crate::vault::paths::{
+    LinkForm, normalize_link_target, normalize_title, split_wikilink_note_body,
+};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
-use super::types::{TextRewrite, WriteError};
+use super::types::{TextRewrite, UnrewritableNote, WriteError};
+
+/// A note's text as the index reads it: lossily when the file is not valid
+/// UTF-8, in which case `utf8` is false.
+pub(super) struct NoteText {
+    pub(super) content: String,
+    pub(super) utf8: bool,
+}
+
+/// Read a note the way the index does, or `None` when it cannot be read at
+/// all.
+///
+/// A Vault-wide planner skips a note it cannot open, such as a dangling `.md`
+/// symlink, because `build_link_graph` skips the same file: it holds no link
+/// the index knows about, so there is nothing to plan for it (#360). A note
+/// that is not valid UTF-8 is read lossily, so the planner can still tell
+/// whether it holds anything the operation would change.
+pub(super) fn read_note_text(path: &Path) -> Option<NoteText> {
+    let bytes = fs::read(path).ok()?;
+    Some(match String::from_utf8(bytes) {
+        Ok(content) => NoteText {
+            content,
+            utf8: true,
+        },
+        Err(error) => NoteText {
+            content: String::from_utf8_lossy(error.as_bytes()).into_owned(),
+            utf8: false,
+        },
+    })
+}
+
+/// Why a note that is not valid UTF-8 cannot take a planned rewrite: writing
+/// it back would replace every byte that is not text.
+pub(super) fn non_utf8_note(relative_path: &str) -> UnrewritableNote {
+    UnrewritableNote {
+        relative_path: relative_path.to_string(),
+        reason: "the note is not valid UTF-8 text".to_string(),
+    }
+}
+
+/// Refuse the whole operation when any planner found a note it could not
+/// rewrite, naming each one once, in path order. Called before anything is
+/// written, folders included.
+pub(super) fn refuse_unrewritable(mut notes: Vec<UnrewritableNote>) -> Result<(), WriteError> {
+    if notes.is_empty() {
+        return Ok(());
+    }
+    notes.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    notes.dedup_by(|left, right| left.relative_path == right.relative_path);
+    Err(WriteError::LinkRewriteUnsupported(notes))
+}
 
 /// Where a note is going, in the two forms a rewrite needs: the link target
 /// other notes will point at, and the filesystem path its own body will be
@@ -22,11 +76,13 @@ pub(super) struct MovedTo<'a> {
 
 /// Retarget every backlink to the moved note, keeping the form its author wrote.
 ///
-/// A link written as a bare title stays a bare title, a path-qualified link
-/// gets the new full path, and `new_target: None` removes the link entirely
-/// (delete). The bare form is only safe while the new title names exactly one
-/// note, so a title another note already carries falls back to the full path:
-/// a link that resolved before the move must still resolve after it (#235).
+/// A link written without a folder path stays bare and picks up the new title,
+/// whether it named the note by title, by a title whose punctuation drifted
+/// from the filename, or by slug (#256). A path-qualified link gets the new
+/// full path, and `new_target: None` removes the link entirely (delete). The
+/// bare form is only safe while the new title names exactly one note, so a
+/// title another note already carries falls back to the full path: a link
+/// that resolved before the move must still resolve after it (#235).
 ///
 /// The moved note holds links to itself like any other note, and its
 /// self-links follow the same rules (#254). Its rewrite is keyed to
@@ -35,15 +91,35 @@ pub(super) struct MovedTo<'a> {
 /// not land. `destination: None` is delete: the link is removed from every
 /// other note, and the trashed body's link to itself is left as written
 /// because it is moot there.
+///
+/// Markdown note links (ADR-28) are rewritten in the same pass, so a file
+/// holding both forms gets one rewrite: see [`retarget_markdown_link`] for
+/// how a path keeps its form, and on delete each link is removed with its
+/// text kept.
+///
+/// A note that cannot be read is skipped, and a note that is not valid UTF-8
+/// is planned over its lossy text: it is skipped when nothing in it would
+/// change and added to `unrewritable` when something would (#360). The caller
+/// refuses the operation with [`refuse_unrewritable`] once every planner has
+/// run.
 pub(super) fn backlink_rewrite_plan(
     index: &VaultIndex,
     moved_slug: &str,
     moved_to: Option<MovedTo<'_>>,
-) -> Result<Vec<TextRewrite>, WriteError> {
+    unrewritable: &mut Vec<UnrewritableNote>,
+) -> Vec<TextRewrite> {
     let new_target = moved_to.map(|moved| moved.new_target);
     let entries = index.ordered_entries();
     let bare_new_target =
         new_target.and_then(|target| unambiguous_bare_title(&entries, moved_slug, target));
+    // How every path resolves once the note has moved, which is what a
+    // retargeted Markdown link has to resolve under.
+    let moved_from = index
+        .find_by_slug(moved_slug)
+        .map(|entry| entry.relative_path.as_str())
+        .unwrap_or_default();
+    let paths_after =
+        new_target.map(|target| index.note_paths.relocated(moved_slug, moved_from, target));
     let mut rewrites = Vec::new();
     for entry in entries {
         let rewrite_path = match moved_to {
@@ -51,12 +127,10 @@ pub(super) fn backlink_rewrite_plan(
             Some(moved) => moved.destination.to_path_buf(),
             None => continue,
         };
-        let content = fs::read_to_string(&entry.path).map_err(|error| {
-            WriteError::Io(format!(
-                "failed to read note '{}' for backlink rewrite: {error}",
-                entry.relative_path
-            ))
-        })?;
+        let Some(note) = read_note_text(&entry.path) else {
+            continue;
+        };
+        let content = note.content;
         let rewritten = transform_wikilinks(&content, |target| {
             let Some(candidate) = index.resolve_wikilink(target) else {
                 return Some(target.to_string());
@@ -65,20 +139,118 @@ pub(super) fn backlink_rewrite_plan(
                 return Some(target.to_string());
             }
             match bare_new_target.as_deref() {
-                Some(bare) if target_is_the_moved_notes_bare_title(target, &candidate.title) => {
-                    Some(bare.to_string())
-                }
+                // The target resolved to the moved note through any lookup
+                // pass, title or slug, so its folder path is all that decides
+                // its form.
+                Some(bare) if is_bare_target(target) => Some(bare.to_string()),
                 _ => new_target.map(ToOwned::to_owned),
             }
         });
-        if rewritten != content {
+        let source_moves = entry.slug == moved_slug;
+        let folder_before = note_dir(&entry.relative_path);
+        let rewritten = rewrite_note_links(&rewritten, |link| {
+            let Some((slug, form)) = index.note_paths.resolve(&link.path, folder_before) else {
+                return NoteLinkEdit::Keep;
+            };
+            let target_moves = slug == moved_slug;
+            let (Some(new_target), Some(paths_after)) = (new_target, paths_after.as_ref()) else {
+                return if target_moves {
+                    NoteLinkEdit::Unlink
+                } else {
+                    NoteLinkEdit::Keep
+                };
+            };
+            if !target_moves && !source_moves {
+                return NoteLinkEdit::Keep;
+            }
+            let target_after = if target_moves {
+                new_target
+            } else {
+                match index.find_by_slug(slug) {
+                    Some(target) => target.relative_path.as_str(),
+                    None => return NoteLinkEdit::Keep,
+                }
+            };
+            let folder_after = if source_moves {
+                note_dir(new_target)
+            } else {
+                folder_before
+            };
+            retarget_markdown_link(
+                paths_after,
+                &link.path,
+                form,
+                folder_after,
+                slug,
+                target_after,
+            )
+        });
+        if rewritten != content && !note.utf8 {
+            unrewritable.push(non_utf8_note(&entry.relative_path));
+        } else if rewritten != content {
             rewrites.push(TextRewrite {
                 path: rewrite_path,
+                // The hash of what is on disk now, for the note this rewrite
+                // lands on. For the moved note's own self-link rewrite that
+                // path is the destination, which the move puts these exact
+                // bytes at before any rewrite is applied.
+                original_hash: content_hash(&content),
                 content: rewritten,
             });
         }
     }
-    Ok(rewrites)
+    rewrites
+}
+
+/// The path a Markdown note link should carry once a move has happened.
+///
+/// A path that still reaches the note from where the linking note will be is
+/// kept exactly as written, so a rename leaves `./Other.md` or a
+/// differently-cased path alone. Otherwise the author's form wins wherever it
+/// still reaches the same note: a bare
+/// filename stays bare, a `/`-anchored path stays anchored, a path written from
+/// the Vault root stays so, and a note-relative path is recomputed from the
+/// linking note's folder. Each candidate is checked against `paths_after`, the
+/// index as it will be after the move, so a form that would now land on a
+/// namesake falls back to the note-relative path and then the anchored one.
+fn retarget_markdown_link(
+    paths_after: &NotePaths,
+    written: &str,
+    form: LinkForm,
+    folder_after: &str,
+    target_slug: &str,
+    target_after: &str,
+) -> NoteLinkEdit {
+    let reaches_target = |path: &str| {
+        paths_after
+            .resolve(path, folder_after)
+            .is_some_and(|(slug, _)| slug == target_slug)
+    };
+    if reaches_target(written) {
+        return NoteLinkEdit::Keep;
+    }
+    let name = target_after.rsplit('/').next().unwrap_or(target_after);
+    let preferred = if !written.contains(['/', '\\']) {
+        format!("{name}.md")
+    } else {
+        match form {
+            LinkForm::Root => format!("/{target_after}.md"),
+            LinkForm::VaultRelative => format!("{target_after}.md"),
+            LinkForm::NoteRelative | LinkForm::ByName => {
+                relative_note_path(folder_after, target_after)
+            }
+        }
+    };
+    let candidates = [
+        preferred,
+        relative_note_path(folder_after, target_after),
+        format!("/{target_after}.md"),
+    ];
+    let chosen = candidates
+        .iter()
+        .find(|candidate| reaches_target(candidate))
+        .unwrap_or(&candidates[2]);
+    NoteLinkEdit::Retarget(chosen.clone())
 }
 
 /// The moved note's new bare title, when no *other* note in the pre-move index
@@ -103,15 +275,14 @@ fn unambiguous_bare_title(
     (!taken_by_another_note).then(|| bare.to_string())
 }
 
-/// Whether this target is the moved note's own title, written bare.
+/// Whether this target names its note without a folder path.
 ///
-/// A slug-form target (`[[some-note]]` for "Some Note") is machine-authored
-/// and takes the full path like any other non-title form; for a single-word
-/// title the two forms normalize alike, so the distinction only ever arises
-/// for multi-word titles.
-fn target_is_the_moved_notes_bare_title(target: &str, moved_title: &str) -> bool {
-    let normalized = normalize_link_target(target);
-    !normalized.contains('/') && normalize_title(&normalized) == normalize_title(moved_title)
+/// A title, a title whose punctuation drifted from the filename
+/// (`[[11 — Used ...]]` for a file named `11 - Used ...`) and a slug
+/// (`[[some-note]]`) all read as bare links, so all of them stay one (#256,
+/// reversing the slug half of #235).
+fn is_bare_target(target: &str) -> bool {
+    !normalize_link_target(target).contains('/')
 }
 
 pub(super) fn transform_wikilinks<F>(content: &str, transform_target: F) -> String
@@ -221,6 +392,12 @@ where
     transform_target(target).map(|new_target| format!("{new_target}{suffix}"))
 }
 
+/// Fold two plans into one rewrite per path, keeping the later content.
+///
+/// The *earlier* entry's `original_hash` is kept, because the later planner
+/// composed its content onto the earlier plan's text rather than onto disk:
+/// the one thing both are derived from is what was on disk when the first of
+/// them read it, and that is the hash the commit must check against.
 pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) -> Vec<TextRewrite> {
     let mut merged: Vec<TextRewrite> = Vec::new();
     for rewrite in left.into_iter().chain(right) {
@@ -236,25 +413,62 @@ pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) ->
     merged
 }
 
-/// The content a plan already holds for `path`, if any rewrite targets it.
+/// The text a later planner composes onto for `path`, and the on-disk hash
+/// whatever it plans must still commit against.
+///
+/// The two travel together because they come apart in exactly the case that
+/// matters: `content` may be an earlier plan's output, while `original_hash`
+/// always describes what is on disk. A rewrite built from this must carry
+/// this hash forward, never one taken of `content`.
+pub(super) struct RewriteBase {
+    pub(super) content: String,
+    pub(super) original_hash: String,
+    /// False when `content` is a lossy reading of a note that is not valid
+    /// UTF-8, which no rewrite may be built from (#360).
+    pub(super) utf8: bool,
+}
+
+/// The base a plan already holds for `path`, if any rewrite targets it.
 ///
 /// A later planner composes onto this rather than appending a second rewrite,
 /// because [`merge_rewrites`] keeps only the last entry per path and a second
 /// one would discard the first.
-pub(super) fn planned_content(path: &Path, rewrites: &[TextRewrite]) -> Option<String> {
-    rewrites
+pub(super) fn planned_base(path: &Path, rewrites: &[TextRewrite]) -> Option<RewriteBase> {
+    // Content from the last entry for the path, because that is what a later
+    // planner must compose onto. Hash from the *first*, because that is the
+    // one taken from disk; a later entry only inherited it, and taking it
+    // from the first keeps the rule true however the slice was assembled.
+    let content = rewrites
         .iter()
         .rev()
-        .find(|rewrite| rewrite.path == path)
-        .map(|rewrite| rewrite.content.clone())
+        .find(|rewrite| rewrite.path == path)?
+        .content
+        .clone();
+    let original_hash = rewrites
+        .iter()
+        .find(|rewrite| rewrite.path == path)?
+        .original_hash
+        .clone();
+    // A planner never plans a rewrite of a note that is not UTF-8, so any
+    // planned content is.
+    Some(RewriteBase {
+        content,
+        original_hash,
+        utf8: true,
+    })
 }
 
-pub(super) fn rewrite_content_or_read(
-    path: &Path,
-    rewrites: &[TextRewrite],
-) -> Result<String, io::Error> {
-    match planned_content(path, rewrites) {
-        Some(content) => Ok(content),
-        None => fs::read_to_string(path),
+/// The base a later planner composes onto for `path`: the planned one when
+/// there is one, otherwise the note as [`read_note_text`] reads it, or `None`
+/// when it cannot be read at all.
+pub(super) fn rewrite_base_or_read(path: &Path, rewrites: &[TextRewrite]) -> Option<RewriteBase> {
+    if let Some(base) = planned_base(path, rewrites) {
+        return Some(base);
     }
+    let note = read_note_text(path)?;
+    Some(RewriteBase {
+        original_hash: content_hash(&note.content),
+        content: note.content,
+        utf8: note.utf8,
+    })
 }

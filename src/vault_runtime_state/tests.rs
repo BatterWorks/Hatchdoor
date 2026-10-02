@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn vault_id(value: &str) -> VaultId {
@@ -223,5 +224,89 @@ fn a_future_schema_file_is_read_as_unknown_and_never_overwritten() {
         std::fs::read_to_string(&path).expect("file still there"),
         from_the_future,
         "the newer file must survive byte for byte"
+    );
+}
+
+/// Record and forget run on different tasks against the same file. Each is a
+/// whole-file read-modify-write, so without one lock between them a writer
+/// could put back what it read before another's change: a lost record, or a
+/// forgotten Vault brought back. And a reader must never catch the file
+/// half-written (#326).
+#[test]
+fn concurrent_records_and_forgets_are_serialized_and_never_expose_a_partial_file() {
+    let directory = tempdir().expect("temporary state directory");
+    let store = VaultRuntimeStateStore::new(directory.path().join("state/vault-runtime.json"));
+    let forgotten = vault_id("00000000-0000-4000-8000-0000000000ff");
+    let record = |store: &VaultRuntimeStateStore, vault: VaultId| {
+        store
+            .record_git_turn(
+                vault,
+                GitTurnRecord {
+                    completed_at: SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(1_787_000_000),
+                    outcome: GitTurnOutcome::Synchronized,
+                },
+            )
+            .expect("record the turn");
+    };
+    record(&store, forgotten);
+
+    let writers_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = std::thread::spawn({
+        let store = store.clone();
+        let writers_done = writers_done.clone();
+        move || {
+            let mut partial_reads = 0;
+            while !writers_done.load(std::sync::atomic::Ordering::Acquire) {
+                if !matches!(store.load(), LoadedState::Usable(_)) {
+                    partial_reads += 1;
+                }
+            }
+            partial_reads
+        }
+    });
+    let writers: Vec<_> = (0..8u32)
+        .map(|writer| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                for turn in 0..25u32 {
+                    let vault = vault_id(&format!(
+                        "00000000-0000-4000-8000-{:012x}",
+                        writer * 100 + turn + 1
+                    ));
+                    record(&store, vault);
+                    if writer == 0 && turn == 12 {
+                        store.forget(forgotten).expect("forget the Vault");
+                    }
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("writer thread");
+    }
+    writers_done.store(true, std::sync::atomic::Ordering::Release);
+    assert_eq!(
+        reader.join().expect("reader thread"),
+        0,
+        "a reader never sees a truncated or half-written file"
+    );
+
+    let LoadedState::Usable(stored) = store.load() else {
+        panic!("the file is readable");
+    };
+    assert_eq!(stored.vaults.len(), 200, "no record was lost to a race");
+    assert!(
+        !stored.vaults.contains_key(&forgotten),
+        "a forgotten Vault is not written back by a concurrent record"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(directory.path().join("state"))
+        .expect("state directory")
+        .map(|entry| entry.expect("directory entry").file_name())
+        .filter(|name| name != RUNTIME_STATE_FILE_NAME)
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no temporary file is left behind: {leftovers:?}"
     );
 }

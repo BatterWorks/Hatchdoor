@@ -141,6 +141,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_BEARER_TOKEN", "instant", "secret"),
     ("HATCHDOOR_MCP_ALLOWED_ORIGINS", "instant", "text"),
+    ("HATCHDOOR_PUBLIC_URL", "instant", "text"),
     ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "instant", "number"),
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
     // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
@@ -457,6 +458,12 @@ fn validate_updates(
                 )),
             }
         }
+        if key == "HATCHDOOR_PUBLIC_URL" && crate::mcp::config::parse_public_url(value).is_err() {
+            errors.push(FieldError::on(
+                key,
+                "Enter a full address starting with http:// or https://, such as https://notes.example.com, or leave it empty.",
+            ));
+        }
         if *kind == "switch" && !matches!(value.trim(), "true" | "false") {
             errors.push(FieldError::on(key, "Choose on or off."));
         }
@@ -536,6 +543,8 @@ mod tests {
             demo_mode: false,
             runtime_config: RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
+            transfer_links: Default::default(),
+            shutdown: Default::default(),
         };
         (state, worker, directory)
     }
@@ -831,6 +840,31 @@ mod tests {
         assert_eq!(
             errors[0].key, None,
             "the refusal spans two fields (enabled + token), so it belongs to neither alone"
+        );
+    }
+
+    #[test]
+    fn public_url_accepts_an_absolute_address_or_empty_and_refuses_anything_else() {
+        let config = RuntimeConfig::for_tests();
+        let check = |value: &str| {
+            validate_updates(
+                &config.snapshot(),
+                &BTreeMap::from([("HATCHDOOR_PUBLIC_URL".into(), value.into())]),
+            )
+        };
+        assert!(check("https://notes.example.com").is_empty());
+        assert!(check("").is_empty());
+        let errors = check("notes.example.com");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key.as_deref(), Some("HATCHDOOR_PUBLIC_URL"));
+
+        let listed = settings_response(&config.snapshot(), false);
+        assert!(
+            listed
+                .settings
+                .iter()
+                .any(|setting| setting.key == "HATCHDOOR_PUBLIC_URL" && setting.kind == "text"),
+            "the setting is editable from Settings (ADR-14)"
         );
     }
 }

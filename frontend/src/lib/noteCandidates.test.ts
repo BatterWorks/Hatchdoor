@@ -35,4 +35,44 @@ describe("flattenNoteCandidates", () => {
       "zeta",
     ]);
   });
+
+  it("records each note's Vault-relative path for a Markdown link", () => {
+    const tree = {
+      name: "My Vault",
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-1" }],
+      folders: [
+        {
+          name: "Projects",
+          notes: [],
+          folders: [
+            {
+              name: "Sub dir",
+              notes: [{ title: "Plan", slug: "plan", vault_id: "vault-1" }],
+              folders: [],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(
+      flattenNoteCandidates(tree).map((note) => note.relativePath),
+    ).toEqual(["Home.md", "Projects/Sub dir/Plan.md"]);
+  });
+
+  it("keeps same-slug notes from different Vaults apart", () => {
+    const tree = {
+      name: "Vaults",
+      notes: [
+        { title: "Plan", slug: "plan", vault_id: "vault-1" },
+        { title: "Plan", slug: "plan", vault_id: "vault-2" },
+      ],
+      folders: [],
+    };
+
+    expect(flattenNoteCandidates(tree).map((note) => note.vault_id)).toEqual([
+      "vault-1",
+      "vault-2",
+    ]);
+  });
 });

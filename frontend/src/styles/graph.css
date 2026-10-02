@@ -175,6 +175,42 @@
   cursor: grabbing;
 }
 
+/* ── SELECTION BAR (#337) ────────────────────────────────────── */
+/* The selected note's title and a way to open it, pinned to the foot of the
+   canvas. The graph's only other route to a note is a double-click or a
+   second tap on a small canvas target; this one is a real button of ordinary
+   size, the same on every device. Sits under the loading/error overlays. */
+.graph-selection {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--space-4);
+  width: fit-content;
+  margin: 0 auto;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: calc(100% - var(--space-8));
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+}
+
+.graph-selection-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.graph-selection-open {
+  flex-shrink: 0;
+}
+
 /* ── OVERLAY (loading / error shown on top of canvas) ────────── */
 .graph-overlay {
   position: absolute;
@@ -287,6 +323,11 @@
 
   .graph-hint {
     display: none;
+  }
+
+  .graph-selection {
+    bottom: var(--space-3);
+    max-width: calc(100% - var(--space-6));
   }
 
   /* Hide inline desktop tag block */

@@ -64,6 +64,46 @@ pub struct AppState {
     /// bind an immutable snapshot once per operation.
     pub runtime_config: crate::runtime_config::RuntimeConfig,
     pub startup: StartupTracker,
+    /// Signs and checks transfer links (ADR-27). Its key lives only here, in
+    /// memory, so a restart strands every outstanding link.
+    pub transfer_links: Arc<crate::transfer_link::TransferLinks>,
+    /// Fired once when the process starts shutting down. The HTTP server
+    /// stops accepting on it, and every response that would otherwise stay
+    /// open forever ends on it (#353).
+    pub shutdown: ShutdownSignal,
+}
+
+/// A one-way "shutting down" flag every clone of [`AppState`] shares.
+///
+/// Graceful shutdown waits for every open connection to close, so a response
+/// that never ends on its own (the collection events stream, an MCP session's
+/// SSE stream) has to end on this, or one open browser tab or connected agent
+/// holds the process until the supervisor kills it (#353).
+#[derive(Clone)]
+pub struct ShutdownSignal {
+    started: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for ShutdownSignal {
+    fn default() -> Self {
+        Self {
+            started: Arc::new(tokio::sync::watch::Sender::new(false)),
+        }
+    }
+}
+
+impl ShutdownSignal {
+    /// Start shutting down. Idempotent.
+    pub fn trigger(&self) {
+        self.started.send_replace(true);
+    }
+
+    /// Resolves once [`Self::trigger`] has been called, at once if it already
+    /// has. The sender lives as long as any clone, so this never resolves early.
+    pub async fn wait(&self) {
+        let mut started = self.started.subscribe();
+        let _ = started.wait_for(|started| *started).await;
+    }
 }
 
 impl AppState {
@@ -200,8 +240,9 @@ mod tests {
         let directory = tempdir().expect("temp dir");
         let vault_path = directory.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("vault dir");
-        let store =
-            crate::vault_registry::VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let store = crate::vault_registry::VaultRegistryStore::new(
+            directory.path().join("state/vaults.json"),
+        );
         let committed = store
             .add(
                 0,

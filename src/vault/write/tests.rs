@@ -4,7 +4,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cache::parse::content_hash;
+use crate::cache::parse::{content_hash, extract_tags};
 use crate::vault::types::{VaultIndex, VaultScanConfig};
 
 fn build(root: &Path) -> VaultIndex {
@@ -821,14 +821,11 @@ fn edit_note_replaces_unique_string() {
     )
     .expect("edit");
 
-    assert_eq!(
-        fs::read_to_string(&path).expect("read"),
-        "alpha BETA gamma\n"
-    );
-    assert_eq!(
-        outcome.content_hash,
-        Some(content_hash("alpha BETA gamma\n"))
-    );
+    // The note had no final newline and the edit did not touch its end, so it
+    // still has none (ADR-22, #316).
+    assert_eq!(fs::read_to_string(&path).expect("read"), "alpha BETA gamma");
+    assert_eq!(outcome.content_hash, Some(content_hash("alpha BETA gamma")));
+    assert!(outcome.quality_warnings.is_empty());
 }
 
 #[test]
@@ -871,7 +868,7 @@ fn edit_note_replace_all_replaces_every_occurrence() {
 
     edit_note(entry, "x", "y", &content_hash("x x x"), true).expect("edit");
 
-    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y\n");
+    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y");
 }
 
 #[test]
@@ -1027,6 +1024,492 @@ fn replace_section_rejects_duplicate_heading() {
         Err(WriteError::Conflict(_))
     ));
     assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+/// A CRLF note used by the partial-write line-ending tests (#316).
+const CRLF_NOTE: &str =
+    "# Title\r\nline one\r\n\r\n## Section\r\nold body\r\n\r\n## Last\r\nend\r\n";
+
+/// Write `body` as `Home.md` in a fresh Vault and return the tempdir, the
+/// note's path, and its entry.
+fn partial_write_note(body: &str) -> (TempDir, std::path::PathBuf, crate::vault::NoteEntry) {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home").clone();
+    (tmp, path, entry)
+}
+
+#[test]
+fn edit_note_on_a_crlf_note_swaps_only_the_replaced_text() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = edit_note(
+        &entry,
+        "line one",
+        "line ONE\nline two",
+        &content_hash(CRLF_NOTE),
+        false,
+    )
+    .expect("edit");
+
+    let expected = CRLF_NOTE.replace("line one", "line ONE\r\nline two");
+    assert_eq!(fs::read_to_string(&path).expect("read"), expected);
+    assert_eq!(outcome.content_hash, Some(content_hash(&expected)));
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["converted line endings in the supplied text to CRLF to match the note".to_string()]
+    );
+}
+
+#[test]
+fn edit_note_without_line_breaks_in_the_new_text_reports_nothing() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = edit_note(
+        &entry,
+        "old body",
+        "new body",
+        &content_hash(CRLF_NOTE),
+        false,
+    )
+    .expect("edit");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        CRLF_NOTE.replace("old body", "new body")
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn replace_section_on_a_crlf_note_leaves_every_byte_outside_the_section() {
+    let cases = [
+        (
+            SectionMode::Replace,
+            "# Title\r\nline one\r\n\r\n## Section\r\nnew body\r\n## Last\r\nend\r\n",
+        ),
+        (
+            SectionMode::Before,
+            "# Title\r\nline one\r\n\r\n## Section\r\nnew body\r\n## Section\r\nold body\r\n\r\n## Last\r\nend\r\n",
+        ),
+        (
+            SectionMode::After,
+            "# Title\r\nline one\r\n\r\n## Section\r\nold body\r\n\r\n## Section\r\nnew body\r\n## Last\r\nend\r\n",
+        ),
+    ];
+    for (mode, expected) in cases {
+        let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+        let outcome = replace_section(
+            &entry,
+            "## Section",
+            mode,
+            "## Section\nnew body\n",
+            &content_hash(CRLF_NOTE),
+        )
+        .expect("replace");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            expected,
+            "{mode:?}"
+        );
+        assert_eq!(
+            outcome.content_hash,
+            Some(content_hash(expected)),
+            "{mode:?}"
+        );
+        assert_eq!(
+            outcome.quality_warnings,
+            vec![
+                "converted line endings in the supplied text to CRLF to match the note".to_string()
+            ],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn append_note_on_a_crlf_note_keeps_the_existing_bytes_and_appends_in_crlf() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = append_note(&entry, "more\nlines\n", &content_hash(CRLF_NOTE)).expect("append");
+
+    let written = fs::read_to_string(&path).expect("read");
+    assert_eq!(written, format!("{CRLF_NOTE}more\r\nlines\r\n"));
+    assert_eq!(outcome.content_hash, Some(content_hash(&written)));
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["converted line endings in the supplied text to CRLF to match the note".to_string()]
+    );
+}
+
+#[test]
+fn partial_writes_on_an_earlier_part_leave_a_missing_final_newline_missing() {
+    let body = "## One\nfirst\n## Two\nsecond";
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = edit_note(&entry, "first", "FIRST", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nFIRST\n## Two\nsecond"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = replace_section(
+        &entry,
+        "## One",
+        SectionMode::Replace,
+        "## One\nNEW\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nNEW\n## Two\nsecond"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn append_note_reports_the_separator_and_final_line_ending_it_adds() {
+    let body = "# Note\nlast line";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = append_note(&entry, "appended", &content_hash(body)).expect("append");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Note\nlast line\nappended\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "added a line break before the supplied text".to_string(),
+            "added a line break after the supplied text".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn append_note_to_an_empty_note_adds_no_separator() {
+    let (_tmp, path, entry) = partial_write_note("");
+
+    let outcome = append_note(&entry, "first\n", &content_hash("")).expect("append");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "first\n");
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn replace_section_reports_the_line_break_it_adds_after_the_supplied_text() {
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = replace_section(
+        &entry,
+        "## One",
+        SectionMode::Replace,
+        "## One\nNEW",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nNEW\n## Two\nsecond\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["added a line break after the supplied text".to_string()]
+    );
+}
+
+#[test]
+fn replace_section_at_the_end_keeps_whether_the_note_ended_with_a_line_break() {
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "## Two",
+        SectionMode::Replace,
+        "## Two\nNEW",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Two\nNEW\n"
+    );
+
+    let body = "## One\nfirst\n## Two\nsecond";
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = replace_section(
+        &entry,
+        "## Two",
+        SectionMode::Replace,
+        "## Two\nNEW",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Two\nNEW"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn partial_writes_on_an_lf_note_convert_crlf_input_to_lf() {
+    let body = "# Title\nline one\n## Section\nold\n";
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome =
+        edit_note(&entry, "line one", "a\r\nb", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Title\na\nb\n## Section\nold\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["converted line endings in the supplied text to LF to match the note".to_string()]
+    );
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "## Section",
+        SectionMode::Replace,
+        "## Section\r\nnew\r\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Title\nline one\n## Section\nnew\n"
+    );
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    append_note(&entry, "x\r\ny\r", &content_hash(body)).expect("append");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        format!("{body}x\ny\n")
+    );
+}
+
+#[test]
+fn partial_writes_on_a_mixed_note_keep_untouched_endings_and_follow_the_majority() {
+    // Two CRLF breaks against one lone LF: CRLF is the majority.
+    let body = "one\r\ntwo\nthree\r\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    edit_note(&entry, "two", "2a\n2b", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "one\r\n2a\r\n2b\nthree\r\n"
+    );
+
+    // One CRLF against two lone LFs: LF is the majority.
+    let body = "one\ntwo\r\nthree\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    append_note(&entry, "four\r\nfive\r\n", &content_hash(body)).expect("append");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "one\ntwo\r\nthree\nfour\nfive\n"
+    );
+
+    // A tie means LF.
+    let body = "one\r\ntwo\nthree";
+    let (_tmp, path, entry) = partial_write_note(body);
+    edit_note(&entry, "three", "3a\r\n3b", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "one\r\ntwo\n3a\n3b"
+    );
+}
+
+#[test]
+fn partial_writes_leave_a_stray_lone_cr_outside_the_replaced_text() {
+    let body = "keep\rthis\r\nchange me\r\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    edit_note(&entry, "change me", "changed", &content_hash(body), false).expect("edit");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "keep\rthis\r\nchanged\r\n"
+    );
+}
+
+#[test]
+fn append_note_adds_no_separator_after_a_last_line_ending_in_a_lone_cr() {
+    let body = "# Note\nlast\r";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = append_note(&entry, "more\n", &content_hash(body)).expect("append");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Note\nlast\rmore\n"
+    );
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn replace_section_before_and_after_at_the_end_of_a_note_with_no_final_newline() {
+    let body = "## One\nfirst\n## Two\nsecond";
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    let outcome = replace_section(
+        &entry,
+        "## Two",
+        SectionMode::After,
+        "## Three\nthird",
+        &content_hash(body),
+    )
+    .expect("after");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Two\nsecond\n## Three\nthird"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["added a line break before the supplied text".to_string()]
+    );
+
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "## Two",
+        SectionMode::Before,
+        "## Inserted\nx\n",
+        &content_hash(body),
+    )
+    .expect("before");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Inserted\nx\n## Two\nsecond"
+    );
+}
+
+#[test]
+fn edit_note_replace_all_on_a_crlf_note_writes_every_replacement_in_crlf() {
+    let body = "x\r\nmid\r\nx\r\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    edit_note(&entry, "x", "a\nb", &content_hash(body), true).expect("edit");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "a\r\nb\r\nmid\r\na\r\nb\r\n"
+    );
+}
+
+#[test]
+fn replace_section_on_a_mixed_note_keeps_untouched_endings() {
+    // Three CRLF breaks against two lone LFs: CRLF is the majority.
+    let body = "# T\r\nintro\n## S\r\nold\n## Next\r\nend";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    replace_section(
+        &entry,
+        "## S",
+        SectionMode::Replace,
+        "## S\nnew\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# T\r\nintro\n## S\r\nnew\r\n## Next\r\nend"
+    );
+}
+
+#[test]
+fn replace_section_with_empty_content_removes_the_section_and_adds_nothing() {
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+
+    let outcome = replace_section(
+        &entry,
+        "## One",
+        SectionMode::Replace,
+        "",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "## Two\nsecond\n");
+    assert!(outcome.quality_warnings.is_empty());
+}
+
+#[test]
+fn create_note_still_normalises_the_whole_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let catalog = build(tmp.path());
+
+    let outcome = create_note(tmp.path(), "Fresh", "a\r\nb\rc", false, &catalog).expect("create");
+
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("Fresh.md")).expect("read"),
+        "a\nb\nc\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "normalized CRLF/CR line endings to LF".to_string(),
+            "added final newline".to_string()
+        ]
+    );
+}
+
+#[test]
+fn partial_writes_refuse_nul_bytes_in_the_supplied_text() {
+    let body = "## One\nfirst\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    let hash = content_hash(body);
+
+    for result in [
+        edit_note(&entry, "first", "a\0b", &hash, false),
+        replace_section(&entry, "## One", SectionMode::Replace, "a\0b", &hash),
+        append_note(&entry, "a\0b", &hash),
+    ] {
+        assert!(matches!(
+            result,
+            Err(WriteError::InvalidInput(message)) if message.contains("NUL")
+        ));
+    }
+    assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
+fn partial_writes_on_a_crlf_note_still_report_frontmatter_warnings() {
+    let body = "---\r\ntags: [a]\r\ntags: [b]\r\n---\r\nbody\r\n";
+    let (_tmp, _path, entry) = partial_write_note(body);
+
+    let outcome = edit_note(&entry, "body", "text", &content_hash(body), false).expect("edit");
+
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["frontmatter has duplicate key: tags".to_string()]
+    );
+}
+
+#[test]
+fn update_note_still_normalises_the_whole_note() {
+    let (_tmp, path, entry) = partial_write_note(CRLF_NOTE);
+
+    let outcome = update_note(&entry, "# New\r\nbody", &content_hash(CRLF_NOTE)).expect("update");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "# New\nbody\n");
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "normalized CRLF/CR line endings to LF".to_string(),
+            "added final newline".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -1865,9 +2348,16 @@ fn every_path_a_planned_asset_move_hands_the_filesystem_is_accepted_by_the_move_
     let index = build(root);
     let entry = index.find_by_slug("b").expect("b").clone();
     let destination = root.join("deeper/nest/B.md");
-    let (moves, _rewrites) =
-        super::assets::asset_move_plan(root, &index, &entry, &destination, false, &[])
-            .expect("plan");
+    let (moves, _rewrites) = super::assets::asset_move_plan(
+        root,
+        &index,
+        &entry,
+        &destination,
+        false,
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("plan");
 
     assert_eq!(moves.len(), 1, "only the note's own asset travels");
     for asset_move in &moves {
@@ -1880,6 +2370,9 @@ fn every_path_a_planned_asset_move_hands_the_filesystem_is_accepted_by_the_move_
                 path.display()
             );
         }
+        // Planning creates no folders; the caller does once the plan stands.
+        fs::create_dir_all(asset_move.destination.parent().expect("parent"))
+            .expect("destination folder");
         super::fs_ops::move_file_no_follow(&asset_move.source, &asset_move.destination)
             .expect("the move primitive must accept every path the planner produced");
     }
@@ -2038,14 +2531,19 @@ fn a_preserved_bare_title_backlink_keeps_its_alias_anchor_and_embed_form() {
 }
 
 #[test]
-fn move_note_rewrites_a_slug_form_backlink_to_the_new_full_path() {
-    // Settled in triage on #235: a slug-form target is machine-authored, so it
-    // takes the full path like any other non-title form. No slug branch.
+fn move_note_keeps_a_slug_form_backlink_bare() {
+    // #256 reverses the slug half of #235: a target with no folder path keeps
+    // its bare form whichever lookup pass resolved it, so a slug-form link
+    // picks up the moved note's new title rather than its full path.
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     fs::create_dir_all(root.join("Notes")).expect("notes");
     fs::write(root.join("Notes/Some Note.md"), "body").expect("target");
-    fs::write(root.join("Backlink.md"), "See [[some-note]]").expect("backlink");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[some-note]], [[some-note|Alias]], [[some-note#Heading]] and ![[some-note^block-id]]",
+    )
+    .expect("backlink");
     let index = build(root);
     let entry = index.find_by_slug("some-note").expect("some note");
 
@@ -2060,7 +2558,97 @@ fn move_note_rewrites_a_slug_form_backlink_to_the_new_full_path() {
 
     assert_eq!(
         fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
-        "See [[Archive/Some Note]]"
+        "See [[Some Note]], [[Some Note|Alias]], [[Some Note#Heading]] and ![[Some Note^block-id]]"
+    );
+}
+
+#[test]
+fn move_note_keeps_a_backlink_bare_when_its_punctuation_differs_from_the_filename() {
+    // The case #256 reported: the link was written with an em dash, the file
+    // with a hyphen. The title lookup misses and the slug lookup finds it, and
+    // the author still wrote a bare title, so it stays one.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let title = "11 - Used self-charging hybrid market and running costs";
+    fs::create_dir_all(root.join("wayfinder/family-car")).expect("folder");
+    fs::write(
+        root.join(format!("wayfinder/family-car/{title}.md")),
+        "body",
+    )
+    .expect("target");
+    fs::write(
+        root.join("Brief.md"),
+        "after [[11 \u{2014} Used self-charging hybrid market and running costs|ticket 11]]",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink(&format!("wayfinder/family-car/{title}"))
+        .expect("ticket");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        &format!("wayfinder/family-car/issues/{title}.md"),
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Brief.md")).expect("backlink"),
+        format!("after [[{title}|ticket 11]]")
+    );
+    let after = build(root);
+    assert_eq!(
+        after
+            .resolve_wikilink(title)
+            .expect("the rewritten link must still resolve")
+            .slug,
+        outcome.slug.expect("moved slug"),
+    );
+}
+
+#[test]
+fn move_note_falls_back_to_the_full_path_for_a_slug_form_backlink_when_the_new_title_collides() {
+    // Widening the bare branch leaves the safety condition alone: a new title
+    // another note already carries sends every slash-free target to the full
+    // path, slug-form and punctuation near-misses included.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::create_dir_all(root.join("Other")).expect("other");
+    fs::write(root.join("Notes/Some Note.md"), "body").expect("target");
+    fs::write(root.join("Other/Renamed Note.md"), "unrelated").expect("collider");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[some-note]] and [[Some \u{2014} Note|alias]]",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("some-note").expect("some note");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed Note.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Archive/Renamed Note]] and [[Archive/Renamed Note|alias]]"
+    );
+    let after = build(root);
+    assert_eq!(
+        after
+            .resolve_wikilink("Archive/Renamed Note")
+            .expect("the rewritten link must still resolve")
+            .slug,
+        outcome.slug.expect("moved slug"),
+        "the fallback form must resolve to the moved note, not its same-titled neighbour"
     );
 }
 
@@ -3071,4 +3659,1658 @@ fn delete_leaves_the_trashed_bodys_link_to_itself_as_written() {
         "every other note still loses its link to the deleted note"
     );
     assert_eq!(outcome.rewritten_notes, 1);
+}
+
+// ---------------------------------------------------------------------------
+// rename_tag (#242)
+// ---------------------------------------------------------------------------
+
+fn tag_vault(notes: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().expect("temp dir");
+    for (path, content) in notes {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().expect("parent")).expect("folders");
+        fs::write(path, content).expect("note");
+    }
+    dir
+}
+
+fn read(root: &Path, path: &str) -> String {
+    fs::read_to_string(root.join(path)).expect("read note")
+}
+
+fn plan_tag(root: &Path, old: &str, new: &str) -> Result<TagRename, TagRenameError> {
+    rename_tag(root, &build_catalog(root), old, new, None)
+}
+
+fn apply_tag(root: &Path, old: &str, new: &str) -> TagRename {
+    let plan = plan_tag(root, old, new).expect("plan");
+    let hash = plan
+        .plan_hash
+        .expect("a plan with changes has a fingerprint");
+    rename_tag(root, &build_catalog(root), old, new, Some(&hash)).expect("apply")
+}
+
+#[test]
+fn rename_tag_plans_without_writing_and_applies_only_its_own_fingerprint() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [domain/homelab, other]\n---\nBody\n")]);
+    let root = dir.path();
+    let before = read(root, "A.md");
+
+    let plan = plan_tag(root, "domain/homelab", "topic/homelab").expect("plan");
+    assert!(!plan.applied);
+    assert_eq!(plan.notes.len(), 1);
+    assert_eq!(plan.notes[0].relative_path, "A");
+    assert!(plan.plan_hash.is_some());
+    assert!(plan.affected_paths.is_empty());
+    assert_eq!(read(root, "A.md"), before, "a plan writes nothing");
+
+    let stale = rename_tag(
+        root,
+        &build_catalog(root),
+        "domain/homelab",
+        "topic/homelab",
+        Some("fnv1a64:0000000000000000"),
+    );
+    assert_eq!(stale, Err(TagRenameError::StalePlan));
+    assert_eq!(read(root, "A.md"), before, "a stale plan writes nothing");
+
+    let applied = rename_tag(
+        root,
+        &build_catalog(root),
+        "domain/homelab",
+        "topic/homelab",
+        plan.plan_hash.as_deref(),
+    )
+    .expect("apply");
+    assert!(applied.applied);
+    assert_eq!(applied.affected_paths, vec![root.join("A.md")]);
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [topic/homelab, other]\n---\nBody\n"
+    );
+    assert_eq!(
+        applied.notes[0].content_hash,
+        content_hash(&read(root, "A.md")),
+        "the reported hash is spendable on the next write"
+    );
+}
+
+#[test]
+fn rename_tag_refuses_a_fingerprint_the_vault_has_moved_past() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [domain/x]\n---\n")]);
+    let root = dir.path();
+    let plan = plan_tag(root, "domain", "topic").expect("plan");
+    fs::write(root.join("B.md"), "---\ntags: [domain/y]\n---\n").expect("new note");
+
+    let result = rename_tag(
+        root,
+        &build_catalog(root),
+        "domain",
+        "topic",
+        plan.plan_hash.as_deref(),
+    );
+    assert_eq!(result, Err(TagRenameError::StalePlan));
+    assert_eq!(read(root, "A.md"), "---\ntags: [domain/x]\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags: [domain/y]\n---\n");
+}
+
+#[test]
+fn renaming_a_namespace_nobody_carries_renames_everything_beneath_it() {
+    let dir = tag_vault(&[
+        (
+            "A.md",
+            "---\ntags: [domain/homelab, domain/plans/q3]\n---\n",
+        ),
+        ("B.md", "Body with #domain/homelab and #Domain/Plans.\n"),
+        ("C.md", "---\ntags: [domainish/x]\n---\n#domainish/y\n"),
+    ]);
+    let root = dir.path();
+    let applied = apply_tag(root, "#domain", "topic");
+    assert_eq!(applied.notes.len(), 2);
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [topic/homelab, topic/plans/q3]\n---\n"
+    );
+    assert_eq!(
+        read(root, "B.md"),
+        "Body with #topic/homelab and #topic/Plans.\n",
+        "the renamed part is written as asked; what sits beneath it keeps its spelling"
+    );
+    assert_eq!(
+        read(root, "C.md"),
+        "---\ntags: [domainish/x]\n---\n#domainish/y\n"
+    );
+}
+
+#[test]
+fn rename_tag_reports_frontmatter_and_body_changes_separately() {
+    let dir = tag_vault(&[
+        ("Both.md", "---\ntags: [a/b]\n---\nSee #a/b here.\n"),
+        ("Front.md", "---\ntags: [a/b]\n---\nNothing inline.\n"),
+        ("Body.md", "Only #a/b inline.\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan_tag(root, "a/b", "c/d").expect("plan");
+    assert_eq!(plan.notes.len(), 3);
+    assert_eq!(plan.frontmatter_notes, 2);
+    assert_eq!(plan.body_notes, 2);
+    let both = plan
+        .notes
+        .iter()
+        .find(|note| note.relative_path == "Both")
+        .expect("both");
+    assert!(both.frontmatter && both.body);
+
+    apply_tag(root, "a/b", "c/d");
+    assert_eq!(
+        read(root, "Both.md"),
+        "---\ntags: [c/d]\n---\nSee #c/d here.\n"
+    );
+    assert_eq!(read(root, "Body.md"), "Only #c/d inline.\n");
+}
+
+#[test]
+fn rename_tag_leaves_hashtags_in_code_alone() {
+    let content = concat!(
+        "Prose #a/b.\n",
+        "```\n",
+        "#a/b in a fence\n",
+        "```\n",
+        "~~~\n",
+        "#a/b in a tilde fence\n",
+        "~~~\n",
+        "Inline `#a/b` code and #a/b again.\n",
+    );
+    let dir = tag_vault(&[("A.md", content)]);
+    let root = dir.path();
+    apply_tag(root, "a/b", "x/y");
+    assert_eq!(
+        read(root, "A.md"),
+        content
+            .replace("Prose #a/b.", "Prose #x/y.")
+            .replace("code and #a/b again", "code and #x/y again")
+    );
+}
+
+#[test]
+fn renaming_into_a_tag_the_note_already_carries_leaves_it_once() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [topic/x, domain/x, keep]\n---\n"),
+        ("B.md", "---\ntags:\n  - domain/x\n  - topic/x\n---\n"),
+        ("C.md", "---\ntags: [dup, dup, domain/x]\n---\n"),
+        ("D.md", "---\ntags: [topic/unrelated]\n---\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan_tag(root, "domain", "topic").expect("plan");
+    assert_eq!(
+        plan.already_tagged_notes, 3,
+        "A, B and D already carry topic/*"
+    );
+    let applied = apply_tag(root, "domain", "topic");
+    assert_eq!(applied.already_tagged_notes, 3);
+    assert_eq!(read(root, "A.md"), "---\ntags: [topic/x, keep]\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags:\n  - topic/x\n---\n");
+    assert_eq!(
+        read(root, "C.md"),
+        "---\ntags: [dup, dup, topic/x]\n---\n",
+        "duplicates the rename did not make are not its business"
+    );
+}
+
+#[test]
+fn rename_tag_changes_only_the_renamed_characters_of_either_list_form() {
+    let one_line = "---\ntitle: \"Quoted: title\"\ntags: [alpha, domain/homelab, beta]\n# a comment\nstatus: draft\n---\n\n# Heading\nbody text\n";
+    let block = "---\nstatus: draft\ntags:\n    - alpha\n    - domain/homelab\ncreated: 2026-01-01\n---\nbody\n";
+    let dir = tag_vault(&[("One.md", one_line), ("Block.md", block)]);
+    let root = dir.path();
+    apply_tag(root, "domain/homelab", "topic/homelab");
+    assert_eq!(
+        read(root, "One.md"),
+        one_line.replace("domain/homelab", "topic/homelab")
+    );
+    assert_eq!(
+        read(root, "Block.md"),
+        block.replace("domain/homelab", "topic/homelab")
+    );
+}
+
+#[test]
+fn a_crlf_note_keeps_its_line_endings() {
+    let content = "---\r\ntags: [a/b]\r\n---\r\nSee #a/b\r\n";
+    let dir = tag_vault(&[("A.md", content)]);
+    let root = dir.path();
+    apply_tag(root, "a/b", "c/d");
+    assert_eq!(read(root, "A.md"), content.replace("a/b", "c/d"));
+}
+
+#[test]
+fn a_tag_list_the_editor_would_restyle_refuses_the_whole_rename() {
+    let dir = tag_vault(&[
+        ("Fine.md", "---\ntags: [domain/x]\n---\n"),
+        ("Quoted.md", "---\ntags: [\"domain/y\", other]\n---\n"),
+        ("Spaced.md", "---\ntags: [ domain/z ]\n---\n"),
+    ]);
+    let root = dir.path();
+    let error = plan_tag(root, "domain", "topic").expect_err("refused");
+    let TagRenameError::UnsupportedShape(notes) = error else {
+        panic!("expected an unsupported-shape refusal, got {error:?}");
+    };
+    let paths: Vec<&str> = notes
+        .iter()
+        .map(|note| note.relative_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["Quoted", "Spaced"]);
+    assert_eq!(
+        read(root, "Fine.md"),
+        "---\ntags: [domain/x]\n---\n",
+        "nothing written"
+    );
+}
+
+#[test]
+fn a_tag_the_rename_cannot_reach_refuses_rather_than_half_renaming() {
+    // Invalid YAML: the index still reads the tag through its fallback, but no
+    // editor can rewrite a block that does not parse.
+    let broken = "---\ntags: [domain/x\nbad: : :\n---\n";
+    // A code span inside an inline tag: indexed as `domain/y`, spelled by no
+    // single run of text.
+    let split = "See #domain/`x`y here.\n";
+    // An inline tag renamed into a name with no namespace stops being a tag.
+    let flat = "See #domain/z here.\n";
+    for (content, new) in [(broken, "topic"), (split, "topic"), (flat, "z")] {
+        let dir = tag_vault(&[("A.md", content)]);
+        let root = dir.path();
+        let old = if new == "z" { "domain/z" } else { "domain" };
+        let error = plan_tag(root, old, new).expect_err("refused");
+        assert!(
+            matches!(&error, TagRenameError::UnsupportedShape(notes) if notes[0].relative_path == "A"),
+            "{content:?}: {error:?}"
+        );
+        assert_eq!(read(root, "A.md"), content);
+    }
+}
+
+#[test]
+fn rename_tag_matches_any_case_and_writes_lowercase() {
+    let dir = tag_vault(&[(
+        "A.md",
+        "---\ntags: [Domain/HomeLab]\n---\n#DOMAIN/HomeLab\n",
+    )]);
+    let root = dir.path();
+    apply_tag(root, "domain", "topic");
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [topic/HomeLab]\n---\n#topic/HomeLab\n"
+    );
+}
+
+#[test]
+fn rename_tag_refuses_a_new_name_the_vault_could_not_hold() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [a/b]\n---\n")]);
+    let root = dir.path();
+    for bad in [
+        "Topic",
+        "has space",
+        "dot.ted",
+        "a//b",
+        "/lead",
+        "trail/",
+        "",
+        "#",
+        "a/b/c",
+    ] {
+        let old = if bad == "a/b/c" { "a/b" } else { "a" };
+        let result = plan_tag(root, old, bad);
+        assert!(
+            matches!(result, Err(TagRenameError::InvalidTagName(_))),
+            "{bad:?}: {result:?}"
+        );
+    }
+    assert!(plan_tag(root, "a", "#topic-1_x/sub").is_ok());
+    assert!(matches!(
+        plan_tag(root, "a", " c/d "),
+        Err(TagRenameError::InvalidTagName(_))
+    ));
+    assert!(
+        matches!(
+            plan_tag(root, "a", "\u{01C5}x"),
+            Err(TagRenameError::InvalidTagName(_))
+        ),
+        "a titlecase letter lowercases to something else, so it is not lowercase"
+    );
+    assert!(matches!(
+        plan_tag(root, "bad name", "topic"),
+        Err(TagRenameError::InvalidTagName(_))
+    ));
+}
+
+#[test]
+fn a_tag_nobody_carries_plans_zero_and_is_not_an_error() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [a/b]\n---\n")]);
+    let plan = plan_tag(dir.path(), "nothing/here", "x").expect("zero plan");
+    assert!(plan.notes.is_empty());
+    assert_eq!(plan.plan_hash, None);
+}
+
+#[test]
+fn a_failed_write_partway_restores_every_note_already_written() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [a/b]\n---\n"),
+        ("B.md", "#a/b\n"),
+        ("C.md", "---\ntags: [a/b]\n---\n"),
+    ]);
+    let root = dir.path();
+    let before: Vec<String> = ["A.md", "B.md", "C.md"]
+        .iter()
+        .map(|p| read(root, p))
+        .collect();
+    let plan = plan_tag(root, "a/b", "c/d").expect("plan");
+    let result = super::tags::rename_tag_with_failure(
+        root,
+        &build_catalog(root),
+        "a/b",
+        "c/d",
+        plan.plan_hash.as_deref(),
+        |position| {
+            if position == 1 {
+                Err(WriteError::Io("injected failure".to_string()))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(
+        matches!(result, Err(TagRenameError::Write(WriteError::Io(_)))),
+        "{result:?}"
+    );
+    let after: Vec<String> = ["A.md", "B.md", "C.md"]
+        .iter()
+        .map(|p| read(root, p))
+        .collect();
+    assert_eq!(after, before);
+}
+
+/// Issue #321, acceptance 3: `rename_tag` reads every matching note under the
+/// Vault's mutation lock, but a person editing the Vault in Obsidian is not
+/// bound by it. A save that lands after the front-loaded staleness pass, while
+/// earlier notes in the same apply loop are being written, must be refused at
+/// the note it hit rather than replaced by text built from the copy the plan
+/// read.
+#[test]
+fn a_manual_save_partway_through_a_tag_rename_is_refused_not_overwritten() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [a/b]\n---\n"),
+        ("B.md", "---\ntags: [a/b]\n---\n"),
+        ("C.md", "---\ntags: [a/b]\n---\n"),
+    ]);
+    let root = dir.path();
+    let manual = "---\ntags: [a/b]\n---\n\nSaved in Obsidian while the rename ran.\n";
+    let plan = plan_tag(root, "a/b", "c/d").expect("plan");
+
+    let result = super::tags::rename_tag_with_failure(
+        root,
+        &build_catalog(root),
+        "a/b",
+        "c/d",
+        plan.plan_hash.as_deref(),
+        |position| {
+            // A concurrent save to a note this rename has not reached yet,
+            // landing after the plan read it and after the pre-check passed.
+            if position == 0 {
+                fs::write(root.join("C.md"), manual).expect("manual save");
+            }
+            Ok(())
+        },
+    );
+
+    assert!(
+        matches!(result, Err(TagRenameError::Write(WriteError::Conflict(_)))),
+        "{result:?}"
+    );
+    assert_eq!(
+        read(root, "C.md"),
+        manual,
+        "the concurrent save must survive untouched"
+    );
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [a/b]\n---\n",
+        "the notes already written must be rolled back"
+    );
+    assert_eq!(read(root, "B.md"), "---\ntags: [a/b]\n---\n");
+}
+
+#[test]
+fn running_the_same_rename_twice_changes_nothing_the_second_time() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [domain/x, topic/x]\n---\n#domain/y\n"),
+        ("B.md", "---\ntags:\n  - Domain\n---\n"),
+    ]);
+    let root = dir.path();
+    apply_tag(root, "domain", "topic");
+    let again = plan_tag(root, "domain", "topic").expect("second plan");
+    assert!(again.notes.is_empty(), "{again:?}");
+    assert_eq!(again.plan_hash, None);
+}
+
+#[test]
+fn a_rename_into_an_ancestor_that_would_not_settle_is_refused() {
+    // `domain/x/x` would become `domain/x`, still under `domain/x`.
+    let dir = tag_vault(&[("A.md", "---\ntags: [domain/x/x]\n---\n")]);
+    let root = dir.path();
+    assert!(matches!(
+        plan_tag(root, "domain/x", "domain"),
+        Err(TagRenameError::InvalidTagName(_))
+    ));
+    assert_eq!(read(root, "A.md"), "---\ntags: [domain/x/x]\n---\n");
+
+    // Without such a tag the same rename flattens and then settles.
+    let dir = tag_vault(&[("B.md", "---\ntags: [domain/x/y]\n---\n")]);
+    let root = dir.path();
+    apply_tag(root, "domain/x", "domain");
+    assert_eq!(read(root, "B.md"), "---\ntags: [domain/y]\n---\n");
+    assert!(
+        plan_tag(root, "domain/x", "domain")
+            .expect("second")
+            .notes
+            .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// delete_tag (#258)
+// ---------------------------------------------------------------------------
+
+fn plan_delete(root: &Path, tag: &str) -> Result<TagDelete, TagDeleteError> {
+    delete_tag(root, &build_catalog(root), tag, None)
+}
+
+fn apply_delete(root: &Path, tag: &str) -> TagDelete {
+    let plan = plan_delete(root, tag).expect("plan");
+    let hash = plan
+        .plan_hash
+        .expect("a plan with changes has a fingerprint");
+    delete_tag(root, &build_catalog(root), tag, Some(&hash)).expect("apply")
+}
+
+#[test]
+fn delete_tag_plans_without_writing_and_applies_only_its_own_fingerprint() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [a, draft, b]\n---\nBody\n"),
+        ("B.md", "---\ntags: [other]\n---\n"),
+    ]);
+    let root = dir.path();
+    let before = read(root, "A.md");
+
+    let plan = plan_delete(root, "draft").expect("plan");
+    assert!(!plan.applied);
+    assert_eq!(plan.tag, "draft");
+    assert_eq!(plan.notes.len(), 1);
+    assert_eq!(plan.notes[0].relative_path, "A");
+    assert!(plan.plan_hash.is_some());
+    assert!(plan.affected_paths.is_empty());
+    assert_eq!(read(root, "A.md"), before, "a plan writes nothing");
+
+    let stale = delete_tag(
+        root,
+        &build_catalog(root),
+        "draft",
+        Some("fnv1a64:0000000000000000"),
+    );
+    assert_eq!(stale, Err(TagDeleteError::StalePlan));
+    assert_eq!(read(root, "A.md"), before, "a stale plan writes nothing");
+
+    let applied = delete_tag(
+        root,
+        &build_catalog(root),
+        "draft",
+        plan.plan_hash.as_deref(),
+    )
+    .expect("apply");
+    assert!(applied.applied);
+    assert_eq!(applied.affected_paths, vec![root.join("A.md")]);
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [a, b]\n---\nBody\n",
+        "only the deleted item goes; the list keeps its one-line form"
+    );
+    assert_eq!(
+        applied.notes[0].content_hash,
+        content_hash(&read(root, "A.md")),
+        "the reported hash is spendable on the next write"
+    );
+    assert!(
+        !extract_tags(&read(root, "A.md")).contains("draft"),
+        "the index no longer reads the tag"
+    );
+}
+
+#[test]
+fn delete_tag_refuses_a_fingerprint_the_vault_has_moved_past() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [draft]\n---\n")]);
+    let root = dir.path();
+    let plan = plan_delete(root, "draft").expect("plan");
+    fs::write(root.join("B.md"), "---\ntags: [draft]\n---\n").expect("new note");
+
+    let result = delete_tag(
+        root,
+        &build_catalog(root),
+        "draft",
+        plan.plan_hash.as_deref(),
+    );
+    assert_eq!(result, Err(TagDeleteError::StalePlan));
+    assert_eq!(read(root, "A.md"), "---\ntags: [draft]\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags: [draft]\n---\n");
+}
+
+#[test]
+fn a_note_losing_its_last_tag_keeps_an_empty_list_and_every_other_byte() {
+    let dir = tag_vault(&[
+        (
+            "Flow.md",
+            "---\ntitle: Flow\ntags: [draft]\n# a comment\nstatus: open\n---\nBody #x/y stays.\n",
+        ),
+        (
+            "Block.md",
+            "---\ntags:\n  - draft\naliases: [b]\n---\nBody\n",
+        ),
+        ("Scalar.md", "---\ntags: draft\ntitle: S\n---\n"),
+        ("Hashed.md", "---\ntags: [\"#Draft\", keep]\n---\n"),
+    ]);
+    let root = dir.path();
+    let applied = apply_delete(root, "draft");
+    assert_eq!(applied.notes.len(), 4);
+    assert_eq!(
+        read(root, "Flow.md"),
+        "---\ntitle: Flow\ntags: []\n# a comment\nstatus: open\n---\nBody #x/y stays.\n"
+    );
+    assert_eq!(
+        read(root, "Block.md"),
+        "---\ntags: []\naliases: [b]\n---\nBody\n",
+        "an emptied block list has no block form, so it becomes one line"
+    );
+    assert_eq!(read(root, "Scalar.md"), "---\ntags: []\ntitle: S\n---\n");
+    assert_eq!(read(root, "Hashed.md"), "---\ntags: [keep]\n---\n");
+}
+
+#[test]
+fn a_block_list_keeps_its_shape_when_other_tags_remain() {
+    let dir = tag_vault(&[("A.md", "---\ntags:\n  - a\n  - draft\n  - b\n---\n")]);
+    let root = dir.path();
+    apply_delete(root, "draft");
+    assert_eq!(read(root, "A.md"), "---\ntags:\n  - a\n  - b\n---\n");
+}
+
+#[test]
+fn delete_tag_matches_any_case_and_accepts_a_leading_hash() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [Draft]\n---\n"),
+        ("B.md", "---\ntags: [draft]\n---\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan_delete(root, "#Draft").expect("plan");
+    assert_eq!(plan.tag, "draft");
+    assert_eq!(plan.notes.len(), 2);
+    assert_eq!(
+        plan.plan_hash,
+        plan_delete(root, "draft").expect("plan").plan_hash,
+        "#Draft and draft are the same delete"
+    );
+    apply_delete(root, "#DRAFT");
+    assert_eq!(read(root, "A.md"), "---\ntags: []\n---\n");
+    assert_eq!(read(root, "B.md"), "---\ntags: []\n---\n");
+}
+
+#[test]
+fn deleting_a_tag_no_note_carries_plans_nothing() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [drafts, draftish/x]\n---\n")]);
+    let root = dir.path();
+    let plan = plan_delete(root, "draft").expect("plan");
+    assert!(plan.notes.is_empty());
+    assert_eq!(plan.plan_hash, None);
+}
+
+#[test]
+fn delete_tag_refuses_while_any_note_uses_the_tag_inline() {
+    let dir = tag_vault(&[
+        ("Front.md", "---\ntags: [area/work]\n---\n"),
+        ("Both.md", "---\ntags: [area/work]\n---\nSee #area/work.\n"),
+        ("Body.md", "Only #Area/Work inline.\n"),
+        (
+            "Code.md",
+            "---\ntags: [area/work]\n---\n`#area/work` is code.\n",
+        ),
+    ]);
+    let root = dir.path();
+    let before: Vec<String> = ["Front.md", "Both.md", "Body.md", "Code.md"]
+        .iter()
+        .map(|path| read(root, path))
+        .collect();
+
+    let Err(TagDeleteError::InlineUse(notes)) = plan_delete(root, "area/work") else {
+        panic!("an inline use refuses the whole delete");
+    };
+    assert_eq!(notes, vec!["Body".to_string(), "Both".to_string()]);
+
+    let refused = delete_tag(
+        root,
+        &build_catalog(root),
+        "area/work",
+        Some("fnv1a64:0000000000000000"),
+    );
+    assert!(matches!(refused, Err(TagDeleteError::InlineUse(_))));
+    let after: Vec<String> = ["Front.md", "Both.md", "Body.md", "Code.md"]
+        .iter()
+        .map(|path| read(root, path))
+        .collect();
+    assert_eq!(after, before, "a refused delete writes nothing");
+}
+
+#[test]
+fn delete_tag_refuses_while_any_tag_is_nested_under_it() {
+    let dir = tag_vault(&[
+        ("A.md", "---\ntags: [domain, domain/work]\n---\n"),
+        (
+            "B.md",
+            "---\ntags: [domain/work/x]\n---\n#domain/work here\n",
+        ),
+        ("C.md", "---\ntags: [domainish/x, domain]\n---\n"),
+    ]);
+    let root = dir.path();
+    let Err(TagDeleteError::NestedTags(nested)) = plan_delete(root, "domain") else {
+        panic!("a nested tag refuses the whole delete");
+    };
+    assert_eq!(
+        nested,
+        vec![
+            NestedTag {
+                tag: "domain/work".to_string(),
+                notes: 2
+            },
+            NestedTag {
+                tag: "domain/work/x".to_string(),
+                notes: 1
+            },
+        ]
+    );
+    assert_eq!(
+        read(root, "A.md"),
+        "---\ntags: [domain, domain/work]\n---\n"
+    );
+    assert_eq!(
+        read(root, "C.md"),
+        "---\ntags: [domainish/x, domain]\n---\n"
+    );
+
+    // Cleared bottom-up, the same delete goes through.
+    apply_delete(root, "domain/work/x");
+    fs::write(root.join("B.md"), "---\ntags: []\n---\nnothing inline\n").expect("edit");
+    apply_delete(root, "domain/work");
+    apply_delete(root, "domain");
+    assert_eq!(read(root, "A.md"), "---\ntags: []\n---\n");
+    assert_eq!(read(root, "C.md"), "---\ntags: [domainish/x]\n---\n");
+}
+
+#[test]
+fn delete_tag_refuses_a_name_the_vault_could_not_hold() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [draft]\n---\n")]);
+    let root = dir.path();
+    for bad in ["", "#", "a b", "a//b", "/a"] {
+        assert!(
+            matches!(
+                plan_delete(root, bad),
+                Err(TagDeleteError::InvalidTagName(_))
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn delete_tag_refuses_a_note_it_cannot_edit_in_place() {
+    let dir = tag_vault(&[
+        ("Quoted.md", "---\ntags: [ 'draft' ,  x ]\n---\n"),
+        ("Fine.md", "---\ntags: [draft]\n---\n"),
+    ]);
+    let root = dir.path();
+    fs::write(root.join("Bytes.md"), b"---\ntags: [draft]\n---\n\xff\n").expect("bytes");
+    let Err(TagDeleteError::UnsupportedShape(notes)) = plan_delete(root, "draft") else {
+        panic!("a note that cannot be edited in place refuses the whole delete");
+    };
+    let paths: Vec<&str> = notes
+        .iter()
+        .map(|note| note.relative_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["Bytes", "Quoted"]);
+    assert_eq!(read(root, "Fine.md"), "---\ntags: [draft]\n---\n");
+
+    // A note that is not text and does not carry the tag is no obstacle.
+    fs::remove_file(root.join("Quoted.md")).expect("remove");
+    fs::write(root.join("Bytes.md"), b"---\ntags: [x]\n---\n\xff\n").expect("bytes");
+    apply_delete(root, "draft");
+    assert_eq!(read(root, "Fine.md"), "---\ntags: []\n---\n");
+}
+
+#[test]
+fn deleting_a_tag_removes_every_spelling_and_leaves_nothing_for_a_second_run() {
+    let dir = tag_vault(&[("A.md", "---\ntags: [draft, keep, Draft]\n---\n")]);
+    let root = dir.path();
+    apply_delete(root, "draft");
+    assert_eq!(read(root, "A.md"), "---\ntags: [keep]\n---\n");
+    let again = plan_delete(root, "draft").expect("second plan");
+    assert!(again.notes.is_empty(), "{again:?}");
+    assert_eq!(again.plan_hash, None);
+}
+
+// ---------------------------------------------------------------------------
+// Writes on a filesystem that cannot exchange two names (#345).
+//
+// OpenZFS before 2.2.0, and every FUSE filesystem, reject `renameat2`'s flags
+// with `EINVAL`. Hatchdoor 2.5.0 made the exchange its commit point with no
+// way back, so a Vault on such a host could create notes and nothing else.
+// CI cannot mount one of those filesystems, so these tests make the write
+// layer's directory answer as one instead, through the same errno the kernel
+// would return.
+// ---------------------------------------------------------------------------
+
+/// A Vault root whose filesystem refuses `renameat2`'s flags.
+fn without_exchange() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    crate::rename_flags::force_unsupported_for_tests(tmp.path());
+    tmp
+}
+
+#[test]
+fn every_conditional_note_write_commits_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::write(root.join("Note.md"), "# Note\n\n## Log\nold\n").expect("note");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let hash = content_hash("# Note\n\n## Log\nold\n");
+    append_note(&entry, "appended\n", &hash).expect("append must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    edit_note(&entry, "old", "edited", &content_hash(&content), false)
+        .expect("edit must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    replace_section(
+        &entry,
+        "## Log",
+        SectionMode::Replace,
+        "replaced\n",
+        &content_hash(&content),
+    )
+    .expect("replace_section must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    let mut updates = serde_json::Map::new();
+    updates.insert("status".to_string(), serde_json::json!("done"));
+    update_note_frontmatter(&entry, updates, &content_hash(&content))
+        .expect("update_frontmatter must work without an exchange");
+
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+    let content = fs::read_to_string(root.join("Note.md")).expect("read");
+    update_note(&entry, "# Note\n\nwhole\n", &content_hash(&content))
+        .expect("update_note must work without an exchange");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("read"),
+        "# Note\n\nwhole\n"
+    );
+    assert!(
+        leftover_sidecars(root).is_empty(),
+        "no temporary sidecar may survive a committed write"
+    );
+}
+
+#[test]
+fn a_stale_expected_hash_is_still_refused_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::write(root.join("Note.md"), "# Note\nbody\n").expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note").clone();
+
+    let error = append_note(&entry, "more\n", &content_hash("# Note\nsomething else\n"))
+        .expect_err("a stale hash must still be refused");
+
+    match error {
+        WriteError::Conflict(message) => assert!(
+            message.starts_with("note changed since it was read: expected "),
+            "the conflict must keep its wording, got: {message}"
+        ),
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("read"),
+        "# Note\nbody\n",
+        "a refused write must leave the note alone"
+    );
+    assert!(
+        leftover_sidecars(root).is_empty(),
+        "a refused write must not leave its prepared bytes behind"
+    );
+}
+
+#[test]
+fn move_rename_archive_and_delete_all_work_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("inbox")).expect("mkdir");
+    fs::write(root.join("inbox/Idea.md"), "body\n").expect("note");
+    fs::write(root.join("Keep.md"), "kept\n").expect("second note");
+
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "projects/Idea.md",
+        &content_hash("body\n"),
+    )
+    .expect("move must work without an exchange");
+    assert_eq!(outcome.relative_path, Some("projects/Idea".to_string()));
+    assert!(root.join("projects/Idea.md").exists());
+    assert!(!root.join("inbox/Idea.md").exists());
+
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+    archive_note(root, &index, entry, "90-archive/", &content_hash("body\n"))
+        .expect("archive must work without an exchange");
+    assert!(root.join("90-archive/Idea.md").exists());
+
+    let index = build(root);
+    let entry = index.find_by_slug("keep").expect("keep");
+    let outcome = delete_note(root, &index, entry, &content_hash("kept\n"))
+        .expect("delete must work without an exchange");
+    assert!(
+        outcome.trashed_path.is_some(),
+        "delete is a move into the trash and must still report where"
+    );
+    assert!(!root.join("Keep.md").exists());
+}
+
+#[test]
+fn a_move_onto_an_existing_destination_is_still_refused_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::write(root.join("Source.md"), "source\n").expect("source");
+    fs::write(root.join("Taken.md"), "occupied\n").expect("destination");
+    let index = build(root);
+    let entry = index.find_by_slug("source").expect("source");
+
+    let error = move_or_rename_note(root, &index, entry, "Taken.md", &content_hash("source\n"))
+        .expect_err("an occupied destination must still refuse the move");
+
+    assert!(
+        matches!(error, WriteError::Conflict(_)),
+        "expected a conflict, got {error:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Taken.md")).expect("read"),
+        "occupied\n",
+        "the occupant must be untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Source.md")).expect("read"),
+        "source\n",
+        "the source must stay where it was"
+    );
+}
+
+#[test]
+fn attachment_move_and_rename_work_without_an_exchange() {
+    let tmp = without_exchange();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("mkdir");
+    fs::write(root.join("Media/diagram.png"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "# Note\n![](Media/diagram.png)\n").expect("note");
+
+    let index = build(root);
+    rename_attachment(root, &index, "Media/diagram.png", "chart.png")
+        .expect("rename must work without an exchange");
+    assert!(root.join("Media/chart.png").exists());
+
+    let index = build(root);
+    move_attachment(root, &index, "Media/chart.png", "chart.png")
+        .expect("move must work without an exchange");
+    assert!(root.join("chart.png").exists());
+    assert!(!root.join("Media/chart.png").exists());
+    assert_eq!(
+        fs::read(root.join("chart.png")).expect("read"),
+        BINARY_ASSET,
+        "the moved bytes must be the same bytes"
+    );
+}
+
+/// Every in-flight write parks its bytes at a dot-prefixed sidecar beside the
+/// destination. A finished or refused write must leave none of them.
+fn leftover_sidecars(root: &Path) -> Vec<String> {
+    fs::read_dir(root)
+        .expect("read vault root")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".hatchdoor-tmp-"))
+        .collect()
+}
+
+// Issue #299: a note rewritten only because a name it carries changed
+// elsewhere is bookkeeping, not authorship, so it keeps the modification time
+// it had.
+
+/// 1 February 2026, with a nanosecond part a whole-second copy would lose.
+fn february_first() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::new(1_769_904_000, 123_456_789)
+}
+
+fn stamp_modified(path: &Path, modified: std::time::SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(modified)))
+        .expect("stamp modification time");
+}
+
+fn modified_time(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .expect("modification time")
+}
+
+fn february_first_ns() -> i64 {
+    let since_epoch = february_first()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after epoch");
+    i64::try_from(since_epoch.as_nanos()).expect("fits")
+}
+
+#[test]
+fn renaming_a_note_leaves_its_referrers_modification_time_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "See [[Target]]").expect("backlink");
+    stamp_modified(&root.join("Backlink.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let outcome = move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("body"))
+        .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Renamed]]"
+    );
+    assert_eq!(modified_time(&root.join("Backlink.md")), february_first());
+    assert_eq!(
+        crate::cache::parse::file_snapshot(&root.join("Backlink.md"))
+            .expect("snapshot")
+            .mtime_ns,
+        february_first_ns(),
+        "the index must read the preserved time, not the rename"
+    );
+}
+
+#[test]
+fn a_renamed_or_moved_note_keeps_its_own_modification_time() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    stamp_modified(&root.join("Target.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("body")).expect("rename");
+    assert_eq!(modified_time(&root.join("Renamed.md")), february_first());
+
+    let index = build(root);
+    let entry = index.find_by_slug("renamed").expect("renamed");
+    move_or_rename_note(root, &index, entry, "Deep/Moved.md", &content_hash("body")).expect("move");
+    assert_eq!(modified_time(&root.join("Deep/Moved.md")), february_first());
+}
+
+#[test]
+fn moving_archiving_and_deleting_a_note_leave_referrers_modification_times_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[Notes/Target]] and [[Target]]",
+    )
+    .expect("backlink");
+    let backlink = root.join("Backlink.md");
+
+    stamp_modified(&backlink, february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let moved = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Moved/Target.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+    assert_eq!(moved.rewritten_notes, 1);
+    assert_eq!(modified_time(&backlink), february_first(), "after move");
+
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let archived =
+        archive_note(root, &index, entry, "90-archive/", &content_hash("body")).expect("archive");
+    assert_eq!(archived.rewritten_notes, 1);
+    assert_eq!(modified_time(&backlink), february_first(), "after archive");
+
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let deleted = delete_note(root, &index, entry, &content_hash("body")).expect("delete");
+    assert!(deleted.rewritten_notes >= 1);
+    assert_eq!(
+        fs::read_to_string(&backlink).expect("backlink"),
+        "See  and ",
+        "delete removed both links"
+    );
+    assert_eq!(modified_time(&backlink), february_first(), "after delete");
+}
+
+#[test]
+fn moving_an_attachment_leaves_the_referring_notes_modification_time_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/image.png"), "png").expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/image.png)").expect("note");
+    stamp_modified(&root.join("Note.md"), february_first());
+    let index = build(root);
+
+    let outcome =
+        move_attachment(root, &index, "Media/image.png", "Archive/image.png").expect("move");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("note"),
+        "![](Archive/image.png)"
+    );
+    assert_eq!(modified_time(&root.join("Note.md")), february_first());
+}
+
+#[test]
+fn a_rolled_back_rewrite_restores_the_referrers_modification_time() {
+    use super::types::MutationPhase;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "before [[Target]] after").expect("backlink");
+    stamp_modified(&root.join("Backlink.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    super::notes::delete_note_with_failure(root, &index, entry, &content_hash("body"), |phase| {
+        if phase == MutationPhase::Rewrite {
+            Err(WriteError::Io(
+                "injected failure after rewrites".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("the injected failure must abort the delete");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("restored"),
+        "before [[Target]] after"
+    );
+    assert_eq!(modified_time(&root.join("Backlink.md")), february_first());
+}
+
+#[test]
+fn a_note_the_author_edits_still_takes_a_fresh_modification_time() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Home.md"), "old").expect("home");
+    stamp_modified(&root.join("Home.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("home").expect("home");
+
+    update_note(entry, "new", &content_hash("old")).expect("update");
+    assert!(modified_time(&root.join("Home.md")) > february_first());
+
+    stamp_modified(&root.join("Home.md"), february_first());
+    let index = build(root);
+    let entry = index.find_by_slug("home").expect("home");
+    edit_note(entry, "new", "newer", &content_hash("new\n"), false).expect("edit");
+    assert!(modified_time(&root.join("Home.md")) > february_first());
+}
+
+#[test]
+fn renaming_a_tag_leaves_the_retagged_notes_modification_time_alone() {
+    let dir = tag_vault(&[("Note.md", "---\ntags: [project]\n---\nBody\n")]);
+    let root = dir.path();
+    stamp_modified(&root.join("Note.md"), february_first());
+
+    apply_tag(root, "project", "projects");
+
+    assert_eq!(read(root, "Note.md"), "---\ntags: [projects]\n---\nBody\n");
+    assert_eq!(modified_time(&root.join("Note.md")), february_first());
+}
+
+/// The #293 layout: a note in `00-inbox` linking to `20-projects/Beacon
+/// Launch.md` in Markdown form.
+fn markdown_link_vault(inbox: &str) -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("00-inbox")).expect("inbox");
+    fs::create_dir_all(root.join("20-projects")).expect("projects");
+    fs::write(root.join("00-inbox/Home.md"), inbox).expect("home");
+    fs::write(root.join("20-projects/Beacon Launch.md"), "# Beacon").expect("beacon");
+    tmp
+}
+
+#[test]
+fn renaming_a_note_retargets_markdown_links_and_keeps_their_text() {
+    let tmp = markdown_link_vault(concat!(
+        "[see the plan](../20-projects/Beacon%20Launch.md) and ",
+        "[Beacon Launch](/20-projects/Beacon%20Launch.md#Goals \"t\")\n",
+        "[angle](<../20-projects/Beacon Launch.md>) [bare](Beacon%20Launch.md)\n",
+        "`[code](../20-projects/Beacon%20Launch.md)`\n",
+    ));
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Beacon Kickoff (v2).md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        concat!(
+            "[see the plan](../20-projects/Beacon%20Kickoff%20%28v2%29.md) and ",
+            "[Beacon Launch](/20-projects/Beacon%20Kickoff%20%28v2%29.md#Goals \"t\")\n",
+            "[angle](<../20-projects/Beacon Kickoff (v2).md>) [bare](Beacon%20Kickoff%20%28v2%29.md)\n",
+            "`[code](../20-projects/Beacon%20Launch.md)`\n",
+        ),
+        "only paths change: text, anchor, title and code stay as written"
+    );
+}
+
+#[test]
+fn moving_a_note_recomputes_relative_markdown_links_from_each_linking_note() {
+    let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md)\n");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("30-areas/deep")).expect("deep");
+    fs::write(
+        root.join("30-areas/deep/Other.md"),
+        "[y](../../20-projects/Beacon%20Launch.md) [z](20-projects/Beacon%20Launch.md)\n",
+    )
+    .expect("other");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "90-archive/Beacon Launch.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "[x](../90-archive/Beacon%20Launch.md)\n"
+    );
+    assert_eq!(
+        read(root, "30-areas/deep/Other.md"),
+        "[y](../../90-archive/Beacon%20Launch.md) [z](90-archive/Beacon%20Launch.md)\n",
+        "a path written from the Vault root stays written from the Vault root"
+    );
+}
+
+#[test]
+fn moving_the_linking_note_repoints_its_own_markdown_links() {
+    let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md) [[Beacon Launch]]\n");
+    let root = tmp.path();
+    let index = build(root);
+    let home = index.find_by_slug("home").expect("home");
+    let body = read(root, "00-inbox/Home.md");
+
+    move_or_rename_note(
+        root,
+        &index,
+        home,
+        "10-daily/2026/Home.md",
+        &content_hash(&body),
+    )
+    .expect("move");
+
+    assert_eq!(
+        read(root, "10-daily/2026/Home.md"),
+        "[x](../../20-projects/Beacon%20Launch.md) [[Beacon Launch]]\n"
+    );
+}
+
+#[test]
+fn a_rename_touching_both_link_forms_in_one_file_writes_once() {
+    let tmp = markdown_link_vault(
+        "[[20-projects/Beacon Launch]] and [x](../20-projects/Beacon%20Launch.md)\n",
+    );
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "[[20-projects/Kickoff]] and [x](../20-projects/Kickoff.md)\n"
+    );
+}
+
+#[test]
+fn a_rename_touching_a_reference_link_changes_only_the_definition() {
+    let body =
+        "Read [the plan][bl] and [bl].\n\n[bl]: ../20-projects/Beacon%20Launch.md \"Plan\"\n";
+    let tmp = markdown_link_vault(body);
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "Read [the plan][bl] and [bl].\n\n[bl]: ../20-projects/Kickoff.md \"Plan\"\n"
+    );
+}
+
+#[test]
+fn a_bare_markdown_link_stays_bare_only_while_its_name_is_unique() {
+    let tmp = markdown_link_vault("[x](Beacon%20Launch.md)\n");
+    let root = tmp.path();
+    // A namesake beside the linking note, which a bare `Kickoff.md` would reach
+    // first.
+    fs::write(root.join("00-inbox/Kickoff.md"), "another kickoff").expect("namesake");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    // `Kickoff.md` alone would now land on the inbox namesake, so the path is
+    // written instead.
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "[x](../20-projects/Kickoff.md)\n"
+    );
+}
+
+#[test]
+fn deleting_a_note_unlinks_markdown_links_and_keeps_their_text() {
+    let tmp = markdown_link_vault(concat!(
+        "see [the plan](../20-projects/Beacon%20Launch.md) today\n",
+        "and [again][bl]\n",
+        "[bl]: ../20-projects/Beacon%20Launch.md\n",
+    ));
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    delete_note(root, &index, entry, &content_hash("# Beacon")).expect("delete");
+
+    assert_eq!(
+        read(root, "00-inbox/Home.md"),
+        "see the plan today\nand again\n"
+    );
+}
+
+#[test]
+fn a_markdown_link_to_a_different_note_survives_a_rename_byte_for_byte() {
+    let body = "[a](../20-projects/Other%20Note.md) [b](Nope.md) [c](x.pdf)\n";
+    let tmp = markdown_link_vault(body);
+    let root = tmp.path();
+    fs::write(root.join("20-projects/Other Note.md"), "other").expect("other");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash("# Beacon"),
+    )
+    .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(read(root, "00-inbox/Home.md"), body);
+}
+
+#[test]
+fn renaming_a_note_in_place_leaves_its_own_links_to_other_notes_as_written() {
+    let tmp = markdown_link_vault("");
+    let root = tmp.path();
+    let body = "[a](./Other.md) [b](other.md) [c](x/../Other.md) [d](../00-inbox/Home.md)\n";
+    fs::write(root.join("20-projects/Other.md"), "other").expect("other");
+    fs::write(root.join("20-projects/Beacon Launch.md"), body).expect("beacon");
+    let index = build(root);
+    let entry = index.find_by_slug("beacon-launch").expect("beacon");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "20-projects/Kickoff.md",
+        &content_hash(body),
+    )
+    .expect("rename");
+
+    assert_eq!(read(root, "20-projects/Kickoff.md"), body);
+}
+
+// #360: one note the link planners cannot read as text must not stop every
+// rename, move and delete in its Vault.
+
+/// Bytes that are not valid UTF-8 inside an otherwise ordinary note, the
+/// shape a Latin-1 export from an older tool leaves behind.
+const LATIN1_NOTE: &[u8] = b"# Caf\xe9\nNo links here.\n";
+
+/// Every path under `root` with its bytes, or its link target for a symlink,
+/// so a refused operation can be shown to have written nothing at all, not
+/// even an empty folder.
+fn vault_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("inside root")
+                .to_string_lossy()
+                .into_owned();
+            let metadata = fs::symlink_metadata(&path).expect("metadata");
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path).expect("link target");
+                out.push((relative, target.to_string_lossy().into_owned().into_bytes()));
+            } else if metadata.is_dir() {
+                out.push((format!("{relative}/"), Vec::new()));
+                walk(root, &path, out);
+            } else {
+                out.push((relative, fs::read(&path).expect("file bytes")));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+fn unrewritable_paths(error: WriteError) -> Vec<String> {
+    match error {
+        WriteError::LinkRewriteUnsupported(notes) => {
+            for note in &notes {
+                assert!(
+                    note.reason.contains("UTF-8"),
+                    "the reason names the problem: {note:?}"
+                );
+            }
+            notes.into_iter().map(|note| note.relative_path).collect()
+        }
+        other => panic!("expected a link rewrite refusal, got {other:?}"),
+    }
+}
+
+/// What one note-moving operation did to a fresh Vault: the Vault itself,
+/// how it looked before the call, and the call's result.
+struct NoteOperationRun {
+    operation: &'static str,
+    vault: TempDir,
+    before: Vec<(String, Vec<u8>)>,
+    result: Result<WriteOutcome, WriteError>,
+}
+
+/// A Vault holding `Notes/Target.md`, a note that links to it, and `extra`
+/// laid down by the caller, run through each note-moving operation in turn on
+/// a fresh copy. The links are path-qualified, so every operation, a move
+/// that keeps the title included, has to rewrite them.
+fn each_note_operation(extra: impl Fn(&Path)) -> Vec<NoteOperationRun> {
+    let operations: [&'static str; 5] = ["rename", "move", "move-rename", "archive", "delete"];
+    operations
+        .into_iter()
+        .map(|operation| {
+            let tmp = TempDir::new().expect("tempdir");
+            let root = tmp.path();
+            fs::create_dir_all(root.join("Notes")).expect("notes");
+            fs::write(root.join("Notes/Target.md"), "target").expect("target");
+            fs::write(root.join("Linker.md"), "See [[Notes/Target]]").expect("linker");
+            extra(root);
+            let before = vault_snapshot(root);
+            let index = build(root);
+            let entry = index.find_by_slug("target").expect("target entry").clone();
+            let hash = content_hash("target");
+            let result = match operation {
+                "rename" => move_or_rename_note(root, &index, &entry, "Notes/Renamed.md", &hash),
+                "move" => move_or_rename_note(root, &index, &entry, "Elsewhere/Target.md", &hash),
+                "move-rename" => {
+                    move_or_rename_note(root, &index, &entry, "Elsewhere/Renamed.md", &hash)
+                }
+                "archive" => archive_note(root, &index, &entry, "Archive", &hash),
+                _ => delete_note(root, &index, &entry, &hash),
+            };
+            NoteOperationRun {
+                operation,
+                vault: tmp,
+                before,
+                result,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn note_operations_skip_a_non_utf8_note_that_does_not_link_to_the_moved_note() {
+    for run in each_note_operation(|root| {
+        fs::write(root.join("Latin1.md"), LATIN1_NOTE).expect("latin-1 note");
+    }) {
+        let operation = run.operation;
+        run.result
+            .unwrap_or_else(|error| panic!("{operation} failed: {error:?}"));
+        assert_eq!(
+            fs::read(run.vault.path().join("Latin1.md")).expect("latin-1 note"),
+            LATIN1_NOTE,
+            "{operation} must leave the unreadable note's bytes alone"
+        );
+        assert_ne!(
+            fs::read_to_string(run.vault.path().join("Linker.md")).expect("linker"),
+            "See [[Notes/Target]]",
+            "{operation} still rewrites the readable backlink"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn note_operations_skip_a_dangling_markdown_symlink() {
+    for run in each_note_operation(|root| {
+        std::os::unix::fs::symlink(root.join("missing.md"), root.join("Dangling.md"))
+            .expect("dangling link");
+    }) {
+        let operation = run.operation;
+        run.result
+            .unwrap_or_else(|error| panic!("{operation} failed: {error:?}"));
+        let link = run.vault.path().join("Dangling.md");
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|meta| meta.file_type().is_symlink()),
+            "{operation} must leave the dangling symlink in place"
+        );
+        assert_eq!(
+            fs::read_link(&link).expect("target"),
+            run.vault.path().join("missing.md")
+        );
+    }
+}
+
+#[test]
+fn note_operations_refuse_when_a_non_utf8_note_links_to_the_moved_note() {
+    for run in each_note_operation(|root| {
+        fs::write(root.join("Wiki.md"), b"[[Notes/Target]] caf\xe9").expect("wikilink note");
+        fs::write(root.join("Markdown.md"), b"[t](Notes/Target.md) caf\xe9")
+            .expect("markdown note");
+    }) {
+        let operation = run.operation;
+        let error = run.result.expect_err(operation);
+        assert_eq!(
+            unrewritable_paths(error),
+            vec!["Markdown".to_string(), "Wiki".to_string()],
+            "{operation} names every note it could not rewrite"
+        );
+        assert_eq!(
+            vault_snapshot(run.vault.path()),
+            run.before,
+            "{operation} must write nothing"
+        );
+    }
+}
+
+#[test]
+fn a_note_move_refuses_when_a_non_utf8_note_references_an_asset_travelling_with_it() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Trip.md"), "![](photo.png)").expect("note");
+    fs::write(root.join("Notes/photo.png"), "png").expect("asset");
+    fs::write(root.join("Album.md"), b"![](Notes/photo.png) caf\xe9").expect("album");
+    let before = vault_snapshot(root);
+    let index = build(root);
+    let entry = index.find_by_slug("trip").expect("trip").clone();
+
+    let error = move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "Travel/Trip.md",
+        &content_hash("![](photo.png)"),
+    )
+    .expect_err("the album cannot be rewritten");
+
+    assert_eq!(unrewritable_paths(error), vec!["Album".to_string()]);
+    assert_eq!(
+        vault_snapshot(root),
+        before,
+        "not even the Travel folder is created"
+    );
+}
+
+#[test]
+fn attachment_moves_refuse_when_a_non_utf8_note_references_the_attachment() {
+    for operation in ["move", "rename", "delete"] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Media")).expect("media");
+        fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+        fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("readable note");
+        fs::write(root.join("Old.md"), b"![](Media/photo.jpg) caf\xe9").expect("old note");
+        fs::write(root.join("Older.md"), b"![[Media/photo.jpg]] \xff").expect("older note");
+        fs::write(root.join("Latin1.md"), LATIN1_NOTE).expect("unrelated note");
+        let before = vault_snapshot(root);
+        let index = build(root);
+
+        let error = match operation {
+            "move" => move_attachment(root, &index, "Media/photo.jpg", "Archive/photo.jpg"),
+            "rename" => rename_attachment(root, &index, "Media/photo.jpg", "picture.jpg"),
+            _ => delete_attachment(root, &index, "Media/photo.jpg"),
+        }
+        .expect_err(operation);
+
+        assert_eq!(
+            unrewritable_paths(error),
+            vec!["Old".to_string(), "Older".to_string()],
+            "{operation} names both notes and not the unrelated one"
+        );
+        assert_eq!(
+            vault_snapshot(root),
+            before,
+            "{operation} must write nothing"
+        );
+    }
+}
+
+#[test]
+fn attachment_moves_skip_a_non_utf8_note_that_does_not_reference_the_attachment() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("note");
+    fs::write(root.join("Latin1.md"), LATIN1_NOTE).expect("latin-1 note");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("missing.md"), root.join("Dangling.md"))
+        .expect("dangling link");
+    let index = build(root);
+
+    move_attachment(root, &index, "Media/photo.jpg", "Archive/photo.jpg").expect("move attachment");
+
+    assert_eq!(read(root, "Note.md"), "![](Archive/photo.jpg)");
+    assert_eq!(
+        fs::read(root.join("Latin1.md")).expect("latin-1"),
+        LATIN1_NOTE
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_rename_and_delete_skip_a_dangling_markdown_symlink() {
+    let dir = tag_vault(&[("Tagged.md", "---\ntags: [draft]\n---\nbody\n")]);
+    let root = dir.path();
+    std::os::unix::fs::symlink(root.join("missing.md"), root.join("Dangling.md"))
+        .expect("dangling link");
+
+    let renamed = apply_tag(root, "draft", "review");
+    assert_eq!(renamed.notes.len(), 1);
+    assert_eq!(read(root, "Tagged.md"), "---\ntags: [review]\n---\nbody\n");
+
+    let deleted = apply_delete(root, "review");
+    assert_eq!(deleted.notes.len(), 1);
+    assert_eq!(read(root, "Tagged.md"), "---\ntags: []\n---\nbody\n");
 }
