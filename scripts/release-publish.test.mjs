@@ -151,11 +151,12 @@ function ticked(body) {
   return body.replaceAll("- [ ] ", "- [x] ");
 }
 
-// A release where `just release-prepare` has done its part: the bump branch
-// merged into `development` with a merge commit, the release pull request
-// open from `development` into `main` with every box ticked, and the draft
-// release written. The checkout sits on `development`.
-async function fixture() {
+// A release where `just release-prepare` has done its part: the bump branch,
+// its checklist all ticked, merged into `development` with a merge commit, the
+// release pull request open from `development` into `main`, and the draft
+// release written. The checkout sits on `development`. With `reviewFix`, the
+// bump branch also carries a fix the review committed to it.
+async function fixture({ reviewFix = false } = {}) {
   const base = await mkdtemp(path.join(tmpdir(), "hatchdoor-release-publish-"));
   temporaryDirectories.push(base);
   const origin = path.join(base, "origin.git");
@@ -202,6 +203,11 @@ async function fixture() {
     "-m",
     `docs: prepare the ${TAG} release`,
   );
+  if (reviewFix) {
+    await write(root, "docs/user-vault/Some note.md", "Fixed.\n");
+    git(root, "add", ".");
+    git(root, "commit", "--quiet", "-m", "docs: fix a stale note");
+  }
   git(root, "switch", "--quiet", "development");
   git(
     root,
@@ -239,7 +245,7 @@ async function fixture() {
           base: "development",
           head: BUMP_BRANCH,
           title: `Prepare the ${TAG} release`,
-          body: "",
+          body: `Sets the version.\n\n## Release checklist\n\n${ticked(renderChecklist("Documentation freshness review required"))}`,
           mergeCommit: { oid: bumpMerge },
         },
         {
@@ -249,7 +255,7 @@ async function fixture() {
           base: "main",
           head: "development",
           title: `Release ${TAG}`,
-          body: `Releases ${TAG}.\n\n## Release checklist\n\n${ticked(renderChecklist("Documentation freshness review required"))}`,
+          body: `Releases ${TAG}.\n`,
         },
       ],
       releases: [
@@ -412,6 +418,43 @@ test("a re-run after a finished release does nothing again", async () => {
   assert.equal(remoteTag(context), tag, "the tag is not recreated");
 });
 
+test("ships a fix the review committed to the bump branch", async () => {
+  const context = await fixture({ reviewFix: true });
+  const result = publish(context);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await actions(context), [
+    "merge",
+    "hook images",
+    "publish",
+    "hook deploy",
+  ]);
+  assert.equal(
+    spawnSync(
+      "git",
+      [
+        "--git-dir",
+        context.origin,
+        "show",
+        `refs/tags/${TAG}:docs/user-vault/Some note.md`,
+      ],
+      { encoding: "utf8" },
+    ).stdout,
+    "Fixed.\n",
+  );
+});
+
+test("reads the checklist from the version-bump pull request, not the release pull request", async () => {
+  const context = await fixture();
+  await editState(context, (state) => {
+    state.pulls[1].body += `\n${ticked(renderChecklist(""))}`;
+    state.pulls[0].body = "Sets the version.\n";
+  });
+  const result = publish(context);
+  assertRefused(result, "release checklist");
+  assert.match(result.stderr, /https:\/\/github\.test\/pull\/1 is missing/);
+  await assertNothingDone(context);
+});
+
 test("refuses without an executable release hook, on every run", async () => {
   const context = await fixture();
 
@@ -462,7 +505,7 @@ test("refuses without an open release pull request", async () => {
 test("refuses while any checklist box is unticked, naming it", async () => {
   const context = await fixture();
   await editState(context, (state) => {
-    state.pulls[1].body = state.pulls[1].body.replace(
+    state.pulls[0].body = state.pulls[0].body.replace(
       "- [x] The roadmap is current.",
       "- [ ] The roadmap is current.",
     );
@@ -476,7 +519,7 @@ test("refuses while any checklist box is unticked, naming it", async () => {
 test("refuses when a checklist item was edited or removed", async () => {
   const context = await fixture();
   await editState(context, (state) => {
-    state.pulls[1].body = state.pulls[1].body.replace(
+    state.pulls[0].body = state.pulls[0].body.replace(
       "- [x] The README describes what shipped.",
       "- [x] The README is fine.",
     );
@@ -572,7 +615,7 @@ test("once merged, the pre-merge checks are skipped and the run resumes after th
   git(context.root, "commit", "--quiet", "-m", "a later change");
   git(context.root, "push", "--quiet", "origin", "development");
   await editState(context, (state) => {
-    state.pulls[1].body = state.pulls[1].body.replaceAll("- [x] ", "- [ ] ");
+    state.pulls[0].body = state.pulls[0].body.replaceAll("- [x] ", "- [ ] ");
     state.calls = [];
   });
 

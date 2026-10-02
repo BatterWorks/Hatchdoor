@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 // `just release-publish <version>`: the second of the two release commands
-// (ADR-36). It merges the release pull request that `just release-prepare`
-// opened, tags the merge, has the release hook build and push the images,
-// publishes the draft GitHub Release, and has the hook deploy.
+// (ADR-36, ADR-37). It merges the release pull request that
+// `just release-prepare` opened, once every box in the checklist on the merged
+// version-bump pull request is ticked, tags the merge, has the release hook
+// build and push the images, publishes the draft GitHub Release, and has the
+// hook deploy.
 //
 // The agent runs it only after the maintainer approved the release title and
 // notes in the agent's own session (ADR-36 decision 4). Nothing here checks
@@ -115,9 +117,10 @@ function requireHook() {
   return hook;
 }
 
-// The bump pull request's merge commit. Prepare names the branch, and a
-// re-used branch can carry closed attempts beside the merged one.
-function bumpMergeCommit(version) {
+// The merged version-bump pull request, which carries the release checklist
+// (ADR-37), with its merge commit as `bumpMerge`. Prepare names the branch,
+// and a re-used branch can carry closed attempts beside the merged one.
+function mergedBumpPullRequest(version) {
   const pulls = JSON.parse(
     gh(
       "pr",
@@ -129,10 +132,11 @@ function bumpMergeCommit(version) {
       "--state",
       "merged",
       "--json",
-      "number,url,mergeCommit",
+      "number,url,body,mergeCommit",
     ),
   );
-  return pulls.find((pull) => pull.mergeCommit?.oid)?.mergeCommit.oid ?? null;
+  const pull = pulls.find((candidate) => candidate.mergeCommit?.oid);
+  return pull ? { ...pull, bumpMerge: pull.mergeCommit.oid } : null;
 }
 
 // The `development` to `main` pull request titled for this version. A merged
@@ -151,7 +155,7 @@ function releasePullRequest(version) {
       "--limit",
       "100",
       "--json",
-      "number,url,state,title,body,mergeCommit",
+      "number,url,state,title,mergeCommit",
     ),
   ).filter((pull) => pull.title === `Release v${version}`);
   for (const state of ["MERGED", "OPEN"]) {
@@ -230,16 +234,20 @@ function requireEmptyUnreleased() {
   }
 }
 
-// Nothing may follow the bump on `development`, so the merge brings into
-// `main` exactly what prepare tested (decision 5).
-function requireBumpTip(version) {
-  const bump = bumpMergeCommit(version);
+function requireMergedBump(version) {
+  const bump = mergedBumpPullRequest(version);
   if (!bump) {
     refuse(
       "development tip",
       `the version-bump pull request from docs/release-v${version} has not merged into ${DEVELOPMENT}.`,
     );
   }
+  return bump;
+}
+
+// Nothing may follow the bump on `development`, so the merge brings into
+// `main` exactly what prepare tested (decision 5).
+function requireBumpTip({ bumpMerge: bump }) {
   const tip = git("rev-parse", `${REMOTE}/${DEVELOPMENT}`);
   if (tip !== bump) {
     refuse(
@@ -433,7 +441,7 @@ async function main() {
   let bumpMerge;
   if (pull?.state === "MERGED") {
     mergeCommit = pull.mergeCommit.oid;
-    bumpMerge = bumpMergeCommit(version);
+    bumpMerge = mergedBumpPullRequest(version)?.bumpMerge;
     if (!bumpMerge) {
       refuse(
         "merge commit",
@@ -450,10 +458,11 @@ async function main() {
         `there is no open or merged pull request from ${DEVELOPMENT} into ${MAIN} titled exactly "Release ${tag}". If it was retitled, restore that title; otherwise run \`just release-prepare ${version}\` to open it.`,
       );
     }
-    requireChecklist(pull);
+    const bump = requireMergedBump(version);
+    requireChecklist(bump);
     requireDraftRelease(tag);
     requireEmptyUnreleased();
-    bumpMerge = requireBumpTip(version);
+    bumpMerge = requireBumpTip(bump);
     requireNoTag(tag);
     mergeCommit = merge(pull, bumpMerge);
   }

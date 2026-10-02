@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 
 // `just release-prepare <version>`: the first of the two release commands
-// (ADR-36). It opens pull requests and a draft release, and stops. It never
-// merges anything, never pushes to `development` or `main`, and never records
-// the documentation review on anyone's behalf.
+// (ADR-36, ADR-37). It opens pull requests and a draft release, and stops. It
+// never merges anything, never pushes to `development` or `main`, and never
+// records the documentation review on anyone's behalf.
 //
 // The first run cuts `docs/release-v<version>` off `development`, sets the
 // version in the four version files, dates the changelog's Unreleased
 // section, runs the mechanical checks, and opens the version-bump pull
-// request into `development`. Once that has merged, the next run opens the
-// `development` to `main` release pull request, carrying the judgment
-// checklist, and creates a draft GitHub Release from the changelog section.
+// request into `development`, carrying the judgment checklist, beside a draft
+// GitHub Release made from the changelog section. The review happens on that
+// pull request, so a fix it needs is committed to the bump branch; a run while
+// the pull request is open tests and pushes such a commit. Once the bump has
+// merged, the next run opens the `development` to `main` release pull
+// request, which carries no checklist.
 //
 // Every run works out where the release stands from git and GitHub rather
 // than from local notes, so re-running after any step, or after a crash,
@@ -330,6 +333,22 @@ async function checkBump(version, branch) {
   }
 }
 
+// The remote branch must not hold a commit the local one lacks. Such a commit
+// was pushed some other way, so no run of this command tested it, and pushing
+// over it would fail only after a full test run.
+function requireRemoteNotAhead(branch) {
+  if (
+    refExists(remoteBranch(branch)) &&
+    run("git", ["merge-base", "--is-ancestor", remoteBranch(branch), "HEAD"])
+      .status !== 0
+  ) {
+    refuse(
+      "bump branch",
+      `${REMOTE}/${branch} has commits the local ${branch} lacks, so they were pushed without this command testing them. Bring them in with \`git pull --ff-only\`, run \`just check-full\` yourself, since this command does not test a commit already on ${REMOTE}, and run this again.`,
+    );
+  }
+}
+
 function isPushed(branch) {
   return (
     refExists(remoteBranch(branch)) &&
@@ -345,68 +364,100 @@ function pushBranch(branch) {
   console.log(`Pushed ${branch}.`);
 }
 
-async function prepareBump(version, branch) {
-  switchToBumpBranch(branch);
-  await applyBump(version);
-  await checkBump(version, branch);
-  pushBranch(branch);
-  const url = gh(
-    "pr",
-    "create",
-    "--base",
-    DEVELOPMENT,
-    "--head",
-    branch,
-    "--title",
-    `Prepare the v${version} release`,
-    "--body",
-    `Sets the version to ${version} in ${VERSION_FILES.map((file) => `\`${file}\``).join(", ")}, and renames the changelog's \`## Unreleased\` section to \`## v${version} - <date>\`.
+function bumpPullRequestBody(version, branch, freshness) {
+  return `Sets the version to ${version} in ${VERSION_FILES.map((file) => `\`${file}\``).join(", ")}, and renames the changelog's \`## Unreleased\` section to \`## v${version} - <date>\`.
 
 The version files agree, every \`[#N]\` in the section has a link definition, and \`just check-full\` passed on this branch.
 
-Made by \`just release-prepare ${version}\`. Once this has merged, run it again to open the release pull request into \`${MAIN}\` and the draft GitHub Release.`,
-  );
-  console.log(`
-Opened the version-bump pull request: ${url}
+The release is reviewed here, before this merges. Commit any fix the review needs to \`${branch}\` and run \`just release-prepare ${version}\` again, which tests and pushes it, so the fix ships in this release. \`just release-publish ${version}\` refuses while any box below is unticked. Tick each box only after doing the check it names. Publishing waits for the maintainer to approve the release title and notes.
 
-Merge it into ${DEVELOPMENT}, then run \`just release-prepare ${version}\` again.`);
+Made by \`just release-prepare ${version}\`. Once this has merged, run it again to open the release pull request into \`${MAIN}\`.
+
+## Release checklist
+
+${renderChecklist(freshness)}
+`;
 }
 
-// ---------------------------------------------------------------------------
-// Step 5: the release pull request and the draft release
+// The notes come from the changelog passed in: the bump branch's before the
+// bump merges, and `development`'s after.
+function ensureDraftRelease(version, release, changelog) {
+  if (release) {
+    console.log(`The draft release already exists: ${release.url}`);
+    return release.url;
+  }
+  const tag = `v${version}`;
+  const url = gh(
+    "release",
+    "create",
+    tag,
+    "--draft",
+    "--target",
+    MAIN,
+    "--title",
+    tag,
+    "--notes",
+    releaseNotes(changelog, version),
+  );
+  console.log(`Created the draft release: ${url}`);
+  return url;
+}
 
-// `just docs-freshness main` judges the checkout, so it runs on the tip of
-// `development` that the release pull request merges, then returns to where
-// the run started. It compares against the local `main` when one exists, so
-// that is brought up to date first; otherwise a stale `main` widens the
-// reading list past what this release touched.
+// A run while the bump is open brings it up to date instead of opening a
+// second one: a commit made on the branch for the review is checked,
+// including `just check-full`, and pushed, and a draft release lost to a crash
+// is created.
+async function prepareBump(version, branch, bump, release) {
+  switchToBumpBranch(branch);
+  requireRemoteNotAhead(branch);
+  await applyBump(version);
+  await checkBump(version, branch);
+  pushBranch(branch);
+  let pullUrl;
+  if (bump) {
+    pullUrl = bump.url;
+    console.log(`The version-bump pull request is open: ${pullUrl}`);
+  } else {
+    pullUrl = gh(
+      "pr",
+      "create",
+      "--base",
+      DEVELOPMENT,
+      "--head",
+      branch,
+      "--title",
+      `Prepare the v${version} release`,
+      "--body",
+      bumpPullRequestBody(version, branch, docsFreshness()),
+    );
+    console.log(`Opened the version-bump pull request: ${pullUrl}`);
+  }
+  const releaseUrl = ensureDraftRelease(
+    version,
+    release,
+    await readRepositoryFile("CHANGELOG.md"),
+  );
+  console.log(`
+Next: work through the checklist on ${pullUrl}. Commit any fix the review needs to ${branch} and run \`just release-prepare ${version}\` again to test and push it. Draft the release title and notes on ${releaseUrl}. Once every box is ticked, merge the pull request into ${DEVELOPMENT} and run \`just release-prepare ${version}\` again to open the release pull request.`);
+}
+
+// `just docs-freshness main` judges the checkout, so it runs on the bump
+// branch just pushed, which is what the release will merge into `main`. It
+// compares against the local `main` when one exists, so that is brought up to
+// date first; otherwise a stale `main` widens the reading list past what this
+// release touched.
 //
 // The script exits 1 both when it hands over a reading list and when the
 // changelog check fails, so only the first counts as a result to paste.
 function docsFreshness() {
-  const branch = git("rev-parse", "--abbrev-ref", "HEAD");
-  const start = branch === "HEAD" ? git("rev-parse", "HEAD") : branch;
-  git("switch", "--quiet", "--detach", `${REMOTE}/${DEVELOPMENT}`);
-  let update;
-  let result;
-  try {
-    update = run("git", ["fetch", "--quiet", REMOTE, `${MAIN}:${MAIN}`]);
-    if (update.status === 0) {
-      result = run("sh", ["-c", `just docs-freshness ${MAIN} 2>&1`]);
-    }
-  } finally {
-    if (branch === "HEAD") {
-      git("switch", "--quiet", "--detach", start);
-    } else {
-      git("switch", "--quiet", start);
-    }
-  }
+  const update = run("git", ["fetch", "--quiet", REMOTE, `${MAIN}:${MAIN}`]);
   if (update.status !== 0) {
     refuse(
       "docs-freshness",
       `could not fast-forward the local ${MAIN} to ${REMOTE}/${MAIN}: ${update.stderr.trim()}`,
     );
   }
+  const result = run("sh", ["-c", `just docs-freshness ${MAIN} 2>&1`]);
   const handedList =
     result.status === 1 &&
     result.stdout.includes("Documentation freshness review required");
@@ -419,18 +470,17 @@ function docsFreshness() {
   return result.stdout;
 }
 
-function releasePullRequestBody(version, freshness) {
+// ---------------------------------------------------------------------------
+// Step 5: the release pull request
+
+function releasePullRequestBody(version, bump) {
   return `Releases v${version}: merges \`${DEVELOPMENT}\` into \`${MAIN}\`.
 
-\`just release-publish ${version}\` merges this pull request, and refuses while any box below is unticked. Tick each box only after doing the check it names. Publishing waits for the maintainer to approve the release title and notes.
-
-## Release checklist
-
-${renderChecklist(freshness)}
+The release was reviewed on the version-bump pull request, ${bump.url}. \`just release-publish ${version}\` merges this pull request, and refuses while any box in that pull request's checklist is unticked. Publishing waits for the maintainer to approve the release title and notes.
 `;
 }
 
-async function prepareRelease(version, release) {
+async function prepareRelease(version, bump, release) {
   const changelog = developmentChangelog();
   if (!releaseSection(changelog, version)) {
     refuse(
@@ -445,7 +495,6 @@ async function prepareRelease(version, release) {
     pullUrl = existing.url;
     console.log(`The release pull request is already open: ${pullUrl}`);
   } else {
-    const freshness = docsFreshness();
     pullUrl = gh(
       "pr",
       "create",
@@ -456,34 +505,15 @@ async function prepareRelease(version, release) {
       "--title",
       `Release v${version}`,
       "--body",
-      releasePullRequestBody(version, freshness),
+      releasePullRequestBody(version, bump),
     );
     console.log(`Opened the release pull request: ${pullUrl}`);
   }
 
-  const tag = `v${version}`;
-  let releaseUrl;
-  if (release) {
-    releaseUrl = release.url;
-    console.log(`The draft release already exists: ${releaseUrl}`);
-  } else {
-    releaseUrl = gh(
-      "release",
-      "create",
-      tag,
-      "--draft",
-      "--target",
-      MAIN,
-      "--title",
-      tag,
-      "--notes",
-      releaseNotes(changelog, version),
-    );
-    console.log(`Created the draft release: ${releaseUrl}`);
-  }
+  const releaseUrl = ensureDraftRelease(version, release, changelog);
 
   console.log(`
-Next: work through the checklist on ${pullUrl}, draft the release title and notes on ${releaseUrl}, and give them to the maintainer to approve. \`just release-publish ${version}\` runs only after that approval.`);
+Next: give the maintainer the release title and notes on ${releaseUrl} to approve. \`just release-publish ${version}\` merges ${pullUrl}, and runs only after that approval.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -520,11 +550,9 @@ async function main() {
 
   const bump = bumpPullRequest(branch);
   if (bump?.state === "MERGED") {
-    await prepareRelease(version, release);
+    await prepareRelease(version, bump, release);
   } else if (bump?.state === "OPEN") {
-    console.log(
-      `The version-bump pull request is open and waiting to be merged: ${bump.url}\nRun \`just release-prepare ${version}\` again once it has merged.`,
-    );
+    await prepareBump(version, branch, bump, release);
   } else if (bump?.state === "CLOSED" && refExists(remoteBranch(branch))) {
     // Once the branch is gone the closed pull request is history, and the
     // next run starts over with a new one.
@@ -533,7 +561,7 @@ async function main() {
       `${bump.url} was closed without merging. Reopen it, or delete the ${branch} branch on ${REMOTE} and locally to start over.`,
     );
   } else {
-    await prepareBump(version, branch);
+    await prepareBump(version, branch, null, release);
   }
 }
 
