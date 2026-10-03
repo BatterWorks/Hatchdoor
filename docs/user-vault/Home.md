@@ -5,54 +5,73 @@ status: current
 
 # Hatchdoor documentation
 
-Hatchdoor is an agent-first notes app for Markdown Vaults you own. Connect an agent to search and change notes through Hatchdoor's guarded tools, then use the Web UI to read and review the same files. Markdown stays authoritative; Hatchdoor supplies the operational layer around it.
-
-> [!tip]
-> Start an agent read-only. It should search before it reads, read before it changes, and use the current note version when it saves.
+Hatchdoor puts your notes in one place that both you and an AI agent can use. Your notes stay ordinary Markdown files in a folder you own. You read and edit them in your browser, and an agent such as Claude Code or Codex searches and edits the same files through Hatchdoor's MCP connection.
 
 ```mermaid
 flowchart LR
-    V[Markdown Vault] <--> H[Hatchdoor]
-    H <--> W[Web UI: browse and review]
-    H <--> M[Agent via MCP: search, read, change]
+    V[Your notes folder] <--> H[Hatchdoor]
+    H <--> W[You, in the browser]
+    H <--> M[Your agent, over MCP]
 ```
+
+> [!tip]
+> Let your agent read before you let it write. Agent access starts read-only, and allowing changes is a separate switch you turn on when you are ready.
 
 ## Start here
 
-Follow [[Welcome to Hatchdoor]] to deploy Hatchdoor, connect your own agent, make one deliberate change, and review it in the browser. These docs target Hatchdoor v2.6.0.
+If you are new to Hatchdoor, follow [[Welcome to Hatchdoor]]. It takes you from installing Hatchdoor to an agent that can search your notes, one page at a time.
 
-Want to look before you install anything? The [public demo](https://hatchdoor.battercloud.cc) is a live, read-only Hatchdoor with four example Vaults in it. It is the same application these docs describe, running the same version.
+A fresh install opens on the **Set up Hatchdoor** checklist, which walks you through adding your notes, connecting your agent and trying a search. You can reopen it any time from **Help** → **Setup checklist**.
 
-## Before you start: what kind of notes app is this
+To look before you install anything, open the [public demo](https://hatchdoor.battercloud.cc), a live, read-only Hatchdoor with four example Vaults in it. Nothing there can be changed, so there is nothing to break.
 
-Hatchdoor is built for keeping a [[The Second Brain method (external reference)|second brain]] — a durable, external place for the things worth keeping — with one difference from most tools built for that: an MCP-connected agent can read and act on it too, not just you. See [[Why keep a second brain]] for what that changes about the ordinary capture-organize-distill-express rhythm.
+When something is not working, [[How to troubleshoot common problems]] lists the usual problems: a forgotten password or token, an agent that cannot connect, notes not showing up, a Git sync that fails.
 
-That still leaves how to lay out a Vault. Hatchdoor doesn't require any particular layout — pick whichever of these fits how you think, or mix them:
+To see what changed in a release, read [[What's new]].
+
+## Words used in this manual
+
+- A **Vault** is one folder of Markdown notes that Hatchdoor knows about. You can have several.
+- The **web token** is the password your browser asks for. It lives in your deployment's `.env` file.
+- The **MCP password** (also called the MCP token) is the separate password your agent uses. You make it in **Settings** → **Agent access (MCP)**.
+- **MCP** is the standard way AI agents connect to tools like Hatchdoor.
+
+## Ways to organize your notes
+
+Hatchdoor doesn't require any particular folder layout. If you want a starting point, [[How to choose a folder layout]] gives a simple one. If you want to read about the idea first, start with [[Why keep a second brain]]. These well-known methods all work, alone or mixed:
 
 | Method | What it optimizes | Reference | See it live |
 | --- | --- | --- | --- |
 | **PARA** | Folders by how actionable a note is (Projects, Areas, Resources, Archives) | [[The PARA method (external reference)]] | [Home & Life](https://hatchdoor.battercloud.cc/v/919a41eb-a699-4d46-9857-eaa6db0a85c4/n/readme) |
-| **Zettelkasten** | Dense links between atomic notes, little to no folder hierarchy | [[The Zettelkasten method (external reference)]] | [Reading Notes](https://hatchdoor.battercloud.cc/v/7b6b865f-e5fa-4abd-8d1d-d5e75a7341f9/n/readme) |
+| **Zettelkasten** | Dense links between small notes, few or no folders | [[The Zettelkasten method (external reference)]] | [Reading Notes](https://hatchdoor.battercloud.cc/v/7b6b865f-e5fa-4abd-8d1d-d5e75a7341f9/n/readme) |
 | **LLM wiki** | An agent that builds and maintains an interlinked wiki for you | [[The LLM wiki pattern (external reference)]] | [Research Wiki](https://hatchdoor.battercloud.cc/v/e1f02552-5a8a-4a5e-9b75-4e40dd1cf141/n/readme) |
 
-The [public demo](https://hatchdoor.battercloud.cc) runs those three side by side, plus a fourth Vault, [Team Docs](https://hatchdoor.battercloud.cc/v/ec49f950-6979-42e3-b31e-e1654e7716c5/n/readme), which uses no folder convention at all and leans on tags and search instead. Every note in them is fictional and the whole instance is read-only, so there is nothing there to break.
+The demo's fourth Vault, [Team Docs](https://hatchdoor.battercloud.cc/v/ec49f950-6979-42e3-b31e-e1654e7716c5/n/readme), uses no folder convention at all and relies on tags and search instead. Every note in the demo is fictional. [[How to run an LLM wiki in Hatchdoor]] shows one way to combine an LLM wiki with folders underneath it.
 
-They aren't mutually exclusive — see [[How to run an LLM wiki in Hatchdoor]] for one way to combine an LLM wiki with folder-based organization underneath it.
+## What's in this manual
 
-## Documentation areas
-
-| Area | Purpose |
+| Section | What you'll find |
 | --- | --- |
-| **Get started** | Your first working Vault, agent, and browser session |
-| **Guides** | Repeatable operational tasks |
-| **Reference** | Configuration and API details |
-| **Concepts** | How Hatchdoor stores, indexes, and protects notes |
+| **Get started** | Install Hatchdoor, add your notes, connect an agent, step by step |
+| **Guides** | How to do one specific thing, such as setting up Git sync or upgrading |
+| **Reference** | Every setting, API route, MCP tool and Markdown feature, in detail |
+| **Concepts** | How Hatchdoor works underneath, for when you want to understand why |
 
-Guides, Reference, and Concepts will grow from this starting point.
+**Get started**
+
+- [[Welcome to Hatchdoor]]
+- [[Install Hatchdoor with Docker Compose]]
+- [[Connect your first Vault]]
+- [[Connect your agent]]
+- [[Search and change notes with your agent]]
+- [[Browse and review through the Web UI]]
+- [[Understand where your data lives]]
 
 **Guides**
 
 - [[How to deploy Hatchdoor with an agent]]
+- [[How to upgrade Hatchdoor]]
+- [[How to troubleshoot common problems]]
 - [[How to work in a Vault as an agent]]
 - [[How to set up a Git-backed Vault]]
 - [[How to manage multiple Vaults]]
@@ -61,7 +80,6 @@ Guides, Reference, and Concepts will grow from this starting point.
 - [[How to run an LLM wiki in Hatchdoor]]
 - [[How to import and work with attachments]]
 - [[How to edit notes with the live editor]]
-- [[How to troubleshoot common problems]]
 
 **Reference**
 
@@ -78,8 +96,8 @@ Guides, Reference, and Concepts will grow from this starting point.
 **Concepts**
 
 - [[What Hatchdoor is]]
+- [[Why keep a second brain]]
 - [[The layer system]]
 - [[How indexing and search work]]
 - [[The security model]]
 - [[Vault lifecycle states]]
-- [[Why keep a second brain]]

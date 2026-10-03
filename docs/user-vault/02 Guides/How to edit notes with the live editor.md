@@ -4,23 +4,23 @@ tags: [type/how-to, topic/web-ui]
 
 # How to edit notes with the live editor
 
-On a writable Vault, the note you're reading *is* the note you edit — there's no separate edit mode to switch into. Click any paragraph, heading, list item, table row, or callout line and it turns into an editable field in place; everything else on the page stays exactly as rendered. This page covers how that works day to day. For the underlying Markdown syntax itself, see [[Supported Markdown reference]]; for browsing and search, see [[Browse and review through the Web UI]].
+On a writable Vault, the note you're reading *is* the note you edit. There's no separate edit mode to switch into. Click any paragraph, heading, list item, table row, or callout line and it turns into an editable field in place; everything else on the page stays exactly as rendered. This page covers how that works day to day. For the underlying Markdown syntax itself, see [[Supported Markdown reference]]; for browsing and search, see [[Browse and review through the Web UI]].
 
 ## Entering a block
 
 - **Mouse:** click the block. The caret lands roughly where you clicked.
 - **Keyboard:** `Tab` to the block, then `Enter`. Every editable block is reachable this way, not just by mouse.
-- **Touch:** double-tap the line. A single tap keeps its normal job (following a link, toggling a checkbox, expanding a callout), so a stray tap while scrolling never opens an editor by accident. The first time you visit a writable Vault on a touch device, a dismissible banner reminds you: *"Double-tap a line to edit it."* — it only shows once.
+- **Touch:** double-tap the line. A single tap keeps its normal job (following a link, toggling a checkbox, expanding a callout), so a stray tap while scrolling never opens an editor by accident. The first time you visit a writable Vault on a touch device, a dismissible banner reminds you: *"Double-tap a line to edit it."* It only shows once.
 
 Links, task-list checkboxes, and callout summary lines never open for editing on click or tap; they do what they already do (navigate, toggle, expand/collapse).
 
 ## Editable units
 
-Each click targets one **block**, not the whole note: one paragraph, one heading, one list item, one table row, one callout line, or one fenced code block. Markdown syntax you don't normally see — `## `, `- `, `> `, the code fence — appears only inside the block you're actively editing, and disappears again once you move on. The rest of the note keeps rendering normally while you edit one piece of it.
+Each click targets one **block**, not the whole note: one paragraph, one heading, one list item, one table row, one callout line, or one fenced code block. Markdown syntax you don't normally see (`## `, `- `, `> `, the code fence) appears only inside the block you're actively editing, and disappears again once you move on. The rest of the note keeps rendering normally while you edit one piece of it.
 
 A saved query is one block as well. Its table is drawn from a fenced `base` block, and clicking the table opens that block's definition for editing. A column heading and a row's link are the exceptions: a heading sorts the table and a link opens its note. Once the edit saves, the table is worked out again from the new definition. Source mode's preview shows the definition rather than a table, because it previews text that isn't saved yet and only the saved note is evaluated.
 
-Note properties (the frontmatter block — tags, status, and so on) are also editable inline, right above the note body.
+Note properties (the frontmatter block: tags, status, and so on) are also editable inline, right above the note body.
 
 ## Moving and splitting as you type
 
@@ -35,15 +35,15 @@ Note properties (the frontmatter block — tags, status, and so on) are also edi
 | `↑` / `↓` at the top/bottom line of a block | Moves to the previous/next block, keeping your column |
 | `Escape` | Commits your edit and returns to the rendered view, with focus back on that block |
 
-These are disabled inside table rows — restructuring a table (adding rows or columns) needs Source mode, below.
+These are disabled inside table rows. Restructuring a table (adding rows or columns) needs Source mode, below.
 
 ## Saving
 
 There's no Save button. Edits save automatically: when you commit a block (by clicking elsewhere, pressing `Escape`, or moving to another block) and again after about two seconds of typing without a pause. A badge above the note tells you where things stand:
 
-- **Saving…** — a write is in flight.
-- **Saved HH:MM** — everything up to that point is on disk.
-- **Not saving** — autosave has stopped; see below.
+- **Saving…**: a write is in flight.
+- **Saved HH:MM**: everything up to that point is on disk.
+- **Not saving**: autosave has stopped; see below.
 
 ## If the page goes away mid-edit
 
@@ -57,21 +57,21 @@ Hatchdoor also waits before updating itself. A new version installs in the backg
 
 ## When editing stops or isn't available
 
-- **"Edits aren't saving. This note changed somewhere else."** — someone or something else (an agent, Obsidian, a git sync) wrote to this note while you were editing. Your local changes are kept; click **Review** to compare your draft against the version on disk and choose which to keep.
-- **"Edits aren't saving"** with nothing else to go on, or a save that fails repeatedly for no visible reason — this is a problem on the server rather than in your browser, and the server log now records every failed save with its cause. See [[How to troubleshoot common problems]].
-- **"Edits aren't saving. Hatchdoor could not reach the vault."** — a connectivity problem. It retries once the connection is back.
-- **"This note changed on disk while your edit was waiting to save."** — the note moved somewhere else while your edit was stuck (a save the server refused, a connection that is down). Nothing of yours is written over: open **Edit** to put the two versions side by side and decide.
-- **"This note is part of a sync conflict with the Vault's remote."** — the Vault's last sync stopped because this note changed both here and on the remote. You can still edit it, but an edit made before the conflict is resolved may cause the same conflict again. [[How to troubleshoot common problems#Resolving a sync conflict]] explains how to resolve it from the Vault's settings.
+- **"Edits aren't saving. This note changed somewhere else."**: someone or something else (an agent, Obsidian, a git sync) wrote to this note while you were editing. Your local changes are kept; click **Review** to compare your draft against the version on disk and choose which to keep.
+- **"Edits aren't saving"** with nothing else to go on, or a save that fails repeatedly for no visible reason: this is a problem on the server rather than in your browser, and the server log records every failed save with its cause. See [[How to troubleshoot common problems]].
+- **"Edits aren't saving. Hatchdoor could not reach the vault."**: a connectivity problem. It retries once the connection is back.
+- **"This note changed on disk while your edit was waiting to save."**: the note moved somewhere else while your edit was stuck (a save the server refused, a connection that is down). Nothing of yours is written over: open **Edit** to put the two versions side by side and decide.
+- **"This note is part of a sync conflict with the Vault's remote."**: the Vault's last sync stopped because this note changed both here and on the remote. You can still edit it, but an edit made before the conflict is resolved may cause the same conflict again. [[How to troubleshoot common problems#Resolving a sync conflict]] explains how to resolve it from the Vault's settings.
 - **`conflict` or `sync stopped` next to the Vault in the sidebar** does not stop your edits. Notes keep saving to disk; only the Vault's Git commit and sync wait until the problem is dealt with from the Vault's settings. See [[How to troubleshoot common problems#Git sync is failing]].
-- **"This note's source and rendered lines don't line up, so inline editing is off here."** — a rare safety guard that disables inline editing for that specific note rather than risk misplacing an edit. Use **Edit** to open Source mode instead.
-- If the Vault is read-only, or you're on a demo deployment, no block is clickable at all — the note behaves as a plain reader.
+- **"This note's source and rendered lines don't line up, so inline editing is off here."**: a rare safety guard that disables inline editing for that specific note rather than risk misplacing an edit. Use **Edit** to open Source mode instead.
+- If the Vault is read-only, or you're on a demo deployment, no block is clickable at all; the note behaves as a plain reader.
 
 > [!note]
 > The detection behind the first and third messages above depends on the filesystem holding the Vault. Hatchdoor normally saves a note by swapping the new copy with the old one in a single step, which is how it notices that something else got there first. Where the filesystem cannot do that swap, ZFS before 2.2 and anything mounted through FUSE, a save checks the note and then replaces it as two steps, and a change that lands in between is overwritten rather than caught. Your own edit is never lost either way, and Hatchdoor tells you when a Vault is in that state: the banner above the note says so, and the server log names the Vault once at startup. [[Install Hatchdoor with Docker Compose]] explains which filesystems are affected.
 
 ## Source mode
 
-The **Edit** button next to the note title opens the older, full-note Markdown editor with an explicit Save button. Use it for anything block editing can't do: restructuring a table, editing display math or raw HTML, and resolving a conflict flagged by the **Review** button above. It's always there as a fallback — nothing you can do in Source mode is off-limits, it's just not block-by-block.
+The **Edit** button next to the note title opens the full-note Markdown editor with an explicit Save button. Use it for anything block editing can't do: restructuring a table, editing display math or raw HTML, and resolving a conflict flagged by the **Review** button above. It's always there as a fallback. Nothing you can do in Source mode is off-limits; it's just not block-by-block.
 
 ### Linking to another note
 

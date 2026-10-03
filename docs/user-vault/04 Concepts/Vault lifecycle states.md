@@ -4,18 +4,17 @@ tags: [type/explanation, topic/vaults]
 
 # Vault lifecycle states
 
-`list_vaults` and the Settings screen report a Vault's condition, but not as one word like "healthy" or "ready" — that single-word framing doesn't actually exist. A Vault's condition is five independent signals plus one operator switch, and conflating them is the most common way to misread what's actually happening.
+This page explains what Hatchdoor means when it describes a Vault's condition, for when a Vault's page in **Settings** or an agent's `list_vaults` reports something you want to understand. For "something is wrong, what do I do", start with [[How to troubleshoot common problems#A Vault won't index or stays in a bad state]] instead.
 
-> [!note]
-> "Healthy" and "degraded" aren't states Hatchdoor reports anywhere — they're not in the API, not in the Settings UI copy, not in the source. The closest the UI comes is describing a Git-backed Vault's sync as "healthy" in one sentence, which just means its Git status isn't `unavailable`. Don't look for a `degraded` value; it doesn't exist.
+A Vault has no single "healthy" or "broken" state. Hatchdoor tracks five separate signals plus one on/off switch, because a Vault can be fine in one way and broken in another. Its Git sync can fail while every note still reads and saves normally, for example. Reading one signal as the whole story is the usual way to misread a Vault.
 
 ## `enabled` is the operator's switch, nothing else
 
-Every Vault definition carries one boolean, `enabled`, set by the operator via **enable_vault**/**disable_vault** (or the equivalent Settings toggle). It answers exactly one question: should this Vault be running at all? It says nothing about whether the Vault is currently working — a Vault can be enabled and still be unavailable (bad path, broken remote, mid-index), or disabled while its last-known runtime state is simply frozen in place.
+Every Vault has one on/off switch, `enabled`, which you set with **Pause Vault** and **Resume Vault** in Settings, or an agent sets with `enable_vault` and `disable_vault`. It answers one question: should this Vault be running at all? It says nothing about whether the Vault works. A Vault can be enabled and still be unavailable (a missing folder, a broken remote), and a paused Vault keeps its last-known state frozen.
 
 ## The five status axes
 
-Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes rather than one combined phase. They can (and routinely do) disagree with each other — a Vault can be browsable while still indexing, or have a broken Git remote while its Markdown is perfectly readable:
+Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes. They often disagree: a Vault can be readable while still indexing, or have a broken Git remote while its notes read fine.
 
 | Axis | Values | What it answers |
 | --- | --- | --- |
@@ -31,22 +30,22 @@ Beside the axes, `index_turn` says where the Vault's indexing stands in the inst
 
 **Search** deserves the closest look, because its middle values are easy to misread:
 
-- `indexing` — actively building; nothing usable yet for this axis.
-- `browsable` — a real, load-bearing state, not a typo for "ready." The Vault's structure (notes, links, headings) is published and current, but this generation has no vectors yet. You can open and read every note; semantic search returns nothing. `query_notes` works in full at this point too, and so does a note's saved query table, since selecting notes by tag, path or property needs the structure and no vectors at all. This is reached once, on a Vault's very first successful index, between the structure pass and the embedding pass — a later rebuild of an already-searchable Vault never regresses through it, it just keeps serving the prior generation while the rebuild runs.
-- `ready` — fully current, structure and vectors both.
-- `stale` — search still works, but what it answers from is a build behind. Three ways to get here: a newer build is in progress (or paused, waiting its turn behind another Vault), the last build failed, or a note was written *during* the build that just finished, so the generation it published was already behind the moment it landed. That last one is normal during a bulk edit or migration — every write arms the next reindex, and the Vault settles on `ready` once the writing stops. Not an error by itself, just "what you're seeing might be a build behind."
+- `indexing`: building its first index; nothing usable yet for this axis.
+- `browsable`: a real state, not a typo for "ready". The Vault's structure (notes, links, headings) is published and current, but this generation has no vectors yet. You can open and read every note; semantic search returns nothing. `query_notes` works in full at this point too, and so does a note's saved query table, since selecting notes by tag, path or property needs the structure and no vectors at all. A Vault passes through it once, on its very first index, between reading the notes and preparing search by meaning. A later rebuild of an already-searchable Vault never drops back to it; search keeps answering from the previous build while the rebuild runs.
+- `ready`: fully current, structure and vectors both.
+- `stale`: search still works, but what it answers from is a build behind. Three ways to get here: a newer build is in progress (or paused, waiting its turn behind another Vault), the last build failed, or a note was written *during* the build that just finished, so the generation it published was already behind the moment it landed. That last one is normal during a bulk edit or migration: every write schedules the next reindex, and the Vault settles on `ready` once the writing stops. Not an error by itself, just "what you're seeing might be a build behind."
 
 ## What capabilities actually come from
 
 `browse`, `search`, `mutate`, `pull`, `push`, `retry`, `commit`, `sync` and `publish_recovery`, the nine flags that decide what the UI shows and what an MCP/API write is allowed to do, are derived from the axes above and from the Vault's own definition, not from any single axis:
 
-- **`browse`** — true whenever local content is `read_write` or `read_only`. Notably independent of the search axis: a Vault mid-index (or even stuck at `browsable`) is still fully browsable.
-- **`search`** — true only for `ready` or `stale`. `browsable` and `indexing` both grant `browse` but not `search`.
-- **`mutate`** — true only when local content is `read_write` *and* the Vault isn't a `pull_only` Git Vault. A `pull_only` Vault never allows local edits, regardless of how healthy everything else looks, since edits would just conflict with the next pull.
-- **`pull`** / **`push`** — true only when Git status is `ready`, gated further by the configured Git mode (`pull_only` or `two_way` for pull; `two_way` only for push).
+- **`browse`**: true whenever local content is `read_write` or `read_only`. Notably independent of the search axis: a Vault mid-index (or even stuck at `browsable`) is still fully browsable.
+- **`search`**: true only for `ready` or `stale`. `browsable` and `indexing` both grant `browse` but not `search`.
+- **`mutate`**: true only when local content is `read_write` *and* the Vault isn't a `pull_only` Git Vault. A `pull_only` Vault never allows local edits, regardless of how healthy everything else looks, since edits would just conflict with the next pull.
+- **`pull`** / **`push`**: true only when Git status is `ready`, gated further by the configured Git mode (`pull_only` or `two_way` for pull; `two_way` only for push).
 - **`commit`** / **`sync`**. `commit` is true when the Vault keeps Git history of its own (`local_history` or `two_way`); `sync` is true when it has a remote to talk to (`pull_only` or `two_way`). Unlike `pull` and `push` these come from the Vault's definition, not its current Git status, so they keep their answer while the Vault is failing. That is what lets the Settings console offer **Commit now** rather than **Sync now** on a Vault with no remote without having to guess from the Git mode.
 - **`publish_recovery`**. True for a Two-way Vault whose Git error is `managed_git_conflict`: its side of the conflict can be published to a recovery branch on the remote. It follows the Vault's current Git status, so it turns off as soon as a sync resolves the conflict. See [[How to troubleshoot common problems#Resolving a sync conflict]].
-- **`retry`** — true if *any* of the four per-axis error fields (activation, search, git, watcher) is marked retryable. This is what puts a **Try again** button in front of an operator instead of leaving a Vault silently stuck.
+- **`retry`**: true if *any* of the four per-axis error fields (activation, search, git, watcher) is marked retryable. This is what puts a **Try again** button in front of an operator instead of leaving a Vault silently stuck.
 
 One answer deliberately sits outside this scheme. Whether a Vault can *write* is the `mutate` capability above, derived from the axes and the definition. Whether it can write **atomically**, committing a save as one swap rather than as a check followed by a replacement, is a property of the filesystem holding the Vault, and no axis and no part of the definition can tell you. Hatchdoor finds it out by trying the operation once when the Vault's runtime is established. It is reported on its own, as `atomic_compare_and_swap` on `GET /api/v1/vaults/{vault_id}/write-capabilities` and as one line per affected Vault in the server log, never folded into `local_content` or `mutate`. A Vault that writes without the atomic swap is `read_write` and `mutate: true`, correctly: it writes, just with a narrower guarantee against an editor outside Hatchdoor. Keeping the two apart is the same rule the rest of this page follows, that one signal answers one question.
 
@@ -57,9 +56,6 @@ One instance-wide exception: on a public read-only demo (`HATCHDOOR_DEMO_MODE=tr
 Registry recovery means the registry file itself (`vaults.json`) fails to load: it's corrupt, or its schema version is unsupported or from a newer Hatchdoor than this one. Every registry-mutating request answers `503 vault_registry_recovery_required` until the file is fixed on disk; there's no in-app action that resolves this, because the thing that's broken is the very store any fix made from inside Hatchdoor would need to write to. A registry file Hatchdoor cannot read at all, for example because of a permission or disk error, is reported as an error (`500 internal_error`) and is never mistaken for an empty registry, so a mutation cannot overwrite the Vaults it holds.
 
 It is not a per-Vault state: it describes the registry as a whole being unable to tell you about any Vault at all, which is a different kind of problem than one Vault having a bad Git remote or a locked file.
-
-> [!warning]
-> There's also an older, single-Vault-only `TermsRequired → Downloading → Validating → Scanning → Indexing → Ready → Unavailable` phase sequence still present in the code, from before the multi-vault registry existed. It only governs the legacy first-run embedding-model setup (accepting Gemma's terms, downloading a model) and has no bearing on how a Vault created through the registry is described — don't confuse it with the five-axis model above if you come across it.
 
 ---
 

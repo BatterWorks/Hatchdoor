@@ -4,54 +4,59 @@ tags: [type/how-to, topic/vaults]
 
 # How to manage multiple Vaults
 
-Hatchdoor is multi-vault by design — there's no selected or default Vault anywhere in the app. [[Connect your first Vault]] and [[How to set up a Git-backed Vault]] cover creating one; this page covers living with more than one: adding another, pausing and resuming, disconnecting, and the same three actions from an agent over MCP.
+You can keep several Vaults in one Hatchdoor, for example one for work notes and one for home. Each is its own folder, and you can pause or remove each one on its own. [[Connect your first Vault]] and [[How to set up a Git-backed Vault]] cover adding one. This page covers living with more than one: adding another, pausing and resuming, disconnecting, and asking an agent to do the same.
+
+Hatchdoor never picks a Vault for you: there is no "default" Vault. Agents name the Vault they mean on every call.
 
 ## Add another Vault
 
-Open **Settings** → **Add a Vault**. The same creation form handles every Vault, first or fifth: **A folder on this server** for a plain directory or an existing local Git checkout, **A managed Git checkout** for a remote Hatchdoor should clone and own. See [[Connect your first Vault]] for the container-path caveat with local folders, and [[How to set up a Git-backed Vault]] for the full field-by-field walkthrough of Git behaviour.
+Open **Settings** → **Add a Vault**. The same form adds every Vault, first or fifth:
 
-A Vault's folder can't overlap Hatchdoor's own instance state: the directory holding `vaults.json` (`/data/state` in the container), the cache directory, or the directory of the settings file. Creating, editing or resuming a local-folder or existing-checkout Vault whose root is one of those directories, sits inside one, or contains one is refused with `400 invalid_vault_definition`. Managed Git checkouts are exempt because Hatchdoor places them under the state directory itself.
+- **A folder on this server** for a plain folder, or a folder you already keep in Git yourself. Pick it from the list, as in [[Connect your first Vault]].
+- **A managed Git checkout** for a Git repository Hatchdoor should copy down and keep in sync. [[How to set up a Git-backed Vault]] walks through every field.
+
+Two Vaults cannot share notes, so a folder inside an existing Vault, or one containing one, is refused. A Vault also cannot overlap Hatchdoor's own data folders: the one holding `vaults.json` (`/data/state` in the container), the cache folder, or the folder of the settings file. Hatchdoor refuses such a Vault with `400 invalid_vault_definition`, whether you are creating, editing or resuming it. Managed Git checkouts are the exception, since Hatchdoor itself places them under the state folder.
 
 > [!note]
-> Demo mode (`HATCHDOOR_DEMO_MODE=true`) removes **Add a Vault** entirely — a public read-only instance has no Settings screen to reach it from.
+> A public demo instance (`HATCHDOOR_DEMO_MODE=true`) has no Settings screen, so it has no **Add a Vault** either.
 
 ## Where each Vault shows up
 
-**Settings** lists every Vault, enabled or paused. The rest of the app — the sidebar, search, the graph — only ever shows enabled Vaults; a paused Vault disappears from browsing and search but keeps its entry, its files, and its history untouched. If you're looking for a Vault you know exists and can't find it while browsing, check whether it's paused in Settings before assuming something's wrong.
+**Settings** lists every Vault, running or paused. The rest of the app (the sidebar, search, the graph) shows only running Vaults. A paused Vault disappears from browsing and search but keeps its entry, its files and its history. If a Vault you know exists is missing from the sidebar, check in Settings whether it is paused before assuming something is wrong.
 
 ## Pause and resume a Vault
 
-Open the Vault from the Settings index and use **Pause Vault** / **Resume Vault** in its action row. Pausing:
+Open the Vault from the list in Settings and use **Pause Vault** or **Resume Vault** on its page. Pausing:
 
-- Removes the Vault from the sidebar, search, and the graph immediately.
-- Leaves every file, the search index, and any Git history exactly as they were — nothing is deleted or rebuilt.
-- Disables that Vault's write capability, MCP included, until it's resumed.
+- Removes the Vault from the sidebar, search and the graph straight away.
+- Leaves every file, the search index and any Git history exactly as they were. Nothing is deleted or rebuilt.
+- Stops all changes to that Vault, from agents too, until you resume it.
 
-There's no separate confirmation step for pausing — it's reversible in one click either direction, unlike disconnecting below.
+Pausing asks for no confirmation, because one click undoes it.
 
 ## Disconnect a Vault
 
-**Disconnect Vault**, in the same action row, is the one Vault-lifecycle action that isn't a toggle. It removes the Vault's *definition* from Hatchdoor's registry — the record of where it lives and how it's configured — while leaving the Vault's own files, folder, Git history, and credentials on disk exactly where they were.
+**Disconnect Vault**, on the same page, makes Hatchdoor forget the Vault. It removes the Vault from Hatchdoor's list, including where it lives and how it is set up, and leaves the Vault's own files, folder and Git history on disk exactly where they were.
 
 > [!warning]
-> Disconnecting forgets the Vault; it does not delete anything. To reconnect, use **Add a Vault** again and point it at the same folder or repository — Hatchdoor treats that as adding new content, not resuming an old identity, so any Vault-scoped settings (exclusion patterns, archive folder, commit identity) need re-entering.
+> Disconnecting forgets the Vault; it does not delete any notes. To reconnect, use **Add a Vault** again and pick the same folder or repository. Hatchdoor treats it as a new Vault, so its own settings (ignored files, archive folder, commit identity) need entering again.
 
-Disconnect has no undo inside Hatchdoor itself, which is why it's a red button with the warning line printed above it rather than a confirmation dialog after the click — the app tells you the consequence before you act, not after.
+Hatchdoor has no undo for disconnecting. That is why the button is red and the warning sits above it, so you read what happens before you click, not after.
 
-## The same three actions over MCP
+## Ask an agent to do it
 
-An agent manages Vaults with the same tools it uses for everything else, gated by `HATCHDOOR_MCP_WRITE_ENABLED` like any other write — see [[MCP tools reference#Vault collection: discovery and management]] for full parameters. The pattern is the same for all three:
+An agent manages Vaults with MCP tools, and needs **Let assistants change notes** turned on for anything but looking. See [[MCP tools reference#Vault collection: discovery and management]] for every parameter. You can ask in plain words, for example "pause my Work Vault in Hatchdoor". The agent then follows this pattern:
 
 ```text
 1. Call list_vaults. Read the target Vault's vault_id and the current registry_revision.
 2. Call enable_vault / disable_vault / disconnect_vault with that vault_id and expected_registry_revision.
-3. A stale expected_registry_revision is rejected rather than silently racing another writer — re-read list_vaults and retry.
+3. If the registry_revision is out of date, the call is refused rather than racing another change. Re-read list_vaults and retry.
 ```
 
-Creating a Vault over MCP works the same way, with `create_vault` in place of the three lifecycle calls — see [[How to deploy Hatchdoor with an agent]] for a full walkthrough of standing up Hatchdoor and its first Vault entirely from an agent session.
+Creating a Vault works the same way, with `create_vault`. [[How to deploy Hatchdoor with an agent]] shows an agent setting up Hatchdoor and its first Vault from scratch.
 
 > [!tip]
-> `list_vaults` is always callable, with or without write mode — an agent can inventory every Vault, its status, and its capabilities before deciding anything needs to change. Only the four mutating calls (`create_vault`, `edit_vault`, `enable_vault`/`disable_vault`, `disconnect_vault`) require write mode.
+> `list_vaults` always works, with or without write access, so an agent can look at every Vault, its status and what it allows before deciding anything needs to change. Only `create_vault`, `edit_vault`, `enable_vault`, `disable_vault` and `disconnect_vault` need write access.
 
 ---
 

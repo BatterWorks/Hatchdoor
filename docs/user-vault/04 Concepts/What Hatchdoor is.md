@@ -4,27 +4,27 @@ tags: [type/explanation, topic/architecture]
 
 # What Hatchdoor is
 
-Hatchdoor is a self-hosted web app that sits in front of a folder of plain Markdown files — an Obsidian-style Vault you already own or are starting fresh — and gives two front doors onto the exact same content: a web UI for you, and an MCP-connected agent for whichever assistant you point at it. Neither is the "real" interface; both act on the same files through the same guarded operations.
+Hatchdoor is an app you run on your own computer or server. It sits in front of one or more folders of Markdown notes, called Vaults, and gives two ways into them: a website for you, and an MCP connection for your AI agent. Both work on the same files, under the same rules. A Vault can be a folder you already use with Obsidian or another Markdown app, or a new, empty one.
 
-## Markdown stays authoritative
+## Your files are the real copy
 
-The files on disk are the source of truth, full stop. Hatchdoor builds a SQLite read model on top of them — for browsing, search (keyword and semantic), backlinks, tags, and graph data — but that database is disposable: delete it, and Hatchdoor rebuilds it by rescanning the Vault. This is a deliberate constraint, not an implementation detail. It's what makes a Vault portable: you can open the same notes in Obsidian, edit them with `git`, or drop Hatchdoor entirely, and nothing about the files themselves depends on it having ever existed.
+The Markdown files on disk are your notes. Hatchdoor builds a search database next to them, which lets it search by keyword and by meaning, show backlinks and tags, and draw the graph. That database is throwaway: delete it and Hatchdoor rebuilds it by reading the notes again.
 
-## Two front doors, one set of rules
+This is deliberate. It means you can open the same notes in Obsidian, track them with Git, or stop using Hatchdoor entirely, and the files never depended on it.
 
-The Web UI edits notes directly — see [[How to edit notes with the live editor]]. An agent edits the same notes over MCP, through the guarded tools in [[MCP tools reference]]: `search_notes`, `create_note`, `edit_note`, and the rest. Both paths go through the same optimistic-concurrency-checked writes, so a human editing a note in the browser and an agent editing it a moment later can't silently clobber each other — see [[How indexing and search work]] for how a write becomes visible again.
+## Two ways in, one set of rules
 
-What separates the two isn't capability so much as posture. A human reviewing a note in the browser is fundamentally different from an autonomous agent acting on your Vault unsupervised, so agent access is designed to be started narrow — read-only first — and widened deliberately. [[The security model]] covers exactly which secret gates which door, and [[Search and change notes with your agent]] covers why read-before-write is the recommended default rather than a hard rule.
+You edit notes in the browser; see [[How to edit notes with the live editor]]. An agent edits the same notes over MCP, with tools such as `search_notes`, `create_note` and `edit_note` from the [[MCP tools reference]]. Both go through the same checked save: a change is refused if the note changed since it was read. So if you edit a note in the browser and an agent edits it a moment later, neither silently overwrites the other.
 
-
+What differs is how much trust each starts with. You, reviewing notes in the browser, are not the same as an agent acting on its own, so agent access starts narrow, read-only, and you widen it when you are ready. [[The security model]] covers which password opens which door. [[Search and change notes with your agent]] covers the read-before-write habit.
 
 ## What it isn't
 
-Hatchdoor isn't a hosted sync service, and it doesn't replace your Markdown editor of choice. There's no proprietary format to lock into and no cloud copy of your notes — the Vault is a folder you point Hatchdoor at, optionally backed by a git remote (see [[How to set up a Git-backed Vault]]) for history and sync, and Hatchdoor's job is the operational layer around that folder: indexing it, serving it, and mediating writes to it.
+Hatchdoor isn't a cloud sync service, and it doesn't replace your Markdown editor. There is no special file format and no cloud copy of your notes. A Vault is a folder you point Hatchdoor at, optionally backed by a Git remote for history and sync (see [[How to set up a Git-backed Vault]]). Hatchdoor's job is everything around that folder: indexing it, serving it, and checking every change made to it.
 
-## Why an agent gets first-class access
+## Why an agent gets full access
 
-Most note-taking tools are built for a single author writing to their future self. Hatchdoor's premise is that a capable agent is a second party with legitimate reasons to read and write the same Vault — filing a source you hand it, cleaning up a rough note, keeping cross-links current — and that this only works if the agent is held to the same guarantees a human editing through the browser gets: atomic writes, a current-version check before saving, and content that stays plain Markdown regardless of who touched it last. [[Why keep a second brain]] goes into what that changes about the ordinary capture–organize–distill–express rhythm, and doesn't require any particular Vault layout — see the comparison in [[Home]].
+Most note apps assume one author writing for their future self. Hatchdoor assumes an agent can be a second, useful author: filing a source you hand it, tidying a rough note, keeping links between notes current. That only works if the agent is held to the same guarantees as you in the browser: a save happens completely or not at all, it is checked against the current version first, and the result is still plain Markdown whoever wrote it. [[Why keep a second brain]] says more about what that changes. None of it needs a particular folder layout; [[Home]] compares a few.
 
 ---
 

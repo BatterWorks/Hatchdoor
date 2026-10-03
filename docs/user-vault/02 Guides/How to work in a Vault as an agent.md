@@ -101,7 +101,7 @@ Use safe filenames: lowercase ASCII letters, numbers and hyphens, with no spaces
 
 ## Git sync
 
-When Git sync is on, Hatchdoor makes the commit and push for every write itself.
+When Git sync is on, Hatchdoor commits your writes itself, a few seconds after they stop, and pushes them to the remote on the Vault's sync schedule. Pass a one-line `commit_summary` on each write so the history says why the note changed.
 
 After writing, use `list_vaults` to check the target Vault's Git status. `sync_vault` and `retry_vault` take the Vault's `vault_id` and ask for its Git work now: a sync with the remote when it has one, or a local commit when it only keeps Git history. A Vault with no Git at all refuses them. Neither rebuilds the search index: for that, see [[#Stale collection reads]].
 
