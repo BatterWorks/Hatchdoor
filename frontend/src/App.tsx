@@ -73,6 +73,7 @@ import {
 } from "./startup/useStartupStatus";
 import { HelpProvider, useHelp } from "./features/help";
 import { SearchDialog, useSearch } from "./features/search";
+import { WhatsNew } from "./features/whats-new";
 
 function VaultWorkspace({
   startupStatus,
@@ -1280,6 +1281,10 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
           startupStatus={startup.status}
           onRetryModelSetup={() => void startup.retryModelSetup()}
         />
+        {/* After an upgrade (#418), over the workspace only: the gate holds
+            its children until discovery has said whether this is a demo,
+            which never shows it (the server refuses it there too). */}
+        {!authRequired && !collection.demoMode ? <WhatsNew /> : null}
       </StartupGate>
     </HelpProvider>
   );

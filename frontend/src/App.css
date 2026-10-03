@@ -10,6 +10,7 @@
 @import "./styles/startup.css";
 @import "./features/settings/settings.css";
 @import "./features/help/help.css";
+@import "./features/whats-new/whats-new.css";
 
 .write-notice {
   display: flex;
