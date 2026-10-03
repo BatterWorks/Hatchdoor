@@ -1199,7 +1199,7 @@ impl VaultRegistryStore {
     /// or any directory named through [`Self::with_reserved_directories`].
     /// A managed-Git source is exempt: its checkout lives under the state
     /// directory by design, at a location this store alone chooses.
-    fn ensure_outside_instance_state(
+    pub(crate) fn ensure_outside_instance_state(
         &self,
         source: &VaultSource,
     ) -> Result<(), VaultRegistryError> {

@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+### Added
+- The signed-in app can now ask which folders Hatchdoor sees under its Vault mount, the folder `VAULT_PATH` names, so a folder picker can offer them instead of asking for a container path. `GET /api/v1/folders?path=<relative>` lists the folders inside one folder with how many Markdown notes each holds, counted down through its subfolders, whether it is already a Vault and which one, and whether it has subfolders of its own. Counting stops at 10,000 notes per folder or after about two seconds, and the answer then says "at least". It never follows a symlink, never leaves the mount, leaves out hidden folders and Hatchdoor's own state, returns no file names or content, and writes nothing. It needs the web token and is refused in demo mode. A missing mount answers with an empty list rather than an error. [#429]
+
 ### Changed
 - Hatchdoor no longer writes starter notes into a new Vault. Creating a Vault on an empty folder, through Settings, the API or an agent, now leaves the folder empty, and so does a first start on an empty `VAULT_PATH`. Notes seeded by earlier versions stay where they are; nothing in an existing Vault is changed or deleted. The Docker image no longer carries the starter notes. [#428]
 
 [#428]: https://github.com/BatterWorks/Hatchdoor/issues/428
+[#429]: https://github.com/BatterWorks/Hatchdoor/issues/429
 
 ## v2.7.0 - 2026-10-02
 
