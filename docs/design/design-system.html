@@ -838,6 +838,49 @@
   }
 
   /* ════════════════════════════════════════════════════════════════
+     COMPONENT — Side panel (Help)
+     ════════════════════════════════════════════════════════════════ */
+  .side-panel-stage {
+    position: relative;
+    height: 360px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .side-panel-under {
+    padding: 1.25rem 1.5rem;
+    max-width: 30rem;
+  }
+  .help-panel {
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: min(32rem, 62%);
+    display: flex; flex-direction: column;
+    background: var(--paper);
+    border-left: 1px solid var(--rule-strong);
+    box-shadow: var(--shadow-overlay);
+  }
+  .help-panel-head {
+    display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-3) var(--space-3) var(--space-2) var(--space-5);
+    border-bottom: 1px solid var(--rule);
+  }
+  .help-eyebrow {
+    font-family: var(--font-display);
+    font-variation-settings: "wdth" 84, "wght" 700;
+    font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--hot);
+  }
+  .help-crumb { flex: 1; font-family: var(--font-sans); font-size: 0.85rem; color: var(--muted); }
+  .help-search { padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--rule); }
+  .help-search input {
+    width: 100%; box-sizing: border-box;
+    border: 1px solid var(--rule-strong); border-radius: 0;
+    padding: 0.6rem 0.7rem; background: var(--bg); color: var(--ink);
+    font-family: var(--font-sans); font-size: 1rem;
+  }
+  .help-panel-body { padding: var(--space-4) var(--space-5); overflow: hidden; }
+
+  /* ════════════════════════════════════════════════════════════════
      COMPONENT — Note page
      ════════════════════════════════════════════════════════════════ */
   .note-page {
@@ -1719,6 +1762,7 @@
     <a href="#search">Search dialog</a>
     <a href="#fields">Form fields &amp; dialog</a>
     <a href="#menu">Popover menu</a>
+    <a href="#side-panel">Side panel (Help)</a>
 
     <h3>Editing</h3>
     <a href="#editing">Inline editing</a>
@@ -3348,6 +3392,47 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">.startup-main</span><span class="key">.startup-kicker</span><span class="key">.startup-lede</span><span class="key">.startup-terms</span><span class="key">.startup-actions</span>
         <span class="key">.startup-primary</span><span class="key">.startup-secondary</span><span class="key">.startup-fallback-note</span>
         <span class="key">.startup-progress</span><span class="key">.startup-progress.is-indeterminate</span><span class="key">.startup-progress-line</span><span class="key">@keyframes startup-scan</span>
+      </div>
+    </section>
+
+    <!-- ───────── SIDE PANEL ───────── -->
+    <section class="doc-section" id="side-panel">
+      <div class="doc-section-num">§34</div>
+      <h2>Side panel (Help)</h2>
+      <p class="blurb"><b>Help reads beside the work, never instead of it.</b> The panel is an overlay (#417): it slides in from the right under the topbar, <span class="key">min(32rem, 40vw)</span> wide, and the screen underneath keeps its width and does not reflow. The part it covers is simply covered. It carries <span class="key">--shadow-overlay</span> and a <span class="key">--rule-strong</span> left edge, on <span class="key">--paper</span>, and it dims nothing: unlike the search dialog (<a href="#search">§17</a>) it is not modal, so the screen beside it stays usable. Entry animation is <span class="key">--dur</span> <span class="key">--ease</span> from <span class="key">--space-8</span> to the right, and none at all under <code>prefers-reduced-motion</code>.</p>
+
+      <div class="stage side-panel-stage" style="padding:0;">
+        <div class="side-panel-under">
+          <h3 style="margin:0 0 0.5rem; font-family: var(--font-display); text-transform: uppercase;">Field notes from the orchard</h3>
+          <p style="margin:0; font-family: var(--font-serif); color: var(--ink-soft);">The screen underneath keeps its layout. Help covers its right side and nothing else.</p>
+        </div>
+        <aside class="help-panel" aria-label="Help (example)">
+          <div class="help-panel-head">
+            <span class="help-eyebrow">Help</span>
+            <span class="help-crumb">How to set up a Git-backed Vault</span>
+            <button class="icon-btn" title="Back">&larr;</button>
+            <button class="icon-btn" title="Manual home">&#8962;</button>
+            <button class="icon-btn" title="Open full width">&#8599;</button>
+            <button class="icon-btn" title="Close">&#10005;</button>
+          </div>
+          <div class="help-search"><input placeholder="Search the manual" /></div>
+          <div class="help-panel-body">
+            <h2 class="ty-h2" style="font-size:1.3rem; margin:0 0 0.5rem;">The four Git behaviours</h2>
+            <p style="margin:0; font-family: var(--font-serif);">The manual renders exactly like a note: callouts, tables, code and diagrams come from the same renderer.</p>
+          </div>
+        </aside>
+      </div>
+
+      <p class="blurb"><b>The head says where you are and how to leave.</b> A hot <span class="key">.help-eyebrow</span> reading HELP, the page title in muted sans, then Back, Manual home, Open full width and Close as ordinary <span class="key">.icon-button</span>s. Under it one search field, the same field as <span class="key">.search-input</span> on <span class="key">--bg</span> so it reads as a field against the panel's paper. Results reuse the search dialog's result rows; no results is a <span class="key">.state-block</span> (<a href="#states">§23</a>) that says what to try.</p>
+
+      <p class="blurb"><b>Full width covers the work area, not the topbar,</b> with the reading column held to 46rem and centred. <b>Below 920px there is no side:</b> the panel covers the whole screen, topbar included, the full-width toggle goes away, and Close gains its label in a bordered button so it can be found with a thumb. On phones the way in is the first item of the topbar's &hellip; menu, because the phone topbar has no room for another icon; on wider screens it is a <span class="key">?</span> icon button beside the theme cycler. While Help is open it takes the filled state every expanded <span class="key">.icon-button</span> already has, with its glyph in <span class="key">--hot</span>.</p>
+
+      <p class="blurb"><b>Signed out it sits above the token prompt.</b> The prompt's two links open Help, so the panel takes <code>z-index: 1001</code> there, one above the prompt; everywhere else it is 50, above the topbar and under the search dialog, menus and form dialogs.</p>
+
+      <div class="tag-row">
+        <span class="key">features/help/HelpPanel.tsx</span><span class="key">features/help/help.css</span>
+        <span class="key">.help-panel</span><span class="key">.help-panel.is-full</span><span class="key">.help-panel.is-above-dialogs</span><span class="key">.help-panel-head</span><span class="key">.help-eyebrow</span><span class="key">.help-crumb</span>
+        <span class="key">.help-search</span><span class="key">.help-search-input</span><span class="key">.help-panel-body</span><span class="key">.help-start</span><span class="key">.help-start-card</span><span class="key">.help-trigger</span><span class="key">.help-link</span>
       </div>
     </section>
 

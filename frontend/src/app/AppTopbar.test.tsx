@@ -464,3 +464,43 @@ describe("AppTopbar single-Vault condition row (#334)", () => {
     expect(document.querySelector(".topbar-mobile-meta")).toBeNull();
   });
 });
+
+describe("AppTopbar Help entry (#417)", () => {
+  afterEach(cleanup);
+
+  it("shows a Help button beside the theme toggle on wide screens", () => {
+    const props = renderTopbar({ onToggleHelp: vi.fn() });
+
+    const help = screen.getByRole("button", { name: "Help" });
+    expect(help).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(help);
+    expect(props.onToggleHelp).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menuitem", { name: "Help" })).toBeNull();
+  });
+
+  it("marks the button while Help is open", () => {
+    renderTopbar({ helpOpen: true });
+
+    expect(screen.getByRole("button", { name: "Help" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("moves Help into the … menu on phones, first", () => {
+    const props = renderTopbar({
+      isMobile: true,
+      actionsMenuOpen: true,
+      writeEnabled: true,
+      onToggleHelp: vi.fn(),
+    });
+
+    expect(screen.queryByRole("button", { name: "Help" })).toBeNull();
+    const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
+    expect(items[0]).toHaveTextContent("Help");
+    fireEvent.click(items[0]);
+    expect(screen.getByRole("button", { name: "More actions" })).toHaveFocus();
+    expect(props.onCloseActionsMenu).toHaveBeenCalled();
+    expect(props.onToggleHelp).toHaveBeenCalledTimes(1);
+  });
+});

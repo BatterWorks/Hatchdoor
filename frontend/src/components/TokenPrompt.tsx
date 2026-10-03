@@ -1,5 +1,7 @@
 import { useState, type CSSProperties } from "react";
 
+import { HELP_PAGES, useHelp } from "../features/help";
+
 const backdrop: CSSProperties = {
   position: "fixed",
   inset: 0,
@@ -32,6 +34,14 @@ const input: CSSProperties = {
   color: "inherit",
 };
 
+const helpLinks: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "0.75rem",
+  margin: 0,
+  fontSize: "0.85rem",
+};
+
 const button: CSSProperties = {
   padding: "0.5rem",
   fontSize: "1rem",
@@ -49,6 +59,7 @@ export function TokenPrompt({
   onSubmit: (token: string) => void;
 }) {
   const [value, setValue] = useState("");
+  const { openHelp } = useHelp();
 
   return (
     <div
@@ -83,6 +94,24 @@ export function TokenPrompt({
         <button style={button} type="submit">
           Unlock
         </button>
+        <p style={helpLinks}>
+          <button
+            type="button"
+            className="help-link"
+            onClick={() =>
+              openHelp(HELP_PAGES.install, "where-do-i-find-my-token")
+            }
+          >
+            Where do I find my token?
+          </button>
+          <button
+            type="button"
+            className="help-link"
+            onClick={() => openHelp()}
+          >
+            Help
+          </button>
+        </p>
       </form>
     </div>
   );

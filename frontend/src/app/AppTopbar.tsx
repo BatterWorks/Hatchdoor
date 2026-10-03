@@ -7,6 +7,7 @@ import { StatusBadge, UiButton } from "../components/ui";
 import {
   ContrastIcon,
   DarkModeIcon,
+  HelpIcon,
   LightModeIcon,
   MenuIcon,
   MoreHorizIcon,
@@ -64,6 +65,9 @@ type TopbarProps = {
   onArchiveNote: () => void;
   onDeleteNote: () => void;
   onCycleTheme: () => void;
+  /** Whether the Help panel is open (#417). */
+  helpOpen?: boolean;
+  onToggleHelp?: () => void;
   onScopeChange: (next: VaultScope) => void;
   viewingVaultId: VaultId | undefined;
   vaultNoteCounts: Record<VaultId, number | undefined>;
@@ -100,6 +104,8 @@ export function AppTopbar({
   onArchiveNote,
   onDeleteNote,
   onCycleTheme,
+  helpOpen = false,
+  onToggleHelp = () => {},
   onScopeChange,
   viewingVaultId,
   vaultNoteCounts,
@@ -111,6 +117,7 @@ export function AppTopbar({
   demoMode = false,
 }: TopbarProps) {
   const actionsMenuRef = useRef<HTMLDivElement>(null);
+  const actionsTriggerRef = useRef<HTMLButtonElement>(null);
   const scopeHostRef = useRef<HTMLDivElement>(null);
   const scopeTriggerRef = useRef<HTMLButtonElement>(null);
   const scopeSheetRef = useRef<HTMLDivElement>(null);
@@ -371,6 +378,20 @@ export function AppTopbar({
               <SearchIcon />
             </button>
           )}
+          {/* A phone's top bar is already full, so there Help is the first
+              item of the "…" menu instead (#417). */}
+          {!isMobile ? (
+            <button
+              type="button"
+              className="icon-button help-trigger"
+              onClick={onToggleHelp}
+              aria-expanded={helpOpen}
+              aria-label="Help"
+              title="Help"
+            >
+              <HelpIcon />
+            </button>
+          ) : null}
           <button
             type="button"
             className="icon-button"
@@ -382,6 +403,7 @@ export function AppTopbar({
           </button>
           <div className="topbar-menu-host" ref={actionsMenuRef}>
             <button
+              ref={actionsTriggerRef}
               type="button"
               className="icon-button"
               onClick={onToggleActionsMenu}
@@ -397,6 +419,24 @@ export function AppTopbar({
               aria-hidden={!actionsMenuOpen}
               data-open={actionsMenuOpen}
             >
+              {isMobile ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    // The menu closes under this item, so Help hands focus
+                    // back to the button that opened the menu instead.
+                    actionsTriggerRef.current?.focus();
+                    onToggleHelp();
+                  }}
+                >
+                  Help
+                </UiButton>
+              ) : null}
+              {isMobile && (writeEnabled || activeNote) ? (
+                <div className="topbar-menu-divider" role="separator" />
+              ) : null}
               {writeEnabled ? (
                 <UiButton
                   className="close-note"

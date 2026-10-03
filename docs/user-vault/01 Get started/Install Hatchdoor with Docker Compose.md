@@ -154,6 +154,14 @@ docker compose up -d
 > [!warning]
 > This is the **web token**. It protects the browser and is not the password you will give an agent later.
 
+## Where do I find my token?
+
+The browser asks for the web token the first time you open Hatchdoor, and again on any new browser or device. It is the value after `HATCHDOOR_WEB_BEARER_TOKEN=` in the `.env` file next to your `compose.yaml`, on the machine that runs Hatchdoor. Copy everything after the `=` sign and paste it into the prompt.
+
+If a browser is already signed in, **Settings** shows it too: choose **Show web access token** under the list of Vaults.
+
+Lost it, or want a new one? Put any long random value after `HATCHDOOR_WEB_BEARER_TOKEN=` in `.env` and run `docker compose up -d`. Every browser then asks for the new token once.
+
 Open `http://localhost:42824` and enter the web token. On the first-run screen,
 choose a search model:
 
