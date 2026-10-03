@@ -21,6 +21,12 @@ flowchart LR
 
 If you are new to Hatchdoor, follow [[Welcome to Hatchdoor]]. It takes you from installing Hatchdoor to an agent that can search your notes, one page at a time.
 
+If you have an AI agent that can run commands, such as Claude Code or Codex, it can do the install for you. Give it this one line, and [[How to deploy Hatchdoor with an agent]] tells it the rest:
+
+```text
+Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
+```
+
 A fresh install opens on the **Set up Hatchdoor** checklist, which walks you through adding your notes, connecting your agent and trying a search. You can reopen it any time from **Help** → **Setup checklist**.
 
 To look before you install anything, open the [public demo](https://hatchdoor.battercloud.cc), a live, read-only Hatchdoor with four example Vaults in it. Nothing there can be changed, so there is nothing to break.

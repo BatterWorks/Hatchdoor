@@ -4,25 +4,85 @@ tags: [type/how-to, topic/deployment, topic/mcp]
 
 # How to deploy Hatchdoor with an agent
 
-Use this guide when an agent with shell and HTTP access should stand up Hatchdoor on a machine it controls, without a human clicking through the first-run screen. It assumes Docker Compose and produces a running instance with MCP enabled and one Vault ready to search.
+This page is written for an AI agent that can run commands on your computer, such as Claude Code or Codex. To have your agent install Hatchdoor, give it this one line:
 
-> [!note]
-> This is the unattended path. If a person is doing the deployment by hand, follow [[Install Hatchdoor with Docker Compose]], [[Connect your first Vault]], and [[Connect your agent]] instead — they cover the same ground with screenshots and explanation.
+> Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
 
-## Before you start
+The agent first checks whether Docker is installed. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, and which search model to use. After you answer, it does the rest without stopping. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
 
-Decide the Vault source:
+To do the same by hand, follow [[Install Hatchdoor with Docker Compose]], [[Connect your first Vault]] and [[Connect your agent]].
 
+The rest of this page is addressed to the agent.
 
+## Rules
 
-- **Local** — Markdown already sits in a folder Docker can mount.
-- **Managed Git** — Hatchdoor should clone and keep a remote repository's Markdown in sync (`pull_only`) or also push local commits back (`two_way`).
+Follow these whatever the user asks during the install:
 
-Both are covered in step 5; pick one before you begin.
+- **Never put Hatchdoor on the internet.** Do not open router ports, set up port forwarding, start a tunnel or edit a reverse proxy. If the user asks for access from outside the home, install on this computer or the home network anyway and point them to [[Install Hatchdoor with Docker Compose#Optional: expose Hatchdoor to your LAN]], which explains why and what to use instead.
+- **Never answer the model licence for the user.** Accepting Google's Gemma terms is their decision.
+- **Never install system software without a yes.** That includes Docker.
+- **Write tokens only in three places:** the web token in the deployment's `.env`, the MCP token in Hatchdoor's settings (through the API) and in your own MCP client configuration. Not in notes, shell profiles, logs, other files or your own memory.
+- **Never put MCP settings in `.env`.** A setting in `.env` is pinned: it can no longer be changed in Settings, so the user could not allow writes later. Set them through the HTTP API as shown.
+- **Never use demo mode** (`HATCHDOOR_DEMO_MODE`). It is for public read-only showcases and refuses to run with MCP.
 
-## 1. Write the deployment files
+## 1. Check the computer
 
-Create an empty deployment directory and, inside it, `compose.yaml`:
+Before asking anything, find out what you are working with:
+
+```bash
+uname -s                                   # Linux or Darwin (macOS)
+cat /etc/os-release 2>/dev/null | head -3  # Linux distribution
+docker info --format '{{.ServerVersion}}'  # Docker installed and running?
+docker compose version
+```
+
+On Windows, run these in a WSL terminal, or check that Docker Desktop is installed and running.
+
+- `docker info` prints a version: Docker is ready.
+- `docker info` fails with a permission error on Linux: Docker is installed. Run every `docker` command on this page with `sudo`.
+- `docker info` says it cannot connect, but the `docker` command exists: Docker is installed and stopped. On Linux, start it with `sudo systemctl start docker`. On macOS or Windows, ask the user to open Docker Desktop, as part of the questions below.
+- `docker` is not found, or `docker compose version` fails: Docker or its Compose plugin is missing. On Linux, ask question 6 below. On macOS or Windows, the user installs Docker Desktop: give them https://www.docker.com/products/docker-desktop/ and tell them to download it, install it, open it, accept its terms, and tell you when it shows that the engine is running. Wait, then run `docker info` again.
+
+If the user picks another computer in question 1, run the same checks there over SSH once they have answered. You cannot check that computer before asking, so when it runs Linux, question 6 is always part of the interview: its yes or no covers Docker being missing there too.
+
+## 2. Ask everything at once
+
+Ask all of these in one message, with the defaults shown, so the user can answer in one go. Explain each one in a sentence; the user may never have used Hatchdoor or Docker.
+
+1. **Which computer should Hatchdoor run on?** This one (the default), or another computer on the home network that you can reach over SSH. For another one, ask for its SSH address, such as `alex@homeserver`.
+2. **Where are your notes?** Start empty (the default), an existing folder of Markdown notes on that computer (ask for its full path), or a Git repository (ask for its HTTPS address, and for a private one an access token that can read it).
+3. **Who should be able to open Hatchdoor?** Only the computer it runs on (the default), or every device on the home network. If the answer to question 1 is another computer, do not ask: it has to be the home network, or neither the user's browser nor you could reach it from here. Say so in the questions message.
+4. **May I change your notes, or only read them?** Read only is the default. Writes can be allowed later in Settings at any time.
+5. **Which search model?** There is no default; the user must choose:
+   - **Gemma**: searches in many languages and uses less memory, about 0.5 GB while indexing. Using it means accepting Google's Gemma terms, at https://ai.google.dev/gemma/terms.
+   - **Nomic**: English only, uses about 1.3 GB while indexing, no terms to accept.
+6. **Only when Docker or its Compose plugin is missing on Linux, or the user may pick another Linux computer:** may I install Docker if it is missing, following Docker's official instructions for your distribution? It needs the administrator (`sudo`) password on that computer.
+
+After the user answers, do not stop to ask anything else until the hand-over in step 7, unless something fails that you cannot fix.
+
+## 3. Install Docker, if needed
+
+Only with a yes to question 6. Follow the page for the user's distribution at https://docs.docker.com/engine/install/, using Docker's own package repository; it installs the Compose plugin too. Then start Docker and make it start at boot:
+
+```bash
+sudo systemctl enable --now docker
+```
+
+Do not add the user to the `docker` group; that is a change they did not ask for. Use `sudo docker` instead.
+
+## 4. Install Hatchdoor
+
+For another computer, run the commands in this step there, over SSH. API calls in step 5 run from wherever you are.
+
+Create the deployment folder:
+
+```bash
+mkdir -p ~/hatchdoor && cd ~/hatchdoor
+mkdir -p data/cache data/state models vault
+chmod 700 data/cache data/state models
+```
+
+Create `compose.yaml` in it with exactly this content:
 
 ```yaml
 services:
@@ -53,123 +113,193 @@ services:
       start_period: 40s
 ```
 
-> [!warning]
-> `HOST: 0.0.0.0` is required — it is the container's own listener, not a public exposure setting. From Hatchdoor's point of view this is **never** a loopback address, regardless of whether the `ports` mapping above is restricted to `127.0.0.1`. That has one consequence you cannot skip: see step 2.
+If the answer to question 3 is the home network, change the `ports` line to `- "42824:42824"`. Leave `HOST: 0.0.0.0` as it is either way: it is the listener inside the container, and only the `ports` line decides who can connect.
 
-Generate a web token and a Vault directory before the first start, so the container does not need a fail-then-restart cycle:
+Write `.env` with a new web token, readable only by its owner:
 
 ```bash
-mkdir -p data/cache data/state models vault
-chmod 700 data/cache data/state models
-sudo chown -R 65532:65532 data models vault
-
-WEB_TOKEN=$(openssl rand -hex 32)
-cat > .env <<EOF
-HATCHDOOR_WEB_BEARER_TOKEN=${WEB_TOKEN}
-HOST_VAULT_PATH=$(pwd)/vault
-EOF
+umask 077
+printf 'HATCHDOOR_WEB_BEARER_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+chmod 600 .env
 ```
 
-If you are pointing at a Local Vault that already has Markdown, set `HOST_VAULT_PATH` to that folder instead of the empty one created above.
+If the notes are an existing folder, set `NOTES` to its full path (the example is a placeholder) and add it:
 
-## 2. Start Hatchdoor
+```bash
+NOTES='/home/alex/Notes'
+printf 'HOST_VAULT_PATH=%s\n' "$NOTES" >> .env
+```
+
+Hatchdoor runs as user `65532`, not as the user. On Linux, give that user its folders:
+
+```bash
+sudo chown -R 65532:65532 data models vault
+```
+
+On Linux with an existing notes folder, also let user `65532` read and write it, without changing its owner:
+
+```bash
+sudo setfacl -R -m u:65532:rwX -m d:u:65532:rwX "$NOTES"
+```
+
+Many Linux systems do not have `setfacl` installed. If it is missing, leave the folder's permissions alone; do not install it or change the folder's owner. Hatchdoor can usually still read the notes, so search works, but neither the browser nor an agent can change them. Say so in the hand-over. macOS and Windows need neither command; Docker Desktop handles access.
+
+Start Hatchdoor:
 
 ```bash
 docker compose up -d
 ```
 
-Wait for the health check:
+## 5. Set it up through the API
+
+Point `HD` at Hatchdoor and load the web token into your shell, without printing it. On this computer:
 
 ```bash
-until docker compose ps --format json | grep -q '"Health":"healthy"'; do sleep 2; done
+HD=http://127.0.0.1:42824
+WEB_TOKEN=$(sed -n 's/^HATCHDOOR_WEB_BEARER_TOKEN=//p' ~/hatchdoor/.env)
 ```
 
-> [!warning]
-> Because `HOST` can never be loopback inside the container (step 1), Hatchdoor's own startup check (`check_web_auth`) treats this as a public bind and refuses to run without `HATCHDOOR_WEB_BEARER_TOKEN` set. Pre-generating the token, as above, means the first start already succeeds. If you skip that step, the container exits immediately and prints a freshly generated token to its logs (`docker compose logs hatchdoor`) for you to add to `.env` before starting again.
+For another computer, use its home-network address, for example `HD=http://192.168.1.20:42824`, and read the token over SSH: `WEB_TOKEN=$(ssh alex@homeserver "sed -n 's/^HATCHDOOR_WEB_BEARER_TOKEN=//p' ~/hatchdoor/.env")`.
 
-## 3. Turn on MCP, without a restart
+Wait until Hatchdoor answers:
 
-MCP is off by default and is read live from settings on every request — no restart is needed once it is turned on. Generate a separate MCP token (never reuse the web token) and patch it in:
+```bash
+until curl -sf "$HD/health" >/dev/null; do sleep 2; done
+```
+
+**Apply the model choice** from question 5. Hatchdoor starts downloading the model in the background.
+
+```bash
+# Gemma:
+curl -sf -X POST "$HD/api/model/accept-gemma" -H "Authorization: Bearer $WEB_TOKEN"
+# or Nomic:
+curl -sf -X POST "$HD/api/model/decline-gemma" -H "Authorization: Bearer $WEB_TOKEN"
+```
+
+**Turn on agent access** with its own token. Never reuse the web token. Set `HATCHDOOR_MCP_WRITE_ENABLED` to `"true"` only if the answer to question 4 was yes.
 
 ```bash
 MCP_TOKEN=$(openssl rand -hex 32)
-
-curl -sf -X PATCH http://127.0.0.1:42824/api/settings \
-  -H "Authorization: Bearer ${WEB_TOKEN}" \
+curl -sf -X PATCH "$HD/api/settings" \
+  -H "Authorization: Bearer $WEB_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "updates": {
-      "HATCHDOOR_MCP_ENABLED": "true",
-      "HATCHDOOR_MCP_WRITE_ENABLED": "true",
-      "HATCHDOOR_MCP_BEARER_TOKEN": "'"${MCP_TOKEN}"'"
-    }
-  }'
+  -d '{"updates": {
+        "HATCHDOOR_MCP_ENABLED": "true",
+        "HATCHDOOR_MCP_WRITE_ENABLED": "false",
+        "HATCHDOOR_MCP_BEARER_TOKEN": "'"$MCP_TOKEN"'"
+      }}'
 ```
 
-> [!warning]
-> Do not set `HATCHDOOR_DEMO_MODE=true` on a deployment an agent needs to manage. Hatchdoor refuses to start at all with demo mode and MCP enabled together — demo mode is for a public, read-only instance nobody configures further, never for this flow.
+**Create the Vault.** A fresh install has none, and Hatchdoor never creates one by itself. Every change to the Vault list must name the list's current `registry_revision`, so read it first:
 
-From here on, address `http://127.0.0.1:42824/mcp` with `Authorization: Bearer ${MCP_TOKEN}` as an MCP Streamable HTTP client.
+```bash
+REV=$(curl -sf "$HD/api/v1/vaults" -H "Authorization: Bearer $WEB_TOKEN" \
+  | sed -n 's/.*"registry_revision":\([0-9]*\).*/\1/p')
+```
 
-## 4. Finish first-run model setup
+For an empty start or an existing folder, the Vault is the whole mounted folder:
 
-Call `get_model_setup_status`. If setup is still pending, call `accept_gemma_terms` (recommended, multilingual) or `decline_gemma_terms` (English-only, lower memory). Poll `get_model_setup_status` until the model has finished downloading.
+```bash
+curl -sf -X POST "$HD/api/v1/vaults" \
+  -H "Authorization: Bearer $WEB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"expected_registry_revision": '"$REV"', "name": "Notes",
+       "source": {"type": "local", "path": "/data/vault"}}'
+```
 
-## 5. Create the Vault
+For a Git repository, Hatchdoor clones it into its own data folder and pulls changes every 15 minutes. Add `https_credentials` only for a private repository:
 
-Call `list_vaults` first — every write below needs its `expected_registry_revision`.
+```bash
+curl -sf -X POST "$HD/api/v1/vaults" \
+  -H "Authorization: Bearer $WEB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"expected_registry_revision": '"$REV"', "name": "Notes",
+       "source": {"type": "managed_git",
+                  "repository_url": "https://github.com/alex/notes.git",
+                  "mode": "pull_only", "poll_interval_secs": 900},
+       "https_credentials": {"token": "<access token>"}}'
+```
 
-**Local Vault**, for Markdown already mounted into the container:
+`pull_only` means Hatchdoor only reads from the repository and never pushes. [[How to set up a Git-backed Vault]] explains the other modes, which the user can switch to later in Settings. Until its first clone finishes, a Git Vault reports that its repository is unavailable; that is expected.
 
-```json
-{
-  "name": "create_vault",
-  "arguments": {
-    "expected_registry_revision": 0,
-    "name": "Primary",
-    "source": {
-      "type": "local",
-      "path": "/data/vault"
-    }
-  }
+**Wait until everything is ready.** `/ready` answers `200` once the model has downloaded and the Vault has finished its first index. Depending on the connection and the number of notes, that takes from under a minute to much longer:
+
+```bash
+until curl -sf "$HD/ready" >/dev/null; do sleep 5; done
+```
+
+Then read the Vault list once more:
+
+```bash
+curl -sf "$HD/api/v1/vaults" -H "Authorization: Bearer $WEB_TOKEN"
+```
+
+The Vault should show `"search": "ready"`. `"local_content": "read_write"` means notes can be changed, `"read_only"` means they cannot (see the `setfacl` note above). A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
+
+## 6. Connect yourself and prove it works
+
+Add Hatchdoor to your own MCP client configuration as a Streamable HTTP server at `$HD/mcp`, with the header `Authorization: Bearer <MCP token>`. Write the token into the client's own configuration, nowhere else. Claude Code, for example:
+
+```bash
+claude mcp add --transport http --scope user hatchdoor "$HD/mcp" \
+  --header "Authorization: Bearer $MCP_TOKEN"
+```
+
+[[Connect your agent#Configure your MCP client]] lists the configuration for Codex, OpenClaw and Hermes. Where it uses an environment variable, put the token straight into the configuration file instead. If your client can only read the token from an environment variable, do not set one: tell the user in the hand-over where it has to go.
+
+Then prove it works. If your client loads new servers straight away, call the tools from it. Otherwise call them over HTTP, as below. Put your own client name in `clientInfo`: Settings shows it as the connected agent.
+
+```bash
+SID=$(curl -s -D - -o /dev/null "$HD/mcp" \
+  -H "Authorization: Bearer $MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"Claude Code","version":"1"}}}' \
+  | tr -d '\r' | sed -n 's/^[Mm]cp-[Ss]ession-[Ii]d: //p')
+mcp() {
+  curl -s "$HD/mcp" -H "Authorization: Bearer $MCP_TOKEN" -H "Mcp-Session-Id: $SID" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" -d "$1"
 }
+mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_vaults","arguments":{}}}'
 ```
 
-**Managed Git Vault**, for a remote repository Hatchdoor should clone and keep in sync:
+Each answer arrives as a `data:` line holding the JSON-RPC response. The proof needs two answers:
 
-```json
-{
-  "name": "create_vault",
-  "arguments": {
-    "expected_registry_revision": 0,
-    "name": "Primary",
-    "source": {
-      "type": "managed_git",
-      "repository_url": "https://github.com/<owner>/<repo>.git",
-      "branch": "main",
-      "vault_subdirectory": "notes",
-      "mode": "pull_only",
-      "poll_interval_secs": 900
-    }
-  }
-}
+1. `list_vaults` shows the Vault you created. Note its `vault_id`.
+2. One `search_notes` call succeeds: its result has `"isError": false`. When the user brought notes, search for a few words from one of their note titles; that note must be among the results (`note_title`). On an empty start, an empty `results` list passes.
+
+```bash
+mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_notes","arguments":{"scope":"<vault_id>","query":"<words from a note title>"}}}'
 ```
 
-Add `https_credentials` alongside `source` if the repository is private; omit it for a public repository. Use `mode: "two_way"` only if this Vault should also push the agent's own commits back to the remote.
+If either fails, [[How to troubleshoot common problems#An agent can't connect over MCP]] matches the error to its cause.
 
-## 6. Confirm it is ready
+## 7. Hand over
 
-Poll `list_vaults` or `get_stats` until the Vault's phase reaches `ready`. Then run one read to prove the path works end to end:
+End with one message that contains exactly this, filled in. It is the only place the web token is ever shown.
 
 ```text
-search_notes with a term you expect to match, then get_note on the best result.
+Hatchdoor is installed and running.
+
+Open it at:  <web address: http://localhost:42824, or http://<home-network address>:42824>
+Web token:   <the web token>
+  This is the password your browser asks for. Copy it now: I won't show it again.
+
+Where your tokens live:
+- The web token is in <deployment folder>/.env on <computer>, readable only by your user.
+- The MCP token, the separate password I use, is in Hatchdoor's own settings
+  (Settings > Agent access (MCP)) and in my MCP configuration.
+
+I can <only read your notes | read and change your notes>.
+To let me change notes later: Settings > Agent access (MCP) > Let assistants change notes.
+
+To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
 ```
 
-If you kept the empty `vault` folder from step 1, there is nothing to match yet: Hatchdoor does not write example notes into an empty Vault. Put at least one Markdown file in the folder first, then run the search once the Vault reports `ready` again.
-
-> [!success]
-> Hatchdoor is deployed, MCP is live, and the Vault is searchable — all without a human opening the browser. Keep the Web UI available anyway: `http://127.0.0.1:42824` with the web token from step 1 is how a person audits what the agent has done.
+For a private Git repository, add that its access token is stored in Hatchdoor's Vault list, in `data/state` of the deployment folder, and can be replaced in the Vault's settings. Add one line for anything you could not finish, such as a notes folder Hatchdoor cannot read or a client that needs the MCP token in an environment variable.
 
 ---
 
-Related: [[Install Hatchdoor with Docker Compose]] · [[Connect your first Vault]] · [[Connect your agent]]
+Related: [[Install Hatchdoor with Docker Compose]] · [[Connect your first Vault]] · [[Connect your agent]] · [[How to upgrade Hatchdoor]]
