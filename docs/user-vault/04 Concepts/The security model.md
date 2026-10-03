@@ -89,6 +89,8 @@ This secret authenticates Hatchdoor *to the remote*, not a caller *to Hatchdoor*
 
 `/health`, `/ready`, and `/api/startup-status` are never gated by any token — they're liveness/readiness probes, meant to be checked by infrastructure (a container orchestrator, a load balancer) that has no credential to present. They report process and indexing state, never Vault content.
 
+The manual is open too. Every instance serves this manual as plain Markdown at `/docs/<page>.md`, with an index at `/docs/index.md`, a word search at `/docs/search`, and an `llms.txt` list of pages, so an agent can read it with an ordinary web fetch. These addresses serve only the manual built into the running version. They never serve Vault content, Vault names or paths, settings or tokens, and you cannot turn them off. A page of the manual can be marked private: such a page answers only with the web token, and never shows up in `llms.txt`, the index or search for anyone without it. With no web token configured, these addresses never serve a private page at all. This is how a page that names the running version stays off the open addresses.
+
 ## Demo mode's narrower rule
 
 A public, read-only demo (`HATCHDOOR_DEMO_MODE=true`) doesn't just relax these rules — it restructures them, and the result isn't uniform across surfaces:

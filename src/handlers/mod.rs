@@ -1,6 +1,7 @@
 mod api;
 mod assets;
 pub mod diagnostics;
+mod docs;
 mod downloads;
 mod folders;
 mod settings;
@@ -12,6 +13,7 @@ mod vault_write;
 pub(crate) mod vaults;
 
 pub use api::health_handler;
+pub use docs::docs_router;
 pub use folders::list_folders_handler;
 // No asset re-export: the contained-resource seam the MCP `get_attachment`
 // tool used to consume from here moved to the read core in #188, so no MCP

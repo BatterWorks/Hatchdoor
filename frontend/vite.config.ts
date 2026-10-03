@@ -166,6 +166,8 @@ export default defineConfig({
           /^\/api\//,
           /^\/vault-assets\//,
           /^\/health/,
+          /^\/docs\//,
+          /^\/llms\.txt/,
         ],
       },
     }),
@@ -176,6 +178,8 @@ export default defineConfig({
       "/api": "http://127.0.0.1:42824",
       "/health": "http://127.0.0.1:42824",
       "/vault-assets": "http://127.0.0.1:42824",
+      "/docs/": "http://127.0.0.1:42824",
+      "/llms.txt": "http://127.0.0.1:42824",
     },
   },
   test: {

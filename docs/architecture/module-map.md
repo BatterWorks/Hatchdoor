@@ -988,7 +988,10 @@ across the registry cutover is unsupported.
 **Owned paths:** `src/auth.rs`.
 
 **Public contract:** `WebToken`, `WebOrLiveMcpToken`, `require_web_token`,
-`require_web_or_live_mcp_token`, and `require_web_or_live_mcp_read_token`. Both
+`require_web_or_live_mcp_token`, and `require_web_or_live_mcp_read_token`, plus
+the crate-internal `request_is_authorized(request, token)`, the web-token check
+those middlewares share, which the public manual routes (`src/handlers/docs.rs`)
+use to decide whether a caller may see private pages without gating the route. Both
 attachment middlewares bind the MCP token from the current runtime snapshot
 instead of retaining a token captured at startup, so disabling MCP at runtime
 immediately revokes that credential; web-token admission is independent of MCP
@@ -1111,7 +1114,13 @@ router tests, followed by the full backend checks.
 
 **Public contract:** `pages()` (Home first, then path order), `home()`,
 `page(name)`, and `search(query)`, which returns at most `SEARCH_RESULTS`
-pages; `ManualPage` (`name`, `title`, `markdown`) and `ManualSearchHit` (`page`, `excerpt`). A page's name is its path under
+pages, private ones included; `manual()`, the `Manual` behind them, whose
+`search(query, include_private)` can leave private pages, and links to them in
+excerpts, out, and whose `markdown_linking(page, link)` renders a page with
+each wikilink pointed wherever `link` says (or reduced to its text);
+`ManualPage` (`name`, `title`, `markdown`, `private`) and `ManualSearchHit` (`page`, `excerpt`).
+`private` is `private: true` in the page's frontmatter (ADR-38 decision 6).
+`Manual::from_sources` builds a manual from fixture pages for tests. A page's name is its path under
 `docs/user-vault` with each folder's ordering number dropped and every segment
 put through the note slug rule, so `03 Reference/MCP tools reference.md` is
 `reference/mcp-tools-reference`. `page` ignores case, surrounding slashes and a
@@ -1124,10 +1133,12 @@ holds, then their headings outside code, then how often the words appear
 anywhere, code included; a query that matches nothing returns nothing.
 
 **Consumers:** the MCP `read_docs` and `search_docs` tools
-(`src/mcp/tools/read.rs`).
+(`src/mcp/tools/read.rs`), and the public manual routes in
+`src/handlers/docs.rs`.
 
 **Consumed dependencies:** `vault::slugify` for page names and anchors, and
-`cache::parse::{frontmatter_span, parse_fence_marker}` to strip frontmatter and
+`cache::parse::{frontmatter_span, parse_fence_marker,
+parse_frontmatter_metadata}` to strip frontmatter, read the `private` flag and
 leave code blocks alone.
 
 **Coordination paths:** `src/lib.rs`, `Dockerfile` and `.dockerignore` (the
@@ -2834,6 +2845,7 @@ vault_runtime`.
 - `src/handlers/api.rs`
 - `src/handlers/assets.rs`
 - `src/handlers/diagnostics.rs`
+- `src/handlers/docs.rs`
 - `src/handlers/downloads.rs`
 - `src/handlers/folders.rs`
 - `src/handlers/settings.rs`
@@ -3090,13 +3102,24 @@ unbounded transfer buffers; an over-limit asset or export receives the shared
 with `200`, and `spa_not_found_handler` is the static directory's fallback
 (#302), so an address no route or built file matches still loads the app with a
 `404` status and the app renders its not-found state. Paths under
-`SPA_RESERVED_PREFIXES` (`/api/`, `/vault-assets/`, and anything starting
-`/health`) keep a bare `404`. That list mirrors the service worker's
-`navigateFallbackDenylist` in `frontend/vite.config.ts`, and a test in `spa.rs`
-fails if the two drift.
+`SPA_RESERVED_PREFIXES` (`/api/`, `/vault-assets/`, `/docs/`, `/llms.txt`, and
+anything starting `/health`) keep a bare `404`. That list mirrors the service
+worker's `navigateFallbackDenylist` in `frontend/vite.config.ts`, and a test in
+`spa.rs` fails if the two drift. `docs.rs` (#422, ADR-38) exports
+`docs_router`, the public manual routes `GET /docs/<page>.md`,
+`/docs/index.md`, `/docs/deploy.md` (the agent deploy page), `/docs/search?q=`
+(JSON `results` of `name`, `title`, `excerpt`; `q` cut to 200 characters) and
+`/llms.txt`, mounted outside every auth layer and in demo mode. Wikilinks
+become links relative to the address asked for; an unknown page is a
+plain-text `404`. A private page (`private: true` in its frontmatter) answers
+only a caller holding the web token, `401` otherwise, and is left out of the
+index, search and its links' destinations for anyone else and out of
+`llms.txt` always; with no web token configured it is never served there.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
-`vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
+`vault/write`, Search, cache queries, Git status, auth (`docs.rs` uses
+`auth::request_is_authorized` to tell whether a caller holds the web token),
+the Bundled manual (`docs.rs` only), and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,
 `VaultCollectionRuntime::{snapshot, reconcile_and_reconstruct,
 subscribe_revisions}`, `VaultWorkCoordinator`, and
@@ -3120,7 +3143,9 @@ and whichever domain a handler adapts.
 
 **Invariants:** handlers stay thin. Write handlers never touch the vault
 filesystem directly (ADR-03). Static and vault asset behavior must retain auth
-and path containment. `vaults.rs` never returns HTTPS credentials, only
+and path containment. `docs.rs` reads the Bundled manual and nothing else: no
+Vault, registry, settings or token value reaches its responses
+(`public_manual_routes_answer_without_a_token_and_reveal_nothing_of_the_instance`). `vaults.rs` never returns HTTPS credentials, only
 `credential_configured` (ADR-01/registry invariant); disconnect deletes no
 files, checkouts, Git history, or credentials outside the registry record.
 

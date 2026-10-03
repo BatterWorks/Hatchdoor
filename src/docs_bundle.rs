@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use crate::cache::parse::{frontmatter_span, parse_fence_marker};
+use crate::cache::parse::{frontmatter_span, parse_fence_marker, parse_frontmatter_metadata};
 use crate::vault::slugify;
 
 /// Every page, by its path under `docs/user-vault`. A page added to that
@@ -175,19 +175,28 @@ pub struct ManualPage {
     /// The page without its frontmatter, every wikilink outside code
     /// rewritten to a Markdown link whose target is a page name.
     pub markdown: String,
+    /// Set by `private: true` in the page's frontmatter. A private page is
+    /// kept off the public `/docs/` addresses and `llms.txt` (ADR-38), but
+    /// signed-in Help and the MCP docs tools still serve it.
+    pub private: bool,
+    /// The page without its frontmatter, wikilinks as written, so
+    /// [`Manual::markdown_linking`] can point them somewhere else.
+    body: &'static str,
 }
 
 /// One search answer: the page and a line of it that matched.
 #[derive(Debug)]
-pub struct ManualSearchHit {
-    pub page: &'static ManualPage,
+pub struct ManualSearchHit<'a> {
+    pub page: &'a ManualPage,
     pub excerpt: String,
 }
 
-struct Manual {
+/// Every page of the manual, ready to read and search.
+pub struct Manual {
     /// Home first, then every other page in path order.
     pages: Vec<ManualPage>,
     words: Vec<PageWords>,
+    targets: LinkTargets,
 }
 
 /// The words of one page, normalized for matching.
@@ -210,58 +219,32 @@ struct Relevance {
     body_hits: usize,
 }
 
-static MANUAL: LazyLock<Manual> = LazyLock::new(Manual::load);
+static MANUAL: LazyLock<Manual> = LazyLock::new(|| Manual::from_sources(PAGES));
+
+/// The bundled manual.
+pub fn manual() -> &'static Manual {
+    &MANUAL
+}
 
 /// Every page, Home first.
 pub fn pages() -> &'static [ManualPage] {
-    &MANUAL.pages
+    MANUAL.pages()
 }
 
 /// The manual's front page.
 pub fn home() -> &'static ManualPage {
-    &MANUAL.pages[0]
+    MANUAL.home()
 }
 
-/// The page with this name, ignoring case, surrounding slashes and any
-/// `#heading` fragment, so a link target copied out of a page resolves too.
+/// The page with this name; see [`Manual::page`].
 pub fn page(name: &str) -> Option<&'static ManualPage> {
-    let name = name.split('#').next().unwrap_or_default();
-    let name = name.trim().trim_matches('/');
-    MANUAL
-        .pages
-        .iter()
-        .find(|page| page.name.eq_ignore_ascii_case(name))
+    MANUAL.page(name)
 }
 
-/// The best [`SEARCH_RESULTS`] pages for `query`. A page matches when any
-/// query word appears in it; see [`Relevance`] for the order. A query that
-/// matches nothing returns nothing.
-pub fn search(query: &str) -> Vec<ManualSearchHit> {
-    let terms = query_terms(query);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-    let manual = &*MANUAL;
-    let mut ranked: Vec<(Relevance, usize)> = manual
-        .words
-        .iter()
-        .enumerate()
-        .map(|(index, words)| (words.relevance(&terms), index))
-        .filter(|(relevance, _)| *relevance != Relevance::default())
-        .collect();
-    // Most relevant first; equals keep the manual's own order.
-    ranked.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    ranked
-        .into_iter()
-        .take(SEARCH_RESULTS)
-        .map(|(_, index)| {
-            let page = &manual.pages[index];
-            ManualSearchHit {
-                page,
-                excerpt: excerpt(&page.markdown, &terms),
-            }
-        })
-        .collect()
+/// The best pages for `query`, private pages included; see
+/// [`Manual::search`].
+pub fn search(query: &str) -> Vec<ManualSearchHit<'static>> {
+    MANUAL.search(query, true)
 }
 
 /// A page's name, from its path under `docs/user-vault`: each folder loses
@@ -285,9 +268,13 @@ fn page_name(path: &str) -> String {
 }
 
 impl Manual {
-    fn load() -> Self {
-        let mut sources: Vec<&(&str, &str)> = PAGES.iter().collect();
+    /// A manual of these `(path, source)` pages. `Home.md` must be one of
+    /// them. The bundled manual is built from [`PAGES`]; tests build their
+    /// own from fixture pages.
+    pub(crate) fn from_sources(sources: &[(&str, &'static str)]) -> Self {
+        let mut sources: Vec<&(&str, &'static str)> = sources.iter().collect();
         sources.sort_by_key(|(path, _)| (*path != HOME_PATH, *path));
+        assert_eq!(sources.first().map(|(path, _)| *path), Some(HOME_PATH));
         let targets = LinkTargets::new(sources.iter().map(|(path, _)| *path));
         let mut pages = Vec::with_capacity(sources.len());
         let mut words = Vec::with_capacity(sources.len());
@@ -301,10 +288,108 @@ impl Manual {
                 name,
                 title,
                 markdown,
+                private: is_private(source),
+                body,
             });
         }
-        Self { pages, words }
+        Self {
+            pages,
+            words,
+            targets,
+        }
     }
+
+    /// Every page, Home first.
+    pub fn pages(&self) -> &[ManualPage] {
+        &self.pages
+    }
+
+    /// The manual's front page.
+    pub fn home(&self) -> &ManualPage {
+        &self.pages[0]
+    }
+
+    /// The page with this name, ignoring case, surrounding slashes and any
+    /// `#heading` fragment, so a link target copied out of a page resolves
+    /// too.
+    pub fn page(&self, name: &str) -> Option<&ManualPage> {
+        let name = name.split('#').next().unwrap_or_default();
+        let name = name.trim().trim_matches('/');
+        self.pages
+            .iter()
+            .find(|page| page.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The best [`SEARCH_RESULTS`] pages for `query`. Unless
+    /// `include_private`, private pages are left out, and so are links to
+    /// them in the excerpts. A page matches when any query word
+    /// appears in it; see [`Relevance`] for the order. A query that matches
+    /// nothing returns nothing.
+    pub fn search(&self, query: &str, include_private: bool) -> Vec<ManualSearchHit<'_>> {
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let mut ranked: Vec<(Relevance, usize)> = self
+            .words
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| include_private || !self.pages[*index].private)
+            .map(|(index, words)| (words.relevance(&terms), index))
+            .filter(|(relevance, _)| *relevance != Relevance::default())
+            .collect();
+        // Most relevant first; equals keep the manual's own order.
+        ranked.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        ranked
+            .into_iter()
+            .take(SEARCH_RESULTS)
+            .map(|(_, index)| {
+                let page = &self.pages[index];
+                let excerpt = if include_private {
+                    excerpt(&page.markdown, &terms)
+                } else {
+                    // A link to a private page must not name it.
+                    let markdown = self.markdown_linking(page, |target, anchor| {
+                        (!target.private).then(|| page_address(&target.name, anchor))
+                    });
+                    excerpt(&markdown, &terms)
+                };
+                ManualSearchHit { page, excerpt }
+            })
+            .collect()
+    }
+
+    /// `page`'s Markdown with each wikilink pointing where `link` says.
+    /// `link` gets the target page and the heading anchor, if any, and
+    /// returns the link destination, or `None` to leave only the link's
+    /// text. [`ManualPage::markdown`] is this with the page name as the
+    /// destination.
+    pub fn markdown_linking(
+        &self,
+        page: &ManualPage,
+        link: impl Fn(&ManualPage, Option<&str>) -> Option<String>,
+    ) -> String {
+        let (markdown, _unresolved) =
+            rewrite_wikilinks_with(page.body, &page.name, &self.targets, |name, anchor| {
+                self.page(name).and_then(|target| link(target, anchor))
+            });
+        markdown
+    }
+}
+
+/// A link destination for a page name and an optional heading anchor.
+fn page_address(name: &str, anchor: Option<&str>) -> String {
+    match anchor {
+        Some(anchor) => format!("{name}#{anchor}"),
+        None => name.to_string(),
+    }
+}
+
+/// Whether `source`'s frontmatter carries `private: true`.
+fn is_private(source: &str) -> bool {
+    parse_frontmatter_metadata(source).is_ok_and(|metadata| {
+        metadata.properties.get("private") == Some(&serde_json::Value::Bool(true))
+    })
 }
 
 impl PageWords {
@@ -548,13 +633,34 @@ fn rewrite_wikilinks(
     this_page: &str,
     targets: &LinkTargets,
 ) -> (String, Vec<String>) {
+    rewrite_wikilinks_with(markdown, this_page, targets, |name, anchor| {
+        Some(page_address(name, anchor))
+    })
+}
+
+/// [`rewrite_wikilinks`] with the destination chosen by `destination`, which
+/// gets the page name and heading anchor and returns `None` to keep only the
+/// link's text.
+fn rewrite_wikilinks_with(
+    markdown: &str,
+    this_page: &str,
+    targets: &LinkTargets,
+    destination: impl Fn(&str, Option<&str>) -> Option<String>,
+) -> (String, Vec<String>) {
     let mut out = String::with_capacity(markdown.len());
     let mut unresolved = Vec::new();
     for (line, in_code) in fenced_lines(markdown) {
         if in_code {
             out.push_str(line);
         } else {
-            rewrite_line(line, this_page, targets, &mut out, &mut unresolved);
+            rewrite_line(
+                line,
+                this_page,
+                targets,
+                &destination,
+                &mut out,
+                &mut unresolved,
+            );
         }
     }
     (out, unresolved)
@@ -566,6 +672,7 @@ fn rewrite_line(
     line: &str,
     this_page: &str,
     targets: &LinkTargets,
+    destination: &dyn Fn(&str, Option<&str>) -> Option<String>,
     out: &mut String,
     unresolved: &mut Vec<String>,
 ) {
@@ -592,7 +699,7 @@ fn rewrite_line(
             let end = at + 2 + close + 2;
             let embed = at > 0 && bytes[at - 1] == b'!';
             match (!embed)
-                .then(|| link_markdown(inner, this_page, targets))
+                .then(|| link_markdown(inner, this_page, targets, destination))
                 .flatten()
             {
                 Some(link) => {
@@ -612,7 +719,12 @@ fn rewrite_line(
 
 /// The Markdown link for one wikilink's inner text, or `None` when it names
 /// no bundled page.
-fn link_markdown(inner: &str, this_page: &str, targets: &LinkTargets) -> Option<String> {
+fn link_markdown(
+    inner: &str,
+    this_page: &str,
+    targets: &LinkTargets,
+    destination: &dyn Fn(&str, Option<&str>) -> Option<String>,
+) -> Option<String> {
     // Inside a table the alias pipe is written `\|`.
     let (target, alias) = match inner.split_once('|') {
         Some((target, alias)) => (
@@ -636,11 +748,14 @@ fn link_markdown(inner: &str, this_page: &str, targets: &LinkTargets) -> Option<
         (_, Some(heading)) => format!("{page_part} > {heading}"),
         _ => page_part.to_string(),
     };
-    let destination = match heading {
-        Some(heading) if !heading.is_empty() => format!("{name}#{}", slugify(heading)),
-        _ => name.to_string(),
+    let anchor = match heading {
+        Some(heading) if !heading.is_empty() => Some(slugify(heading)),
+        _ => None,
     };
-    Some(format!("[{label}]({destination})"))
+    Some(match destination(name, anchor.as_deref()) {
+        Some(destination) => format!("[{label}]({destination})"),
+        None => label,
+    })
 }
 
 #[cfg(test)]

@@ -7,7 +7,8 @@ const INDEX_PATH: &str = "frontend/dist/index.html";
 /// `starts_with`. They mirror the service worker's `navigateFallbackDenylist`
 /// in `frontend/vite.config.ts`, so an address answers the same way whether a
 /// returning visitor's worker serves it or a cold load reaches the server.
-const SPA_RESERVED_PREFIXES: [&str; 3] = ["/api/", "/vault-assets/", "/health"];
+const SPA_RESERVED_PREFIXES: [&str; 5] =
+    ["/api/", "/vault-assets/", "/health", "/docs/", "/llms.txt"];
 
 pub async fn spa_index_handler() -> impl IntoResponse {
     match read_index() {
@@ -87,6 +88,8 @@ mod tests {
             "/vault-assets/nope.png",
             "/health/nope",
             "/healthz",
+            "/docs/nope.md",
+            "/llms.txt",
         ] {
             assert_eq!(
                 answer(path, Some(APP)).await,
