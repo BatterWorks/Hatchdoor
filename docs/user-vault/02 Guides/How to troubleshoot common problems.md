@@ -17,6 +17,8 @@ Fix: `docker compose logs hatchdoor | grep HATCHDOOR_WEB_BEARER_TOKEN | tail -1`
 
 A second, rarer startup failure: `HATCHDOOR_MCP_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing`. This only happens if you set `HATCHDOOR_MCP_ENABLED=true` directly in `.env` before ever starting — the normal path is to enable MCP live from **Settings** after the container is already running (see [[Connect your agent]]), which doesn't hit this check at all. Fix: either also set `HATCHDOOR_MCP_BEARER_TOKEN` in `.env`, or remove `HATCHDOOR_MCP_ENABLED` from `.env` and enable MCP from Settings instead.
 
+After an upgrade, the container may exit with `This install still has the single-Vault setup of Hatchdoor 2.4.x or earlier`. The install is too old to upgrade straight to this version, and Hatchdoor stops rather than open on an empty screen that would look like lost notes. Nothing was changed. Fix: run a 2.5.0 to 2.7.x image once, which moves your Vault into the Vault list, then upgrade to this version again.
+
 ## The workspace says "Vaults Unavailable"
 
 The browser could not get the list of Vaults from the server: it is offline, the server is restarting, or a proxy in front of it answered with an error such as `502`. Your Vaults and notes are untouched; the app just does not know about them yet, which is why it shows this instead of the "No Vaults Yet" screen. The note you had open is kept and comes back once the list loads. While the server stays unreachable, note counts in the sidebar and on a Vault's Settings page read `–` (not known) rather than `0`.
