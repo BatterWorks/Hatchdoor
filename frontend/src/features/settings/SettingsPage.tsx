@@ -22,6 +22,7 @@ import {
   type HeldDraft,
 } from "../../lib/writeDrafts";
 import { formatWhen } from "./relativeTime";
+import { generateMcpTokenCandidate, patchSettings } from "./settingsApi";
 import { SettingsModal } from "./SettingsModal";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
@@ -420,11 +421,7 @@ export function SettingsPage({
     setBusy(null);
     setSaved(null);
     try {
-      const response = await apiFetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates, confirm }),
-      });
+      const response = await patchSettings(updates, confirm);
       const payload = (await response.json()) as {
         settings?: Setting[];
         last_agent?: LastAgentConnection | null;
@@ -509,9 +506,7 @@ export function SettingsPage({
   const generateMcpToken = async () => {
     setBanner(null);
     try {
-      const response = await apiFetch("/api/settings/mcp-token/generate", {
-        method: "POST",
-      });
+      const response = await generateMcpTokenCandidate();
       const payload = (await response.json()) as { value?: string };
       if (!response.ok || !payload.value) throw new Error();
       setRevealed((old) => ({

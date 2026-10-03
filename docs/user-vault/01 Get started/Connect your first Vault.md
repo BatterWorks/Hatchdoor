@@ -10,7 +10,7 @@ A Vault is a folder of Markdown files. The `HOST_VAULT_PATH` value in `.env` is 
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 ```
 
-Hatchdoor can see that folder, but it does not turn it into a Vault by itself: a fresh install opens with **No Vaults Yet**. To add it:
+Hatchdoor can see that folder, but it does not turn it into a Vault by itself. A fresh install opens on the **Set up Hatchdoor** checklist instead: its first step, **Add your notes**, has **Pick a folder**, which shows the same folder list as below, a name field filled in from the folder you pick, and **Add these notes**. Once you close the checklist, an install with no Vaults shows **No Vaults Yet**. Either way works; from **No Vaults Yet** or Settings:
 
 1. Choose **Add a Vault** and give the Vault a name.
 2. Leave **A folder on this server** selected. The **Folder** list shows the folders Hatchdoor can see, with how many notes each one holds.

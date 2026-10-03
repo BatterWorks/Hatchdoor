@@ -7,6 +7,21 @@ tags: [type/tutorial, topic/mcp]
 Hatchdoor exposes a Streamable HTTP MCP endpoint. It is off by default and has
 its own password, separate from the web token you used to open the browser.
 
+## The quick way: the setup checklist
+
+A new install opens on the **Set up Hatchdoor** checklist. Its third step, **Connect your agent**, does the whole setup below in one click:
+
+1. Select **Connect an agent**. Hatchdoor turns agent access on, keeps **Let assistants change notes** off, and makes a new MCP password.
+2. Pick your agent: **Claude Code**, **Codex**, **OpenClaw**, **Hermes**, or **Other** for any other MCP client. The checklist shows the exact command or settings to paste, with your Hatchdoor address and the new password already filled in.
+3. Copy it now. The password is shown only this once. If you lose it, select **Make a new password**; agents still using the old one stop getting in.
+4. Paste it into your agent and ask it to use Hatchdoor. The step ticks itself as soon as the agent makes its first request, and names it, for example "Claude Code connected 2 minutes ago".
+
+If you closed the checklist, reopen it from **Help** → **Setup checklist**. If the MCP password is set in the deployment's `.env` file as `HATCHDOOR_MCP_BEARER_TOKEN`, the checklist cannot show it: the config says `<your MCP password>` where it goes.
+
+The rest of this page does the same thing by hand, from Settings.
+
+## Set it up in Settings
+
 In Hatchdoor, open **Settings** → **Agent access (MCP)**. Then:
 
 1. Turn on **Let assistants connect (MCP)**.

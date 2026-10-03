@@ -57,6 +57,7 @@ export function HelpPanel({
   fullWidth,
   demoMode,
   aboveDialogs,
+  onOpenSetupChecklist,
   onNavigate,
   onBack,
   onHome,
@@ -68,6 +69,7 @@ export function HelpPanel({
   fullWidth: boolean;
   demoMode: boolean;
   aboveDialogs: boolean;
+  onOpenSetupChecklist?: () => void;
   onNavigate: (location: HelpLocation) => void;
   onBack: () => void;
   onHome: () => void;
@@ -313,13 +315,18 @@ export function HelpPanel({
               onBrowse={onHome}
             />
           ) : (
-            <HelpPage
-              state={pageState}
-              showStart={demoMode && location.page === HELP_HOME}
-              components={components}
-              onOpen={(page) => onNavigate({ page })}
-              onHome={onHome}
-            />
+            <>
+              {onOpenSetupChecklist && location.page === HELP_HOME ? (
+                <HelpSetupChecklist onOpen={onOpenSetupChecklist} />
+              ) : null}
+              <HelpPage
+                state={pageState}
+                showStart={demoMode && location.page === HELP_HOME}
+                components={components}
+                onOpen={(page) => onNavigate({ page })}
+                onHome={onHome}
+              />
+            </>
           )}
         </div>
       </div>
@@ -399,6 +406,21 @@ function HelpStart({ onOpen }: { onOpen: (page: string) => void }) {
         <span className="help-start-title">Let your agent install it</span>
         <span className="help-start-blurb">
           Give your coding agent one line and answer its questions.
+        </span>
+      </button>
+    </nav>
+  );
+}
+
+/** Home's way back to the first-run checklist (#419) after it was closed. */
+function HelpSetupChecklist({ onOpen }: { onOpen: () => void }) {
+  return (
+    <nav className="help-start" aria-label="Setup checklist">
+      <button type="button" className="help-start-card" onClick={onOpen}>
+        <span className="help-start-title">Setup checklist</span>
+        <span className="help-start-blurb">
+          Add your notes, connect your agent and try a search, one step at a
+          time.
         </span>
       </button>
     </nav>
