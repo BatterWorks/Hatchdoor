@@ -10,6 +10,7 @@ pub mod eval;
 pub mod folder_listing;
 pub mod git;
 pub mod handlers;
+pub mod instance_state;
 pub mod mcp;
 pub mod model_setup;
 pub mod rename_flags;

@@ -211,11 +211,11 @@ node scripts/check-docs-freshness.mjs --validate-table
 
 A release is cut with `just release-prepare <version>` and `just release-publish <version>`, following [`docs/maintenance/release-runbook.md`](docs/maintenance/release-runbook.md) (ADR-36).
 
-Only the maintainer approves a release. After working through the version-bump pull request's checklist, draft the GitHub Release title and notes on the draft release, give the maintainer that exact title and notes, and stop. Run `just release-publish` only after the maintainer replies "approved" to that draft in the current session. That approval also covers the deploy that `release-publish` runs.
+Only the maintainer approves a release. After working through the version-bump pull request's checklist, draft the GitHub Release title and notes on the draft release, give the maintainer that exact title and notes together with the release's section of `docs/user-vault/What's new.md` (ADR-42), and stop. Run `just release-publish` only after the maintainer replies "approved" to that draft in the current session. That approval also covers the deploy that `release-publish` runs.
 
 Ask again, and do not publish, when either holds:
 
 - This session cannot see the maintainer's "approved" in its own conversation, as when it was resumed or is a new session. A summary or note saying approval was given does not count.
-- The title or notes changed after the maintainer replied.
+- The title, the notes or the What's new section changed after the maintainer replied.
 
 No script checks this. `release-publish` publishes whatever the draft says when it runs.

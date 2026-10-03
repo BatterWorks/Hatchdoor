@@ -32,8 +32,8 @@ The first run:
 
 1. Fetches `origin` with its tags and refuses if the version is not higher than the latest release tag or is already published.
 2. Cuts `docs/release-v2.7.0` from `origin/development`.
-3. Sets the version in `Cargo.toml`, `Cargo.lock`, `frontend/package.json` and `frontend/package-lock.json`, renames `## Unreleased` in `CHANGELOG.md` to `## v2.7.0 - <today>`, and commits.
-4. Refuses unless the four files agree on the version, the dated section has entries, and every `[#N]` in it has a `[#N]: <url>` definition somewhere in the file.
+3. Sets the version in `Cargo.toml`, `Cargo.lock`, `frontend/package.json` and `frontend/package-lock.json`, renames `## Unreleased` in `CHANGELOG.md` to `## v2.7.0 - <today>`, drafts the release's highlights in `docs/user-vault/What's new.md` (see [Highlights](#highlights)), and commits.
+4. Refuses unless the four files agree on the version, the dated section has entries, every `[#N]` in it has a `[#N]: <url>` definition somewhere in the file, and the What's new section has 3 to 6 lines with action-needed lines first.
 5. Runs `just check-full`. A cold build takes tens of minutes, and its output streams to the terminal.
 6. Pushes the branch.
 7. Runs `just docs-freshness main` on the bump branch, after fast-forwarding the local `main` to `origin/main` so the list covers this release and no more.
@@ -62,6 +62,8 @@ A fix that adds a changelog entry goes under the dated `## v2.7.0` section, not 
 
 ### 3. Draft the release title and notes
 
+Before the notes, rewrite the highlights if the first run did not already make you (see [Highlights](#highlights)). They are part of what the maintainer approves.
+
 Edit the draft GitHub Release until its title and notes are what should go public:
 
 ```bash
@@ -84,7 +86,7 @@ The same command, run again, sees that the bump has merged and opens **Release v
 
 ### 6. Get the maintainer's approval
 
-Give the maintainer the exact title and notes now on the draft, and stop. Wait for the maintainer to reply "approved". The rule and the cases where it must be asked again are in [Approval](#approval).
+Give the maintainer the exact title and notes now on the draft, together with the release's section of `docs/user-vault/What's new.md`, and stop. Wait for the maintainer to reply "approved". The rule and the cases where it must be asked again are in [Approval](#approval).
 
 ### 7. Publish
 
@@ -131,12 +133,38 @@ A check that fails is fixed on the bump branch, as in step 2, and its box is tic
 
 Only the maintainer approves a release's title and notes, and the approval is given in the agent's session. This is a rule the agent follows; no script checks it.
 
-1. After the judgment checklist on the version-bump pull request, the agent gives the maintainer the release title and notes as they stand on the draft GitHub Release, and stops.
-2. The agent runs `just release-publish` only after the maintainer replies "approved" to that draft in the current session.
+1. After the judgment checklist on the version-bump pull request, the agent gives the maintainer the release title and notes as they stand on the draft GitHub Release, and the release's What's new highlights as they stand on the bump branch, and stops.
+2. The agent runs `just release-publish` only after the maintainer replies "approved" to that draft in the current session. The approval covers the highlights too ([ADR-42](../adr/README.md#adr-42--every-release-ships-plain-highlights)).
 3. A resumed or new session that cannot see that reply in its own conversation asks again.
-4. If the title or notes changed after the reply, the agent asks again.
+4. If the title, the notes or the highlights changed after the reply, the agent asks again.
 
 `release-publish` publishes whatever is on the draft when it runs, so the draft on GitHub must be the text that was approved. Approval also authorizes the hook's deploy step, which pushes to the deployment configuration of the servers that run releases.
+
+## Highlights
+
+Every release adds a section to the manual's What's new page, `docs/user-vault/What's new.md` ([ADR-42](../adr/README.md#adr-42--every-release-ships-plain-highlights)). The What's new pop-up, Help and agents all read it, so it is written for someone who does not read changelogs:
+
+```markdown
+## v2.8.0 - 2026-10-20
+
+- **Action needed:** Installs on 2.4.x or earlier must upgrade to a 2.5.0 to 2.7.x release first. [[Install Hatchdoor with Docker Compose]]
+- A plain line about something you can now do.
+```
+
+- 3 to 6 lines in total, action-needed lines first, each starting with `**Action needed:**`.
+- One sentence per line, about what a person can now do or must do, not how it was built.
+- A line may end with one wikilink to the manual page that explains it. Links elsewhere in the line must point outside the manual.
+- The heading is the same `## v<version> - <date>` the changelog uses. Newest release first.
+
+`release-prepare` drafts the section from the changelog's Unreleased entries, one line per entry, with entries under a breaking-changes heading first as action needed. A section already on the page for the version is kept as written. Most releases have more than six entries, so the first run usually refuses with `highlights`: rewrite the section on the bump branch, commit, and run again. `cargo test whats_new`, which `just check-full` runs, checks the format the binary reads.
+
+### For 2.8.0
+
+The 2.8.0 section must include these three lines:
+
+- **Action needed:** an install on 2.4.x or earlier must upgrade to a 2.5.0 to 2.7.x release before 2.8.0.
+- The setup checklist, which Help can reopen.
+- The opt-in daily check for a newer release.
 
 ## The release hook
 
@@ -175,6 +203,7 @@ Every refusal names its check in brackets, as in `release-prepare refused (chang
 | `changelog` | The bump has merged, but `CHANGELOG.md` on `development` has no `## v<version>` section. | Something changed the changelog after the bump. Stop and ask the maintainer. |
 | `version files` | The four files do not agree on the version after the bump. | Fix the disagreeing file on `docs/release-v<version>`, commit, and run again. |
 | `changelog links` | A `[#N]` in the section has no `[#N]: <url>` definition. | Add the definition above the first release heading on the bump branch, commit, and run again. |
+| `highlights` | `docs/user-vault/What's new.md` is missing, has no `## v<version>` section, or its section is not 3 to 6 one-line items with action-needed lines first. | Rewrite the section on the bump branch as in [Highlights](#highlights), commit, and run again. |
 | `just check-full` | A test or check failed, on the bump or on a review fix committed after it. | Fix it on the bump branch, commit, and run again. Nothing is pushed until it passes. |
 | `bump branch` | `origin/docs/release-v<version>` holds commits the local branch lacks, pushed by hand, from another clone or through GitHub. | Bring them in with `git pull --ff-only`, run `just check-full` yourself, since `release-prepare` does not test a commit already on `origin`, and run again. |
 | `bump pull request` | The version-bump pull request was closed without merging. | Reopen it, or delete `docs/release-v<version>` on `origin` and locally to start the version over. |

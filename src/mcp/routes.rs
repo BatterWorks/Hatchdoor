@@ -364,6 +364,7 @@ mod tests {
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
             vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
             shutdown: Default::default(),
         }
     }

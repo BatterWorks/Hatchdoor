@@ -149,6 +149,7 @@ const CHANGELOG = `# Changelog
 
 ### Added
 - A new thing. [#12]
+- Another thing, with more to say. It goes on.
 
 ### Fixed
 - An old thing. [#3]
@@ -162,6 +163,19 @@ const CHANGELOG = `# Changelog
 
 [#3]: https://github.test/issues/3
 `;
+
+const WHATS_NEW = `# What's new
+
+Intro.
+
+## v1.0.0 - 2026-01-01
+
+- One.
+- Two.
+- Three.
+`;
+
+const WHATS_NEW_PATH = "docs/user-vault/What's new.md";
 
 function git(root, ...args) {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -188,7 +202,11 @@ const GIT_IDENTITY = {
 
 // A clone whose `origin` is a local bare repository holding `main` and
 // `development` and a v1.0.0 tag, with the checkout on `development`.
-async function fixture({ changelog = CHANGELOG, cargoLock = CARGO_LOCK } = {}) {
+async function fixture({
+  changelog = CHANGELOG,
+  cargoLock = CARGO_LOCK,
+  whatsNew = WHATS_NEW,
+} = {}) {
   const base = await mkdtemp(path.join(tmpdir(), "hatchdoor-release-prepare-"));
   temporaryDirectories.push(base);
   const origin = path.join(base, "origin.git");
@@ -213,6 +231,9 @@ async function fixture({ changelog = CHANGELOG, cargoLock = CARGO_LOCK } = {}) {
   await write(root, "frontend/package.json", PACKAGE_JSON);
   await write(root, "frontend/package-lock.json", PACKAGE_LOCK);
   await write(root, "CHANGELOG.md", changelog);
+  if (whatsNew !== null) {
+    await write(root, WHATS_NEW_PATH, whatsNew);
+  }
   for (const script of ["release-prepare.mjs", "release-common.mjs"]) {
     await mkdir(path.join(root, "scripts"), { recursive: true });
     await copyFile(
@@ -333,6 +354,11 @@ test("opens the bump with the checklist and draft release, ships a review fix th
     `+## v1.1.0 - ${today()}`,
     '+version = "1.1.0"',
     '+version = "1.1.0"',
+    // The highlights drafted from the Unreleased entries.
+    `+## v1.1.0 - ${today()}`,
+    "+- A new thing.",
+    "+- Another thing, with more to say.",
+    "+- An old thing.",
     // package-lock.json sorts first and declares the version twice.
     '+  "version": "1.1.0",',
     '+      "version": "1.1.0"',
@@ -375,7 +401,7 @@ test("opens the bump with the checklist and draft release, ships a review fix th
   );
   assert.equal(
     state.releases[0].notes,
-    "### Added\n- A new thing. [#12]\n\n### Fixed\n- An old thing. [#3]\n\n[#12]: https://github.test/issues/12\n\n[#3]: https://github.test/issues/3\n",
+    "### Added\n- A new thing. [#12]\n- Another thing, with more to say. It goes on.\n\n### Fixed\n- An old thing. [#3]\n\n[#12]: https://github.test/issues/12\n\n[#3]: https://github.test/issues/3\n",
   );
 
   const waiting = prepare(context);
@@ -579,7 +605,7 @@ test("refuses a resumed bump whose release section was emptied", async () => {
   await writeFile(
     file,
     (await readFile(file, "utf8")).replace(
-      /^- A new thing.*\n|^- An old thing.*\n/gm,
+      /^- (A new|Another|An old) thing.*\n/gm,
       "",
     ),
   );
@@ -745,4 +771,84 @@ test("a docs-freshness exit 1 without a reading list is a failure, not a result"
   assertRefused(result, "docs-freshness");
   assert.match(result.stderr, /changelog needs an entry/);
   assert.equal((await stubState(context)).pulls.length, 0);
+});
+
+test("drafts the highlights above older releases, and keeps a section written before the bump", async () => {
+  const context = await fixture();
+  const result = prepare(context);
+  assert.equal(result.status, 0, result.stderr);
+  const page = await readFile(path.join(context.root, WHATS_NEW_PATH), "utf8");
+  assert.equal(
+    page,
+    `# What's new\n\nIntro.\n\n## v1.1.0 - ${today()}\n\n- A new thing.\n- Another thing, with more to say.\n- An old thing.\n\n## v1.0.0 - 2026-01-01\n\n- One.\n- Two.\n- Three.\n`,
+  );
+
+  const written = await fixture({
+    whatsNew: `${WHATS_NEW.replace("Intro.\n", "Intro.\n\n## v1.1.0 - 2026-02-02\n\n- **Action needed:** Hand.\n- Written.\n- Lines.\n")}`,
+  });
+  const before = await readFile(path.join(written.root, WHATS_NEW_PATH), "utf8");
+  const kept = prepare(written);
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.equal(
+    await readFile(path.join(written.root, WHATS_NEW_PATH), "utf8"),
+    before,
+  );
+});
+
+test("drafts entries under a breaking-changes heading first, as action needed", async () => {
+  const changelog = CHANGELOG.replace(
+    "- Another thing, with more to say. It goes on.\n",
+    "",
+  ).replace(
+    "### Added",
+    "### ⚠️ Breaking changes — action required on upgrade\n- Move the data folder first ([#12]).\n\n### Added",
+  );
+  const context = await fixture({ changelog });
+  const result = prepare(context);
+  assert.equal(result.status, 0, result.stderr);
+  const page = await readFile(path.join(context.root, WHATS_NEW_PATH), "utf8");
+  assert.match(
+    page,
+    /## v1\.1\.0 - .*\n\n- \*\*Action needed:\*\* Move the data folder first\.\n- A new thing\.\n- An old thing\.\n/,
+  );
+});
+
+test("refuses a draft with too few lines, before running the tests", async () => {
+  const changelog = CHANGELOG.replace(
+    "- Another thing, with more to say. It goes on.\n",
+    "",
+  );
+  const context = await fixture({ changelog });
+  const first = prepare(context);
+  assertRefused(first, "highlights");
+  assert.match(first.stderr, /it has 2 lines; a release has 3 to 6\./);
+  assert.equal((await calls(context, "just", "check-full")).length, 0);
+  assert.equal((await stubState(context)).pulls.length, 0);
+
+  // The fix is committed on the bump branch, and the next run carries on.
+  const pagePath = path.join(context.root, WHATS_NEW_PATH);
+  const page = await readFile(pagePath, "utf8");
+  await writeFile(pagePath, page.replace("- An old thing.\n", "- An old thing.\n- A third line.\n"));
+  git(context.root, "commit", "--quiet", "-am", "docs: fix the highlights");
+  const second = prepare(context);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
+  assert.equal((await stubState(context)).pulls.length, 1);
+});
+
+test("refuses when the What's new page is missing", async () => {
+  const context = await fixture({ whatsNew: null });
+  const result = prepare(context);
+  assertRefused(result, "highlights");
+  assert.match(result.stderr, /What's new\.md is missing/);
+});
+
+test("refuses a draft with more than six lines, before running the tests", async () => {
+  const extra = Array.from({ length: 5 }, (_, index) => `- Extra ${index}.`).join("\n");
+  const changelog = CHANGELOG.replace("### Fixed\n", `${extra}\n\n### Fixed\n`);
+  const context = await fixture({ changelog });
+  const result = prepare(context);
+  assertRefused(result, "highlights");
+  assert.match(result.stderr, /it has 8 lines; a release has 3 to 6\./);
+  assert.equal((await calls(context, "just", "check-full")).length, 0);
 });
