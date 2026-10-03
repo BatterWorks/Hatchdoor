@@ -103,6 +103,14 @@ const settings = [
     kind: "number",
   },
   {
+    key: "HATCHDOOR_UPDATE_CHECK_ENABLED",
+    value: "false",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
     key: "HATCHDOOR_GIT_AUTHOR_NAME",
     value: "Server author",
     source: "default",
@@ -302,8 +310,8 @@ describe("SettingsPage", () => {
     expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
       "author@example.test",
     );
-    // The footer counts the rows the page renders: all eleven, none hidden.
-    expect(screen.getByText(/11 editable here, 0 set in/)).toBeVisible();
+    // The footer counts the rows the page renders: all twelve, none hidden.
+    expect(screen.getByText(/12 editable here, 0 set in/)).toBeVisible();
   });
 
   it("offers the public address under Agent access", async () => {
@@ -497,6 +505,7 @@ describe("How does this work? links (#423)", () => {
     [/Notes handling/, CONTEXTUAL_HELP.notesSettings],
     [/Agent access/, CONTEXTUAL_HELP.agentSettings],
     [/Uploads/, CONTEXTUAL_HELP.uploadSettings],
+    [/Updates/, CONTEXTUAL_HELP.upgrade],
   ] as const)("links the %s section to its page", async (name, target) => {
     const { container } = await openSection(name);
     clickLinkIn(container.querySelector(".settings-sec-head"));
@@ -546,6 +555,26 @@ describe("How does this work? links (#423)", () => {
     expect(openHelp).toHaveBeenLastCalledWith(
       CONTEXTUAL_HELP.agentWrites.page,
       undefined,
+    );
+  });
+
+  it("offers the update check off, saying exactly what it sends (#425)", async () => {
+    await openSection(/Updates/);
+    const row = screen
+      .getByText("Tell me about new releases")
+      .closest(".settings-row");
+    expect(row).toHaveTextContent(
+      "Once a day, Hatchdoor sends one request to GitHub's public list of Hatchdoor releases, carrying this server's IP address and the user-agent Hatchdoor, nothing else.",
+    );
+    expect(
+      within(row as HTMLElement).getByRole("button", {
+        name: "Tell me about new releases",
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+    clickLinkIn(row);
+    expect(openHelp).toHaveBeenLastCalledWith(
+      CONTEXTUAL_HELP.updateCheck.page,
+      CONTEXTUAL_HELP.updateCheck.heading,
     );
   });
 

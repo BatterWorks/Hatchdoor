@@ -29,6 +29,8 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
         ("HATCHDOOR_MCP_ENABLED", "false"),
         ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
         ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "10485760"),
+        // ADR-39: the daily check for a newer release is opt-in.
+        ("HATCHDOOR_UPDATE_CHECK_ENABLED", "false"),
         ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "5242880"),
         ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "true"),
         ("HATCHDOOR_MCP_BEARER_TOKEN", ""),

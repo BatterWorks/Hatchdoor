@@ -49,6 +49,13 @@ export const CONTEXTUAL_HELP = {
     page: "guides/how-to-import-and-work-with-attachments",
     heading: "what-may-be-uploaded",
   },
+  /** Settings' Updates section, its update check switch, and the update
+   * banner's "How to upgrade" (#425). */
+  upgrade: { page: "guides/how-to-upgrade-hatchdoor" },
+  updateCheck: {
+    page: "guides/how-to-upgrade-hatchdoor",
+    heading: "hear-about-new-releases",
+  },
   /** A Vault's own Settings page while nothing is wrong. */
   vaultSettings: { page: MULTIPLE_VAULTS },
   /** Vault conditions. */
