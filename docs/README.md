@@ -54,7 +54,3 @@ Accepted decisions belong in `adr/`.
   reviews.
 - [`superpowers/`](superpowers/) — task-specific design, handoff, and
   implementation records retained for context.
-
-## Dev fixture content
-
-- [`starter-vault/`](starter-vault/): the starter notes earlier releases wrote into empty Vaults. The binary no longer carries them; `scripts/dev-vaults.sh` still copies them into the dev fixtures until #431 moves the useful ones into the manual and retires the folder.

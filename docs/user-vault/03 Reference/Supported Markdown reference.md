@@ -4,7 +4,7 @@ tags: [type/reference, topic/markdown]
 
 # Supported Markdown reference
 
-A dictionary of the Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` file — this page shows what that file can contain and how Hatchdoor displays it.
+A dictionary of the Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` file — this page shows what that file can contain and how Hatchdoor displays it. To see every feature rendered on one page, open [[Markdown feature showcase]].
 
 ## Inline formatting
 
@@ -217,4 +217,4 @@ An agent renaming a tag across the Vault with `rename_tag` goes by these same ru
 
 ---
 
-Related: [[MCP tools reference]] · [[HTTP API reference]]
+Related: [[Markdown feature showcase]] · [[MCP tools reference]] · [[HTTP API reference]]

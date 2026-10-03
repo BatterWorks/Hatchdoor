@@ -37,7 +37,7 @@ Forte designed PARA to apply "across any platform" — a computer's file system,
 
 ## How this shows up in a Hatchdoor Vault
 
-The starter Vault that earlier Hatchdoor releases wrote into empty folders used a PARA variant (`10-topics/`, `20-projects/`, `30-areas/`, `40-reference/`, `90-archive/`), with "Topics" in the Resources role, plus a numbered `00-inbox/` for unsorted capture that PARA itself doesn't specify. Nothing in Hatchdoor requires this or any other layout; folders are just folders.
+[[How to choose a folder layout]] suggests a PARA variant for a new Vault (`10-topics/`, `20-projects/`, `30-areas/`, `40-reference/`, `90-archive/`), with "Topics" in the Resources role, plus a numbered `00-inbox/` for unsorted capture that PARA itself doesn't specify. Nothing in Hatchdoor requires this or any other layout; folders are just folders.
 
 One genuine point of contact: `archive_note` (both the MCP tool and the Web UI action) moves a note into a Vault's configured archive folder in one step, which operationalizes exactly what PARA's Archives category asks for — see [[MCP tools reference]]. Beyond that, PARA and Hatchdoor's [[The layer system|layer system]] solve different problems and can be used together without conflict: PARA organizes *where* a note lives; layers control whether it shows up in *default* search and browsing, regardless of which PARA folder it's in.
 

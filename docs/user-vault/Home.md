@@ -53,8 +53,10 @@ Guides, Reference, and Concepts will grow from this starting point.
 **Guides**
 
 - [[How to deploy Hatchdoor with an agent]]
+- [[How to work in a Vault as an agent]]
 - [[How to set up a Git-backed Vault]]
 - [[How to manage multiple Vaults]]
+- [[How to choose a folder layout]]
 - [[How to organize a Vault with layers]]
 - [[How to run an LLM wiki in Hatchdoor]]
 - [[How to import and work with attachments]]
@@ -66,6 +68,7 @@ Guides, Reference, and Concepts will grow from this starting point.
 - [[HTTP API reference]]
 - [[MCP tools reference]]
 - [[Supported Markdown reference]]
+- [[Markdown feature showcase]]
 - [[Settings and environment variables reference]]
 - [[The LLM wiki pattern (external reference)]]
 - [[The PARA method (external reference)]]
