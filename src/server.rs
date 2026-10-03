@@ -28,9 +28,9 @@ use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
-    disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
-    enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
-    list_folders_handler, list_vaults_handler, patch_settings_handler,
+    disable_vault_handler, disconnect_vault_handler, docs_router, download_transfer_handler,
+    edit_vault_handler, enable_vault_handler, generate_mcp_token_handler, get_settings_handler,
+    health_handler, list_folders_handler, list_vaults_handler, patch_settings_handler,
     publish_recovery_branch_handler, refresh_vault_handler, retry_vault_handler,
     reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler, spa_not_found_handler,
     start_with_no_vaults_handler, sync_vault_handler, upload_transfer_handler,
@@ -587,10 +587,16 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         None => folders,
     };
 
+    // ADR-38: the bundled manual as public plain Markdown and `llms.txt`.
+    // Outside every auth layer and mounted in demo mode too, like `/health`;
+    // the web token only decides whether private pages are served.
+    let docs = docs_router(web_bearer_token.clone());
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
+        .merge(docs)
         .merge(model_setup)
         .merge(settings)
         .merge(vaults_v1)
@@ -4364,6 +4370,105 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// ADR-38: the public manual routes answer without a token on an
+    /// instance that has one, and serve the bundled manual and nothing else:
+    /// no Vault name or path, no setting, no token.
+    #[tokio::test]
+    async fn public_manual_routes_answer_without_a_token_and_reveal_nothing_of_the_instance() {
+        let web_token = "docs-route-web-token";
+        let mcp_token = "docs-route-mcp-token";
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from(web_token)),
+            Some(mcp_token.to_string()),
+            true,
+        );
+        let vault_root = tmp.path().join("zanzibar-private-notes");
+        create_vault_with_files_using_token(
+            &app,
+            "Zanzibar Private Notes",
+            &vault_root,
+            &[("Qwyzzle.md", "# Qwyzzle\n\nThe git launch plan.\n")],
+            0,
+            Some(web_token),
+        )
+        .await;
+
+        let secrets = [
+            "Zanzibar".to_string(),
+            vault_root.to_string_lossy().into_owned(),
+            tmp.path().to_string_lossy().into_owned(),
+            web_token.to_string(),
+            mcp_token.to_string(),
+            "Qwyzzle".to_string(),
+        ];
+        for uri in [
+            "/llms.txt",
+            "/docs/index.md",
+            "/docs/deploy.md",
+            "/docs/home.md",
+            "/docs/concepts/the-security-model.md",
+            "/docs/search?q=git",
+            "/docs/search?q=zanzibar%20qwyzzle",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body = String::from_utf8_lossy(&body);
+            for secret in &secrets {
+                assert!(!body.contains(secret.as_str()), "{uri} reveals {secret}");
+            }
+        }
+
+        // The Vault routes beside them still want the token.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn public_manual_routes_answer_in_demo_mode() {
+        for web_token in [None, Some(Arc::from("demo-web-token"))] {
+            let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(web_token, true);
+            for uri in [
+                "/llms.txt",
+                "/docs/index.md",
+                "/docs/deploy.md",
+                "/docs/search?q=git",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | Surface | Auth |
 | --- | --- |
 | `/health`, `/ready`, `/api/startup-status` | None, always |
+| `/docs/*`, `/llms.txt` | None, always, demo mode included. A private manual page needs the web token (if configured) |
 | `/api/model/*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
 | `/api/settings*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
 | `/mcp` | Its own MCP bearer token — see [[Connect your agent]] |
@@ -41,14 +42,28 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 | GET | `/ready` | `200 ready` once the search model is set up and every active Vault's first index has settled, else `503 not ready`. A Vault that failed to index, or has no folder, counts as settled: its problem shows on that Vault (`GET /api/v1/vaults`), not here. Once `200`, it stays `200` through later reindexing. |
 | GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). While first-run indexing runs, `percent` and `eta_seconds` cover every active Vault, including ones still waiting their turn, and `percent` never goes down; the `notes_*`, `chunks_*` and `tokens_*` counters describe only the Vault indexing right now. `Cache-Control: no-store`. |
 
+## Manual
+
+The manual built into the running version, as plain Markdown. These routes never read a Vault, the settings or a token. Wikilinks in a page become relative links to other `/docs/<page>.md` addresses. A page's name is its path in the manual, each folder's number dropped and every part lowercased with dashes, so this page is `reference/http-api-reference`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/docs/<page>.md` | One page, `text/markdown; charset=utf-8`. An unknown page is a plain-text `404`. |
+| GET | `/docs/index.md` | The Home page, then a list of every page. |
+| GET | `/docs/deploy.md` | [[How to deploy Hatchdoor with an agent]], at a short address to hand an agent. |
+| GET | `/docs/search?q=<words>` | JSON `{ "results": [{ "name", "title", "excerpt" }] }`, at most 5 pages, best first. The same word search as the MCP `search_docs` tool. Only the first 200 characters of `q` count. |
+| GET | `/llms.txt` | A plain-text list of every page in the [llms.txt](https://llmstxt.org) format, the deploy page first. |
+
+A page marked `private: true` in its frontmatter answers `/docs/<page>.md` only with the web token, `401` without it, and appears in the index and search only for a caller who sends the token. It never appears in `/llms.txt`. On an instance with no web token there is no token to send, so these routes never serve a private page. Signed-in Help and the MCP docs tools still serve them.
+
 ## Browser app
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/`, `/stats`, `/graph`, `/settings`, `/v/{vault_id}/n/{slug}` | The browser app, `200`. |
-| GET | any other path, outside `/api/`, `/vault-assets/` and paths starting `/health` | The browser app with a `404` status, when no built file matches. The app shows a not-found page with a way back to your notes. |
+| GET | any other path, outside `/api/`, `/vault-assets/`, `/docs/`, `/llms.txt` and paths starting `/health` | The browser app with a `404` status, when no built file matches. The app shows a not-found page with a way back to your notes. |
 
-Paths under `/api/` and `/vault-assets/`, and any path starting `/health`, never get the app. An unknown one there is a plain `404`, so a script calling a mistyped API path gets an error, not a page of HTML.
+Paths under `/api/`, `/vault-assets/` and `/docs/`, `/llms.txt`, and any path starting `/health`, never get the app. An unknown one there is a plain `404`, so a script calling a mistyped API path gets an error, not a page of HTML.
 
 ## Model setup
 
