@@ -363,6 +363,7 @@ mod tests {
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
             shutdown: Default::default(),
         }
     }

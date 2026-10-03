@@ -25,6 +25,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | `/api/v1/vaults/...` reads (`GET`) | Web bearer token if configured, **unauthenticated in demo mode** |
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
 | `/api/v1/vaults/{vault_id}/attachments` (upload) | Web bearer token **or** a live MCP bearer token; same demo-mode refusal as other writes |
+| `/api/v1/folders` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
 | `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled — see [[#Transfer links]] |
 
 > [!warning]
@@ -163,6 +164,47 @@ In demo mode the block answers the visitor's question instead. `mutate`, `pull`,
 `https_credentials`, `archive_folder`, and `commit_identity` are all optional; omitted, the server-wide defaults apply (`HATCHDOOR_GIT_HTTPS_*`, `HATCHDOOR_ARCHIVE_PREFIX`, `HATCHDOOR_GIT_AUTHOR_*`). Embedded credentials in `repository_url` are rejected — supply them via `https_credentials` instead.
 
 `EditVaultRequest` is the same shape, plus `vault_id` in the path and `confirm_identity_change: bool`. It replaces the definition wholesale: `name` and `source` are required on every edit, and omitting `exclude_patterns`, `archive_folder`, or `commit_identity` clears the stored value rather than preserving it. The one exception is `https_credentials`, which takes an explicit `{"action": "keep"}` / `{"action": "remove"}` / `{"action": "replace", "username": "...", "token": "..."}` so a secret never has to be resent just to survive an edit.
+
+## Folders under the Vault mount
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/folders?path=<relative>` | List the folders directly inside one folder under the Vault mount, so a Vault can be picked instead of typed. Without `path` it lists the mount itself. |
+
+The mount is the folder `VAULT_PATH` names: `/data/vault` in the stock Compose file, `./vault` when unset. `path` is relative to it, with `/` between folder names.
+
+```json
+{
+  "root_found": true,
+  "path": "",
+  "markdown": { "count": 214, "at_least": false },
+  "vault": null,
+  "folders": [
+    {
+      "name": "Work",
+      "path": "Work",
+      "markdown": { "count": 180, "at_least": false },
+      "vault": { "vault_id": "4f1c...", "name": "Work" },
+      "has_subfolders": true
+    }
+  ],
+  "skipped_invalid_names": 0
+}
+```
+
+- `markdown` counts the `.md` notes in a folder and every folder below it. Each listed subfolder's count stops at 10,000 notes, and a listing stops counting after about two seconds, so a folder late in the list can come back as `at least 0`. When either limit cut a count short, `at_least` is `true` and the real number is higher. The top-level `markdown` is the listed folder's own notes plus its subfolders' counts, so it can pass 10,000, and a mount that is itself one notes folder shows its notes there.
+- `vault` names the registered Vault whose folder is exactly this one, or is `null`.
+- `has_subfolders` says whether opening the folder would list anything. It is `true` when counting stopped before Hatchdoor could tell.
+- `skipped_invalid_names` counts folders left out because their names are not valid UTF-8.
+- When the mount folder does not exist, the answer is `200` with `root_found: false` and no folders.
+
+The listing never returns file names or file contents and changes nothing on disk. It never follows a symlink, so a symlinked folder is left out and a symlink cannot lead outside the mount. Hidden folders (`.git`, `.obsidian`, `.trash` and other names starting with a dot) are left out, as is any folder that holds Hatchdoor's own state, which the registry would refuse as a Vault anyway.
+
+| Status | `code` | When |
+| --- | --- | --- |
+| `400` | `folder_outside_root` | `path` starts with `/` or contains `..`. |
+| `404` | `folder_not_found` | Nothing the listing would show is at `path`: it is missing, a file, a symlink, hidden, or holds Hatchdoor's state. |
+| `422` | `folder_unreadable` | The folder exists but Hatchdoor has no permission to read it. |
 
 ## Vault-scoped content — one Vault
 

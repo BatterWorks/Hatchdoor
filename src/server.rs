@@ -30,12 +30,13 @@ use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
     disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
     enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
-    list_vaults_handler, patch_settings_handler, publish_recovery_branch_handler,
-    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    spa_index_handler, spa_not_found_handler, start_with_no_vaults_handler, sync_vault_handler,
-    upload_transfer_handler, vault_collection_events_handler, vault_scope_graph_handler,
-    vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
-    vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    list_folders_handler, list_vaults_handler, patch_settings_handler,
+    publish_recovery_branch_handler, refresh_vault_handler, retry_vault_handler,
+    reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler, spa_not_found_handler,
+    start_with_no_vaults_handler, sync_vault_handler, upload_transfer_handler,
+    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
+    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
+    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
     vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
@@ -572,6 +573,20 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )
         .layer(Extension(mcp_transport.limiter()));
 
+    // ADR-41: the folders under the Vault mount, for the folder picker. An
+    // operator surface, so demo mode refuses it with `demo_read_only` before
+    // the token check could answer, and otherwise it sits behind the web
+    // token like the rest of the API.
+    let folders = Router::new().route("/api/v1/folders", get(list_folders_handler));
+    let folders = match web_bearer_token.clone() {
+        _ if state.demo_mode => folders.layer(demo_guard.clone()),
+        Some(token) => folders.layer(axum::middleware::from_fn_with_state(
+            WebToken(token),
+            require_web_token,
+        )),
+        None => folders,
+    };
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
@@ -582,6 +597,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(vault_assets)
         .merge(vault_attachment)
         .merge(transfers)
+        .merge(folders)
         .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
@@ -1215,6 +1231,9 @@ pub async fn run_server() {
         runtime_config,
         startup,
         transfer_links: Default::default(),
+        vault_mount_root: match &config.vault_source {
+            VaultSource::Local { vault_path } => vault_path.clone(),
+        },
         shutdown: Default::default(),
     };
 
@@ -2000,6 +2019,7 @@ mod tests {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: tmp.path().join("mount"),
             shutdown: Default::default(),
         };
 
@@ -2084,6 +2104,7 @@ mod tests {
             runtime_config,
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -9430,6 +9451,110 @@ mod tests {
                 !body.contains("<div id=\"root\">"),
                 "{uri} must not be answered with the app shell, got {body:?}"
             );
+        }
+    }
+
+    fn folders_request(query: &str, token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder().uri(format!("/api/v1/folders{query}"));
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn folders_lists_the_vault_mount_behind_the_web_token() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let mount = tmp.path().join("mount");
+        std::fs::create_dir_all(mount.join("Notes/Sub")).expect("mkdir");
+        std::fs::write(mount.join("Notes/a.md"), "# a\n").expect("write");
+        std::fs::create_dir_all(mount.join(".git")).expect("mkdir");
+
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(folders_request("", token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(folders_request("", Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["root_found"], true);
+        assert_eq!(body["path"], "");
+        assert_eq!(
+            body["folders"],
+            serde_json::json!([{
+                "name": "Notes",
+                "path": "Notes",
+                "markdown": {"count": 1, "at_least": false},
+                "vault": null,
+                "has_subfolders": true,
+            }])
+        );
+        assert_eq!(body["skipped_invalid_names"], 0);
+
+        let nested = app
+            .clone()
+            .oneshot(folders_request("?path=Notes", Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(nested.status(), StatusCode::OK);
+        assert_eq!(json_body(nested).await["folders"][0]["path"], "Notes/Sub");
+
+        for (query, status, code) in [
+            (
+                "?path=../..",
+                StatusCode::BAD_REQUEST,
+                "folder_outside_root",
+            ),
+            ("?path=Missing", StatusCode::NOT_FOUND, "folder_not_found"),
+            ("?path=.git", StatusCode::NOT_FOUND, "folder_not_found"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(folders_request(query, Some("web-secret")))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status, "{query}");
+            assert_eq!(json_body(response).await["code"], code, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn folders_answers_a_missing_mount_with_an_empty_listing() {
+        let (app, _tmp, _state) = app_for_tests_with_state();
+        let response = app
+            .oneshot(folders_request("", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["root_found"], false);
+        assert_eq!(body["folders"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn folders_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            std::fs::create_dir_all(tmp.path().join("mount/Notes")).expect("mkdir");
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(folders_request("", token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
         }
     }
 }

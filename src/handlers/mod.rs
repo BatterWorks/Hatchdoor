@@ -2,6 +2,7 @@ mod api;
 mod assets;
 pub mod diagnostics;
 mod downloads;
+mod folders;
 mod settings;
 mod spa;
 mod transfer;
@@ -11,6 +12,7 @@ mod vault_write;
 pub(crate) mod vaults;
 
 pub use api::health_handler;
+pub use folders::list_folders_handler;
 // No asset re-export: the contained-resource seam the MCP `get_attachment`
 // tool used to consume from here moved to the read core in #188, so no MCP
 // tool imports this module and `assets` is once again private to the HTTP

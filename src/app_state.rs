@@ -67,6 +67,9 @@ pub struct AppState {
     /// Signs and checks transfer links (ADR-27). Its key lives only here, in
     /// memory, so a restart strands every outstanding link.
     pub transfer_links: Arc<crate::transfer_link::TransferLinks>,
+    /// The configured Vault root (`VAULT_PATH`), which the folder listing
+    /// walks so a Vault can be picked from what Hatchdoor can see (ADR-41).
+    pub vault_mount_root: std::path::PathBuf,
     /// Fired once when the process starts shutting down. The HTTP server
     /// stops accepting on it, and every response that would otherwise stay
     /// open forever ends on it (#353).

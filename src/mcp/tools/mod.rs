@@ -497,6 +497,7 @@ mod tests {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::terms_required(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
             shutdown: Default::default(),
         };
         (state, tmp)
