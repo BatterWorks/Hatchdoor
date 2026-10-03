@@ -206,12 +206,6 @@ const SURFACES = [
     ],
   },
   {
-    id: "starter-content",
-    label: "Starter Vault content seeded on first run",
-    paths: ["src/vault/seed.rs", "docs/starter-vault/"],
-    notes: [`${GET_STARTED}/Connect your first Vault.md`],
-  },
-  {
     id: "startup",
     label: "Startup, readiness, and note reads",
     paths: [
@@ -251,7 +245,6 @@ const SHIPPED_PATHS = [
   "Dockerfile",
   "docker-compose.yml",
   ".env.example",
-  "docs/starter-vault/",
 ];
 
 // Test code sits inside the shipped trees but never ships.

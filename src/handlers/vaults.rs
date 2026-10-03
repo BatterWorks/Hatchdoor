@@ -5,8 +5,7 @@
 //! ([`crate::vault_management`]), and turn the typed response or the
 //! structured error into a status code and a JSON body. The registry commit,
 //! the runtime reconciliation through the foreground mutation boundary, the
-//! authenticated and demo projections, the starter-Vault seeding, the
-//! credential-replacement Git retry, the manual sync/retry/refresh controls,
+//! authenticated and demo projections, the credential-replacement Git retry, the manual sync/retry/refresh controls,
 //! and the confirmed start-with-no-Vaults recovery all live there, shared with
 //! the MCP management tools, which no longer proxy these handlers (ADR-19).
 //!

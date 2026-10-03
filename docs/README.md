@@ -55,8 +55,6 @@ Accepted decisions belong in `adr/`.
 - [`superpowers/`](superpowers/) — task-specific design, handoff, and
   implementation records retained for context.
 
-## Runtime-coupled documentation
+## Dev fixture content
 
-- [`starter-vault/`](starter-vault/) — documentation and example content
-  compiled into Hatchdoor's seeded starter vault. Moving these files requires
-  updating their `include_str!` or `include_bytes!` paths in `src/vault/seed.rs`.
+- [`starter-vault/`](starter-vault/): the starter notes earlier releases wrote into empty Vaults. The binary no longer carries them; `scripts/dev-vaults.sh` still copies them into the dev fixtures until #431 moves the useful ones into the manual and retires the folder.
