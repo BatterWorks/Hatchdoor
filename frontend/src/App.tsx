@@ -71,7 +71,13 @@ import {
   useStartupStatus,
   type StartupStatus,
 } from "./startup/useStartupStatus";
-import { HelpProvider, useHelp } from "./features/help";
+import {
+  CONTEXTUAL_HELP,
+  ContextualHelpLink,
+  type HelpLocation,
+  HelpProvider,
+  useHelp,
+} from "./features/help";
 import { SearchDialog, useSearch } from "./features/search";
 import { WhatsNew } from "./features/whats-new";
 
@@ -927,6 +933,7 @@ function VaultWorkspace({
                     title="Vaults Unavailable"
                     message={collectionError ?? "Could not load your Vaults."}
                     onTryAgain={() => void loadVaults()}
+                    manual={CONTEXTUAL_HELP.vaultsUnavailable}
                   />
                 ) : registryRecovery ? (
                   <BrokenStartState
@@ -1336,6 +1343,11 @@ function ZeroVaultState({
       }
       actionLabel={demoMode ? undefined : "Add a Vault"}
       onAction={demoMode ? undefined : onAddVault}
+      help={
+        demoMode ? undefined : (
+          <ContextualHelpLink to={CONTEXTUAL_HELP.noVaults} />
+        )
+      }
     />
   );
 }
@@ -1349,12 +1361,15 @@ function BrokenStartState({
   onTryAgain,
   onStartWithNoVaults,
   unchangedNotice = true,
+  manual = CONTEXTUAL_HELP.registryRecovery,
 }: {
   title?: string;
   message: string;
   onTryAgain?: () => void;
   onStartWithNoVaults?: () => void;
   unchangedNotice?: boolean;
+  /** The manual page that explains this start (#423). */
+  manual?: HelpLocation;
 }) {
   return (
     <StateBlock
@@ -1367,6 +1382,7 @@ function BrokenStartState({
         onStartWithNoVaults ? "Start with no Vaults" : undefined
       }
       onSecondaryAction={onStartWithNoVaults}
+      help={<ContextualHelpLink to={manual} />}
     />
   );
 }

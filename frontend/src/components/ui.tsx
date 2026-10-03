@@ -71,6 +71,7 @@ export function StateBlock({
   secondaryActionLabel,
   onSecondaryAction,
   tone,
+  help,
 }: {
   title: string;
   description: string;
@@ -84,6 +85,9 @@ export function StateBlock({
   /** The documented §23 error variant (red heading) — a genuine failure,
    * never the plain empty shell used for "nothing here yet". */
   tone?: "error";
+  /** A link to the manual page that explains this state (#423), on its own
+   * line under the description. */
+  help?: ReactNode;
 }) {
   return (
     <UiPanel
@@ -91,6 +95,7 @@ export function StateBlock({
     >
       <h2>{title}</h2>
       <p>{description}</p>
+      {help ? <p>{help}</p> : null}
       {actionLabel && onAction ? (
         secondaryActionLabel && onSecondaryAction ? (
           <div className="modal-actions">

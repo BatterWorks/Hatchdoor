@@ -11,6 +11,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App as RootApp, VaultApp as App } from "./App";
 import { LAST_NOTE_KEY } from "./app/constants";
+import { CONTEXTUAL_HELP } from "./features/help";
+import { HelpContext } from "./features/help/useHelp";
 import { discoveryResponse, THREE_VAULTS } from "./test/fixtures/vaults";
 import type { VaultDiscoveryResponse } from "./types";
 
@@ -489,5 +491,107 @@ describe("VaultApp when Vault discovery fails (#333)", () => {
       await screen.findByRole("heading", { level: 2, name: "Alpha Home" }),
     ).toBeInTheDocument();
     expect(window.localStorage.getItem(LAST_NOTE_KEY)).toBe(stored);
+  });
+});
+
+describe("How does this work? links on the start states (#423)", () => {
+  const openHelp = vi.fn();
+
+  function renderWithHelp() {
+    render(
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        <MemoryRouter initialEntries={["/"]}>
+          <App
+            startupStatus={{ state: "ready" }}
+            onRetryModelSetup={() => {}}
+          />
+        </MemoryRouter>
+      </HelpContext.Provider>,
+    );
+  }
+
+  async function clickLinkUnder(title: string) {
+    const block = (await screen.findByText(title)).closest(".state-block");
+    fireEvent.click(
+      within(block as HTMLElement).getByRole("button", {
+        name: "How does this work?",
+      }),
+    );
+  }
+
+  function expectOpened(target: { page: string; heading?: string }) {
+    expect(openHelp).toHaveBeenLastCalledWith(
+      target.page,
+      "heading" in target ? target.heading : undefined,
+    );
+  }
+
+  it("links No Vaults Yet to connecting a first Vault", async () => {
+    mockDiscovery({
+      registry_revision: 0,
+      collection_revision: 0,
+      vaults: [],
+      demo_mode: false,
+    });
+    renderWithHelp();
+    await clickLinkUnder("No Vaults Yet");
+    expectOpened(CONTEXTUAL_HELP.noVaults);
+  });
+
+  it("leaves the link off a demo with no Vaults, which nobody there can add", async () => {
+    mockDiscovery({
+      registry_revision: 0,
+      collection_revision: 0,
+      vaults: [],
+      demo_mode: true,
+    });
+    renderWithHelp();
+    await screen.findByText("No Vaults Yet");
+    expect(
+      screen.queryByRole("button", { name: "How does this work?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("links an unreadable registry to the recovery section", async () => {
+    mockDiscovery({
+      collection_revision: 0,
+      vaults: [],
+      recovery: {
+        code: "vault_registry_recovery_required",
+        kind: "corrupt",
+        message: "the registry file is not valid JSON",
+      },
+      demo_mode: false,
+    } as VaultDiscoveryResponse);
+    renderWithHelp();
+    await clickLinkUnder("Vault Registry Unavailable");
+    expectOpened(CONTEXTUAL_HELP.registryRecovery);
+  });
+
+  it("links a legacy recovery that needs a restart to the same section", async () => {
+    mockDiscovery({
+      registry_revision: 1,
+      collection_revision: 0,
+      vaults: [],
+      legacy_migration_recovery: {
+        code: "legacy_environment_cleanup_required",
+        message: "Remove HATCHDOOR_EXCLUDE from your .env.",
+      },
+      demo_mode: false,
+    });
+    renderWithHelp();
+    await clickLinkUnder("Restart Required");
+    expectOpened(CONTEXTUAL_HELP.registryRecovery);
+  });
+
+  it("links Vaults Unavailable to its troubleshooting entry", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      jsonResponse({ code: "internal_error", message: "Bad gateway" }, 502),
+    );
+    renderWithHelp();
+    await clickLinkUnder("Vaults Unavailable");
+    expectOpened(CONTEXTUAL_HELP.vaultsUnavailable);
   });
 });

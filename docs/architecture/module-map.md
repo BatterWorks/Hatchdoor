@@ -3340,7 +3340,13 @@ refuses them as items. `read_docs` answers `ReadDocsResult` (the Home page plus
 every page's name and title with no argument, one page otherwise) and refuses a
 name that matches no page with the structured `docs_page_not_found` error;
 `search_docs` answers `SearchDocsResult`. Both instruction variants name them.
-Catalogue grows to 48, purely additive.
+Catalogue grows to 48, purely additive. #423 adds `docs` to a standalone tool
+call's structured error when its `code` is one the manual explains
+(`docs_pointers.rs` holds that code-to-page table): `{page, heading}`, where
+`page` is a name `read_docs` accepts. `handle_tools_call` adds it to the
+finished result, so `batch` item errors, `VaultOperationError` and HTTP bodies
+never carry it, and errors for other codes, the writes-off `-32602` refusal and
+the plain-text setup refusals are unchanged. Additive.
 
 **Kind:** adapter/security surface.
 
@@ -3350,6 +3356,7 @@ Catalogue grows to 48, purely additive.
 - `src/mcp/adapter.rs`
 - `src/mcp/auth.rs`
 - `src/mcp/config.rs`
+- `src/mcp/docs_pointers.rs`
 - `src/mcp/protocol.rs`
 - `src/mcp/results.rs`
 - `src/mcp/routes.rs`
@@ -3998,7 +4005,9 @@ derives for a post-latch `downloading`, #339) and
 blocks. The latch itself is read and written through `lib/storage.ts`'s
 guarded helpers, so blocked site data leaves it unset rather than throwing.
 
-**Consumed dependencies:** shared API client and theme hook.
+**Consumed dependencies:** shared API client, theme hook, and the Help
+reader's `ContextualHelpLink` and `CONTEXTUAL_HELP` (the model choice's
+"How does this work?" link, #423).
 
 **Coordination paths:** `App.tsx`, `app/ExplorerPane.tsx`,
 `features/search/SearchDialog.tsx`, backend startup/model setup handlers and
@@ -4239,23 +4248,33 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/features/help/HelpPanel.tsx`
 - `frontend/src/features/help/useHelp.ts`
 - `frontend/src/features/help/helpPages.ts`
+- `frontend/src/features/help/contextualLinks.ts`
+- `frontend/src/features/help/ContextualHelpLink.tsx`
 - `frontend/src/features/help/help.css`
 
 Feature tests:
 
 - `frontend/src/features/help/HelpPanel.test.tsx`
 - `frontend/src/features/help/helpPages.test.ts`
+- `frontend/src/features/help/contextualLinks.test.ts`
 
 **Public contract:** `frontend/src/features/help/index.ts` is the only public
 TS/TSX entry point. `HelpProvider` (props `demoMode`, and `signedOut` while the
 token prompt is up, which lifts the panel above it) owns whether Help is open,
-the page it shows and the pages behind Back, and mounts the panel.
-`useHelp()` returns `{ openHelp(page?, heading?), closeHelp, isOpen }`; outside
-a provider it does nothing. `page` is a manual page name such as
+the page it shows and the pages behind Back, and mounts the panel. `useHelp()`
+returns `{ openHelp(page?, heading?), closeHelp, isOpen }`; outside a provider
+it does nothing. `page` is a manual page name such as
 `guides/how-to-set-up-a-git-backed-vault` (no page opens Home, `index`), and
 `heading` is a heading anchor in the note slug rule; the panel scrolls to it.
-`HELP_PAGES` names the pages other features open Help at. Help CSS is
-integrated through the `App.css` stylesheet aggregation seam.
+`HELP_PAGES` names the pages other features open Help at. Since #423,
+`CONTEXTUAL_HELP` is the one table of where each "How does this work?" link
+opens Help (`{page, heading?}` per screen or condition), with
+`vaultConditionHelp(vault, paused)` and `gitConsoleHelp(vault)` choosing the
+entry for a Vault's condition line and Git console, and `ContextualHelpLink`
+(prop `to`) is the link itself, a `.help-link` button. `contextualLinks.test.ts`
+reads `docs/user-vault` from disk and fails when a page or heading in the table
+is missing. Help CSS is integrated through the `App.css` stylesheet aggregation
+seam.
 
 **Behaviour:** Help is an overlay beside the work (the #417 resolution): fixed
 to the right under the topbar, the screen underneath keeps its width, full
@@ -4269,7 +4288,10 @@ inside Help; other links open in a new tab. Pages render through
 `createManualMarkdownComponents`, so the manual looks like a note.
 
 **Consumed dependencies:** the public manual routes (`src/handlers/docs.rs`),
-`api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
+`types.ts`'s `VaultSummary` (whose `activation`, `git`, `search` and `*_error`
+codes `vaultConditionHelp` and `gitConsoleHelp` read, including ADR-30's
+`managed_git_conflict`), the shared `test/fixtures/vaults.ts` builders (tests
+only), `api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
 `lib/noteHeadings.ts` from Note reading and rendering, and the icons in
 `components/icons.tsx`. It also borrows other modules' CSS classes, so a change
 there reaches Help: the Search dialog's result rows (`.search-results`,
@@ -4280,7 +4302,13 @@ styles, and Shared UI's `.state-block` and `.icon-button`.
 **Coordination paths:** `App.tsx` (mounts `HelpProvider` in `AppSession`, wires
 the topbar), `App.css`, `app/AppTopbar.tsx` (the `?` button on wide screens and
 the first `…` menu item on phones), and `components/TokenPrompt.tsx` (its two
-Help links).
+Help links). The contextual links (#423) sit in `App.tsx` (No Vaults Yet, Vaults
+Unavailable and the registry recovery screens), `startup/StartupGate.tsx` (the
+model choice), `features/settings/SettingsPage.tsx` (each section head, and the
+MCP writes row or its "Managed outside this page" entry) and
+`features/settings/VaultSettingsIndex.tsx` (a Vault's condition line, its Git
+console, and the index's recovery blocks), each passing a `CONTEXTUAL_HELP`
+entry and nothing else.
 
 **Invariants:** Help never fetches or shows Vault content and calls no
 `/api/` route; it never needs the web token; a `base` block renders as its
@@ -4288,7 +4316,8 @@ source. Heading ids inside Help carry a `help-` prefix so they never collide
 with the note open underneath.
 
 **Validation:** `npx vitest run src/features/help src/app/AppTopbar.test.tsx
-src/App.startup-auth.test.tsx`, then full frontend checks.
+src/App.startup-auth.test.tsx src/App.startup-workspace-states.test.tsx
+src/startup src/features/settings`, then full frontend checks.
 
 ### What's new pop-up
 
@@ -4976,8 +5005,9 @@ separate, pre-existing design-system documentation debt rather than in scope
 here.
 
 **Consumed dependencies:** authenticated `apiFetch`, the settings HTTP
-contract, and (for `UnsavedDrafts.tsx`) `lib/writeDrafts.ts`'s held-draft
-functions.
+contract, (for `UnsavedDrafts.tsx`) `lib/writeDrafts.ts`'s held-draft
+functions, and the Help reader's `ContextualHelpLink`, `CONTEXTUAL_HELP`,
+`vaultConditionHelp` and `gitConsoleHelp` (#423).
 
 **Coordination paths:** `frontend/src/App.tsx` (route; also supplies
 `vaults` and `onOpenCreateDraft` to `SettingsPage`, and seeds the standalone
@@ -5043,7 +5073,9 @@ never eliding; consumers give the adjacent title or path the shrinking room
 instead. `StateBlock` (`ui.tsx`) takes an optional `tone="error"` (#141) for
 the documented §23 red-heading variant — a genuine failure, never the plain
 empty shell — consumed wherever a partial collection read has nothing usable
-and wherever an exact read fails outright.
+and wherever an exact read fails outright. Its optional `help` node (#423)
+renders on its own line under the description, for the start states' "How
+does this work?" links.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected

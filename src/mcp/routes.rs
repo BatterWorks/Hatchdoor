@@ -2209,6 +2209,121 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Errors that name their docs page (#423)
+    // ---------------------------------------------------------------------------
+
+    /// A standalone call refused with a code the manual explains names the
+    /// page, in the structured payload and the text alike, and keeps every
+    /// field it had.
+    #[tokio::test]
+    async fn a_standalone_error_the_manual_explains_names_its_page() {
+        let (state, _tmp) = unusable_local_content_write_state();
+
+        let body = call_tool(&state, "get_note", json!({"slug": "home"})).await;
+        let payload = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(payload["code"], "vault_read_unavailable", "{body:#}");
+        assert_eq!(payload["retryable"], true);
+        assert_eq!(payload["ok"], false);
+        assert_eq!(
+            payload["docs"],
+            json!({
+                "page": "guides/how-to-troubleshoot-common-problems",
+                "heading": "a-vault-wont-index-or-stays-in-a-bad-state",
+            })
+        );
+        assert!(
+            crate::docs_bundle::page(payload["docs"]["page"].as_str().unwrap()).is_some(),
+            "read_docs accepts the page"
+        );
+        let text: Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().expect("text"))
+                .expect("text is the payload");
+        assert_eq!(&text, payload);
+    }
+
+    /// A refusal the manual explains keeps its old shape as a `batch` item: no
+    /// `docs`.
+    #[tokio::test]
+    async fn a_batch_item_error_never_gains_a_docs_field() {
+        let (state, _tmp) = unusable_local_content_write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}}
+            ]}),
+        )
+        .await;
+        let error = &body["result"]["structuredContent"]["items"][0]["error"];
+        let code = error["code"].as_str().expect("item error code");
+        assert!(
+            crate::mcp::docs_pointers::for_code(code).is_some(),
+            "the item's code must be one a standalone error names a page for: {body:#}"
+        );
+        assert!(error.get("docs").is_none(), "{body:#}");
+        assert!(
+            body["result"]["structuredContent"].get("docs").is_none(),
+            "{body:#}"
+        );
+    }
+
+    /// A code the manual does not explain, and the two refusals that are not
+    /// structured errors, are untouched.
+    #[tokio::test]
+    async fn other_errors_and_the_two_refusals_carry_no_docs_field() {
+        let (state, _tmp) = test_state();
+        let unknown = call_tool_unscoped(
+            &state,
+            "get_note",
+            json!({"vault_id": "00000000-0000-4000-8000-000000000999", "slug": "home"}),
+        )
+        .await;
+        assert_eq!(
+            unknown["result"]["structuredContent"],
+            json!({
+                "code": "vault_not_found",
+                "message": "Vault definition was not found",
+                "vault_id": "00000000-0000-4000-8000-000000000999",
+                "retryable": false,
+                "ok": false,
+            }),
+            "{unknown:#}"
+        );
+
+        let writes_off = call_tool(
+            &state,
+            "disable_vault",
+            json!({"expected_registry_revision": 0}),
+        )
+        .await;
+        assert_eq!(
+            writes_off["error"],
+            json!({
+                "code": -32602,
+                "message": "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
+            }),
+            "{writes_off:#}"
+        );
+
+        state.startup.set_terms_required();
+        let setup = call_tool(&state, "search_notes", json!({"query": "alpha"})).await;
+        assert_eq!(
+            setup["result"],
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.",
+                }],
+                "isError": true,
+            }),
+            "{setup:#}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // The bundled manual (ADR-38, #421)
     // ---------------------------------------------------------------------------
 

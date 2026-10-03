@@ -3465,10 +3465,12 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <p class="blurb"><b>Signed out it sits above the token prompt.</b> The prompt's two links open Help, so the panel takes <code>z-index: 1001</code> there, one above the prompt; everywhere else it is 50, above the topbar and under the search dialog, menus and form dialogs.</p>
 
+      <p class="blurb"><b>A stuck screen links to the page that explains it</b> (#423). The link reads <i>How does this work?</i> and is Help&rsquo;s own text-link button, <span class="key">.help-link</span>: underlined in <span class="key">--hot</span>, in the ink and size of the sentence it follows, with nothing added. It sits at the end of that sentence, on its own line under a <span class="key">.state-block</span>&rsquo;s description, or after the key in a Settings &ldquo;Managed outside this page&rdquo; entry, never as a button beside the block&rsquo;s actions. One link per explanation: where a Vault&rsquo;s Git console explains a sync failure, the condition line above it carries none.</p>
+
       <div class="tag-row">
         <span class="key">features/help/HelpPanel.tsx</span><span class="key">features/help/help.css</span>
         <span class="key">.help-panel</span><span class="key">.help-panel.is-full</span><span class="key">.help-panel.is-above-dialogs</span><span class="key">.help-panel-head</span><span class="key">.help-eyebrow</span><span class="key">.help-crumb</span>
-        <span class="key">.help-search</span><span class="key">.help-search-input</span><span class="key">.help-panel-body</span><span class="key">.help-start</span><span class="key">.help-start-card</span><span class="key">.help-trigger</span><span class="key">.help-link</span>
+        <span class="key">.help-search</span><span class="key">.help-search-input</span><span class="key">.help-panel-body</span><span class="key">.help-start</span><span class="key">.help-start-card</span><span class="key">.help-trigger</span><span class="key">.help-link</span><span class="key">features/help/ContextualHelpLink.tsx</span>
       </div>
     </section>
 
