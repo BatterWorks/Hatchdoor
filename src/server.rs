@@ -9224,6 +9224,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["root_found"], true);
+        assert_eq!(body["root"], mount.to_str().expect("utf-8 mount"));
         assert_eq!(body["path"], "");
         assert_eq!(
             body["folders"],

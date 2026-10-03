@@ -1229,18 +1229,21 @@ Vault).
 **Owned paths:** `src/folder_listing.rs`.
 
 **Public contract:** `list_folders(root, relative, registry, limits)` returns a
-`FolderListing` (`root_found`, `path`, `markdown`, `vault`, `folders`,
+`FolderListing` (`root`, `root_found`, `path`, `markdown`, `vault`, `folders`,
 `skipped_invalid_names`) of the immediate subfolders of one folder under the
 Vault mount, each a `FolderEntry` with its name, relative path, recursive
 `MarkdownCount { count, at_least }`, the `RegisteredVault` rooted exactly
 there, and `has_subfolders`; or a `FolderListingError` (`OutsideRoot`,
 `NotFound`, `Unreadable`) with a stable `code`. `ListingLimits` defaults to
 `MARKDOWN_COUNT_CAP` notes per folder and `COUNT_TIME_BUDGET` per listing. A
-missing root is an empty listing with `root_found: false`, not an error. See
-ADR-41.
+missing root is an empty listing with `root_found: false`, not an error.
+`root` is the configured mount made absolute, not resolved through symlinks,
+so a picker joins it with a folder's `path` to get the path a Vault is created
+from (#430). See ADR-41.
 
 **Consumers:** `src/handlers/folders.rs` (`GET /api/v1/folders`), and through
-it the first-run folder picker (#430).
+it Settings' `FolderPicker.tsx` in Add a Vault (#430), which the first-run
+checklist (#419) reuses.
 
 **Consumed dependencies:** the Vault collection registry's `load`,
 `vault_path` and crate-private `ensure_outside_instance_state`.
@@ -4279,8 +4282,9 @@ Unavailable and the registry recovery screens), `startup/StartupGate.tsx` (the
 model choice), `features/settings/SettingsPage.tsx` (each section head, and the
 MCP writes row or its "Managed outside this page" entry) and
 `features/settings/VaultSettingsIndex.tsx` (a Vault's condition line, its Git
-console, and the index's recovery blocks), each passing a `CONTEXTUAL_HELP`
-entry and nothing else.
+console, and the index's recovery blocks), and
+`features/settings/FolderPicker.tsx` (`folderOutsideMount`, #430), each
+passing a `CONTEXTUAL_HELP` entry and nothing else.
 
 **Invariants:** Help never fetches or shows Vault content and calls no
 `/api/` route; it never needs the web token; a `base` block renders as its
@@ -4821,6 +4825,8 @@ route tests, and full frontend checks.
 - `frontend/src/features/settings/VaultCreation.tsx`
 - `frontend/src/features/settings/VaultCreation.test.tsx`
 - `frontend/src/features/settings/vaultCreation.ts`
+- `frontend/src/features/settings/FolderPicker.tsx`
+- `frontend/src/features/settings/FolderPicker.test.tsx`
 - `frontend/src/features/settings/UnsavedDrafts.tsx`
 - `frontend/src/features/settings/UnsavedDrafts.test.tsx`
 - `frontend/src/features/settings/relativeTime.ts`
@@ -4994,7 +5000,10 @@ closes on Escape (held while the dialog's own Cancel is disabled), and
 returns focus to the opener. It follows `NoteActionsDialog.tsx`'s focus-in,
 Tab-wrap and Escape behaviour and adds what that dialog does not: focus
 return to the opener, pulling stray focus back inside, and focusing the
-dialog itself when it holds no focusable control. A Vault's own page (#338) reads the registry revision
+dialog itself when it holds no focusable control. While Help is open beside
+it (#430, from the folder picker's link), its backdrop gives up Help's width,
+Escape closes Help before the dialog, and Tab is not held inside, the What's
+new dialog's rules. A Vault's own page (#338) reads the registry revision
 fresh at the click for Pause, Resume and Disconnect, which carry no form
 fields; a Save and the identity round trip's pause step are checked against
 the revision the form was based on, and a `registry_revision_conflict`
@@ -5018,8 +5027,9 @@ separate, pre-existing design-system documentation debt rather than in scope
 here.
 
 **Consumed dependencies:** authenticated `apiFetch`, the settings HTTP
-contract, (for `UnsavedDrafts.tsx`) `lib/writeDrafts.ts`'s held-draft
-functions, and the Help reader's `ContextualHelpLink`, `CONTEXTUAL_HELP`,
+contract, the folder listing `GET /api/v1/folders` (for `FolderPicker.tsx`,
+#430), (for `UnsavedDrafts.tsx`) `lib/writeDrafts.ts`'s held-draft
+functions, and the Help reader's `useHelp` (for `SettingsModal.tsx`), `ContextualHelpLink`, `CONTEXTUAL_HELP`,
 `vaultConditionHelp` and `gitConsoleHelp` (#423).
 
 **Coordination paths:** `frontend/src/App.tsx` (route; also supplies
@@ -5033,8 +5043,9 @@ the one-time legacy sweep and browser-state cleanup before rendering),
 `src/server.rs` (SPA/API routes), `src/handlers/settings.rs` (settings wire
 producer), and `frontend/src/types.ts`
 (`VaultSource`/`VaultGitMode`, mirroring `src/vault_registry.rs`'s
-same-named types, and `VaultSummary`'s `source` field, now typed rather than
-`unknown`; consumed by this section and by
+same-named types, `VaultSummary`'s `source` field, now typed rather than
+`unknown`, and the `FolderListing` types mirroring `src/folder_listing.rs`
+for the folder picker; consumed by this section and by
 `frontend/src/app/vaultSlotLogic.ts`, already listed under Vault chrome's
 own `types.ts` coordination entry).
 
@@ -5045,6 +5056,15 @@ yet" (#426). The **Updates** section holds the
 `HATCHDOOR_UPDATE_CHECK_ENABLED` switch, whose help sentence states exactly
 what the daily request sends (#425); the banner itself is the Update banner's.
 
+Add a Vault's local-folder choice (#430) defaults to `FolderPicker.tsx`, a
+flat list of the Vault mount with drill-in and a breadcrumb, which reports the
+picked folder's absolute path (`root` joined with its relative `path`); it
+takes `value` and `onPick` only, so it renders outside the dialog too.
+**Type a path instead** swaps in the unchanged Folder path field; both edit
+the same path draft, and the create request is the same `POST /api/v1/vaults`.
+Its "My folder isn't here" and empty-mount Help links read
+`CONTEXTUAL_HELP.folderOutsideMount`.
+
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than
 disabled form controls; secret values are never rendered from the settings
@@ -5052,7 +5072,7 @@ document; a held draft is deleted only through an explicit Restore or
 Discard, never aged out.
 
 **Validation:** `SettingsPage.test.tsx`, `VaultSettingsIndex.test.tsx`,
-`VaultCreation.test.tsx`, `UnsavedDrafts.test.tsx`, affected shell tests
+`VaultCreation.test.tsx`, `FolderPicker.test.tsx`, `UnsavedDrafts.test.tsx`, affected shell tests
 (`App.startup-workspace-states.test.tsx` covers the zero-Vault entry point),
 frontend typecheck, then full frontend checks.
 

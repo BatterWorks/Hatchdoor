@@ -190,6 +190,7 @@ The mount is the folder `VAULT_PATH` names: `/data/vault` in the stock Compose f
 
 ```json
 {
+  "root": "/data/vault",
   "root_found": true,
   "path": "",
   "markdown": { "count": 214, "at_least": false },
@@ -207,6 +208,7 @@ The mount is the folder `VAULT_PATH` names: `/data/vault` in the stock Compose f
 }
 ```
 
+- `root` is the mount as an absolute path inside the container, as `VAULT_PATH` names it, made absolute but not resolved through symlinks. Join it and a folder's `path` with `/` to get the `path` that `POST /api/v1/vaults` takes for a `local` source.
 - `markdown` counts the `.md` notes in a folder and every folder below it. Each listed subfolder's count stops at 10,000 notes, and a listing stops counting after about two seconds, so a folder late in the list can come back as `at least 0`. When either limit cut a count short, `at_least` is `true` and the real number is higher. The top-level `markdown` is the listed folder's own notes plus its subfolders' counts, so it can pass 10,000, and a mount that is itself one notes folder shows its notes there.
 - `vault` names the registered Vault whose folder is exactly this one, or is `null`.
 - `has_subfolders` says whether opening the folder would list anything. It is `true` when counting stopped before Hatchdoor could tell.

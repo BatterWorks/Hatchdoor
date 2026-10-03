@@ -512,3 +512,34 @@ export type LastAgentConnection = {
   name: string;
   connected_at: string;
 };
+
+/** How many Markdown notes a folder holds, counted recursively. `at_least`
+ * means counting stopped early (a cap or the time budget) and the real
+ * number is higher. */
+export type FolderNoteCount = { count: number; at_least: boolean };
+
+/** The registered Vault rooted exactly at a listed folder. */
+export type FolderVaultRef = { vault_id: string; name: string };
+
+/** One folder in a `GET /api/v1/folders` answer (#429, ADR-41). `path` is
+ * relative to the Vault mount, `/`-separated. */
+export type FolderListingEntry = {
+  name: string;
+  path: string;
+  markdown: FolderNoteCount;
+  vault: FolderVaultRef | null;
+  has_subfolders: boolean;
+};
+
+/** `GET /api/v1/folders?path=<relative>`: one folder under the Vault mount
+ * and its immediate subfolders. `root` is the mount's absolute path (#430);
+ * joined with a `path` it is what `POST /api/v1/vaults` takes. */
+export type FolderListing = {
+  root: string;
+  root_found: boolean;
+  path: string;
+  markdown: FolderNoteCount;
+  vault: FolderVaultRef | null;
+  folders: FolderListingEntry[];
+  skipped_invalid_names: number;
+};

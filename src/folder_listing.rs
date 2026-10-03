@@ -45,6 +45,11 @@ impl Default for ListingLimits {
 /// One listing: the requested folder and its immediate visible subfolders.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FolderListing {
+    /// The Vault mount as an absolute path: the configured root, made
+    /// absolute against the working directory but not resolved through
+    /// symlinks. A picked folder's Vault path is this joined with its
+    /// relative `path`, the shape `POST /api/v1/vaults` takes.
+    pub root: String,
     /// False when the Vault root does not exist (or is not a folder). The
     /// listing is then empty rather than an error.
     pub root_found: bool,
@@ -129,13 +134,14 @@ pub fn list_folders(
     limits: ListingLimits,
 ) -> Result<FolderListing, FolderListingError> {
     let components = parse_relative(relative)?;
+    let configured_root = absolute_root(root);
     // The root is the operator's own configuration, so it is resolved once,
     // symlinks and all. Nothing below it is followed.
     let root = match fs::metadata(root) {
         Ok(metadata) if metadata.is_dir() => root.canonicalize().map_err(read_error)?,
-        Ok(_) => return Ok(FolderListing::root_missing()),
+        Ok(_) => return Ok(FolderListing::root_missing(configured_root)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(FolderListing::root_missing());
+            return Ok(FolderListing::root_missing(configured_root));
         }
         Err(error) => return Err(read_error(error)),
     };
@@ -218,6 +224,7 @@ pub fn list_folders(
         .collect();
 
     Ok(FolderListing {
+        root: configured_root,
         root_found: true,
         vault: vault_at(&vaults, &target),
         path: prefix,
@@ -228,8 +235,9 @@ pub fn list_folders(
 }
 
 impl FolderListing {
-    fn root_missing() -> Self {
+    fn root_missing(root: String) -> Self {
         Self {
+            root,
             root_found: false,
             path: String::new(),
             markdown: MarkdownCount::default(),
@@ -238,6 +246,16 @@ impl FolderListing {
             skipped_invalid_names: 0,
         }
     }
+}
+
+/// The configured root as the absolute path a Vault definition would store.
+/// It comes from `VAULT_PATH`, an environment string, so the lossy
+/// conversion only matters for a working directory that is not UTF-8.
+fn absolute_root(root: &Path) -> String {
+    std::path::absolute(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Split a `/`-separated relative path, refusing anything that could name a
@@ -496,6 +514,41 @@ mod tests {
         assert_eq!(nested.folders[0].path, "Work/Projects");
         assert_eq!(nested.folders[0].markdown, exact(2));
         assert!(nested.folders[0].has_subfolders);
+    }
+
+    #[test]
+    fn every_listing_names_the_mount_as_an_absolute_path() {
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Work")).unwrap();
+
+        assert_eq!(
+            list(&fixture, "").unwrap().root,
+            fixture.root.to_str().unwrap()
+        );
+        assert_eq!(
+            list(&fixture, "Work").unwrap().root,
+            fixture.root.to_str().unwrap()
+        );
+
+        let missing = fixture.root.join("absent");
+        let listing =
+            list_folders(&missing, "", &fixture.registry, ListingLimits::default()).unwrap();
+        assert_eq!(listing.root, missing.to_str().unwrap());
+
+        // A relative configuration (`./vault` when `VAULT_PATH` is unset) is
+        // reported against the working directory, the way the registry
+        // resolves a Vault path.
+        let expected = std::env::current_dir().unwrap().join("vault");
+        for configured in ["vault", "./vault"] {
+            let relative = list_folders(
+                Path::new(configured),
+                "",
+                &fixture.registry,
+                ListingLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(relative.root, expected.to_str().unwrap());
+        }
     }
 
     #[test]
