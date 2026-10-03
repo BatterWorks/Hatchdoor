@@ -167,6 +167,101 @@ export function releaseNotes(text, version) {
 }
 
 // ---------------------------------------------------------------------------
+// What's new highlights (ADR-42)
+//
+// The manual's What's new page carries 3 to 6 plain lines per release,
+// action-needed items first, under the same `## v<version> - <date>` heading
+// the changelog uses. `src/handlers/whats_new.rs` parses the page the binary
+// bundles, and its `the_bundled_page_parses` test, which `just check-full`
+// runs, holds the rest of the format: one link at most per line, into the
+// manual, at its end.
+
+export const WHATS_NEW_PAGE = "docs/user-vault/What's new.md";
+export const MIN_HIGHLIGHTS = 3;
+export const MAX_HIGHLIGHTS = 6;
+const ACTION_NEEDED = "**Action needed:**";
+
+// A changelog subheading whose entries ask something of the person
+// upgrading, such as "Breaking changes — action required on upgrade".
+const ACTION_HEADING = /breaking|action/i;
+
+// One draft line per changelog entry: its first sentence, without issue
+// references, action-needed entries first. The draft is a starting point;
+// a release with more than six entries refuses until someone cuts it down.
+export function draftHighlights(sectionBody) {
+  const action = [];
+  const plain = [];
+  let actionNeeded = false;
+  for (const line of sectionBody.split("\n")) {
+    if (line.startsWith("### ")) {
+      actionNeeded = ACTION_HEADING.test(line);
+      continue;
+    }
+    const entry = /^[-*+][ \t]+(.*\S)/.exec(line);
+    if (!entry) {
+      continue;
+    }
+    const text = entry[1]
+      .replace(/\s*\(\[#\d+\]\)/g, "")
+      .replace(/\s*\[#\d+\]/g, "")
+      .trim();
+    const sentence = /^.+?[.!?](?=\s|$)/.exec(text)?.[0] ?? text;
+    (actionNeeded ? action : plain).push(
+      actionNeeded ? `- ${ACTION_NEEDED} ${sentence}` : `- ${sentence}`,
+    );
+  }
+  return [...action, ...plain];
+}
+
+export function whatsNewSection(page, version) {
+  const prefix = releaseHeadingPrefix(version);
+  return findSection(page, (line) => line.startsWith(prefix));
+}
+
+// The page with a new release section, above every older one.
+export function addWhatsNewSection(page, version, date, lines) {
+  const section = [`${releaseHeadingPrefix(version)}${date}`, "", ...lines, ""];
+  const pageLines = page.split("\n");
+  const first = pageLines.findIndex((line) => line.startsWith("## "));
+  if (first !== -1) {
+    pageLines.splice(first, 0, ...section);
+    return pageLines.join("\n");
+  }
+  return `${page.trimEnd()}\n\n${section.join("\n")}`;
+}
+
+// Why a release section cannot ship, or an empty list when it can.
+export function highlightProblems(sectionBody) {
+  const problems = [];
+  const items = [];
+  for (const line of sectionBody.split("\n")) {
+    if (line.trim() === "") {
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      items.push(line);
+    } else {
+      problems.push(`"${line}" is not a one-line "- " item.`);
+    }
+  }
+  if (items.length < MIN_HIGHLIGHTS || items.length > MAX_HIGHLIGHTS) {
+    problems.push(
+      `it has ${items.length} lines; a release has ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS}.`,
+    );
+  }
+  const firstPlain = items.findIndex(
+    (item) => !item.startsWith(`- ${ACTION_NEEDED}`),
+  );
+  if (
+    firstPlain !== -1 &&
+    items.slice(firstPlain).some((item) => item.startsWith(`- ${ACTION_NEEDED}`))
+  ) {
+    problems.push("an action-needed line comes after a plain one; they go first.");
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------------------
 // Version files
 
 export const VERSION_FILES = [

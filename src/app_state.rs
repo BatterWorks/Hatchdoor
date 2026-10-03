@@ -70,6 +70,9 @@ pub struct AppState {
     /// The configured Vault root (`VAULT_PATH`), which the folder listing
     /// walks so a Vault can be picked from what Hatchdoor can see (ADR-41).
     pub vault_mount_root: std::path::PathBuf,
+    /// Which versions this instance has run, recorded once at startup
+    /// (`instance_state`, ADR-40 decision 6).
+    pub instance_versions: Arc<crate::instance_state::VersionRecord>,
     /// Fired once when the process starts shutting down. The HTTP server
     /// stops accepting on it, and every response that would otherwise stay
     /// open forever ends on it (#353).

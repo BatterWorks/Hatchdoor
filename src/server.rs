@@ -44,6 +44,7 @@ use crate::handlers::{
     vault_scoped_resolve_batch_handler, vault_scoped_resolve_handler,
     vault_scoped_stats_detail_handler, vault_scoped_update_note_handler,
     vault_scoped_upload_attachment_handler, vault_scoped_write_capabilities_handler,
+    whats_new_handler,
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -587,6 +588,20 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         None => folders,
     };
 
+    // ADR-42: the version record and the release highlights since the last
+    // version. The answer names the running version, so it sits behind the
+    // web token, and demo mode refuses it like the folder listing (ADR-38
+    // decision 6).
+    let whats_new = Router::new().route("/api/v1/whats-new", get(whats_new_handler));
+    let whats_new = match web_bearer_token.clone() {
+        _ if state.demo_mode => whats_new.layer(demo_guard.clone()),
+        Some(token) => whats_new.layer(axum::middleware::from_fn_with_state(
+            WebToken(token),
+            require_web_token,
+        )),
+        None => whats_new,
+    };
+
     // ADR-38: the bundled manual as public plain Markdown and `llms.txt`.
     // Outside every auth layer and mounted in demo mode too, like `/health`;
     // the web token only decides whether private pages are served.
@@ -604,6 +619,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(vault_attachment)
         .merge(transfers)
         .merge(folders)
+        .merge(whats_new)
         .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
@@ -945,6 +961,25 @@ async fn reject_demo_mutation(
     next.run(request).await
 }
 
+/// Record this start in the instance state and return the version record.
+/// An install counts as existing when a Vault registry or stored settings are
+/// already on disk; with neither, this is a fresh install.
+fn record_instance_start(
+    store: &crate::instance_state::InstanceStateStore,
+    registry_path: &std::path::Path,
+    settings_path: &std::path::Path,
+) -> crate::instance_state::VersionRecord {
+    let existing_install = registry_path.exists() || settings_path.exists();
+    let record = store.record_start(&crate::config::version_string(), existing_install);
+    info!(
+        current = %record.current,
+        previous = record.previous.as_deref().unwrap_or("none"),
+        fresh_install = record.fresh_install.as_deref().unwrap_or("no"),
+        "Instance version record"
+    );
+    record
+}
+
 pub async fn run_server() {
     let mut config = AppConfig::from_env().unwrap_or_else(|e| {
         error!("Configuration error: {e}");
@@ -1040,6 +1075,14 @@ pub async fn run_server() {
                 }
             }),
     );
+    // ADR-40 decision 6: record which version runs before anything below can
+    // write a registry, so a registry or settings file on disk still means an
+    // install that existed before this start.
+    let instance_versions = Arc::new(record_instance_start(
+        &crate::instance_state::InstanceStateStore::beside_registry(vault_registry.path()),
+        vault_registry.path(),
+        &settings_path,
+    ));
     let legacy_vault_path = match &config.vault_source {
         VaultSource::Local { vault_path } => vault_path.clone(),
     };
@@ -1240,6 +1283,7 @@ pub async fn run_server() {
         vault_mount_root: match &config.vault_source {
             VaultSource::Local { vault_path } => vault_path.clone(),
         },
+        instance_versions,
         shutdown: Default::default(),
     };
 
@@ -2026,6 +2070,7 @@ mod tests {
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
             vault_mount_root: tmp.path().join("mount"),
+            instance_versions: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -2111,6 +2156,7 @@ mod tests {
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
             vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -9659,6 +9705,128 @@ mod tests {
                     .expect("response");
                 assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
                 assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+        }
+    }
+
+    fn whats_new_request(token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder().uri("/api/v1/whats-new");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn whats_new_reports_the_version_record_behind_the_web_token() {
+        let (_app, _tmp, mut state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.8.0".into(),
+            previous: Some("2.7.0".into()),
+            fresh_install: None,
+        });
+        let app = build_router(state, Some(Arc::from("web-secret")));
+
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(whats_new_request(token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+
+        let response = app
+            .oneshot(whats_new_request(Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = json_body(response).await;
+        assert_eq!(body["version"], crate::config::version_string());
+        assert_eq!(body["previous_version"], "2.7.0");
+        assert_eq!(body["fresh_install"], false);
+        assert!(body["releases"].is_array());
+    }
+
+    #[tokio::test]
+    async fn whats_new_on_a_fresh_install_lists_no_release() {
+        let (_app, _tmp, mut state) = app_for_tests_with_state();
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.8.0".into(),
+            previous: None,
+            fresh_install: Some("2.8.0".into()),
+        });
+        let response = build_router(state, None)
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["previous_version"], serde_json::Value::Null);
+        assert_eq!(body["fresh_install"], true);
+        assert_eq!(body["releases"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn whats_new_after_upgrading_a_fresh_install_is_no_longer_fresh() {
+        let (_app, _tmp, mut state) = app_for_tests_with_state();
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.9.0".into(),
+            previous: Some("2.8.0".into()),
+            fresh_install: Some("2.8.0".into()),
+        });
+        let response = build_router(state, None)
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+        let body = json_body(response).await;
+        assert_eq!(body["previous_version"], "2.8.0");
+        assert_eq!(body["fresh_install"], false);
+    }
+
+    #[tokio::test]
+    async fn whats_new_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, _tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(whats_new_request(token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+        }
+    }
+
+    #[test]
+    fn a_start_with_a_registry_or_settings_on_disk_is_an_upgrade() {
+        let running =
+            crate::instance_state::base_version(&crate::config::version_string()).to_string();
+        for existing in [None, Some("vaults.json"), Some("settings.json")] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let registry = directory.path().join("vaults.json");
+            let settings = directory.path().join("settings.json");
+            if let Some(file) = existing {
+                std::fs::write(directory.path().join(file), "{}").expect("write");
+            }
+            let store = crate::instance_state::InstanceStateStore::beside_registry(&registry);
+            let record = record_instance_start(&store, &registry, &settings);
+            assert_eq!(record.current, running);
+            match existing {
+                None => {
+                    assert_eq!(record.previous, None);
+                    assert_eq!(record.fresh_install.as_deref(), Some(running.as_str()));
+                }
+                Some(_) => {
+                    // A 2.7.0 build has no earlier version to point at.
+                    let expected = (running != "2.7.0").then_some("2.7.0");
+                    assert_eq!(record.previous.as_deref(), expected);
+                    assert_eq!(record.fresh_install, None);
+                }
             }
         }
     }

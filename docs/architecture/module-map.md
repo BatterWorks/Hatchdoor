@@ -106,7 +106,9 @@ that production inventory are still checked for stale paths and duplicates.
   (`legacy_migration_recovery`, `model_setup`, `model_setup_started`,
   `web_auth_enabled`, `demo_mode`, `startup`), live configuration
   (`runtime_config`), folder listing (`vault_mount_root`, the configured
-  `VAULT_PATH`), or process lifecycle (`shutdown`).
+  `VAULT_PATH`), instance state (`instance_versions`, the version record
+  `run_server` takes once from `instance_state` before the legacy import or
+  anything else can write a registry), or process lifecycle (`shutdown`).
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -912,6 +914,48 @@ store adds no service, framework, or speculative trait (ADR-02/13).
 **Validation:** `cargo test vault_runtime_state`,
 `node scripts/check-module-map.mjs`, followed by the full backend checks.
 
+### Instance state
+
+**Status:** Added by #424 (ADR-40 decision 6, ADR-42).
+
+**Kind:** infrastructure/persistent operational state.
+
+**Owned paths:** `src/instance_state.rs`.
+
+**Public contract:** `INSTANCE_STATE_SCHEMA_VERSION`,
+`INSTANCE_STATE_FILE_NAME`, `UNRECORDED_UPGRADE_FROM`,
+`InstanceStateStore` (`new`, `beside_registry`, `path`, `record_start`,
+`section`, `write_section`), `VersionRecord` (`current`, `previous`,
+`fresh_install`, `after_start`, and a `Default` of the running version with no
+history), and `base_version`, which reads `2.8.0 (dev abc123)` as `2.8.0`. The versioned `state/instance.json` format: a
+`schema_version` beside named sections, each a JSON value owned by one
+feature. `versions` is this module's own: `current`, `previous` and
+`fresh_install`, all base versions. `previous` moves only when the base
+version changes; with no record, a registry or stored settings on disk means
+an upgrade from `UNRECORDED_UPGRADE_FROM` (2.7.0), with no previous version
+when the running one is 2.7.0 itself, and neither means a fresh install of the
+running version. Other sections belong to the features that
+write them through `write_section` (#426, #425).
+
+**Consumers:** the runtime composition root, which records the start before
+the legacy import and holds the record in `AppState::instance_versions`, and
+through it `src/handlers/whats_new.rs`.
+
+**Consumed dependencies:** `config::version_string` for the default record.
+
+**Invariants:** bookkeeping, never configuration or credentials: a missing or
+unreadable file reads as "no record", and `record_start` never fails, logging a
+write it could not make and returning the record it computed, so a state
+directory that cannot be written never blocks startup. A file whose
+`schema_version` exceeds this build's is treated as no record and never
+written. Every read-modify-write is serialized by one lock that clones share,
+and the file is replaced by write-to-temporary-then-rename in its own
+directory. It never touches a Vault and never contacts the network.
+
+**Validation:** `cargo test instance_state`, `cargo test
+server::tests::a_start_with`, `node scripts/check-module-map.mjs`, followed by
+the full backend checks.
+
 ### Legacy single-Vault import
 
 **Kind:** infrastructure/migration boundary.
@@ -1133,8 +1177,9 @@ holds, then their headings outside code, then how often the words appear
 anywhere, code included; a query that matches nothing returns nothing.
 
 **Consumers:** the MCP `read_docs` and `search_docs` tools
-(`src/mcp/tools/read.rs`), and the public manual routes in
-`src/handlers/docs.rs`.
+(`src/mcp/tools/read.rs`), the public manual routes in
+`src/handlers/docs.rs`, and `src/handlers/whats_new.rs`, which reads the
+private What's new page's releases.
 
 **Consumed dependencies:** `vault::slugify` for page names and anchors, and
 `cache::parse::{frontmatter_span, parse_fence_marker,
@@ -2855,6 +2900,7 @@ vault_runtime`.
 - `src/handlers/vault_content.rs`
 - `src/handlers/vault_write.rs`
 - `src/handlers/vaults.rs`
+- `src/handlers/whats_new.rs`
 
 **Public contract:** handler functions intentionally re-exported by
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
@@ -2882,6 +2928,21 @@ routes sit outside the bearer and web-token guards, which they leave unchanged.
 blocking pool, behind the web token when one is configured and refused with
 `403 demo_read_only` in demo mode; its refusals are `400 folder_outside_root`,
 `404 folder_not_found` and `422 folder_unreadable` (ADR-41).
+`whats_new.rs` serves `GET /api/v1/whats-new` (ADR-42) behind the web token
+when one is configured and refused with `403 demo_read_only` in demo mode,
+because it names the running version (ADR-38 decision 6). It answers
+`no-store` JSON: `version` (`config::version_string`), `previous_version`,
+`fresh_install` (true only while the instance runs the version it was freshly
+installed on) and `releases`, the sections of the bundled What's new page
+after `previous_version` up to the running version, newest first, each with
+`version`, `date` and `highlights` (`text`, `action_needed`, `link` with
+`label`, `page` and `heading`). It also owns the page's format,
+`parse_releases`: `## v<version> - <YYYY-MM-DD>` sections, newest first, of 3
+to 6 one-line items, action-needed items (`**Action needed:**`) first, each
+ending in at most one link into the manual. `the_bundled_page_parses` keeps a
+malformed page from shipping; `scripts/release-common.mjs` drafts and checks
+the same shape at release time. `PAGE` (`whats-new`, re-exported as
+`WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite.
 `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
 full refreshed document. MCP enablement and its bearer token validate together

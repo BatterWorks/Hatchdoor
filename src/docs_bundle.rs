@@ -147,6 +147,10 @@ const PAGES: &[(&str, &str)] = &[
         include_str!("../docs/user-vault/04 Concepts/Why keep a second brain.md"),
     ),
     ("Home.md", include_str!("../docs/user-vault/Home.md")),
+    (
+        "What's new.md",
+        include_str!("../docs/user-vault/What's new.md"),
+    ),
 ];
 
 /// The page an index starts from.

@@ -11,6 +11,7 @@ pub(crate) mod vault_collection_reads;
 pub(crate) mod vault_content;
 mod vault_write;
 pub(crate) mod vaults;
+mod whats_new;
 
 pub use api::health_handler;
 pub use docs::docs_router;
@@ -49,3 +50,4 @@ pub use vaults::{
     refresh_vault_handler, retry_vault_handler, start_with_no_vaults_handler, sync_vault_handler,
     vault_collection_events_handler,
 };
+pub use whats_new::{PAGE as WHATS_NEW_PAGE, whats_new_handler};

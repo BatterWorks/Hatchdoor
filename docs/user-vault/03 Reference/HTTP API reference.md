@@ -27,6 +27,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
 | `/api/v1/vaults/{vault_id}/attachments` (upload) | Web bearer token **or** a live MCP bearer token; same demo-mode refusal as other writes |
 | `/api/v1/folders` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
+| `/api/v1/whats-new` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
 | `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled — see [[#Transfer links]] |
 
 > [!warning]
@@ -220,6 +221,44 @@ The listing never returns file names or file contents and changes nothing on dis
 | `400` | `folder_outside_root` | `path` starts with `/` or contains `..`. |
 | `404` | `folder_not_found` | Nothing the listing would show is at `path`: it is missing, a file, a symlink, hidden, or holds Hatchdoor's state. |
 | `422` | `folder_unreadable` | The folder exists but Hatchdoor has no permission to read it. |
+
+## What's new
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/whats-new` | Which version runs, which ran before it, and the release highlights in between, from [[What's new]]. `Cache-Control: no-store`. |
+
+```json
+{
+  "version": "2.8.0",
+  "previous_version": "2.7.0",
+  "fresh_install": false,
+  "releases": [
+    {
+      "version": "2.8.0",
+      "date": "2026-10-20",
+      "highlights": [
+        {
+          "text": "Installs on 2.4.x or earlier must upgrade to a 2.5.0 to 2.7.x release first.",
+          "action_needed": true,
+          "link": {
+            "label": "Install Hatchdoor with Docker Compose",
+            "page": "get-started/install-hatchdoor-with-docker-compose",
+            "heading": null
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `version` is the running version as the binary reports it. A development build adds ` (dev <commit>)`.
+- `previous_version` is the version this instance ran before the current one, or `null` when it has run no other. An install that was already set up before it started keeping this record counts as coming from `2.7.0`, unless it runs 2.7.0 itself.
+- `fresh_install` is `true` when the instance was first started with no Vault list and no stored settings and still runs the version it started on. It turns `false` at its first upgrade.
+- `releases` lists the releases after `previous_version` up to the running version, newest first. It is empty on a fresh install that has not been upgraded yet. Each highlight's `text` is Markdown. `action_needed` lines come first, and `link`, when present, names the manual page (`read_docs` and `/docs/<page>.md` take the same name) and heading that explain it.
+
+Hatchdoor keeps the version record in `instance.json`, beside the Vault list in its state folder. It updates the record once at startup, and only when the version changes. Deleting the file makes the next start count as an upgrade from `2.7.0` when a Vault list or settings exist, and as a fresh install otherwise.
 
 ## Vault-scoped content — one Vault
 
