@@ -17,11 +17,11 @@ see [[What Hatchdoor is]] for the full picture.
 
 - [ ] Docker with Docker Compose
 - [ ] A machine where you can run Docker
-- [ ] A folder of Markdown notes, or an empty folder for the starter Vault
+- [ ] A folder of Markdown notes, or an empty folder to start from nothing
 - [ ] An MCP-capable agent client you trust
 
 > [!note]
-> An empty folder is useful for evaluation. For real work, point Hatchdoor at the folder you already use for notes.
+> Hatchdoor does not fill an empty folder with example notes. For real work, point Hatchdoor at the folder you already use for notes.
 
 You will complete this path:
 

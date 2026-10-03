@@ -25,7 +25,7 @@ Read once at process startup via `AppConfig::from_env`. Docker Compose fixes mos
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VAULT_PATH` | `./vault` | The folder Hatchdoor recognizes as its first local Vault on a first start. Legacy: read once to seed the Vault registry, then ignored — later Vaults are managed through the registry, not this variable. |
+| `VAULT_PATH` | `./vault` | The folder Hatchdoor recognizes as its first local Vault on a first start, read then to seed the Vault registry; later Vaults are managed through the registry, not this variable. It is also the folder whose subfolders `GET /api/v1/folders` lists, so a Vault can be picked from what Hatchdoor can see. |
 | `HATCHDOOR_CACHE_DB` | `./data/cache/hatchdoor-cache.sqlite3` | Where the disposable SQLite search cache lives. |
 | `HOST` | `127.0.0.1` | The interface the process binds to. The standard Compose file fixes this at `0.0.0.0` inside the container so Docker's port publishing can reach it — see [[The security model]] for why that makes a web token mandatory. |
 | `PORT` | `42824` | The port the process listens on. |

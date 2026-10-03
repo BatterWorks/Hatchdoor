@@ -7,6 +7,7 @@ pub mod config;
 pub mod docs_bundle;
 pub mod embed;
 pub mod eval;
+pub mod folder_listing;
 pub mod git;
 pub mod handlers;
 pub mod mcp;

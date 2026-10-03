@@ -105,7 +105,8 @@ that production inventory are still checked for stale paths and duplicates.
   `runtime_embedder`, `mcp_tools_changed`), startup or posture
   (`legacy_migration_recovery`, `model_setup`, `model_setup_started`,
   `web_auth_enabled`, `demo_mode`, `startup`), live configuration
-  (`runtime_config`), or process lifecycle (`shutdown`).
+  (`runtime_config`), folder listing (`vault_mount_root`, the configured
+  `VAULT_PATH`), or process lifecycle (`shutdown`).
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -763,7 +764,9 @@ checks.
 types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
-operations, store-owned `vault_path` resolution for runtime consumers,
+operations, store-owned `vault_path` resolution for runtime consumers, the
+crate-private `ensure_outside_instance_state` containment check the folder
+listing reuses to hide instance state,
 a remote-backed source's own `poll_interval_secs` (issue #97's reopening
 finding 2: per-Vault, not scheduler-wide; `#[serde(default)]`s to 24h so a
 registry record written before this field existed keeps loading under the
@@ -831,6 +834,10 @@ falling back to `AppState::runtime_archive_prefix` when absent. Both the HTTP an
 writes through Vault collection management, which owns the
 `create_vault`/`edit_vault` request and credential-patch types they share.
 Frontend, cache, and search adapters remain separately owned later packets.
+
+The folder listing consumes `load`, `vault_path` and
+`ensure_outside_instance_state` to flag registered Vaults and skip folders
+that hold instance state.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
 `src/app_state.rs` construct and retain it; `/data/state` deployment
@@ -924,13 +931,10 @@ import's registry commit and its one-shot cleanup cannot leave the plaintext
 token in settings (#325); `HATCHDOOR_EXCLUDE` and the author keys keep their
 live readers and are left alone. A safe import copies legacy exclusions,
 Git behavior, credentials, and commit identity into the ordinary Vault
-definition; the retired write-debounce value has no successor. A safe import of
-a plain `Local` source whose directory holds no Markdown writes the starter
-Vault into it (`vault::seed_new_vault`) after the registry commit and before
-the collection runtime activates it, so a first boot on an empty `VAULT_PATH`
-opens on the welcome notes; a Git-backed legacy deployment is never seeded, and
-a directory that already holds Markdown is left untouched. Confirmed Start
-with no Vaults writes an ordinary revisioned zero-Vault registry.
+definition; the retired write-debounce value has no successor. An import never
+writes into the Vault folder: an empty `VAULT_PATH` stays empty (ADR-40).
+Confirmed Start with no Vaults writes an ordinary revisioned zero-Vault
+registry.
 
 **Consumers:** startup runtime composition calls this isolated adapter before
 opening the disposable cache and activating Vault runtimes. Safe imports become
@@ -1142,6 +1146,46 @@ it needs no Vault, index or model, so it answers during model setup.
 **Validation:** `cargo test docs_bundle`, `cargo test mcp`, and
 `docker build` for the image's view of `docs/user-vault`.
 
+### Folder listing
+
+**Kind:** product capability/adapter (the first filesystem read outside any
+Vault).
+
+**Owned paths:** `src/folder_listing.rs`.
+
+**Public contract:** `list_folders(root, relative, registry, limits)` returns a
+`FolderListing` (`root_found`, `path`, `markdown`, `vault`, `folders`,
+`skipped_invalid_names`) of the immediate subfolders of one folder under the
+Vault mount, each a `FolderEntry` with its name, relative path, recursive
+`MarkdownCount { count, at_least }`, the `RegisteredVault` rooted exactly
+there, and `has_subfolders`; or a `FolderListingError` (`OutsideRoot`,
+`NotFound`, `Unreadable`) with a stable `code`. `ListingLimits` defaults to
+`MARKDOWN_COUNT_CAP` notes per folder and `COUNT_TIME_BUDGET` per listing. A
+missing root is an empty listing with `root_found: false`, not an error. See
+ADR-41.
+
+**Consumers:** `src/handlers/folders.rs` (`GET /api/v1/folders`), and through
+it the first-run folder picker (#430).
+
+**Consumed dependencies:** the Vault collection registry's `load`,
+`vault_path` and crate-private `ensure_outside_instance_state`.
+
+**Coordination paths:** `src/lib.rs`, `src/app_state.rs`
+(`vault_mount_root`), `src/server.rs` (the route, its web-token gate and demo
+refusal, and the field from `AppConfig::vault_source`),
+`src/handlers/mod.rs`, `src/vault_registry.rs` (the widened check).
+
+**Invariants:** read-only: it opens no file and writes nothing; it resolves the
+configured root once and follows no symlink below it, so it never leaves the
+root and cannot loop; a requested path that is absolute or contains `..` is
+refused; hidden folders, folders that would overlap instance state, and
+non-UTF-8 names (counted) are left out; responses carry folder names and
+counts only, never file names or content; it is not exposed over MCP; the
+registry's containment rule is reused, not reimplemented.
+
+**Validation:** `cargo test folder_listing`, `cargo test handlers::folders`,
+`cargo test server::tests::folders`, followed by the full backend checks.
+
 ### HTTP wire types
 
 **Kind:** shared contract.
@@ -1182,21 +1226,13 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/links.rs`
 - `src/vault/markdown_links.rs`
 - `src/vault/paths.rs`
-- `src/vault/seed.rs`
 - `src/vault/types.rs`
 - `src/vault/tests.rs`
 
 **Public contract:** the intentional re-exports from `src/vault.rs`, notably
 `VaultIndex`, note/tree/link types, path normalization helpers, layer and
-exclusion types, `is_servable_asset`, `split_wikilink_asset_body`,
-`seed_empty_vault`, and `seed_new_vault`.
-`seed_new_vault` is the single decision point for which newly defined Vaults
-receive the starter notes — a `Local` source whose directory holds no Markdown,
-judged with that Vault's own exclude matcher so trashed notes do not count —
-shared by the two callers that create Vault definitions (`handlers/vaults.rs`'s
-creation route and `vault_migration.rs`'s one-time import), so the rule cannot
-drift between them; it reports `SeedError` rather than deciding what a failure
-means, which is each caller's call. `VaultIndex`
+exclusion types, `is_servable_asset`, and `split_wikilink_asset_body`. Nothing
+here writes starter notes into a Vault (ADR-40). `VaultIndex`
 additionally carries an asset index (`asset_paths`, `assets_by_name`) filled by
 the same walk that collects the Markdown files, and `resolve_asset` reads it:
 Obsidian's default link format writes an attachment embed as a bare filename and
@@ -1918,12 +1954,8 @@ the demo projection, which withholds operator deployment detail;
 `last_checked_at` is additionally absent until a turn completes, while
 `next_attempt_at` is always present for a tracked Vault, because one that has
 never completed a turn is due immediately rather than unscheduled. Failures leave as the transport-neutral `VaultOperationError`
-(ADR-19). Creating a Vault on a `Local` source whose directory holds no
-Markdown seeds the starter Vault (`vault::seed_new_vault`) between the
-registry commit and reconciliation, so both surfaces seed identically and the
-welcome notes are in that Vault's first index rather than arriving as a later
-watcher event; emptiness is decided with the Vault's own exclude matcher, a
-Git-backed source is never seeded, and nothing but creation seeds. An edit
+(ADR-19). Creating a Vault never writes into its folder: a `Local` Vault on an
+empty directory stays empty (ADR-40). An edit
 whose `https_credentials` was `Replace` additionally requests an immediate Git
 turn and notifies a definition change, because `VaultDefinition` equality
 cannot observe a credential value change (#97's and #98's reopening
@@ -1958,7 +1990,7 @@ reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
 notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
 `vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
-`vault_migration::start_with_no_vaults`, `vault::seed_new_vault`,
+`vault_migration::start_with_no_vaults`,
 `vault::{vault_link_style, count_link_forms}`, `VaultControlBlock::{vault_path,
 authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode` and the pending
 `legacy_migration_recovery` flag.
@@ -2803,6 +2835,7 @@ vault_runtime`.
 - `src/handlers/assets.rs`
 - `src/handlers/diagnostics.rs`
 - `src/handlers/downloads.rs`
+- `src/handlers/folders.rs`
 - `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
 - `src/handlers/transfer.rs`
@@ -2833,6 +2866,10 @@ request: MCP disabled refuses every link (`mcp_disabled`), write mode off every
 upload (`mcp_write_disabled`), and a link that does not verify is `403` with
 `transfer_link_invalid`, `transfer_link_expired`, or `transfer_link_spent`. The
 routes sit outside the bearer and web-token guards, which they leave unchanged.
+`folders.rs` serves `GET /api/v1/folders?path=` over the folder listing on the
+blocking pool, behind the web token when one is configured and refused with
+`403 demo_read_only` in demo mode; its refusals are `400 folder_outside_root`,
+`404 folder_not_found` and `422 folder_unreadable` (ADR-41).
 `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
 full refreshed document. MCP enablement and its bearer token validate together
@@ -2877,7 +2914,7 @@ stream — and nothing else. Since #187 each route parses its own path, query,
 and body, calls `vault_management::VaultCollectionManagement` once, and maps
 the typed response or the structured `VaultOperationError` onto a status code
 and a JSON body. The registry commit, the runtime reconciliation, the
-authenticated and demo projections, the starter-Vault seeding, the
+authenticated and demo projections, the
 credential-replacement Git retry, and the recovery action all live in that
 core, shared with the MCP management tools, which no longer proxy these
 handlers.

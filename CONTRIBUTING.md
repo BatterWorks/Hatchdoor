@@ -205,9 +205,7 @@ Do not open a public issue for a vulnerability. Follow the process in
 ## The local `vault/` directory
 
 `vault/` is the default vault path (`VAULT_PATH` defaults to `./vault`) and is
-gitignored — it is not committed. You do not need to create it: on first boot
-the app runs `seed_empty_vault`, which creates the directory and, if it has no
-Markdown yet, populates it with the starter vault from `docs/starter-vault/`.
+gitignored — it is not committed. Hatchdoor neither creates nor fills it: create the folder yourself before pointing a Vault at it, and it stays as empty as you leave it.
 Everything else vault-shaped is gitignored too: `demo-vaults/` (read-only demo
 content — one folder per vault, e.g. `demo-vaults/para/`), `data/` (generated
 cache), and `.fastembed_cache/` (downloaded model weights).

@@ -5,7 +5,6 @@ mod link_style;
 mod links;
 mod markdown_links;
 mod paths;
-mod seed;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -20,7 +19,6 @@ pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
     split_wikilink_asset_body,
 };
-pub use seed::{SeedError, seed_empty_vault, seed_new_vault};
 pub use types::{
     ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,
