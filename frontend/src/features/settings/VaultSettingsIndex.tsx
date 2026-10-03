@@ -90,9 +90,6 @@ export function VaultSettingsIndex({
   // every surface reads (#198). `recovery` means the persisted registry file
   // itself is unreadable (#150) — distinct from a Vault-level `needs
   // attention` recovery below, it replaces the whole group.
-  // `legacy_migration_recovery` is deliberately not surfaced here: the
-  // registry loads fine (empty) in that case, so the group renders its
-  // ordinary zero-Vault "Add a Vault" state.
   const {
     allVaults: vaults,
     noteCounts: counts,

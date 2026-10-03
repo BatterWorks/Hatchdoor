@@ -720,7 +720,8 @@ impl VaultRegistryStore {
         self.load_unlocked()
     }
 
-    /// Persist an intentionally empty registry so legacy import stays disabled.
+    /// Persist an intentionally empty registry: what a start with no registry
+    /// writes (ADR-40).
     pub fn initialize_empty(
         &self,
         expected_revision: u64,

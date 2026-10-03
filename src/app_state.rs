@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -10,7 +10,6 @@ use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::StartupTracker;
 use crate::vault::VaultScanConfig;
-use crate::vault_migration::LegacyMigrationRecovery;
 use crate::vault_registry::{VaultDefinition, VaultRegistryStore};
 use crate::vault_runtime::VaultCollectionRuntime;
 
@@ -31,12 +30,6 @@ pub struct AppState {
     /// watcher-forwarding path asks it whether a change may request a commit
     /// and the Vault work executor is what arms and clears it (#267).
     pub commit_cooldown: Arc<crate::git::CommitCooldown>,
-    /// Present when safe automatic import could not prove the legacy
-    /// deployment. Collection/setup surfaces remain available for recovery.
-    /// Cleared by a confirmed "Start with no Vaults"
-    /// (`start_with_no_vaults_handler`), so this needs interior mutability
-    /// rather than a plain `Option` fixed at startup.
-    pub legacy_migration_recovery: Arc<StdRwLock<Option<LegacyMigrationRecovery>>>,
     /// The one SQLite database every Vault's snapshot is read from and
     /// written to. Opened at startup, before any Vault runtime is activated.
     pub startup_sqlite: Arc<SqliteCache>,

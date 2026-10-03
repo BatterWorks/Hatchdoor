@@ -294,8 +294,9 @@ Hatchdoor is designed around a simple rule: your Markdown vault is the source of
 truth.
 
 - Markdown files live in each Vault's own folder, as recorded in the Vault
-  registry. `VAULT_PATH` is not that location: it is read once on a first start
-  to seed the registry with a first local Vault, and ignored from then on.
+  registry. `VAULT_PATH` is not that location: it is the folder Hatchdoor can
+  see, and nothing in it becomes a Vault until you add one. A fresh install
+  starts with no Vaults.
 - Vault identities and source definitions live in `/data/state/vaults.json`.
   A Vault's Git HTTPS credential is stored there too, so the file is created
   with `0600` permissions on Unix and belongs in a backup you treat as secret.
@@ -314,10 +315,11 @@ truth.
 - Versioning is off by default; it can keep local Git history or safely sync an
   existing remote.
 
-Upgrading an existing single-Vault deployment requires persistent
-`/data/state`; see the [legacy single-Vault upgrade
-guide](docs/migrations/legacy-single-vault.md) for detection, recovery, and
-rollback constraints.
+A single-Vault deployment from 2.4.x or earlier cannot upgrade to this version
+directly: upgrade it to a 2.5.0 to 2.7.x release first, which moves its Vault
+into the registry. Hatchdoor refuses to start on such an install rather than
+opening it empty. See the [legacy single-Vault upgrade
+guide](docs/migrations/legacy-single-vault.md).
 
 Hatchdoor never writes example notes into a Vault folder. An empty folder opens as an empty Vault until you add Markdown files to it.
 
@@ -420,12 +422,9 @@ Run the backend:
 cargo run
 ```
 
-By default, local source runs bind to `127.0.0.1:42824` and seed their first
-Vault from `./vault`. Point that first start at a real vault with:
-
-```bash
-VAULT_PATH=/path/to/notes cargo run
-```
+By default, local source runs bind to `127.0.0.1:42824` and start with no
+Vaults. Add one in Settings, or with `POST /api/v1/vaults`. For a ready-made
+set of development Vaults, use `just dev-start` instead (see `AGENTS.md`).
 
 For frontend dev mode:
 

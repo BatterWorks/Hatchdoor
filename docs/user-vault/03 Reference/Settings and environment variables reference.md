@@ -25,7 +25,7 @@ Read once at process startup via `AppConfig::from_env`. Docker Compose fixes mos
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VAULT_PATH` | `./vault` | The folder Hatchdoor recognizes as its first local Vault on a first start, read then to seed the Vault registry; later Vaults are managed through the registry, not this variable. It is also the folder whose subfolders `GET /api/v1/folders` lists, so a Vault can be picked from what Hatchdoor can see. |
+| `VAULT_PATH` | `./vault` | The folder Hatchdoor can see Vaults in: `GET /api/v1/folders` lists its subfolders, so a Vault can be picked from what Hatchdoor can see. Nothing in it becomes a Vault by itself; a fresh install starts with no Vaults, and every Vault is one you added. |
 | `HATCHDOOR_CACHE_DB` | `./data/cache/hatchdoor-cache.sqlite3` | Where the disposable SQLite search cache lives. |
 | `HOST` | `127.0.0.1` | The interface the process binds to. The standard Compose file fixes this at `0.0.0.0` inside the container so Docker's port publishing can reach it — see [[The security model]] for why that makes a web token mandatory. |
 | `PORT` | `42824` | The port the process listens on. |
@@ -76,25 +76,25 @@ Above these settings, **Agent access (MCP)** names the last agent that used a to
 | --- | --- | --- | --- |
 | `HATCHDOOR_UPDATE_CHECK_ENABLED` | `false` | instant | Shown in Settings as **Tell me about new releases**. On, Hatchdoor sends one `GET` a day to `https://api.github.com/repos/BatterWorks/Hatchdoor/releases/latest` with the user-agent `Hatchdoor` and no version, so GitHub sees the server's IP address and nothing else about the instance. A newer release shows a banner with links to its release notes and to [[How to upgrade Hatchdoor]]. A failed request is logged and tried again the next day. Turning it on checks within a minute; turning it off stops the check at once, both without a restart. Never runs in demo mode. Hatchdoor never upgrades itself. |
 
-**Legacy — single-Vault import only**
+**Legacy — single-Vault keys**
 
-The following exist solely to import a pre-registry, single-Vault `.env` deployment once; see the fuller explanation already on [[HTTP API reference#Settings|the HTTP API reference's Settings section]]. For any Vault created directly in the registry, the equivalent per-Vault field (`source`, `https_credentials`, `commit_identity`) is the only place the setting lives — none of these override it.
+These configured a single-Vault deployment before the Vault registry existed. Releases 2.5.0 to 2.7.x imported them into a Vault once; this version no longer does. Each Vault's own field (`source`, `https_credentials`, `commit_identity`) is the only place the setting lives, and none of these override it. See [[HTTP API reference#Settings|the HTTP API reference's Settings section]].
 
-| Key | Legacy default | Stands in for |
+| Key | Legacy default | Was imported as |
 | --- | --- | --- |
 | `HATCHDOOR_EXCLUDE` | empty | A Vault's `exclude_patterns` |
 | `HATCHDOOR_GIT_SYNC_ENABLED` | `false` | A Vault's Git `mode` |
 | `HATCHDOOR_GIT_HTTPS_USERNAME` | `hatchdoor` | A Vault's `https_credentials` username |
 | `HATCHDOOR_GIT_HTTPS_TOKEN` | empty | A Vault's `https_credentials` token |
-| `HATCHDOOR_GIT_REMOTE` | `origin` | Which remote in the legacy repository to read: its URL becomes the imported Vault's `source` repository URL |
+| `HATCHDOOR_GIT_REMOTE` | `origin` | Which remote in the legacy repository to read: its URL became the imported Vault's `source` repository URL |
 | `HATCHDOOR_GIT_BRANCH` | `main` | A Vault's `branch` |
 | `HATCHDOOR_GIT_AUTHOR_NAME` / `HATCHDOOR_GIT_AUTHOR_EMAIL` | `Hatchdoor` / `hatchdoor@localhost` | A Vault's `commit_identity` — see the note below |
 | `HATCHDOOR_GIT_DEBOUNCE_SECONDS` | `30` | No registry equivalent — retired once imported |
 
-`HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` are the one pair that keeps a live job after the import: they're the name and address Hatchdoor signs commits with for any Vault that hasn't been given a `commit_identity` of its own. Changing either in **Settings** applies to the next commit Hatchdoor makes in such a Vault, with no restart. A Vault that has its own `commit_identity` ignores them entirely.
+`HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` are the one pair that keeps a live job: they're the name and address Hatchdoor signs commits with for any Vault that hasn't been given a `commit_identity` of its own. Changing either in **Settings** applies to the next commit Hatchdoor makes in such a Vault, with no restart. A Vault that has its own `commit_identity` ignores them entirely.
 
 > [!warning]
-> Leave these exactly as they were in an upgraded single-Vault `.env` for one start so Hatchdoor can import them, then delete them — it refuses to start again while they're still set, since they aren't valid configuration for a registry Vault.
+> Remove these from `.env`. Hatchdoor logs a warning at startup naming any that are still set, because they do nothing there. An install from 2.4.x or earlier that still stores the retired Git settings (every key above except `HATCHDOOR_EXCLUDE` and the two author keys) in its settings file, with no Vault registry, refuses to start: upgrade it to a 2.5.0 to 2.7.x release first, which imports them, then to this version. See `docs/migrations/legacy-single-vault.md` in the repository.
 
 ## Logging (environment-only)
 

@@ -172,8 +172,10 @@ choose a search model:
 | **Accept terms and set up Gemma** | Recommended; multilingual search |
 | **Use Nomic instead** | You decline Gemma terms; English-only search |
 
-Hatchdoor downloads the selected model and indexes the Vault. Wait until setup
-is ready, then continue with [[Connect your first Vault]].
+Hatchdoor downloads the selected model. A fresh install starts with no Vaults,
+so there is nothing to index yet: the folder you mounted becomes a Vault only
+when you add it. Wait until setup is ready, then continue with [[Connect your
+first Vault]].
 
 ---
 
