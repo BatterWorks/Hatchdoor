@@ -881,6 +881,41 @@
   .help-panel-body { padding: var(--space-4) var(--space-5); overflow: hidden; }
 
   /* ════════════════════════════════════════════════════════════════
+     COMPONENT — What's new pop-up
+     ════════════════════════════════════════════════════════════════ */
+  .whats-new-stage {
+    display: flex; justify-content: center; align-items: center;
+    padding: var(--space-6) var(--space-4);
+    background: var(--overlay-bg);
+  }
+  .whats-new-demo {
+    width: min(560px, 100%);
+    display: flex; flex-direction: column;
+    background: var(--paper); color: var(--ink);
+    border: 1px solid var(--rule-strong);
+  }
+  .whats-new-demo .wn-head { display: grid; gap: var(--space-1); padding: var(--space-4) var(--space-4) var(--space-3); border-bottom: 1px solid var(--rule); }
+  .whats-new-demo .wn-title { margin: 0; font-family: var(--font-display); font-size: 1.5rem; line-height: 1.1; text-transform: uppercase; }
+  .whats-new-demo .wn-sub { margin: 0; color: var(--muted); font-size: 0.9rem; }
+  .whats-new-demo .wn-body { display: grid; gap: var(--space-4); padding: var(--space-4); }
+  .whats-new-demo .wn-action { border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn-fg); padding: var(--space-3); }
+  .whats-new-demo .wn-label {
+    margin: 0 0 var(--space-2);
+    font-family: var(--font-display); font-variation-settings: "wdth" 84, "wght" 700;
+    font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .whats-new-demo .wn-release-head { display: flex; justify-content: space-between; padding-bottom: var(--space-1); border-bottom: 1px solid var(--rule); }
+  .whats-new-demo .wn-date { color: var(--muted); font-family: var(--font-mono); letter-spacing: 0; text-transform: none; }
+  .whats-new-demo ul { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-2); font-size: 0.95rem; line-height: 1.45; }
+  .whats-new-demo li { position: relative; padding-left: var(--space-6); }
+  .whats-new-demo li::before { content: "\2014"; position: absolute; left: 0; color: var(--hot); }
+  .whats-new-demo .wn-action li::before { color: inherit; }
+  .whats-new-demo .wn-tag { font-family: var(--font-mono); font-size: 0.75rem; }
+  .whats-new-demo .wn-link { color: inherit; text-decoration: underline; text-decoration-color: var(--hot); text-underline-offset: 3px; }
+  .whats-new-demo .wn-link::after { content: "\00a0\2192"; }
+  .whats-new-demo .wn-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--rule); }
+
+  /* ════════════════════════════════════════════════════════════════
      COMPONENT — Note page
      ════════════════════════════════════════════════════════════════ */
   .note-page {
@@ -1763,6 +1798,7 @@
     <a href="#fields">Form fields &amp; dialog</a>
     <a href="#menu">Popover menu</a>
     <a href="#side-panel">Side panel (Help)</a>
+    <a href="#whats-new">What&rsquo;s new pop-up</a>
 
     <h3>Editing</h3>
     <a href="#editing">Inline editing</a>
@@ -3433,6 +3469,50 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">features/help/HelpPanel.tsx</span><span class="key">features/help/help.css</span>
         <span class="key">.help-panel</span><span class="key">.help-panel.is-full</span><span class="key">.help-panel.is-above-dialogs</span><span class="key">.help-panel-head</span><span class="key">.help-eyebrow</span><span class="key">.help-crumb</span>
         <span class="key">.help-search</span><span class="key">.help-search-input</span><span class="key">.help-panel-body</span><span class="key">.help-start</span><span class="key">.help-start-card</span><span class="key">.help-trigger</span><span class="key">.help-link</span>
+      </div>
+    </section>
+
+    <!-- ───────── WHAT'S NEW ───────── -->
+    <section class="doc-section" id="whats-new">
+      <div class="doc-section-num">§35</div>
+      <h2>What&rsquo;s new pop-up</h2>
+      <p class="blurb"><b>After an upgrade, one centred dialog says what changed</b> (#418). It is the dialog shell from <a href="#fields">§18</a>, <span class="key">.modal-backdrop</span> and <span class="key">.modal-panel</span>, widened to 560px and split into a fixed head and foot around a list that scrolls. It is modal on purpose: it shows once per browser per upgrade, and anything it pins is something the reader has to do.</p>
+
+      <div class="stage whats-new-stage">
+        <div class="whats-new-demo" role="dialog" aria-label="What's new (example)">
+          <div class="wn-head">
+            <span class="help-eyebrow">What&rsquo;s new</span>
+            <h3 class="wn-title">Hatchdoor 2.8.0</h3>
+            <p class="wn-sub">Updated to 2.8.0. You skipped 1 release since you last looked.</p>
+          </div>
+          <div class="wn-body">
+            <section class="wn-action">
+              <p class="wn-label">Action needed</p>
+              <ul><li><span class="wn-tag">v2.8.0</span> Installs on 2.4.x or earlier must upgrade to a 2.7.x release first. <a class="wn-link" href="#whats-new">Install Hatchdoor with Docker Compose</a></li></ul>
+            </section>
+            <section>
+              <p class="wn-label wn-release-head"><span>v2.8.0</span><span class="wn-date">20 Oct 2026</span></p>
+              <ul>
+                <li>Help opens beside what you are doing. <a class="wn-link" href="#whats-new">Browse and review through the Web UI</a></li>
+                <li>A setup checklist takes a new install from empty to a working agent.</li>
+              </ul>
+            </section>
+          </div>
+          <div class="wn-foot">
+            <a class="wn-link" href="#whats-new">Full changelog</a>
+            <button class="ui-btn">Got it</button>
+          </div>
+        </div>
+      </div>
+
+      <p class="blurb"><b>The head names the version, the body lists releases newest first.</b> A hot eyebrow reading WHAT&rsquo;S NEW, the version as a display title, and one muted line saying how many releases were skipped. <b>Action-needed items from every listed release are pinned first</b> in one box on <span class="key">--warn-bg</span> with a <span class="key">--warn-border</span> edge and <span class="key">--warn-fg</span> text, each tagged with its version in mono. Each release then gets a section-label heading with its date in mono on the right, and its other lines as em-dash items in <span class="key">--hot</span>, the same device note lists use.</p>
+
+      <p class="blurb"><b>Links open Help, not a new page.</b> A highlight&rsquo;s link and Full changelog are Help&rsquo;s own text-link buttons, <span class="key">.help-link</span>, underlined in <span class="key">--hot</span>, with a trailing arrow. The eyebrow is Help&rsquo;s <span class="key">.help-eyebrow</span>. Help (<a href="#side-panel">§34</a>) then opens above the dialog, and the backdrop shrinks to the space left of it so the dialog stays readable. <b>Below 920px</b> the backdrop pads by <span class="key">--space-2</span>, so the dialog fills a phone&rsquo;s width (still capped at 560px), scrolls inside, and keeps Got it in view; Help covers it until closed.</p>
+
+      <div class="tag-row">
+        <span class="key">features/whats-new/WhatsNew.tsx</span><span class="key">features/whats-new/whats-new.css</span>
+        <span class="key">.modal-backdrop.whats-new-backdrop</span><span class="key">.whats-new-backdrop.is-beside-help</span><span class="key">.modal-panel.whats-new</span><span class="key">.whats-new-head</span><span class="key">.help-eyebrow</span><span class="key">.whats-new-title</span><span class="key">.whats-new-sub</span><span class="key">.whats-new-body</span>
+        <span class="key">.whats-new-action</span><span class="key">.whats-new-action-label</span><span class="key">.whats-new-release-head</span><span class="key">.whats-new-date</span><span class="key">.whats-new-list</span><span class="key">.whats-new-version-tag</span><span class="key">.help-link.whats-new-link</span><span class="key">.whats-new-foot</span>
       </div>
     </section>
 

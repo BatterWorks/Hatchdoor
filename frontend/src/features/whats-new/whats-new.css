@@ -1,0 +1,175 @@
+/* What's new pop-up (#418). The existing modal shell (.modal-backdrop,
+   .modal-panel) holding a fixed head and foot around a scrolling list. See
+   §What's new in docs/design/design-system.html. */
+
+.modal-backdrop.whats-new-backdrop {
+  align-items: center;
+}
+
+/* Help opened from a highlight sits over the right; the dialog recentres in
+   what is left, under Help's layer. The width and the layer below it follow
+   .help-panel in features/help/help.css (min(32rem, 40vw), z-index 50). */
+.modal-backdrop.whats-new-backdrop.is-beside-help {
+  right: min(32rem, 40vw);
+  z-index: 45;
+}
+
+.modal-panel.whats-new {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: min(760px, calc(var(--visual-viewport-height, 100dvh) - 2rem));
+  overflow: hidden;
+  padding: 0;
+}
+
+.whats-new:focus {
+  outline: none;
+}
+
+.whats-new-head {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--rule);
+}
+
+.modal-panel .whats-new-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.whats-new-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.whats-new-body {
+  display: grid;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-4);
+  overflow: auto;
+}
+
+.whats-new-body > * {
+  min-width: 0;
+}
+
+.whats-new-action {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  padding: var(--space-3);
+}
+
+.whats-new-action-label,
+.whats-new-release-head {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 84,
+    "wght" 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.whats-new-release-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--rule);
+}
+
+.whats-new-date {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.whats-new-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.whats-new-list li {
+  position: relative;
+  padding-left: var(--space-6);
+}
+
+.whats-new-list li::before {
+  content: "\2014";
+  position: absolute;
+  left: 0;
+  color: var(--hot);
+}
+
+.whats-new-action .whats-new-list li::before {
+  color: inherit;
+}
+
+.whats-new-version-tag {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.whats-new-list a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--hot);
+  text-underline-offset: 3px;
+}
+
+/* Help's text-link button (.help-link), with an arrow that stays on the
+   link's last line. */
+.whats-new-link {
+  display: inline;
+  text-align: inherit;
+}
+
+.whats-new-link::after {
+  content: "\00a0\2192";
+}
+
+.whats-new-link:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 2px;
+}
+
+.whats-new-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--rule);
+}
+
+/* Phone: Help is full screen, so the dialog keeps the whole width. */
+@media (max-width: 920px) {
+  .modal-backdrop.whats-new-backdrop {
+    padding: var(--space-2);
+  }
+
+  .modal-backdrop.whats-new-backdrop.is-beside-help {
+    right: 0;
+  }
+
+  .modal-panel.whats-new {
+    max-height: calc(
+      var(--visual-viewport-height, 100dvh) - 2 * var(--space-2)
+    );
+  }
+}

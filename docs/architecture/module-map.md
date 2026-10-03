@@ -4290,6 +4290,60 @@ with the note open underneath.
 **Validation:** `npx vitest run src/features/help src/app/AppTopbar.test.tsx
 src/App.startup-auth.test.tsx`, then full frontend checks.
 
+### What's new pop-up
+
+**Status:** Added by #418 (ADR-42).
+
+**Kind:** product capability.
+
+**Owned paths:**
+
+- `frontend/src/features/whats-new/index.ts`
+- `frontend/src/features/whats-new/WhatsNew.tsx`
+- `frontend/src/features/whats-new/whatsNew.ts`
+- `frontend/src/features/whats-new/whats-new.css`
+
+Feature tests:
+
+- `frontend/src/features/whats-new/WhatsNew.test.tsx`
+- `frontend/src/features/whats-new/whatsNew.test.ts`
+- `frontend/src/App.whats-new.test.tsx`
+
+**Public contract:** `frontend/src/features/whats-new/index.ts` exports only
+`WhatsNew`, a component with no props. Mounted once, it reads
+`GET /api/v1/whats-new` and shows nothing or one centred dialog (the #418
+resolution). The browser remembers the last version it dismissed What's new
+for under the `localStorage` key `hatchdoor_whats_new_seen`, as a base version
+(`2.8.0`, never the ` (dev …)` suffix). CSS is integrated through the `App.css`
+stylesheet aggregation seam.
+
+**Behaviour:** the releases shown are the server's list, newer than the stored
+version when there is one, newest first. Action-needed items from every
+listed release are pinned in one box at the top, each tagged with its version;
+each release then lists its other items. A highlight's link and "Full
+changelog" open Help through `useHelp()`; Help sits above the dialog, which
+moves left of it and stays unseen. "Got it" or Escape marks the running version
+seen; with Help open, Escape closes Help first. Nothing shows on a fresh
+install, when nothing is new, when the request fails, or when `localStorage`
+throws, since a dismissal that cannot be remembered would bring it back on
+every load. Highlight text renders as inline Markdown only.
+
+**Consumed dependencies:** the What's new endpoint (`src/handlers/whats_new.rs`)
+through `api/api.ts`'s `apiFetch`, `useHelp()` from the Help reader, and
+Shared UI's `UiButton`. It borrows the shell's `.modal-backdrop` and
+`.modal-panel` and Help's `.help-eyebrow` and `.help-link`, and sits beside
+Help by matching `.help-panel`'s width and staying under its layer, so a
+change to any of those reaches it.
+
+**Coordination paths:** `App.tsx` (mounts it inside the startup gate's
+children in `AppSession`, signed in and never in demo mode) and `App.css`.
+
+**Invariants:** never shown in demo mode or on a fresh install; a storage
+failure never throws and never shows the dialog.
+
+**Validation:** `npx vitest run src/features/whats-new
+src/App.whats-new.test.tsx`, then full frontend checks.
+
 ### Note reading and rendering
 
 **Kind:** product capability.
