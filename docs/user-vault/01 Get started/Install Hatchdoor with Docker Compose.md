@@ -162,6 +162,8 @@ If a browser is already signed in, **Settings** shows it too: choose **Show web 
 
 Lost it, or want a new one? Put any long random value after `HATCHDOOR_WEB_BEARER_TOKEN=` in `.env` and run `docker compose up -d`. Every browser then asks for the new token once.
 
+## Choose a search model
+
 Open `http://localhost:42824` and enter the web token. On the first-run screen,
 choose a search model:
 

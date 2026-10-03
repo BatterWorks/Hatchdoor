@@ -5,9 +5,12 @@ import {
   screen,
   within,
 } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
+import { CONTEXTUAL_HELP } from "../help";
+import { HelpContext } from "../help/useHelp";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 import {
   behaviorOptions,
@@ -1836,5 +1839,173 @@ describe("Settings modals (#338)", () => {
       screen.queryByRole("dialog", { name: "Before this is saved" }),
     ).not.toBeInTheDocument();
     expect(save).toHaveFocus();
+  });
+});
+
+describe("How does this work? links (#423)", () => {
+  const openHelp = vi.fn();
+
+  function withHelp(node: ReactNode) {
+    return (
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        {node}
+      </HelpContext.Provider>
+    );
+  }
+
+  async function renderDetail(vault: unknown) {
+    mockDetail(vault);
+    const view = render(
+      withHelp(
+        <VaultSettingsDetail
+          vaultId={VAULT_ID}
+          serverIdentity={SERVER_IDENTITY}
+          onDisconnect={() => {}}
+        />,
+      ),
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    return view;
+  }
+
+  function clickLinkIn(container: Element | null) {
+    expect(container).not.toBeNull();
+    fireEvent.click(
+      within(container as HTMLElement).getByRole("button", {
+        name: "How does this work?",
+      }),
+    );
+  }
+
+  function expectOpened(target: { page: string; heading?: string }) {
+    expect(openHelp).toHaveBeenLastCalledWith(
+      target.page,
+      "heading" in target ? target.heading : undefined,
+    );
+  }
+
+  const local = { type: "local", path: "/notes" };
+  const twoWay = {
+    type: "managed_git",
+    repository_url: "https://example.test/notes.git",
+    branch: "main",
+    vault_subdirectory: null,
+    mode: "two_way",
+    poll_interval_secs: 3600,
+  };
+
+  it("links a healthy Vault's page to managing Vaults", async () => {
+    const { container } = await renderDetail(baseVault(local));
+    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    expectOpened(CONTEXTUAL_HELP.vaultSettings);
+  });
+
+  it("links a paused Vault to pausing and resuming", async () => {
+    const { container } = await renderDetail(
+      baseVault(local, { enabled: false, activation: "disabled" }),
+    );
+    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    expectOpened(CONTEXTUAL_HELP.vaultPaused);
+  });
+
+  it("links a missing folder to the permissions section", async () => {
+    const { container } = await renderDetail(
+      baseVault(local, {
+        activation: "unavailable",
+        local_content: "unavailable",
+        search: "unavailable",
+        activation_error: {
+          code: "vault_path_unavailable",
+          message: "No such file or directory (os error 2)",
+          retryable: true,
+        },
+      }),
+    );
+    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    expectOpened(CONTEXTUAL_HELP.vaultFolder);
+  });
+
+  it("links any other unavailable or stale Vault to the bad-state section", async () => {
+    const { container } = await renderDetail(
+      baseVault(local, {
+        search: "stale",
+        search_error: {
+          code: "vault_index_failed",
+          message: "Indexing could not be completed.",
+          retryable: true,
+        },
+      }),
+    );
+    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    expectOpened(CONTEXTUAL_HELP.vaultUnavailable);
+  });
+
+  it("links a healthy Git console to the Git-backed Vault guide", async () => {
+    const { container } = await renderDetail(
+      baseVault(twoWay, { git: "ready" }),
+    );
+    clickLinkIn(container.querySelector(".settings-git-console"));
+    expectOpened(CONTEXTUAL_HELP.gitSetup);
+  });
+
+  it("links a failing sync to the Git section, and only from the console", async () => {
+    const { container } = await renderDetail(
+      baseVault(twoWay, {
+        git: "unavailable",
+        git_error: {
+          code: "managed_git_remote_unreachable",
+          message: "could not reach the remote",
+          retryable: true,
+        },
+      }),
+    );
+    clickLinkIn(container.querySelector(".settings-git-console"));
+    expectOpened(CONTEXTUAL_HELP.gitFailing);
+    expect(
+      within(
+        container.querySelector(".settings-vault-condition") as HTMLElement,
+      ).queryByRole("button", { name: "How does this work?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("links a sync conflict to resolving it", async () => {
+    const { container } = await renderDetail(
+      baseVault(twoWay, {
+        git: "unavailable",
+        git_error: {
+          code: "managed_git_conflict",
+          message: "notes changed on both sides",
+          retryable: false,
+        },
+      }),
+    );
+    clickLinkIn(container.querySelector(".settings-git-console"));
+    expectOpened(CONTEXTUAL_HELP.gitConflict);
+  });
+
+  it("links the registry recovery block in the Vault index", async () => {
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          collection_revision: 0,
+          vaults: [],
+          recovery: {
+            code: "vault_registry_recovery_required",
+            kind: "corrupt",
+            message: "the registry file is not valid JSON",
+          },
+          demo_mode: false,
+        }),
+    });
+    render(
+      withHelp(
+        <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+      ),
+    );
+    await screen.findByText("Vault Registry Unavailable");
+    clickLinkIn(document.body);
+    expectOpened(CONTEXTUAL_HELP.registryRecovery);
   });
 });

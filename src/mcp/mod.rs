@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod auth;
 pub mod config;
+mod docs_pointers;
 pub mod limits;
 pub mod protocol;
 pub mod results;

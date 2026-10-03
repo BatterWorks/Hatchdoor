@@ -80,6 +80,8 @@ Two related, more specific errors:
 
 `local_content` reports `unavailable` with an error code of `vault_path_unreadable` or `vault_path_unavailable`, and the message includes the underlying OS error (e.g. `Permission denied (os error 13)`). This is almost always the container's UID: the image runs as the numeric `nonroot` user (UID `65532`), and the host folder mounted as the Vault needs to be readable — and writable, if agents or the Web UI should change notes — by that UID specifically, not just by your own host user. See [[Install Hatchdoor with Docker Compose]] for the exact `chown`/`chmod` commands.
 
+If the message says `No such file or directory (os error 2)` instead, the folder is not there at all, as seen from inside the container: it was moved or renamed, or the mount in `compose.yaml` no longer points at it. Put the folder back, or fix the mount, then run `docker compose up -d` so Hatchdoor starts again with the folder in place.
+
 A softer variant: `local_content` reports `read_only` rather than `unavailable` — the folder is readable but not writable by UID `65532`. This isn't an error state; it just means Hatchdoor can browse and search the Vault but not write to it. Fix the same way if write access is what you actually wanted.
 
 ## Editing a note fails but creating one works

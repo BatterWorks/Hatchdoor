@@ -9,6 +9,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
+import { CONTEXTUAL_HELP } from "../help";
+import { HelpContext } from "../help/useHelp";
 import { SettingsPage } from "./SettingsPage";
 
 function renderSettingsPage() {
@@ -461,5 +463,101 @@ describe("SettingsPage", () => {
     expect(
       screen.queryByRole("dialog", { name: "Before this is saved" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("How does this work? links (#423)", () => {
+  const openHelp = vi.fn();
+
+  async function openSection(name: RegExp) {
+    mockPage();
+    const view = render(
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        <MemoryRouter initialEntries={["/settings"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </HelpContext.Provider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name }));
+    return view;
+  }
+
+  function clickLinkIn(container: Element | null) {
+    expect(container).not.toBeNull();
+    fireEvent.click(
+      within(container as HTMLElement).getByRole("button", {
+        name: "How does this work?",
+      }),
+    );
+  }
+
+  it.each([
+    [/Notes handling/, CONTEXTUAL_HELP.notesSettings],
+    [/Agent access/, CONTEXTUAL_HELP.agentSettings],
+    [/Uploads/, CONTEXTUAL_HELP.uploadSettings],
+  ] as const)("links the %s section to its page", async (name, target) => {
+    const { container } = await openSection(name);
+    clickLinkIn(container.querySelector(".settings-sec-head"));
+    expect(openHelp).toHaveBeenLastCalledWith(
+      target.page,
+      "heading" in target ? target.heading : undefined,
+    );
+  });
+
+  it("keeps the write switch's link when .env pins it", async () => {
+    const pinned = settings.map((item) =>
+      item.key === "HATCHDOOR_MCP_WRITE_ENABLED"
+        ? { ...item, source: "environment", locked: "environment" }
+        : item,
+    );
+    mockedApiFetch.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/settings")
+        return json({ settings: pinned, last_agent: null });
+      if (url === "/api/v1/vaults")
+        return json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [vault("Field notes")],
+          demo_mode: false,
+        });
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      return json({ data: [] });
+    });
+    render(
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        <MemoryRouter initialEntries={["/settings"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </HelpContext.Provider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+    clickLinkIn(
+      screen
+        .getByText("HATCHDOOR_MCP_WRITE_ENABLED")
+        .closest(".settings-plaque-row"),
+    );
+    expect(openHelp).toHaveBeenLastCalledWith(
+      CONTEXTUAL_HELP.agentWrites.page,
+      undefined,
+    );
+  });
+
+  it("links the write switch to the page on letting agents change notes", async () => {
+    await openSection(/Agent access/);
+    const row = screen
+      .getByText("Let assistants change notes")
+      .closest(".settings-row");
+    clickLinkIn(row);
+    expect(openHelp).toHaveBeenLastCalledWith(
+      CONTEXTUAL_HELP.agentWrites.page,
+      undefined,
+    );
   });
 });

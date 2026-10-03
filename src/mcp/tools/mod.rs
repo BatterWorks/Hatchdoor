@@ -65,7 +65,20 @@ fn runs_during_environment_cleanup(name: &str) -> bool {
     READ_OPS.contains(&name) || matches!(name, "list_vaults" | "batch")
 }
 
+/// Runs one `tools/call`. A structured error for a code the manual explains
+/// gains a `docs` field naming the page (#423); `batch` item errors sit inside
+/// a successful call and are never touched.
 pub async fn handle_tools_call(
+    state: AppState,
+    params: Option<Value>,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    dispatch_tools_call(state, params, config)
+        .await
+        .map(super::docs_pointers::attach)
+}
+
+async fn dispatch_tools_call(
     state: AppState,
     params: Option<Value>,
     config: &McpConfig,

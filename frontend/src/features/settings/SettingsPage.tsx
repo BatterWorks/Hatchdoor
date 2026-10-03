@@ -10,6 +10,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
+import {
+  CONTEXTUAL_HELP,
+  ContextualHelpLink,
+  type HelpLocation,
+} from "../help";
 import type { LastAgentConnection, VaultSummary } from "../../types";
 import {
   discardHeldDraft,
@@ -64,18 +69,21 @@ const SECTIONS = [
     number: "01",
     title: "Notes handling",
     blurb: "How this server indexes the notes its Vaults provide.",
+    manual: CONTEXTUAL_HELP.notesSettings,
   },
   {
     id: "agents",
     number: "02",
     title: "Agent access (MCP)",
     blurb: "Whether AI assistants can reach this vault, and what they may do.",
+    manual: CONTEXTUAL_HELP.agentSettings,
   },
   {
     id: "uploads",
     number: "03",
     title: "Uploads",
     blurb: "How large a file may be attached to a note.",
+    manual: CONTEXTUAL_HELP.uploadSettings,
   },
 ] as const;
 
@@ -92,6 +100,8 @@ const COPY: Record<
     example?: string;
     /** A quiet line under the help, for a fact the help sentence cannot hold. */
     note?: string;
+    /** The manual page that explains this setting on its own (#423). */
+    manual?: HelpLocation;
   }
 > = {
   HATCHDOOR_ARCHIVE_PREFIX: {
@@ -125,6 +135,7 @@ const COPY: Record<
     section: "agents",
     label: "Let assistants change notes",
     help: "Assistants can create, edit, move and delete notes and attachments. Off means they can only read.",
+    manual: CONTEXTUAL_HELP.agentWrites,
   },
   HATCHDOOR_MCP_RATE_LIMITS_ENABLED: {
     section: "agents",
@@ -787,7 +798,9 @@ export function SettingsPage({
                   <span className="settings-sec-num">{section.number}</span>{" "}
                   {section.title}
                 </h2>
-                <p className="settings-sec-blurb">{section.blurb}</p>
+                <p className="settings-sec-blurb">
+                  {section.blurb} <ContextualHelpLink to={section.manual} />
+                </p>
                 {active === "agents" ? (
                   <p className="settings-sec-blurb" data-testid="last-agent">
                     {lastAgent
@@ -856,7 +869,15 @@ export function SettingsPage({
                           />
                         ) : null}
                       </div>
-                      <p className="settings-row-help">{copy.help}</p>
+                      <p className="settings-row-help">
+                        {copy.help}
+                        {copy.manual ? (
+                          <>
+                            {" "}
+                            <ContextualHelpLink to={copy.manual} />
+                          </>
+                        ) : null}
+                      </p>
                       {copy.note ? (
                         <p className="settings-row-note">{copy.note}</p>
                       ) : null}
@@ -885,15 +906,21 @@ export function SettingsPage({
                   Managed outside this page
                 </p>
                 <dl>
-                  {locked.map((setting) => (
-                    <div className="settings-plaque-row" key={setting.key}>
-                      <dt>
-                        {COPY[setting.key].label}
-                        <code>{setting.key}</code>
-                      </dt>
-                      <dd>{plaqueValue(setting)}</dd>
-                    </div>
-                  ))}
+                  {locked.map((setting) => {
+                    const copy = COPY[setting.key];
+                    return (
+                      <div className="settings-plaque-row" key={setting.key}>
+                        <dt>
+                          {copy.label}
+                          <code>{setting.key}</code>
+                          {copy.manual ? (
+                            <ContextualHelpLink to={copy.manual} />
+                          ) : null}
+                        </dt>
+                        <dd>{plaqueValue(setting)}</dd>
+                      </div>
+                    );
+                  })}
                 </dl>
                 {[...new Set(locked.map((setting) => setting.locked!))].map(
                   (reason) => (

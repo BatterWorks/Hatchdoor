@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { CONTEXTUAL_HELP, ContextualHelpLink } from "../features/help";
 import { useTheme } from "../hooks/useTheme";
 import type { StartupStatus } from "./useStartupStatus";
 
@@ -152,6 +153,9 @@ export function StartupGate({
               only. It still provides solid search, but Gemma performed better
               in our tests, including English searches. Nomic uses about 1.3 GB
               of RAM while indexing; Gemma uses about 0.5 GB.
+            </p>
+            <p className="startup-fallback-note">
+              <ContextualHelpLink to={CONTEXTUAL_HELP.modelChoice} />
             </p>
           </section>
         ) : (
