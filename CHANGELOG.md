@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Hatchdoor no longer writes starter notes into a new Vault. Creating a Vault on an empty folder, through Settings, the API or an agent, now leaves the folder empty, and so does a first start on an empty `VAULT_PATH`. Notes seeded by earlier versions stay where they are; nothing in an existing Vault is changed or deleted. The Docker image no longer carries the starter notes. [#428]
+
+[#428]: https://github.com/BatterWorks/Hatchdoor/issues/428
+
 ## v2.7.0 - 2026-10-02
 
 ### Added

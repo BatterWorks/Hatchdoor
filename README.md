@@ -193,8 +193,7 @@ workstreams and where each one stands.
 You need:
 
 - Docker and Docker Compose (Podman and `podman compose` also work)
-- A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
-  starter vault
+- A Markdown vault folder, or an empty folder if you want to start from nothing
 
 ### 2. Create Your Config
 
@@ -204,8 +203,7 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-The defaults create a starter vault beside the Compose file. To use an existing
-vault, uncomment its host path in `.env`:
+The defaults mount an empty `vault` folder beside the Compose file. To use an existing vault, uncomment its host path in `.env`:
 
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
@@ -321,11 +319,7 @@ Upgrading an existing single-Vault deployment requires persistent
 guide](docs/migrations/legacy-single-vault.md) for detection, recovery, and
 rollback constraints.
 
-If the folder `VAULT_PATH` points at contains no Markdown files, Hatchdoor
-creates a small starter vault there (a lightweight PARA-style structure with
-onboarding notes) before the first index build. Existing vaults are never
-seeded or modified. The starter notes are ordinary Markdown you can edit, move,
-or delete like any other.
+Hatchdoor never writes example notes into a Vault folder. An empty folder opens as an empty Vault until you add Markdown files to it.
 
 For write access: browser writes, MCP writes, attachment uploads, and git sync
 all require the vault mount, cache directory, and state directory to be
@@ -455,13 +449,9 @@ Set `HATCHDOOR_WEB_BEARER_TOKEN`, bind to `127.0.0.1`, or enable
 `HATCHDOOR_DEMO_MODE=true` for a read-only public demo. This is intentional: a
 non-loopback bind can expose your vault to the network.
 
-### The app starts with a starter vault
+### The app opens on an empty Vault
 
-Hatchdoor seeds starter notes only on a first start, and only when the folder
-`VAULT_PATH` points at holds no Markdown files. If you expected an existing
-vault, this almost always means the container mounted an empty directory:
-double-check `HOST_VAULT_PATH` in `.env` isn't a typo or a stale Docker volume
-shadowing the mount.
+If you expected an existing vault, the container almost always mounted an empty directory. Check that `HOST_VAULT_PATH` in `.env` is not a typo and that no stale Docker volume shadows the mount.
 
 For write permission issues, MCP `401`/`403`, git sync problems, and more, see
 [How to troubleshoot common

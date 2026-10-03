@@ -924,13 +924,10 @@ import's registry commit and its one-shot cleanup cannot leave the plaintext
 token in settings (#325); `HATCHDOOR_EXCLUDE` and the author keys keep their
 live readers and are left alone. A safe import copies legacy exclusions,
 Git behavior, credentials, and commit identity into the ordinary Vault
-definition; the retired write-debounce value has no successor. A safe import of
-a plain `Local` source whose directory holds no Markdown writes the starter
-Vault into it (`vault::seed_new_vault`) after the registry commit and before
-the collection runtime activates it, so a first boot on an empty `VAULT_PATH`
-opens on the welcome notes; a Git-backed legacy deployment is never seeded, and
-a directory that already holds Markdown is left untouched. Confirmed Start
-with no Vaults writes an ordinary revisioned zero-Vault registry.
+definition; the retired write-debounce value has no successor. An import never
+writes into the Vault folder: an empty `VAULT_PATH` stays empty (ADR-40).
+Confirmed Start with no Vaults writes an ordinary revisioned zero-Vault
+registry.
 
 **Consumers:** startup runtime composition calls this isolated adapter before
 opening the disposable cache and activating Vault runtimes. Safe imports become
@@ -1137,21 +1134,13 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/links.rs`
 - `src/vault/markdown_links.rs`
 - `src/vault/paths.rs`
-- `src/vault/seed.rs`
 - `src/vault/types.rs`
 - `src/vault/tests.rs`
 
 **Public contract:** the intentional re-exports from `src/vault.rs`, notably
 `VaultIndex`, note/tree/link types, path normalization helpers, layer and
-exclusion types, `is_servable_asset`, `split_wikilink_asset_body`,
-`seed_empty_vault`, and `seed_new_vault`.
-`seed_new_vault` is the single decision point for which newly defined Vaults
-receive the starter notes — a `Local` source whose directory holds no Markdown,
-judged with that Vault's own exclude matcher so trashed notes do not count —
-shared by the two callers that create Vault definitions (`handlers/vaults.rs`'s
-creation route and `vault_migration.rs`'s one-time import), so the rule cannot
-drift between them; it reports `SeedError` rather than deciding what a failure
-means, which is each caller's call. `VaultIndex`
+exclusion types, `is_servable_asset`, and `split_wikilink_asset_body`. Nothing
+here writes starter notes into a Vault (ADR-40). `VaultIndex`
 additionally carries an asset index (`asset_paths`, `assets_by_name`) filled by
 the same walk that collects the Markdown files, and `resolve_asset` reads it:
 Obsidian's default link format writes an attachment embed as a bare filename and
@@ -1873,12 +1862,8 @@ the demo projection, which withholds operator deployment detail;
 `last_checked_at` is additionally absent until a turn completes, while
 `next_attempt_at` is always present for a tracked Vault, because one that has
 never completed a turn is due immediately rather than unscheduled. Failures leave as the transport-neutral `VaultOperationError`
-(ADR-19). Creating a Vault on a `Local` source whose directory holds no
-Markdown seeds the starter Vault (`vault::seed_new_vault`) between the
-registry commit and reconciliation, so both surfaces seed identically and the
-welcome notes are in that Vault's first index rather than arriving as a later
-watcher event; emptiness is decided with the Vault's own exclude matcher, a
-Git-backed source is never seeded, and nothing but creation seeds. An edit
+(ADR-19). Creating a Vault never writes into its folder: a `Local` Vault on an
+empty directory stays empty (ADR-40). An edit
 whose `https_credentials` was `Replace` additionally requests an immediate Git
 turn and notifies a definition change, because `VaultDefinition` equality
 cannot observe a credential value change (#97's and #98's reopening
@@ -1913,7 +1898,7 @@ reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
 notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
 `vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
-`vault_migration::start_with_no_vaults`, `vault::seed_new_vault`,
+`vault_migration::start_with_no_vaults`,
 `vault::{vault_link_style, count_link_forms}`, `VaultControlBlock::{vault_path,
 authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode` and the pending
 `legacy_migration_recovery` flag.
@@ -2830,7 +2815,7 @@ stream — and nothing else. Since #187 each route parses its own path, query,
 and body, calls `vault_management::VaultCollectionManagement` once, and maps
 the typed response or the structured `VaultOperationError` onto a status code
 and a JSON body. The registry commit, the runtime reconciliation, the
-authenticated and demo projections, the starter-Vault seeding, the
+authenticated and demo projections, the
 credential-replacement Git retry, and the recovery action all live in that
 core, shared with the MCP management tools, which no longer proxy these
 handlers.

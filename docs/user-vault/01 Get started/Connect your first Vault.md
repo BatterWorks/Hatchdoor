@@ -12,17 +12,15 @@ HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 ```
 
 On a first start, Hatchdoor recognizes that folder as its first local Vault and
-stores the Vault definition in its registry. Existing Markdown is not seeded
-or rewritten. Its folder name becomes the initial Vault name.
+stores the Vault definition in its registry. Existing Markdown is not
+rewritten. Its folder name becomes the initial Vault name.
 
 - [ ] Confirm the host folder is the Vault you intended.
 - [ ] Confirm the container can read it.
 - [ ] If agents or the browser should write, confirm the container can write it.
 - [ ] If that folder is on ZFS or a FUSE mount, read the filesystem note in [[Install Hatchdoor with Docker Compose]].
 
-If you omit `HOST_VAULT_PATH`, Compose mounts `./vault` next to the deployment.
-An empty folder receives the starter Vault. This is useful for a trial, not a
-reason to copy your real notes into the container.
+If you omit `HOST_VAULT_PATH`, Compose mounts `./vault` next to the deployment. Hatchdoor writes nothing into an empty folder, so that Vault stays empty until you add Markdown files to it.
 
 > [!warning]
 > Do not set a path in Settings that exists only on your host. Settings sees paths inside the Hatchdoor container. The standard Compose file exposes only `/data/vault`; add a volume mount before connecting any other local folder.

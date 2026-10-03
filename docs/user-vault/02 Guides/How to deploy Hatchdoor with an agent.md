@@ -165,6 +165,8 @@ Poll `list_vaults` or `get_stats` until the Vault's phase reaches `ready`. Then 
 search_notes with a term you expect to match, then get_note on the best result.
 ```
 
+If you kept the empty `vault` folder from step 1, there is nothing to match yet: Hatchdoor does not write example notes into an empty Vault. Put at least one Markdown file in the folder first, then run the search once the Vault reports `ready` again.
+
 > [!success]
 > Hatchdoor is deployed, MCP is live, and the Vault is searchable — all without a human opening the browser. Keep the Web UI available anyway: `http://127.0.0.1:42824` with the web token from step 1 is how a person audits what the agent has done.
 
