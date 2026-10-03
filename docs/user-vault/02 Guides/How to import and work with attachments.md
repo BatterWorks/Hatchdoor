@@ -22,11 +22,11 @@ Every upload path, browser or agent, is limited to the same file types and enfor
 
 | | Allowed on upload | Default limit |
 | --- | --- | --- |
-| Extensions | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | — |
-| HTTP upload (Web UI, upload links, and agents holding a token) | — | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, 10 MiB |
-| Agent downloads (download links and `get_attachment` base64), and the MCP base64 upload fallback `import_attachment` | — | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded |
+| Extensions | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | |
+| HTTP upload (Web UI, upload links, and agents holding a token) | | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, 10 MiB |
+| Agent downloads (download links and `get_attachment` base64), and the MCP base64 upload fallback `import_attachment` | | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded |
 
-Both limits are adjustable at runtime in **Settings → Uploads** — see [[Settings and environment variables reference]].
+Both limits are adjustable at runtime in **Settings → Uploads**; see [[Settings and environment variables reference]].
 
 ## From the Web UI
 
@@ -35,7 +35,7 @@ Paste an image, or drag and drop an image or PDF, directly into the note editor.
 1. Uploads it into a Vault-root `Attachments/` folder, numbering the filename (`report-1.pdf`, `report-2.pdf`, ...) if one with that name already exists rather than overwriting it.
 2. Inserts an embed at the cursor in the Vault's link style. A wikilink Vault gets `![[...]]` with a relative path that walks back out to the vault root, even for a note several folders deep. A Markdown-link Vault gets `![](...)`, with the path written in the Vault's path form. See [[Supported Markdown reference#Which link style Hatchdoor writes]].
 
-An unsupported file type or an oversized file is rejected inline with the reason (wrong extension, or how many MB over the limit) — nothing partially uploads.
+An unsupported file type or an oversized file is rejected inline with the reason (wrong extension, or how many MB over the limit). Nothing partially uploads.
 
 ## From an agent, over MCP or HTTP
 
@@ -44,7 +44,7 @@ An agent has three ways in, and should check which one applies before uploading 
 ```text
 Call get_attachment_import_config with the target vault_id first. It reports
 whether uploads are currently possible for that Vault, which method(s) are
-available, their byte limits, and the allowed extensions — check this instead
+available, their byte limits, and the allowed extensions. Check this instead
 of guessing, since it can differ per Vault (a pull_only Git Vault, for
 instance, never accepts writes).
 ```
@@ -53,9 +53,9 @@ instance, never accepts writes).
 | --- | --- | --- |
 | `create_upload_link` (MCP tool), then send the file to the link | The default. Use it whenever the client can make an HTTP request, including `curl` from a shell-capable agent. It needs no token and no server address, which an agent inside an MCP client usually does not have. | Call `create_upload_link` with `vault_id`, `target_relative_path`, and optionally `overwrite`. It returns `upload_url`; `POST` the file there as `multipart/form-data` in a field named `file`, for example `curl -F file=@scan.pdf '<upload_url>'`. The link is good for one upload to exactly that path and expires after five minutes. |
 | `POST /api/v1/vaults/{vault_id}/attachments` | Only for a client that holds a bearer token and knows the server's address itself | `multipart/form-data` with fields `target_relative_path` and `file`. Accepts either the web bearer token or a live MCP bearer token. |
-| `import_attachment` (MCP tool) | The fallback, for clients that genuinely cannot make an out-of-band HTTP request | `content` (base64), `target_relative_path`. Rides inside the JSON-RPC message, so it gets unreliable as files approach the base64 size limit — prefer the HTTP path whenever it's available. |
+| `import_attachment` (MCP tool) | The fallback, for clients that genuinely cannot make an out-of-band HTTP request | `content` (base64), `target_relative_path`. Rides inside the JSON-RPC message, so it gets unreliable as files approach the base64 size limit. Prefer the HTTP path whenever it's available. |
 
-All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. None of them creates the embed syntax in a note for you — write the returned `attachment.relative_path` into the note yourself, in the Vault's link style. `list_vaults` reports it on each Vault as `link_style` (`wikilink` for `![[...]]`, `markdown` for `![](...)`) and `link_path_form`. Hatchdoor writes what you send as-is and never converts it.
+All three return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, `cleanup_warning`. None of them creates the embed syntax in a note for you, so write the returned `attachment.relative_path` into the note yourself, in the Vault's link style. `list_vaults` reports it on each Vault as `link_style` (`wikilink` for `![[...]]`, `markdown` for `![](...)`) and `link_path_form`. Hatchdoor writes what you send as-is and never converts it.
 
 ### Importing a Markdown file as a note
 
@@ -66,7 +66,7 @@ The file is written the way `create_note` writes a note. Line endings become LF 
 To re-import over a note that already exists, pass `overwrite: true` and `expected_content_hash`, the note's current hash from `get_frontmatter`. The upload then replaces the note only if nobody has changed it since you read that hash, and otherwise fails with `write_conflict` and leaves their edit alone. The size limit is the same `HATCHDOOR_MAX_ATTACHMENT_BYTES`. The Web UI's drop zone still refuses Markdown files.
 
 > [!tip]
-> There's no requirement to use the Vault-root `Attachments/` folder the Web UI uses — `target_relative_path` is any Vault-relative path you choose. Keeping the Web UI's convention makes files easy to find by browsing, but an agent following its own filing scheme (per-note folders, a `Sources/` layer) works just as well.
+> There's no requirement to use the Vault-root `Attachments/` folder the Web UI uses. `target_relative_path` is any Vault-relative path you choose. Keeping the Web UI's convention makes files easy to find by browsing, but an agent following its own filing scheme (per-note folders, a `Sources/` layer) works just as well.
 
 ## Getting one back out
 
@@ -84,20 +84,20 @@ Reading an attachment is a read: `get_attachment` works whenever MCP is enabled,
 
 ## Managing attachments already in the Vault
 
-These tools act on bytes the Vault already stores, so the upload list does not apply to them: they accept any file that is not Markdown, whatever its extension, including files with no extension at all. Four things are refused. A note, because moving one this way would skip the backlink rewriting and the safety check the note tools do — use those instead. A folder's `.hatchdoor-layer` marker, since trashing one would quietly change which notes sit on the default surface (see [[The layer system]]). Anything under `.git`, which is the Vault's own version history rather than your content. And anything inside a folder the Vault excludes as noise, `.obsidian/` included, so an agent tidying up attachments cannot walk off into your Obsidian configuration.
+These tools act on bytes the Vault already stores, so the upload list does not apply to them: they accept any file that is not Markdown, whatever its extension, including files with no extension at all. Four things are refused. A note, because moving one this way would skip the backlink rewriting and the safety check the note tools do; use those instead. A folder's `.hatchdoor-layer` marker, since trashing one would quietly change which notes sit on the default surface (see [[The layer system]]). Anything under `.git`, which is the Vault's own version history rather than your content. And anything inside a folder the Vault excludes as noise, `.obsidian/` included, so an agent tidying up attachments cannot walk off into your Obsidian configuration.
 
 | Tool | Does | Write mode |
 | --- | --- | --- |
-| `list_note_attachments` | Every attachment one note references, without pulling the note's full content — useful before deciding whether a move or rename is safe. | Not required |
+| `list_note_attachments` | Every attachment one note references, without pulling the note's full content. Useful before deciding whether a move or rename is safe. | Not required |
 | `move_attachment` | Moves the file and rewrites every note that referenced it. | Required |
 | `rename_attachment` | Renames the file in place and rewrites every reference. | Required |
-| `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference — the same trash mechanism `delete_note` uses (see [[MCP tools reference#Write content tools]]), so it's recoverable from disk, not gone. | Required |
+| `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference, with the same trash mechanism `delete_note` uses (see [[MCP tools reference#Write content tools]]), so it's recoverable from disk, not gone. | Required |
 
 One limit worth knowing: reference rewriting keys on the file extension, so a link to a file with no extension at all is left exactly as written when that file moves. Rename the file to carry an extension if you want its links to follow it.
 
 A note that is not valid UTF-8 text, such as a Latin-1 export from an older tool, cannot have its references rewritten without damaging the bytes that are not text. If one references the attachment you move, rename or delete, the call is refused with `link_rewrite_unsupported` and nothing is written; the message names each such note. Re-save those notes as UTF-8 and try again.
 
-The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write — see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); it is best-effort, so read each item's own `ok` rather than assuming the whole set landed.
+The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write; see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); it is best-effort, so read each item's own `ok` rather than assuming the whole set landed.
 
 ---
 

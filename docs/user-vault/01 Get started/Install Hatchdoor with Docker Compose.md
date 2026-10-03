@@ -4,10 +4,15 @@ tags: [type/tutorial, topic/installation]
 
 # Install Hatchdoor with Docker Compose
 
-Create an empty directory for this deployment and work inside it. You do not
-need a Hatchdoor source checkout.
+This page gets Hatchdoor running on your computer. You create two small text files, run one command, copy a password from the output, and pick a search model. It takes about ten minutes plus the model download. You do not need to download Hatchdoor's source code.
 
-Create `compose.yaml` with this complete content:
+You type the commands below in a terminal. On Linux and macOS that is the Terminal app. On Windows, use PowerShell or the WSL terminal.
+
+## 1. Create the deployment folder
+
+Make a new, empty folder for Hatchdoor, for example `hatchdoor` in your home folder, and open your terminal inside it. Everything Hatchdoor keeps about itself (its settings, its search data, the downloaded model) ends up in this folder. Your notes stay wherever they are.
+
+In that folder, create a file named `compose.yaml` with exactly this content:
 
 ```yaml
 services:
@@ -39,45 +44,27 @@ services:
       start_period: 40s
 ```
 
-> [!note]
-> `HOST: 0.0.0.0` makes Hatchdoor reachable through Docker's internal network. The `127.0.0.1:42824:42824` port mapping keeps it accessible only from the machine running Docker.
+You don't need to change anything in it. In case you are curious:
 
-> [!note]
-> `stop_grace_period: 3m` lets Hatchdoor finish shutting down cleanly. On `docker compose down` or a restart, it waits for any Git sync that is running to finish or fail. A remote that stops answering is given up on after 15 seconds to connect or 120 seconds without data. Without the setting, Docker waits only 10 seconds and then kills the process mid-sync.
+- The `ports` line means only this computer can open Hatchdoor. Other devices on your network cannot, until you choose to allow it (see [[#Optional: expose Hatchdoor to your LAN]]).
+- `HOST: 0.0.0.0` is needed inside the container for Docker to reach Hatchdoor at all. It does not open Hatchdoor to your network; the `ports` line decides that.
+- `stop_grace_period: 3m` gives Hatchdoor time to finish a Git sync before it stops. Without it, Docker stops it after 10 seconds, even mid-sync.
 
-> [!tip]
-> Using Podman instead of Docker? Everything on this page works unchanged — swap `docker` / `docker compose` for `podman` / `podman compose`, but also change the image to `battermanz/hatchdoor:podman-latest` (or `podman-<version>`); the plain `latest` tag above is Docker-only. The `chown` step further down needs `podman unshare` too — see the note there.
+## 2. Tell Hatchdoor where your notes are
 
-## Optional: expose Hatchdoor to your LAN
-
-If an agent or browser on another trusted device needs to connect, replace only the `ports` section above:
-
-```yaml
-    ports:
-      - "42824:42824"
-```
-
-Do not change `HOST: 0.0.0.0`; Hatchdoor needs that value inside the container. After saving the file, run `docker compose up -d` and connect to `http://<hatchdoor-server-address>:42824`.
-
-> [!warning]
-> Publishing `42824:42824` listens on every host interface. Use it only on a trusted LAN with the web and MCP passwords enabled. For internet access, put Hatchdoor behind an authenticated, encrypted access layer instead.
-
-> [!note] Behind a reverse proxy
-> Agents download and upload files through short-lived links that carry the server's address. Behind a proxy that adds HTTPS, Hatchdoor learns the address agents used from the proxy's `Forwarded` header, or its `X-Forwarded-Proto` and `X-Forwarded-Host` headers. Caddy, Traefik and Nginx Proxy Manager send them by default. Plain nginx and openresty need `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header X-Forwarded-Host $http_host;` (`$http_host` keeps a non-standard port, `$host` drops it) in the `location` block. If your proxy cannot send them, or serves Hatchdoor under a path such as `/notes`, set **Public address** in **Settings** → **Agent access (MCP)** instead.
-
-Create `.env` with your host-side Vault path:
+In the same folder, create a file named `.env` with one line, the full path to the folder that holds your notes:
 
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 ```
 
-Leave the other paths unset to use `./data/cache`, `./data/state`, and
-`./models` beside `compose.yaml`. You do not need `.env.example` for this
-deployment.
+For example `/home/alex/Notes` on Linux or `/Users/alex/Documents/Notes` on macOS. Hatchdoor can only see this folder and what is inside it. If you put several Vaults inside one parent folder, point `HOST_VAULT_PATH` at the parent and you can add each of them later.
 
-Prepare the writable deployment directories before first start. The image runs
-as the numeric `nonroot` user, so Docker must not create these bind sources as
-root:
+If you leave the line out, Hatchdoor uses a `vault` folder next to `compose.yaml`, which starts empty.
+
+## 3. Prepare the data folders
+
+Hatchdoor runs as a restricted user with the number `65532`, not as you. Create its data folders and hand them to that user before the first start, or Docker creates them owned by the administrator account and Hatchdoor cannot write to them:
 
 ```bash
 mkdir -p data/cache data/state models
@@ -85,74 +72,38 @@ chmod 700 data/cache data/state models
 sudo chown -R 65532:65532 data models
 ```
 
-> [!tip]
-> On rootless Podman, `sudo chown` targets the wrong namespace — use
-> `podman unshare chown -R 65532:65532 data models` instead. Apply the same
-> substitution to a custom `HOST_CACHE_PATH`, `HOST_STATE_PATH`, or
-> `HOST_MODELS_PATH`.
+Hatchdoor also needs to read your notes folder. It needs to write to it only if you want to edit notes in the browser or let an agent change them. On Linux, check that user `65532` can read (and, if you want, write) the folder. Don't change the owner of an existing notes folder without thinking about what else uses it.
 
-The container also needs read access to your Vault. Grant it write access only
-if agents or the Web UI should change notes. On Linux, verify access for UID
-`65532` without blindly changing ownership of an existing Vault.
+## 4. Start Hatchdoor and get your web token
 
-### A note on the filesystem holding your Vault
-
-Hatchdoor saves a note by writing the new version beside the old one and then
-swapping the two in a single step. That swap is what lets it notice you also
-saved the note in Obsidian and refuse rather than overwrite your change.
-
-Not every filesystem can do it. ZFS gained the ability in OpenZFS 2.2, and
-Ubuntu 22.04's standard kernel ships 2.1.5, so a Vault on ZFS there cannot;
-neither can anything mounted through FUSE. ext4, XFS, btrfs and ZFS 2.2 or
-later all can. Check with `zfs version` if you are unsure.
-
-A Vault on a filesystem that cannot do the swap still works, and you can still
-edit, move, rename, archive and delete notes in it. Hatchdoor falls back to
-checking the note and then replacing it as two steps. Saving against a note
-that changed under you is still refused. What you lose is the narrow case
-where something outside Hatchdoor saves the note in the instant between the
-check and the replacement: that change is overwritten instead of reported. If
-you are the only one editing, or you always edit through one tool at a time,
-this costs you nothing.
-
-You do not have to configure any of this. Hatchdoor tests the filesystem when
-it opens a Vault and writes one line to its log for each Vault that cannot do
-the swap, saying so in these terms. If the Vault's write settings are shown in
-the Web UI, it says so there too.
-
-> [!note]
-> Before version 2.7.0 there was no fallback, so a Vault on one of those
-> filesystems could create notes but not edit, move or delete them, and the
-> failure reached you only as `Invalid argument (os error 22)` in your agent's
-> log. If you saw that, upgrading fixes it. Nothing was damaged: those writes
-> were refused, not half applied.
-
-Start Hatchdoor:
+Start it:
 
 ```bash
 docker compose up -d
 ```
 
-Compose publishes port `42824` on the host's loopback interface. Hatchdoor
-still sees its container-side non-loopback listener and correctly refuses the
-first run until browser access has a token. Retrieve the token:
+The first start stops on purpose. Hatchdoor refuses to run without a password for the browser, so it makes one for you and prints it. Show the output with:
 
 ```bash
 docker compose logs hatchdoor
 ```
 
-Add the printed assignment to `.env`, then start again:
+Near the end is a line that contains `HATCHDOOR_WEB_BEARER_TOKEN=` followed by a long random value. Copy that whole `HATCHDOOR_WEB_BEARER_TOKEN=...` part and add it as a new line in `.env`:
 
 ```env
 HATCHDOOR_WEB_BEARER_TOKEN=paste-the-printed-token-here
 ```
 
+If you see several such lines, take the last one: Docker retries the start, and each attempt prints a new value. Then start Hatchdoor again:
+
 ```bash
 docker compose up -d
 ```
 
+This time it stays running.
+
 > [!warning]
-> This is the **web token**. It protects the browser and is not the password you will give an agent later.
+> This is the **web token**, the password for your browser. It is not the password you will give an agent later; that one is made separately in Settings.
 
 ## Where do I find my token?
 
@@ -164,18 +115,50 @@ Lost it, or want a new one? Put any long random value after `HATCHDOOR_WEB_BEARE
 
 ## Choose a search model
 
-Open `http://localhost:42824` and enter the web token. On the first-run screen,
-choose a search model:
+Open `http://localhost:42824` in your browser and enter the web token. Hatchdoor first asks which search model to download. The model is what lets Hatchdoor find notes by meaning, not only by exact words.
 
-| Choice | When to choose it |
+| Choice | What you get |
 | --- | --- |
-| **Accept terms and set up Gemma** | Recommended; multilingual search |
-| **Use Nomic instead** | You decline Gemma terms; English-only search |
+| **Accept terms and set up Gemma** | Recommended. Searches in many languages, and uses less memory: about 0.5 GB while indexing. You accept Google's Gemma terms to use it. |
+| **Use Nomic instead** | English only, and uses more memory: about 1.3 GB while indexing. Choose it if you don't want to accept the Gemma terms. |
 
-Hatchdoor downloads the selected model. A fresh install starts with no Vaults,
-so there is nothing to index yet: the folder you mounted becomes a Vault only
-when you add it. Wait until setup is ready, then continue with [[Connect your
-first Vault]].
+Hatchdoor downloads the model you chose, which can take a few minutes, and keeps it in the `models` folder so it never downloads it again.
+
+A fresh install has no Vaults yet, so there is nothing to index. Once the model is ready, Hatchdoor opens the **Set up Hatchdoor** checklist. Continue with [[Connect your first Vault]].
+
+## Optional: expose Hatchdoor to your LAN
+
+By default only the computer running Hatchdoor can open it. If an agent or browser on another device in your home network needs to connect, replace only the `ports` section of `compose.yaml`:
+
+```yaml
+    ports:
+      - "42824:42824"
+```
+
+Do not change `HOST: 0.0.0.0`. After saving the file, run `docker compose up -d` and open `http://<address-of-the-hatchdoor-computer>:42824` from the other device.
+
+> [!warning]
+> This lets every device on your network reach Hatchdoor, protected by the web token and the MCP password. Use it only on a network you trust. Never put Hatchdoor directly on the internet. If you need to reach it from outside, put it behind a service that adds its own sign-in and encryption, such as a VPN.
+
+## Using Podman instead of Docker
+
+Everything on this page works with Podman. Use `podman` and `podman compose` wherever it says `docker` and `docker compose`, and change the image to `battermanz/hatchdoor:podman-latest` (or `podman-<version>`); the plain `latest` image is for Docker only.
+
+In step 3, rootless Podman needs `podman unshare chown -R 65532:65532 data models` in place of `sudo chown`. Do the same for a custom `HOST_CACHE_PATH`, `HOST_STATE_PATH` or `HOST_MODELS_PATH`.
+
+## Behind a reverse proxy
+
+Agents download and upload files through short-lived links that carry the server's address. Behind a proxy that adds HTTPS, Hatchdoor learns the address agents used from the proxy's `Forwarded` header, or its `X-Forwarded-Proto` and `X-Forwarded-Host` headers. Caddy, Traefik and Nginx Proxy Manager send them by default. Plain nginx and openresty need `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header X-Forwarded-Host $http_host;` (`$http_host` keeps a non-standard port, `$host` drops it) in the `location` block. If your proxy cannot send them, or serves Hatchdoor under a path such as `/notes`, set **Public address** in **Settings** → **Agent access (MCP)** instead.
+
+## If your notes are on ZFS or a FUSE mount
+
+Most people can skip this. It matters only if your notes folder is on ZFS older than OpenZFS 2.2 (Ubuntu 22.04's standard kernel ships 2.1.5) or on a FUSE mount. ext4, XFS, btrfs and ZFS 2.2 or later are all fine. Check with `zfs version` if you are unsure.
+
+Hatchdoor normally saves a note by writing the new version beside the old one and swapping the two in a single step. That swap is what lets it notice that you also saved the same note in Obsidian at the same moment, and refuse rather than overwrite your change. Those filesystems cannot do the swap.
+
+Your notes still work there: you can edit, move, rename, archive and delete them. Hatchdoor checks the note and then replaces it, in two steps. Saving over a note that changed since it was read is still refused. What you lose is one narrow case: if another program saves the note in the instant between Hatchdoor's check and its replacement, that change is overwritten instead of reported. If you are the only one editing, or use one app at a time, this costs you nothing.
+
+You do not have to set anything. Hatchdoor tests the filesystem when it opens a Vault, writes one line to its log for each Vault that cannot do the swap, and shows the same warning above the note in the browser.
 
 ---
 

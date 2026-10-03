@@ -4,15 +4,17 @@ tags: [type/how-to, topic/vaults, topic/git]
 
 # How to set up a Git-backed Vault
 
-This covers adding or editing a Vault's Git behaviour from the Web UI's **Settings** screen — not the MCP/API path, which [[How to deploy Hatchdoor with an agent]] and [[HTTP API reference]] already cover. If you only want a plain folder with no Git at all, [[Connect your first Vault]] is the shorter path.
+Git keeps a history of every change to your notes and can sync them with a copy elsewhere, such as GitHub, GitLab or your own Git server. A Git-backed Vault lets Hatchdoor do that for you: it records your changes and, if you want, pulls and pushes them on a schedule.
+
+This page sets one up from **Settings** in the browser. An agent can do the same over MCP; see [[MCP tools reference]] and [[HTTP API reference]]. If you only want a plain folder with no Git at all, [[Connect your first Vault]] is the shorter path.
 
 ## Pick the right starting point first
 
 Three questions decide which option you want, before you open the form:
 
-- **Does this Vault need version history or a remote at all?** If not, choose **A folder on this server** and leave its Git behaviour at **No Git** — a plain folder, nothing else.
-- **Do you already keep this folder in Git yourself, on the same machine Hatchdoor runs on?** Choose **A folder on this server**, then pick a Git behaviour (**Local history**, **Pull-only**, or **Two-way**) — Hatchdoor uses your existing working copy in place. It never clones it.
-- **Is the source of truth a remote repository you don't have checked out locally?** Choose **A managed Git checkout** — Hatchdoor clones the repository itself and owns that checkout.
+- **Does this Vault need version history or a remote at all?** If not, choose **A folder on this server** and leave its Git behaviour at **No Git**: a plain folder, nothing else.
+- **Do you already keep this folder in Git yourself, on the same machine Hatchdoor runs on?** Choose **A folder on this server**, then pick a Git behaviour (**Local history**, **Pull-only**, or **Two-way**). Hatchdoor uses your existing working copy in place. It never clones it.
+- **Is the source of truth a remote repository you don't have checked out locally?** Choose **A managed Git checkout**. Hatchdoor clones the repository itself and owns that checkout.
 
 ## Create the Vault
 
@@ -21,8 +23,8 @@ Open **Settings** → **Add a Vault**, then:
 1. Enter a **Name**.
 2. Optionally fill **Ignore these files and folders** with comma-separated patterns to leave out of this Vault's search.
 3. Under **Where is this Vault?**, choose **A folder on this server** or **A managed Git checkout**.
-4. If you chose **A folder on this server**, enter its **Folder path** — the path as the Hatchdoor container sees it, not your host machine's path (see [[Connect your first Vault]] if that distinction is new).
-5. Under **Git behaviour**, choose one of the options below. A managed checkout only offers **Pull-only** and **Two-way** — a managed Vault exists specifically to track a remote, so there's no "no remote" option for it.
+4. If you chose **A folder on this server**, pick the folder from the **Folder** list, as in [[Connect your first Vault]]. The list shows only folders Hatchdoor can see.
+5. Under **Git behaviour**, choose one of the options below. A managed checkout only offers **Pull-only** and **Two-way**, because a managed Vault exists to track a remote, so there's no "no remote" option for it.
 6. If the behaviour you chose talks to a remote, fill in the fields that appear: **Repository URL**, optionally **Branch** and **Folder within the repository**, **Sign-in**, and the **Sync schedule**.
 7. Select **Create Vault**.
 
@@ -30,7 +32,7 @@ Open **Settings** → **Add a Vault**, then:
 
 | Behaviour | What it does | Available on |
 | --- | --- | --- |
-| **No Git** | Nothing — a plain folder, no history, no remote. | A folder on this server |
+| **No Git** | Nothing: a plain folder, no history, no remote. | A folder on this server |
 | **Local history** | Hatchdoor commits your changes locally, shortly after you stop writing. Never contacts a remote. | A folder on this server |
 | **Pull-only** | Fetches from the remote on the sync schedule and sends nothing back. The Vault refuses every write, so Hatchdoor never commits on it. | Either |
 | **Two-way** | Commits your changes locally, and fetches from and pushes to the remote on the sync schedule. | Either |
@@ -44,17 +46,17 @@ Hatchdoor commits a few seconds after the writing stops, so one commit usually g
 
 These appear whenever the chosen behaviour talks to a remote (**Pull-only** or **Two-way**, on either source):
 
-- **Repository URL** — required for Pull-only/Two-way; not shown for Local history, which has nothing to fetch or push.
-- **Branch** (optional) — leave blank to track the remote's default branch.
-- **Folder within the repository** (optional) — leave blank to use the repository root as the Vault.
-- **Sign-in** — **No sign-in** for a public repository, or **Access token** for a private one. The token is HTTPS-only, write-only (never shown again once saved), and stored separately from every other credential Hatchdoor holds.
-- **Sync schedule** — how often Hatchdoor checks the remote absent a manual sync, since "Hatchdoor has no way to be told when something is pushed." Anywhere from 1 minute to 1440 minutes (24 hours); the default is the slowest setting, once a day, so a Vault you want to stay current sooner needs a shorter interval set deliberately.
+- **Repository URL**: required for Pull-only/Two-way; not shown for Local history, which has nothing to fetch or push.
+- **Branch** (optional): leave blank to track the remote's default branch.
+- **Folder within the repository** (optional): leave blank to use the repository root as the Vault.
+- **Sign-in**: **No sign-in** for a public repository, or **Access token** for a private one. The token is HTTPS-only, write-only (never shown again once saved), and stored separately from every other credential Hatchdoor holds.
+- **Sync schedule**: how often Hatchdoor checks the remote when you don't sync by hand. Hatchdoor cannot be told when something is pushed, so it has to ask. Anywhere from 1 minute to 1440 minutes (24 hours); the default is the slowest setting, once a day, so a Vault you want to stay current sooner needs a shorter interval set deliberately.
 
-The schedule is measured from the Vault's last completed check and survives a restart: Hatchdoor remembers when each Vault last checked, so restarting or redeploying resumes the countdown instead of starting a fresh one. A Vault that is already past its interval when Hatchdoor starts syncs straight away, and one still inside its interval waits out the remainder rather than checking again. This matters on a deployment that redeploys often — before, a Vault set to check once a day would sync on every restart and never actually reach a scheduled check.
+The schedule is measured from the Vault's last completed check and survives a restart: Hatchdoor remembers when each Vault last checked, so restarting or redeploying resumes the countdown instead of starting a fresh one. A Vault that is already past its interval when Hatchdoor starts syncs straight away, and one still inside its interval waits out the remainder rather than checking again.
 
 Changing the schedule applies to the check the Vault is already waiting on, not just the one after it: shorten a Vault from daily to hourly and its next check moves to an hour after its last one, which may be immediately. Lengthening the schedule leaves the pending check where it is and takes effect from there on, so a Vault never has a check it was about to make pushed further away.
 
-The exception is a Vault that is currently retrying a failure. After a check fails for a reason worth retrying — a remote that was briefly unreachable — Hatchdoor schedules the retry itself, in seconds rather than on your schedule, and shortening the interval deliberately leaves that retry alone rather than making a failing remote be hammered harder. So if you shorten the schedule of a Vault showing `unavailable` and its next check does not move, that is the retry in progress, not the edit being ignored; the new schedule takes over once a check succeeds.
+The exception is a Vault that is currently retrying a failure. After a check fails for a reason worth retrying, such as a remote that was briefly unreachable, Hatchdoor schedules the retry itself, in seconds rather than on your schedule, and shortening the interval deliberately leaves that retry alone rather than making a failing remote be hammered harder. So if you shorten the schedule of a Vault showing `unavailable` and its next check does not move, that is the retry in progress, not the edit being ignored; the new schedule takes over once a check succeeds.
 
 ## Editing an existing Vault's Git settings
 
@@ -62,19 +64,19 @@ Open the Vault from **Settings** and its own page has a **Save Vault** button in
 
 Two kinds of edit behave differently:
 
-- **Ordinary edits** — name, ignored patterns, archive folder, commit identity, sync schedule, or switching between Pull-only and Two-way on the *same* repository — save immediately with **Save Vault**.
-- **Identity changes** — a different folder path, repository URL, branch, or subdirectory — change what the Vault actually points at. For a local folder these fields are always editable directly; for a Git-sourced Vault they're read-only until you select **Edit** to unlock them. Saving one of these shows a confirmation first:
+- **Ordinary edits** (name, ignored patterns, archive folder, commit identity, sync schedule, or switching between Pull-only and Two-way on the *same* repository) save immediately with **Save Vault**.
+- **Identity changes** (a different folder path, repository URL, branch, or subdirectory) change what the Vault actually points at. For a local folder these fields are always editable directly; for a Git-sourced Vault they're read-only until you select **Edit** to unlock them. Saving one of these shows a confirmation first:
 
 > [!note]
-> "This runs as one step: the Vault pauses, the change saves, and the Vault starts back up. It stays out of the sidebar and All Vaults for that moment." Confirming also clears any stored sign-in token, even if you didn't touch it — sign in again afterward if the Vault still needs one. If you're moving into Local history, the disk-growth warning above appears again in the same confirmation.
+> "This runs as one step: the Vault pauses, the change saves, and the Vault starts back up. It stays out of the sidebar and All Vaults for that moment." Confirming also clears any stored sign-in token, even if you didn't touch it, so sign in again afterward if the Vault still needs one. If you're moving into Local history, the disk-growth warning above appears again in the same confirmation.
 
-If the final restart step ever fails, the Vault is left paused and hidden rather than silently broken — a banner appears with a **Try to bring this Vault back** button to retry just that step.
+If the final restart step ever fails, the Vault is left paused and hidden rather than silently broken. A banner appears with a **Try to bring this Vault back** button to retry just that step.
 
 ## If a commit or a sync fails
 
 Every Git-backed Vault has a console on its Settings page. On a Vault with a remote it is headed **Sync** and its button reads **Sync now**; on a Local history Vault it is headed **History** and reads **Commit now**, because there is nothing to sync with. Either way it reports what happened in plain language rather than a code: a rejected sign-in, an unreachable remote, local edits Hatchdoor isn't sure how to reconcile, or unpushed commits sitting on a Pull-only Vault it isn't allowed to push. Every failure sentence says what happened, confirms nothing was lost, and states the one thing that clears it, ending in **Try again**.
 
-One failure belongs to setting the Vault up rather than to running it: a managed checkout that cloned fine but could not be moved into place. The message gives the underlying error, without naming the checkout's path on the server. Before 2.7.0 it said only "could not be installed atomically" and threw the real cause away, and that cause was usually the filesystem, since installing the checkout needs the same single-step file operation a note save needs. If a clone is interrupted, by a restart or a dropped connection, the next attempt clears away what it left behind and clones again; no manual cleanup is needed. See [[How to troubleshoot common problems]].
+One failure belongs to setting the Vault up rather than to running it: a managed checkout that cloned fine but could not be moved into place. The message gives the underlying error. A common cause is the filesystem, since installing the checkout needs the same single-step file swap a note save needs (see [[Install Hatchdoor with Docker Compose#If your notes are on ZFS or a FUSE mount]]). If a clone is interrupted, by a restart or a dropped connection, the next attempt clears away what it left behind and clones again; no manual cleanup is needed. See [[How to troubleshoot common problems]].
 
 A sync with a remote fails rather than hangs: a remote that takes more than 15 seconds to connect, or sends nothing for 120 seconds mid-transfer, is reported as unreachable and retried. A conflict with the remote leaves the checkout exactly as it was before the merge, with no conflict markers in your notes, and a push the remote refuses (a protected branch, a server-side hook) is reported as a failure with the remote's reason rather than as a successful sync. Either failure stays on the Vault's console while Hatchdoor keeps committing your saves locally; a successful commit does not clear it, only a successful sync does. On a Two-way Vault, a conflict can be resolved without access to the server: **Publish my side to a branch** on the Vault's page pushes Hatchdoor's side to a branch on the remote for you to merge there. [[How to troubleshoot common problems]] lists each failure and its fix.
 
