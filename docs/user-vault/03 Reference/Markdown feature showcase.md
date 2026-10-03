@@ -1,10 +1,10 @@
 ---
-tags: [type/reference]
+tags: [type/reference, topic/markdown]
 ---
 
-# Hatchdoor — Markdown Feature Showcase
+# Markdown feature showcase
 
-This note demonstrates Markdown features that Hatchdoor renders. Use it as a quick visual test after changing styling or rendering code.
+This page uses every Markdown feature Hatchdoor renders, so you can see what each one looks like. [[Supported Markdown reference]] explains the syntax and the rules behind it; this page only shows the result. Open it in Help or copy it into a Vault, and you have a quick visual check after changing a theme or a stylesheet.
 
 ## Inline formatting
 
@@ -14,14 +14,14 @@ Raw HTML is not part of the supported Markdown contract. Keep notes portable by 
 
 ## Headings
 
-# Heading level 1
-## Heading level 2
+The page title above is a level 1 heading, and each section on this page is level 2. The rest look like this:
+
 ### Heading level 3
 #### Heading level 4
 ##### Heading level 5
 ###### Heading level 6
 
-Headings receive generated IDs so the table of contents and heading links can target them.
+Every heading gets an ID, which is what lets the table of contents and a heading wikilink jump to it.
 
 ## Lists
 
@@ -56,7 +56,7 @@ Task lists:
 | Mermaid | fenced `mermaid` block | Diagram rendering |
 | Math | `$...$` or `$$...$$` | KaTeX rendering |
 
-Tables scroll horizontally on small screens.
+On a small screen a wide table scrolls sideways instead of breaking the page.
 
 ## Blockquotes
 
@@ -139,28 +139,25 @@ $$
 
 ## Images
 
-Use local Markdown image syntax:
+The manual carries no pictures, so this section shows the syntax only. In a Vault, a local image is written like this:
 
 ```markdown
 ![Alt text](image-file-name.jpg)
 ```
 
-Store images near the note when possible, and use safe filenames with lowercase ASCII letters, numbers, and hyphens.
+Keep the image near the note that uses it, and give it a safe filename: lowercase ASCII letters, numbers and hyphens.
 
 ## PDFs
 
-An ordinary Markdown PDF link is marked as a document and opens in a new tab: [Open the PDF preview sample](pdf-preview-sample.pdf).
-
-The same local attachment can be embedded with Obsidian syntax. It renders an inline, responsive preview with page controls:
-
-![[pdf-preview-sample.pdf]]
+The manual carries no PDFs either. In a Vault, an ordinary Markdown link to a local PDF, such as `[Open the report](report.pdf)`, gets a document marker and opens in a new tab. The Obsidian embed `![[report.pdf]]` instead shows the PDF inside the note, sized to fit, with buttons to move between pages.
 
 ## Wikilinks
 
-- Plain wikilink: [[Hatchdoor — Getting Started]]
-- Aliased wikilink: [[Hatchdoor — Getting Started|start with the guide]]
-- Heading wikilink: [[Hatchdoor — Getting Started#Search]]
-- Intentional broken wikilink: [[Missing Demo Note]]
+- Plain wikilink: [[Connect your agent]]
+- Aliased wikilink: [[Connect your agent|set up your agent]]
+- Heading wikilink: [[Connect your agent#Configure your MCP client]]
+
+A wikilink to a note that does not exist, such as `[[Missing Demo Note]]`, still renders in a Vault, as a link with nowhere to go yet. The manual only links to pages that exist, so it is shown here as code.
 
 ## Horizontal rule
 
@@ -180,9 +177,8 @@ tags: [type/reference]
 ---
 ```
 
-Hatchdoor parses frontmatter and can show properties separately from the note body.
+Hatchdoor reads frontmatter and shows the properties apart from the note body. This page has frontmatter too; Help leaves it out.
 
-## Related
+---
 
-- [[Hatchdoor — Getting Started]]
-- [[Hatchdoor — Starter Vault Organisation]]
+Related: [[Supported Markdown reference]] · [[How to edit notes with the live editor]]

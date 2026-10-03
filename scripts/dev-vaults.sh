@@ -42,8 +42,140 @@ note() {
 }
 
 # ---------------------------------------------------------------------------
+# sample: a small generated Vault, so a fresh clone has content without
+# demo-vaults/. A few linked notes in a PARA-style layout, a callout, a task
+# list, a heading link, a saved query and an embedded PDF.
+# ---------------------------------------------------------------------------
+write_sample_pdf() {
+    # A one-page PDF built by hand. The cross-reference table holds byte
+    # offsets, so measure in bytes, not characters.
+    local out="$1"
+    local LC_ALL=C
+    local -a objects=(
+        "<< /Type /Catalog /Pages 2 0 R >>"
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"
+        "" # object 4, the content stream, is filled in below
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    )
+    local stream="BT /F1 24 Tf 72 700 Td (Hatchdoor dev sample PDF) Tj ET"
+    objects[3]="<< /Length ${#stream} >>
+stream
+${stream}
+endstream"
+    local body="%PDF-1.4
+" offsets=() i
+    for i in "${!objects[@]}"; do
+        offsets+=("${#body}")
+        body+="$((i + 1)) 0 obj
+${objects[$i]}
+endobj
+"
+    done
+    local xref_at="${#body}"
+    body+="xref
+0 $((${#objects[@]} + 1))
+0000000000 65535 f 
+"
+    for i in "${offsets[@]}"; do
+        body+="$(printf '%010d' "$i") 00000 n 
+"
+    done
+    body+="trailer
+<< /Size $((${#objects[@]} + 1)) /Root 1 0 R >>
+startxref
+${xref_at}
+%%EOF
+"
+    printf '%s' "$body" > "$out"
+}
+
+build_sample_vault() {
+    local dest="$1"
+    mkdir -p "$dest"
+
+    note "$dest/README.md" <<'EOF'
+---
+tags: [type/home]
+---
+
+# Sample Vault
+
+A small generated Vault for local development. `scripts/dev-vaults.sh` writes it whenever `demo-vaults/` is not available, so every note here is disposable.
+
+- [[Kitchen renovation]] is an active project.
+- [[Home networking]] is a topic note with a heading link target.
+- [[Project dashboard]] holds a saved query.
+EOF
+
+    note "$dest/20-projects/Kitchen renovation.md" <<'EOF'
+---
+tags: [type/project, area/home]
+status: active
+due: 2026-12-01
+---
+
+# Kitchen renovation
+
+> [!tip]
+> Order the worktop before the cabinets arrive.
+
+- [x] Measure the room
+- [ ] Choose a worktop
+- [ ] Book the electrician
+
+The quote is attached: ![[kitchen-quote.pdf]]
+
+Network points for the new layout follow [[Home networking#Wired backbone]].
+EOF
+    write_sample_pdf "$dest/20-projects/kitchen-quote.pdf"
+
+    note "$dest/10-topics/Home networking.md" <<'EOF'
+---
+tags: [type/topic]
+---
+
+# Home networking
+
+## Wired backbone
+
+Run Cat 6 to every room that has a desk, and keep Wi-Fi for everything else.
+
+## Wi-Fi
+
+One access point per floor, all on the same network name.
+
+Related: [[Kitchen renovation]]
+EOF
+
+    note "$dest/40-reference/Project dashboard.md" <<'EOF'
+---
+tags: [type/reference]
+---
+
+# Project dashboard
+
+<!-- hatchdoor-query: active-projects -->
+```base
+filters:
+  and:
+    - file.hasTag("type/project")
+    - 'status == "active"'
+views:
+  - type: table
+    name: Active projects
+    order:
+      - file.name
+      - due
+```
+EOF
+
+    mkdir -p "$dest/00-inbox" "$dest/90-archive"
+}
+
+# ---------------------------------------------------------------------------
 # healthy: the control. Prefer the local demo vault (richer, ~50 notes) and
-# fall back to the committed starter vault so a fresh clone still works.
+# fall back to the generated sample Vault so a fresh clone still works.
 # ---------------------------------------------------------------------------
 build_healthy() {
     local dest="$vaults_dir/healthy"
@@ -51,7 +183,7 @@ build_healthy() {
     if [ -d "$repo_root/demo-vaults/para" ]; then
         cp -a "$repo_root/demo-vaults/para/." "$dest/"
     else
-        cp -a "$repo_root/docs/starter-vault/." "$dest/"
+        build_sample_vault "$dest"
     fi
 }
 
@@ -75,8 +207,7 @@ build_demo_vault() {
 # ---------------------------------------------------------------------------
 build_readonly() {
     local dest="$vaults_dir/readonly"
-    mkdir -p "$dest"
-    cp -a "$repo_root/docs/starter-vault/." "$dest/"
+    build_sample_vault "$dest"
     chmod -R a-w "$dest"
 }
 
@@ -93,8 +224,7 @@ build_empty() {
 # ---------------------------------------------------------------------------
 build_disabled() {
     local dest="$vaults_dir/disabled"
-    mkdir -p "$dest"
-    cp -a "$repo_root/docs/starter-vault/." "$dest/"
+    build_sample_vault "$dest"
 }
 
 # ---------------------------------------------------------------------------
@@ -649,10 +779,7 @@ EOF
     # Attachments with awkward names.
     local media="$dest/Media"
     mkdir -p "$media"
-    if [ -f "$repo_root/docs/starter-vault/40-reference/pdf-preview-sample.pdf" ]; then
-        cp "$repo_root/docs/starter-vault/40-reference/pdf-preview-sample.pdf" \
-            "$media/dossier — résumé (final) v2.pdf"
-    fi
+    write_sample_pdf "$media/dossier — résumé (final) v2.pdf"
     if [ -d "$repo_root/demo-vaults/para/Media" ]; then
         cp "$repo_root/demo-vaults/para/Media/demo-dashboard.png" "$media/スクリーンショット 2026-08-16 🎉.png" 2>/dev/null || true
     fi

@@ -89,7 +89,7 @@ just docs-freshness
 It reports which user-facing surfaces the branch changed and which notes claim
 to document each one. The surfaces cover MCP tools, the HTTP API, settings,
 Git-backed Vaults, vault lifecycle, search and indexing, layers, attachments,
-Markdown, note mutations, security, starter content, startup, the Web UI, and
+Markdown, note mutations, security, startup, the Web UI, and
 deployment; the authoritative list is the table in the script. It exits
 non-zero, because it cannot tell you whether a note still reads true; only
 reading it can.

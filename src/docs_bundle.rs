@@ -51,6 +51,10 @@ const PAGES: &[(&str, &str)] = &[
         include_str!("../docs/user-vault/01 Get started/Welcome to Hatchdoor.md"),
     ),
     (
+        "02 Guides/How to choose a folder layout.md",
+        include_str!("../docs/user-vault/02 Guides/How to choose a folder layout.md"),
+    ),
+    (
         "02 Guides/How to deploy Hatchdoor with an agent.md",
         include_str!("../docs/user-vault/02 Guides/How to deploy Hatchdoor with an agent.md"),
     ),
@@ -87,8 +91,16 @@ const PAGES: &[(&str, &str)] = &[
         include_str!("../docs/user-vault/02 Guides/How to upgrade Hatchdoor.md"),
     ),
     (
+        "02 Guides/How to work in a Vault as an agent.md",
+        include_str!("../docs/user-vault/02 Guides/How to work in a Vault as an agent.md"),
+    ),
+    (
         "03 Reference/HTTP API reference.md",
         include_str!("../docs/user-vault/03 Reference/HTTP API reference.md"),
+    ),
+    (
+        "03 Reference/Markdown feature showcase.md",
+        include_str!("../docs/user-vault/03 Reference/Markdown feature showcase.md"),
     ),
     (
         "03 Reference/MCP tools reference.md",
