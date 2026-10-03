@@ -10,12 +10,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
-import type { VaultSummary } from "../../types";
+import type { LastAgentConnection, VaultSummary } from "../../types";
 import {
   discardHeldDraft,
   listHeldDrafts,
   type HeldDraft,
 } from "../../lib/writeDrafts";
+import { formatWhen } from "./relativeTime";
 import { SettingsModal } from "./SettingsModal";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
@@ -273,6 +274,7 @@ export function SettingsPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [settings, setSettings] = useState<Setting[]>([]);
+  const [lastAgent, setLastAgent] = useState<LastAgentConnection | null>(null);
   const [active, setActive] = useState<SectionId>("notes");
   const [showDrafts, setShowDrafts] = useState(false);
   const [heldDrafts, setHeldDrafts] = useState<HeldDraft[]>(() =>
@@ -305,8 +307,12 @@ export function SettingsPage({
   const load = async () => {
     const response = await apiFetch("/api/settings");
     if (!response.ok) throw new Error("Settings could not be loaded.");
-    const payload = (await response.json()) as { settings: Setting[] };
+    const payload = (await response.json()) as {
+      settings: Setting[];
+      last_agent?: LastAgentConnection | null;
+    };
     setSettings(payload.settings);
+    setLastAgent(payload.last_agent ?? null);
     setDrafts({});
     setErrors({});
     setRevealed({});
@@ -397,6 +403,7 @@ export function SettingsPage({
       });
       const payload = (await response.json()) as {
         settings?: Setting[];
+        last_agent?: LastAgentConnection | null;
         error?: string;
         fields?: { key: string | null; message: string }[];
         confirmation_required?: Consequence;
@@ -437,6 +444,7 @@ export function SettingsPage({
       }
       const sentKeys = new Set(Object.keys(updates));
       setSettings(payload.settings ?? settings);
+      if (payload.last_agent !== undefined) setLastAgent(payload.last_agent);
       setDrafts((old) => withoutKeys(old, sentKeys));
       setRevealed((old) => withoutKeys(old, sentKeys));
       setReplacing((old) => withoutKeys(old, sentKeys));
@@ -780,6 +788,15 @@ export function SettingsPage({
                   {section.title}
                 </h2>
                 <p className="settings-sec-blurb">{section.blurb}</p>
+                {active === "agents" ? (
+                  <p className="settings-sec-blurb" data-testid="last-agent">
+                    {lastAgent
+                      ? `${lastAgent.name} connected ${
+                          formatWhen(lastAgent.connected_at) ?? "just now"
+                        }`
+                      : "No agent has connected yet"}
+                  </p>
+                ) : null}
               </div>
               {/* A section with nothing to edit is a record, not a form: no dead
                 save button above a plaque holding all its content. */}

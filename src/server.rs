@@ -1078,10 +1078,16 @@ pub async fn run_server() {
     // ADR-40 decision 6: record which version runs before anything below can
     // write a registry, so a registry or settings file on disk still means an
     // install that existed before this start.
+    let instance_state =
+        crate::instance_state::InstanceStateStore::beside_registry(vault_registry.path());
     let instance_versions = Arc::new(record_instance_start(
-        &crate::instance_state::InstanceStateStore::beside_registry(vault_registry.path()),
+        &instance_state,
         vault_registry.path(),
         &settings_path,
+    ));
+    // One store for both sections, so their writes share its lock (#426).
+    let agent_connections = Arc::new(crate::instance_state::AgentConnectionLog::load(
+        instance_state,
     ));
     let legacy_vault_path = match &config.vault_source {
         VaultSource::Local { vault_path } => vault_path.clone(),
@@ -1284,6 +1290,7 @@ pub async fn run_server() {
             VaultSource::Local { vault_path } => vault_path.clone(),
         },
         instance_versions,
+        agent_connections,
         shutdown: Default::default(),
     };
 
@@ -2071,6 +2078,7 @@ mod tests {
             transfer_links: Default::default(),
             vault_mount_root: tmp.path().join("mount"),
             instance_versions: Default::default(),
+            agent_connections: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -2157,6 +2165,7 @@ mod tests {
             transfer_links: Default::default(),
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
+            agent_connections: Default::default(),
             shutdown: Default::default(),
         };
 

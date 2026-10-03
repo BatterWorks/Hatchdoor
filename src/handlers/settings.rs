@@ -23,6 +23,9 @@ pub const MAX_IN_MEMORY_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Serialize)]
 pub struct SettingsResponse {
     pub settings: Vec<SettingResponse>,
+    /// The last MCP client that called a tool, or `None` when no agent has
+    /// connected yet (#426). Read-only: no setting changes it.
+    pub last_agent: Option<crate::instance_state::AgentConnection>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +168,7 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> impl IntoRes
     Json(settings_response(
         &state.runtime_snapshot(),
         state.demo_mode,
+        state.agent_connections.latest(),
     ))
 }
 
@@ -307,7 +311,12 @@ fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Re
         // MCP sessions to re-list. Failure only means nobody is subscribed.
         let _ = state.mcp_tools_changed.send(());
     }
-    Json(settings_response(saved, state.demo_mode)).into_response()
+    Json(settings_response(
+        saved,
+        state.demo_mode,
+        state.agent_connections.latest(),
+    ))
+    .into_response()
 }
 
 fn validation_response(errors: Vec<FieldError>) -> Response {
@@ -369,7 +378,11 @@ fn is_reindex_setting_changed(snapshot: &ConfigSnapshot, key: &str, value: &str)
     })
 }
 
-fn settings_response(snapshot: &ConfigSnapshot, demo_mode: bool) -> SettingsResponse {
+fn settings_response(
+    snapshot: &ConfigSnapshot,
+    demo_mode: bool,
+    last_agent: Option<crate::instance_state::AgentConnection>,
+) -> SettingsResponse {
     let mut settings: Vec<SettingResponse> = SETTINGS
         .iter()
         .filter_map(|&(key, class, kind)| {
@@ -414,7 +427,10 @@ fn settings_response(snapshot: &ConfigSnapshot, demo_mode: bool) -> SettingsResp
         kind: "switch",
     });
 
-    SettingsResponse { settings }
+    SettingsResponse {
+        settings,
+        last_agent,
+    }
 }
 
 fn validate_updates(
@@ -546,6 +562,7 @@ mod tests {
             transfer_links: Default::default(),
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
+            agent_connections: Default::default(),
             shutdown: Default::default(),
         };
         (state, worker, directory)
@@ -785,7 +802,7 @@ mod tests {
         )
         .expect("runtime config")
         .snapshot();
-        let response = settings_response(&snapshot, false);
+        let response = settings_response(&snapshot, false, None);
         let archive = response
             .settings
             .iter()
@@ -805,7 +822,7 @@ mod tests {
     #[test]
     fn demo_mode_is_reported_as_locked_for_a_reason_distinct_from_environment_and_branch() {
         let snapshot = RuntimeConfig::for_tests().snapshot();
-        let response = settings_response(&snapshot, true);
+        let response = settings_response(&snapshot, true, None);
         let demo = response
             .settings
             .iter()
@@ -815,6 +832,23 @@ mod tests {
         assert_ne!(demo.locked, Some("environment"));
         assert_ne!(demo.locked, Some("never"));
         assert_eq!(demo.value.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn the_last_agent_is_reported_or_null_when_none_has_connected() {
+        let snapshot = RuntimeConfig::for_tests().snapshot();
+        let none = serde_json::to_value(settings_response(&snapshot, false, None)).unwrap();
+        assert_eq!(none["last_agent"], serde_json::Value::Null);
+
+        let agent = crate::instance_state::AgentConnection {
+            name: "Claude Code".into(),
+            connected_at: "2026-10-03T09:00:00Z".into(),
+        };
+        let some = serde_json::to_value(settings_response(&snapshot, false, Some(agent))).unwrap();
+        assert_eq!(
+            some["last_agent"],
+            serde_json::json!({"name": "Claude Code", "connected_at": "2026-10-03T09:00:00Z"})
+        );
     }
 
     #[test]
@@ -860,7 +894,7 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].key.as_deref(), Some("HATCHDOOR_PUBLIC_URL"));
 
-        let listed = settings_response(&config.snapshot(), false);
+        let listed = settings_response(&config.snapshot(), false, None);
         assert!(
             listed
                 .settings

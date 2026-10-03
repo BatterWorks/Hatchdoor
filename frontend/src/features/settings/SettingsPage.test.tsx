@@ -163,6 +163,7 @@ function vault(name: string, enabled = true) {
 function mockPage(
   vaults = [vault("Field notes")],
   onPatch?: (updates: Record<string, string>) => void,
+  lastAgent: { name: string; connected_at: string } | null = null,
 ) {
   mockedApiFetch.mockImplementation(async (input, init) => {
     const url = String(input);
@@ -177,7 +178,8 @@ function mockPage(
         ),
       });
     }
-    if (url === "/api/settings") return json({ settings });
+    if (url === "/api/settings")
+      return json({ settings, last_agent: lastAgent });
     if (url === "/api/v1/vaults")
       return json({
         registry_revision: 3,
@@ -313,6 +315,43 @@ describe("SettingsPage", () => {
     expect(
       screen.getByPlaceholderText("https://notes.example.com"),
     ).toBeVisible();
+  });
+
+  it("says no agent has connected yet under Agent access", async () => {
+    mockPage();
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+
+    expect(await screen.findByTestId("last-agent")).toHaveTextContent(
+      "No agent has connected yet",
+    );
+  });
+
+  it("names the last agent and when it connected under Agent access", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
+    mockPage([vault("Field notes")], undefined, {
+      name: "Claude Code",
+      connected_at: twoMinutesAgo,
+    });
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+
+    expect(await screen.findByTestId("last-agent")).toHaveTextContent(
+      "Claude Code connected 2 minutes ago",
+    );
+  });
+
+  it("shows the last agent only under Agent access", async () => {
+    mockPage();
+    renderSettingsPage();
+    expect(
+      await screen.findByRole("heading", { name: /Notes handling/ }),
+    ).toBeVisible();
+    expect(screen.queryByTestId("last-agent")).toBeNull();
   });
 
   it("surfaces a held draft under This server and withdraws once it is discarded", async () => {
