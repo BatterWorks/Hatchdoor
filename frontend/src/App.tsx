@@ -79,6 +79,7 @@ import {
   useHelp,
 } from "./features/help";
 import { SearchDialog, useSearch } from "./features/search";
+import { UpdateBanner } from "./features/update-banner";
 import { WhatsNew } from "./features/whats-new";
 
 function VaultWorkspace({
@@ -806,6 +807,10 @@ function VaultWorkspace({
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {scopeLiveMessage}
       </div>
+
+      {/* The opt-in update check's banner (#425). Signed in only: it reads
+          the settings response, which demo mode does not serve. */}
+      {settingsEnabled ? <UpdateBanner /> : null}
 
       {writeWarnings.length > 0 || writeNotice ? (
         <div className="write-notice" role="status">

@@ -85,6 +85,13 @@ const SECTIONS = [
     blurb: "How large a file may be attached to a note.",
     manual: CONTEXTUAL_HELP.uploadSettings,
   },
+  {
+    id: "updates",
+    number: "04",
+    title: "Updates",
+    blurb: "Whether Hatchdoor tells you when a newer version is out.",
+    manual: CONTEXTUAL_HELP.upgrade,
+  },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
@@ -169,6 +176,12 @@ const COPY: Record<
     label: "Largest file from an assistant",
     help: "The biggest file an assistant can send inline, and the biggest it can download. An assistant uploading through a link is held to the limit above instead.",
     unit: "in megabytes",
+  },
+  HATCHDOOR_UPDATE_CHECK_ENABLED: {
+    section: "updates",
+    label: "Tell me about new releases",
+    help: "Once a day, Hatchdoor sends one request to GitHub's public list of Hatchdoor releases, carrying this server's IP address and the user-agent Hatchdoor, nothing else.",
+    manual: CONTEXTUAL_HELP.updateCheck,
   },
   HATCHDOOR_GIT_SYNC_ENABLED: {
     section: "notes",

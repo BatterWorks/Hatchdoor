@@ -1085,9 +1085,9 @@ pub async fn run_server() {
         vault_registry.path(),
         &settings_path,
     ));
-    // One store for both sections, so their writes share its lock (#426).
+    // One store for every section, so their writes share its lock (#426).
     let agent_connections = Arc::new(crate::instance_state::AgentConnectionLog::load(
-        instance_state,
+        instance_state.clone(),
     ));
     let legacy_vault_path = match &config.vault_source {
         VaultSource::Local { vault_path } => vault_path.clone(),
@@ -1352,6 +1352,19 @@ pub async fn run_server() {
     });
     let scheduler_tick_task =
         crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
+    // ADR-39: the opt-in daily check for a newer release. The task reads the
+    // setting on every tick, so it runs whenever the setting is on; a demo
+    // instance never starts it.
+    let update_check_task = (!config.demo_mode).then(|| {
+        crate::update_check::spawn(
+            crate::update_check::UpdateChecker::new(
+                state.runtime_config.clone(),
+                instance_state,
+                crate::update_check::github_latest_release(),
+            ),
+            state.shutdown.clone(),
+        )
+    });
     // Lets a Vault whose commit failed resume committing on its own once its
     // cooldown elapses, instead of waiting for the operator's next save.
     let commit_cooldown_tick_task = crate::git::spawn_commit_cooldown_tick(
@@ -1403,6 +1416,9 @@ pub async fn run_server() {
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
     commit_cooldown_tick_task.abort();
+    if let Some(task) = update_check_task {
+        task.abort();
+    }
     if let Some(task) = watcher_index_task {
         task.abort();
     }

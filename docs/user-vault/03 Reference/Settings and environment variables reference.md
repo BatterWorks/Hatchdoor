@@ -70,6 +70,12 @@ Above these settings, **Agent access (MCP)** names the last agent that used a to
 | `HATCHDOOR_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | instant | Size limit for an attachment uploaded through the Web UI, an agent's upload link, or `POST /api/v1/vaults/{vault_id}/attachments`. |
 | `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for what an agent moves through MCP's own allowance: `import_attachment` on the way in, and every download on the way out, whether `get_attachment` returns the bytes as base64 or as a download link. |
 
+**Updates**
+
+| Key | Default | Class | Purpose |
+| --- | --- | --- | --- |
+| `HATCHDOOR_UPDATE_CHECK_ENABLED` | `false` | instant | Shown in Settings as **Tell me about new releases**. On, Hatchdoor sends one `GET` a day to `https://api.github.com/repos/BatterWorks/Hatchdoor/releases/latest` with the user-agent `Hatchdoor` and no version, so GitHub sees the server's IP address and nothing else about the instance. A newer release shows a banner with links to its release notes and to [[How to upgrade Hatchdoor]]. A failed request is logged and tried again the next day. Turning it on checks within a minute; turning it off stops the check at once, both without a restart. Never runs in demo mode. Hatchdoor never upgrades itself. |
+
 **Legacy — single-Vault import only**
 
 The following exist solely to import a pre-registry, single-Vault `.env` deployment once; see the fuller explanation already on [[HTTP API reference#Settings|the HTTP API reference's Settings section]]. For any Vault created directly in the registry, the equivalent per-Vault field (`source`, `https_credentials`, `commit_identity`) is the only place the setting lives — none of these override it.

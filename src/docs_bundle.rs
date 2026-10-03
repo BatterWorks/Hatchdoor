@@ -83,6 +83,10 @@ const PAGES: &[(&str, &str)] = &[
         include_str!("../docs/user-vault/02 Guides/How to troubleshoot common problems.md"),
     ),
     (
+        "02 Guides/How to upgrade Hatchdoor.md",
+        include_str!("../docs/user-vault/02 Guides/How to upgrade Hatchdoor.md"),
+    ),
+    (
         "03 Reference/HTTP API reference.md",
         include_str!("../docs/user-vault/03 Reference/HTTP API reference.md"),
     ),

@@ -26,6 +26,10 @@ pub struct SettingsResponse {
     /// The last MCP client that called a tool, or `None` when no agent has
     /// connected yet (#426). Read-only: no setting changes it.
     pub last_agent: Option<crate::instance_state::AgentConnection>,
+    /// The opt-in check for a newer release (ADR-39): whether it is on, when
+    /// it last ran, and the release the update banner offers, if any.
+    /// Read-only; `HATCHDOOR_UPDATE_CHECK_ENABLED` above turns it on.
+    pub update_check: crate::update_check::UpdateCheckStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +151,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_PUBLIC_URL", "instant", "text"),
     ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "instant", "number"),
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
+    ("HATCHDOOR_UPDATE_CHECK_ENABLED", "instant", "switch"),
     // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
     // the schema as first-boot import inputs: #185 deleted the instance-wide
     // lane whose behaviour they drove, and `vault_migration.rs` consumes them
@@ -165,11 +170,26 @@ const SETTINGS: &[(&str, &str, &str)] = &[
 ];
 
 pub async fn get_settings_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.runtime_snapshot();
     Json(settings_response(
-        &state.runtime_snapshot(),
+        &snapshot,
         state.demo_mode,
         state.agent_connections.latest(),
+        update_check_status(&state, &snapshot),
     ))
+}
+
+/// Read from the instance state file beside the registry, where the update
+/// check writes it.
+fn update_check_status(
+    state: &AppState,
+    snapshot: &ConfigSnapshot,
+) -> crate::update_check::UpdateCheckStatus {
+    crate::update_check::status(
+        snapshot,
+        &crate::instance_state::InstanceStateStore::beside_registry(state.vault_registry.path()),
+        &crate::config::version_string(),
+    )
 }
 
 /// A viewer who already authenticated with the web bearer token gains no new
@@ -315,6 +335,7 @@ fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Re
         saved,
         state.demo_mode,
         state.agent_connections.latest(),
+        update_check_status(state, saved),
     ))
     .into_response()
 }
@@ -382,6 +403,7 @@ fn settings_response(
     snapshot: &ConfigSnapshot,
     demo_mode: bool,
     last_agent: Option<crate::instance_state::AgentConnection>,
+    update_check: crate::update_check::UpdateCheckStatus,
 ) -> SettingsResponse {
     let mut settings: Vec<SettingResponse> = SETTINGS
         .iter()
@@ -430,6 +452,7 @@ fn settings_response(
     SettingsResponse {
         settings,
         last_agent,
+        update_check,
     }
 }
 
@@ -802,7 +825,7 @@ mod tests {
         )
         .expect("runtime config")
         .snapshot();
-        let response = settings_response(&snapshot, false, None);
+        let response = settings_response(&snapshot, false, None, Default::default());
         let archive = response
             .settings
             .iter()
@@ -822,7 +845,7 @@ mod tests {
     #[test]
     fn demo_mode_is_reported_as_locked_for_a_reason_distinct_from_environment_and_branch() {
         let snapshot = RuntimeConfig::for_tests().snapshot();
-        let response = settings_response(&snapshot, true, None);
+        let response = settings_response(&snapshot, true, None, Default::default());
         let demo = response
             .settings
             .iter()
@@ -837,18 +860,93 @@ mod tests {
     #[test]
     fn the_last_agent_is_reported_or_null_when_none_has_connected() {
         let snapshot = RuntimeConfig::for_tests().snapshot();
-        let none = serde_json::to_value(settings_response(&snapshot, false, None)).unwrap();
+        let none = serde_json::to_value(settings_response(
+            &snapshot,
+            false,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
         assert_eq!(none["last_agent"], serde_json::Value::Null);
 
         let agent = crate::instance_state::AgentConnection {
             name: "Claude Code".into(),
             connected_at: "2026-10-03T09:00:00Z".into(),
         };
-        let some = serde_json::to_value(settings_response(&snapshot, false, Some(agent))).unwrap();
+        let some = serde_json::to_value(settings_response(
+            &snapshot,
+            false,
+            Some(agent),
+            Default::default(),
+        ))
+        .unwrap();
         assert_eq!(
             some["last_agent"],
             serde_json::json!({"name": "Claude Code", "connected_at": "2026-10-03T09:00:00Z"})
         );
+    }
+
+    #[tokio::test]
+    async fn the_update_check_is_a_switch_and_its_status_is_read_beside_the_registry() {
+        let (state, _worker, _directory) = test_state();
+        let store =
+            crate::instance_state::InstanceStateStore::beside_registry(state.vault_registry.path());
+        store
+            .write_section(
+                "update_check",
+                &serde_json::json!({
+                    "checked_at": "2026-10-03T09:00:00Z",
+                    "latest": {
+                        "version": "99.0.0",
+                        "release_url": "https://github.com/BatterWorks/Hatchdoor/releases/tag/v99.0.0"
+                    }
+                }),
+            )
+            .unwrap();
+        let read = |state: AppState| async move {
+            let response = get_settings_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let off = read(state.clone()).await;
+        assert_eq!(
+            off["update_check"],
+            serde_json::json!({
+                "enabled": false,
+                "checked_at": "2026-10-03T09:00:00Z",
+                "update_available": null
+            }),
+            "nothing is offered while the check is off"
+        );
+        let setting = off["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|setting| setting["key"] == "HATCHDOOR_UPDATE_CHECK_ENABLED")
+            .expect("the setting is editable from Settings (ADR-14)");
+        assert_eq!(setting["kind"], "switch");
+        assert_eq!(setting["value"], "false");
+
+        assert!(
+            validate_updates(
+                &state.runtime_snapshot(),
+                &BTreeMap::from([("HATCHDOOR_UPDATE_CHECK_ENABLED".into(), "true".into())]),
+            )
+            .is_empty()
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_UPDATE_CHECK_ENABLED".to_string(),
+                "true".to_string(),
+            )])
+            .unwrap();
+        let on = read(state).await;
+        assert_eq!(on["update_check"]["enabled"], true);
+        assert_eq!(on["update_check"]["update_available"]["version"], "99.0.0");
     }
 
     #[test]
@@ -894,7 +992,7 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].key.as_deref(), Some("HATCHDOOR_PUBLIC_URL"));
 
-        let listed = settings_response(&config.snapshot(), false, None);
+        let listed = settings_response(&config.snapshot(), false, None, Default::default());
         assert!(
             listed
                 .settings

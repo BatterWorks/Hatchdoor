@@ -1492,6 +1492,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
+ "ureq",
  "walkdir",
  "zip",
 ]

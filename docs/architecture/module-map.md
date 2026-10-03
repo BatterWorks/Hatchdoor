@@ -972,6 +972,49 @@ record stays in memory.
 server::tests::a_start_with`, `node scripts/check-module-map.mjs`, followed by
 the full backend checks.
 
+### Update check
+
+**Status:** Added by #425 (ADR-39).
+
+**Kind:** infrastructure/background capability.
+
+**Owned paths:** `src/update_check.rs`.
+
+**Public contract:** `UPDATE_CHECK_SETTING` (`HATCHDOOR_UPDATE_CHECK_ENABLED`,
+off by default), `CHECK_INTERVAL` (a day), `TICK_INTERVAL` (a minute),
+`FetchLatest` (the seam tests replace: returns the latest release's tag),
+`github_latest_release` (the real request), `UpdateChecker` (`new`, `tick`),
+`spawn`, `status`, and the wire types `UpdateCheckStatus` (`enabled`,
+`checked_at`, `update_available`) and `LatestRelease` (`version`,
+`release_url`). The `update_check` section of `state/instance.json`, written
+through `InstanceStateStore::write_section`: `checked_at` (the last attempt,
+RFC 3339 UTC) and `latest` (the last check's answer, `None` after a failure,
+so a failed check shows no banner). `status` reports `update_available` only while the setting is on and
+the stored version is newer than the running base version.
+
+**Consumers:** runtime composition spawns it with the live configuration,
+the instance state store and `github_latest_release`, never in demo mode;
+`src/handlers/settings.rs` serves `status` as the settings response's
+`update_check`, read from the store beside the registry; the frontend Update
+banner reads that field.
+
+**Consumed dependencies:** Live configuration foundation (the setting, read
+per tick), Instance state (`InstanceStateStore`, `base_version`),
+`config::version_string`, `ureq` (ADR-39, native TLS as `hf-hub` uses it).
+
+**Invariants:** no request at all while the setting is off; at most one
+request a day, plus one at the first tick after the setting is switched on,
+and never more than one a minute even when the state file cannot be written;
+the request is one `GET` to GitHub's latest-release API for this repository
+with the user-agent `Hatchdoor`, no version and nothing about the instance; a
+failure is logged at info and tried again a day later; the release link is
+built from the parsed version on this repository's release page, never taken
+from the response, and a tag that is not three plain numbers is never offered;
+nothing is downloaded or installed. Tests never reach the network.
+
+**Validation:** `cargo test update_check`, `cargo test handlers::settings`,
+followed by the full backend checks.
+
 ### Legacy single-Vault import
 
 **Kind:** infrastructure/migration boundary.
@@ -2962,7 +3005,9 @@ the same shape at release time. `PAGE` (`whats-new`, re-exported as
 `WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite.
 `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
-full refreshed document. MCP enablement and its bearer token validate together
+full refreshed document, plus the read-only `last_agent` (#426) and
+`update_check` (#425, `update_check::status` read from the instance state file
+beside the registry) fields. MCP enablement and its bearer token validate together
 against one prospective snapshot, so an invalid combination saves nothing and
 reports field errors. Its candidate-token and capability-safe secret-reveal
 endpoints are `no-store`; the ordinary settings document never exposes secret
@@ -4373,6 +4418,50 @@ failure never throws and never shows the dialog.
 **Validation:** `npx vitest run src/features/whats-new
 src/App.whats-new.test.tsx`, then full frontend checks.
 
+### Update banner
+
+**Status:** Added by #425 (ADR-39).
+
+**Kind:** product capability.
+
+**Owned paths:**
+
+- `frontend/src/features/update-banner/index.ts`
+- `frontend/src/features/update-banner/UpdateBanner.tsx`
+- `frontend/src/features/update-banner/updateBanner.ts`
+
+Feature tests:
+
+- `frontend/src/features/update-banner/UpdateBanner.test.tsx`
+
+**Public contract:** `frontend/src/features/update-banner/index.ts` exports
+only `UpdateBanner`, a component with no props. Mounted once, it reads the
+`update_check` field of `GET /api/settings` and shows nothing or one line in
+the shell's notice strip: "Hatchdoor <version> is available", a "What's new"
+link to the release page in a new tab and a "How to upgrade" link that opens
+Help at `CONTEXTUAL_HELP.upgrade`. The browser remembers the last version it
+dismissed under the `localStorage` key `hatchdoor_update_dismissed`; a later
+version shows again. It borrows the shell's `.write-notice` styles and Help's
+`.help-link`, so it needs no stylesheet of its own.
+
+**Behaviour:** nothing shows when the check is off, found nothing newer, or
+the request fails. Blocked storage still dismisses for the visit and forgets
+it at the next load.
+
+**Consumed dependencies:** the settings endpoint through `api/api.ts`'s
+`apiFetch`, `lib/storage.ts`'s safe accessors, and `useHelp()` and
+`CONTEXTUAL_HELP` from the Help reader.
+
+**Coordination paths:** `App.tsx` (mounts it above the notice strip in
+`VaultWorkspace` while `settingsEnabled`, so never in demo mode and never
+before discovery has said whether this is a demo).
+
+**Invariants:** never shown in demo mode; the link it opens in a new tab is
+always the server-built GitHub release page.
+
+**Validation:** `npx vitest run src/features/update-banner`, then full
+frontend checks.
+
 ### Note reading and rendering
 
 **Kind:** product capability.
@@ -5028,7 +5117,9 @@ own `types.ts` coordination entry).
 The **Agent access (MCP)** section shows the settings response's read-only
 `last_agent` (`LastAgentConnection` in `frontend/src/types.ts`) as "<name>
 connected <relative time>" through `formatWhen`, or "No agent has connected
-yet" (#426).
+yet" (#426). The **Updates** section holds the
+`HATCHDOOR_UPDATE_CHECK_ENABLED` switch, whose help sentence states exactly
+what the daily request sends (#425); the banner itself is the Update banner's.
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than
