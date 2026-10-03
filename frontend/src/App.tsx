@@ -71,6 +71,7 @@ import {
   useStartupStatus,
   type StartupStatus,
 } from "./startup/useStartupStatus";
+import { HelpProvider, useHelp } from "./features/help";
 import { SearchDialog, useSearch } from "./features/search";
 
 function VaultWorkspace({
@@ -110,6 +111,7 @@ function VaultWorkspace({
   const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
+  const help = useHelp();
 
   const [scope, setScope, scopeFallbackNotice] = useVaultScope();
   const {
@@ -770,6 +772,8 @@ function VaultWorkspace({
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
         onCycleTheme={cycleTheme}
+        helpOpen={help.isOpen}
+        onToggleHelp={() => (help.isOpen ? help.closeHelp() : help.openHelp())}
         onScopeChange={handleScopeChange}
         viewingVaultId={activeNote?.vaultId}
         vaultNoteCounts={vaultNoteCounts}
@@ -1248,7 +1252,7 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
   }, []);
 
   return (
-    <>
+    <HelpProvider demoMode={collection.demoMode} signedOut={authRequired}>
       {authRequired ? (
         <TokenPrompt
           onSubmit={(token) => {
@@ -1277,7 +1281,7 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
           onRetryModelSetup={() => void startup.retryModelSetup()}
         />
       </StartupGate>
-    </>
+    </HelpProvider>
   );
 }
 

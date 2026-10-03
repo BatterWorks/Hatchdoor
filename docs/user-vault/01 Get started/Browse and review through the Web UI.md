@@ -56,6 +56,10 @@ A note's text is always read straight from its file. Its links and backlinks sho
 
 A note can also hold a saved query: a fenced `base` block describing which notes to list, such as every subscription that has not finished yet. The note page draws it as a table of those notes, worked out afresh each time you open the note, and each row links to its note. Click a column heading to sort the table by it; the sort stays on your screen and a reload forgets it. The table is never written into the file, so opening the same note in another Markdown app shows the block itself. [[Supported Markdown reference]] lists what a saved query can say.
 
+Select the **?** button in the top bar to open Help, this manual, beside whatever you are doing. On a phone, Help is the first item of the **…** menu instead, and takes the whole screen. Help shows the manual for the version of Hatchdoor you are running. Its search box finds pages by the words in them, links between pages stay inside Help, and **Open full width** gives a long page the whole screen. Press `Escape` or select **Close** to go back where you were.
+
+Help works before you sign in. The token prompt links straight to [[Install Hatchdoor with Docker Compose#Where do I find my token?|where to find your token]], and to Help itself.
+
 Finish with [[Understand where your data lives]].
 
 

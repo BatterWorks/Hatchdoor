@@ -1,0 +1,272 @@
+/* Help side panel (#417). An overlay: it slides in over the right side below
+   the top bar, and the screen underneath keeps its width. See §Side panel in
+   docs/design/design-system.html. */
+
+.help-panel {
+  position: fixed;
+  top: var(--help-top, 0);
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  width: min(32rem, 40vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  color: var(--ink);
+  border-left: 1px solid var(--rule-strong);
+  box-shadow: var(--shadow-overlay);
+  animation: help-panel-in var(--dur) var(--ease);
+}
+
+.help-panel:focus {
+  outline: none;
+}
+
+/* Signed out, the token prompt is up; Help opens above it. */
+.help-panel.is-above-dialogs {
+  z-index: 1001;
+}
+
+@keyframes help-panel-in {
+  from {
+    transform: translateX(var(--space-8));
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .help-panel {
+    animation: none;
+  }
+}
+
+/* Full width: the whole work area below the top bar, reading column centred. */
+.help-panel.is-full {
+  left: 0;
+  width: auto;
+  border-left: 0;
+  box-shadow: none;
+}
+
+.help-panel.is-full .help-search,
+.help-panel.is-full .help-panel-column {
+  width: 100%;
+  max-width: 46rem;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+}
+
+.help-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3) var(--space-2) var(--space-5);
+  border-bottom: 1px solid var(--rule);
+}
+
+.help-panel-heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 0;
+}
+
+.help-eyebrow,
+.help-start-label {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 84,
+    "wght" 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hot);
+}
+
+.help-crumb {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.help-panel-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.help-panel-tools .icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.help-close-text {
+  display: none;
+}
+
+.help-search {
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Matches .search-input, the system's only documented field, on the panel's
+   paper so it reads as a field. */
+.help-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.help-search-input:focus {
+  outline: none;
+  border-color: var(--hot);
+}
+
+.help-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5) var(--space-12);
+}
+
+.help-note-body h1:first-child {
+  margin-top: 0;
+}
+
+.help-note-body :is(h1, h2, h3, h4, h5, h6) {
+  scroll-margin-top: var(--space-4);
+}
+
+.help-status,
+.help-search-count {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.help-search-results {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-state {
+  margin: var(--space-4) 0 0;
+}
+
+/* Demo mode's Home: installing first. */
+.help-start {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+}
+
+.help-start-label {
+  margin: 0;
+  color: var(--ink);
+}
+
+.help-start-card {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--hot);
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.help-start-card:hover {
+  border-color: var(--ink);
+  border-left-color: var(--hot);
+}
+
+.help-start-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+.help-start-blurb {
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+/* The top-bar trigger while Help is open. */
+.icon-button.help-trigger[aria-expanded="true"] {
+  color: var(--hot);
+  border-color: var(--rule-strong);
+}
+
+/* A text link that is really a button: the token prompt's Help links and
+   the panel's own "go elsewhere" actions. */
+.help-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--hot);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* Phone: a full-screen sheet with a labelled Close; no full-width toggle. */
+@media (max-width: 920px) {
+  .help-panel,
+  .help-panel.is-full {
+    top: 0;
+    left: 0;
+    width: auto;
+    border-left: 0;
+    box-shadow: none;
+  }
+
+  .help-panel-head {
+    padding-left: var(--space-4);
+  }
+
+  .help-panel-tools .help-full-toggle {
+    display: none;
+  }
+
+  .help-panel-tools .help-close {
+    width: auto;
+    gap: var(--space-1);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--rule-strong);
+    font-family: var(--font-display);
+    font-size: 0.85rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .help-close-text {
+    display: inline;
+  }
+
+  .help-search,
+  .help-panel-body {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+}

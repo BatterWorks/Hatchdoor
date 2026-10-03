@@ -1194,8 +1194,9 @@ anywhere, code included; a query that matches nothing returns nothing.
 
 **Consumers:** the MCP `read_docs` and `search_docs` tools
 (`src/mcp/tools/read.rs`), the public manual routes in
-`src/handlers/docs.rs`, and `src/handlers/whats_new.rs`, which reads the
-private What's new page's releases.
+`src/handlers/docs.rs` (which the frontend Help reader reads), and
+`src/handlers/whats_new.rs`, which reads the private What's new page's
+releases.
 
 **Consumed dependencies:** `vault::slugify` for page names and anchors, and
 `cache::parse::{frontmatter_span, parse_fence_marker,
@@ -3929,7 +3930,8 @@ the client and then owned locally.
 **Shared path:** `frontend/src/types.ts`.
 
 **Contract and responsibility:** authenticated/time-bounded fetch, unauthorized
-notification, tokenized asset/download/SSE URLs, error extraction, login prompt,
+notification, tokenized asset/download/SSE URLs, error extraction, login prompt
+(whose "Where do I find my token?" and "Help" links open the Help reader, #417),
 and cross-capability TypeScript representations of backend payloads. A feature
 may own its wire types when all consumers go through that feature's public
 entry point, as Search now does.
@@ -4224,6 +4226,70 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 **Validation:** the feature's `SearchDialog.test.tsx` and `useSearch.test.ts`,
 `App.navigation-search.test.tsx`, and full frontend checks.
 
+### Help reader
+
+**Status:** Added by #417 (ADR-38 decision 3).
+
+**Kind:** product capability.
+
+**Owned paths:**
+
+- `frontend/src/features/help/index.ts`
+- `frontend/src/features/help/HelpProvider.tsx`
+- `frontend/src/features/help/HelpPanel.tsx`
+- `frontend/src/features/help/useHelp.ts`
+- `frontend/src/features/help/helpPages.ts`
+- `frontend/src/features/help/help.css`
+
+Feature tests:
+
+- `frontend/src/features/help/HelpPanel.test.tsx`
+- `frontend/src/features/help/helpPages.test.ts`
+
+**Public contract:** `frontend/src/features/help/index.ts` is the only public
+TS/TSX entry point. `HelpProvider` (props `demoMode`, and `signedOut` while the
+token prompt is up, which lifts the panel above it) owns whether Help is open,
+the page it shows and the pages behind Back, and mounts the panel.
+`useHelp()` returns `{ openHelp(page?, heading?), closeHelp, isOpen }`; outside
+a provider it does nothing. `page` is a manual page name such as
+`guides/how-to-set-up-a-git-backed-vault` (no page opens Home, `index`), and
+`heading` is a heading anchor in the note slug rule; the panel scrolls to it.
+`HELP_PAGES` names the pages other features open Help at. Help CSS is
+integrated through the `App.css` stylesheet aggregation seam.
+
+**Behaviour:** Help is an overlay beside the work (the #417 resolution): fixed
+to the right under the topbar, the screen underneath keeps its width, full
+width covers the work area, and below 920px it is full screen. Escape closes it
+unless a dialog above it owns the key, and focus returns to where it was. Pages
+come from `/docs/<page>.md` and search from `/docs/search`, through plain
+`fetch` with the web token attached when one is stored, never `apiFetch`: a
+401 there means a private page, not a lost session, so it must not raise the
+token prompt. Links resolve against the page's own `/docs/` address and stay
+inside Help; other links open in a new tab. Pages render through
+`createManualMarkdownComponents`, so the manual looks like a note.
+
+**Consumed dependencies:** the public manual routes (`src/handlers/docs.rs`),
+`api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
+`lib/noteHeadings.ts` from Note reading and rendering, and the icons in
+`components/icons.tsx`. It also borrows other modules' CSS classes, so a change
+there reaches Help: the Search dialog's result rows (`.search-results`,
+`.search-group`, `.search-result--primary`, `.result-title`,
+`.result-path-text`, `.result-snippet`), Note reading's `.note-body` prose
+styles, and Shared UI's `.state-block` and `.icon-button`.
+
+**Coordination paths:** `App.tsx` (mounts `HelpProvider` in `AppSession`, wires
+the topbar), `App.css`, `app/AppTopbar.tsx` (the `?` button on wide screens and
+the first `…` menu item on phones), and `components/TokenPrompt.tsx` (its two
+Help links).
+
+**Invariants:** Help never fetches or shows Vault content and calls no
+`/api/` route; it never needs the web token; a `base` block renders as its
+source. Heading ids inside Help carry a `help-` prefix so they never collide
+with the note open underneath.
+
+**Validation:** `npx vitest run src/features/help src/app/AppTopbar.test.tsx
+src/App.startup-auth.test.tsx`, then full frontend checks.
+
 ### Note reading and rendering
 
 **Kind:** product capability.
@@ -4266,7 +4332,10 @@ resolved one is pointed at the asset route, so a root-anchored or bare-name
 image keeps its destination. `resolveAssetTargets` is the uncached form the
 editor asks when choosing a `shortest` attachment path — heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the editable-block component map produced by
-`createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
+`createNoteMarkdownComponents`, the Vault-free `createManualMarkdownComponents`
+(#417: the same callouts, code, tables and headings, a `base` block shown as
+its source, no Vault endpoint, and links left to the caller's `renderLink`),
+consumed by the Help reader, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one
 source line per rendered line for the two unit types addressed per line.
 A note link in a rendered body is a router navigation, not a browser one:
