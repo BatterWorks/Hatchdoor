@@ -210,7 +210,7 @@ export function VaultCreationDialog({
           <span className="settings-row-label">Where is this Vault?</span>
         </span>
         <div
-          className="settings-segmented"
+          className="settings-segmented settings-segmented-stackable"
           role="group"
           aria-label="Where is this Vault?"
         >

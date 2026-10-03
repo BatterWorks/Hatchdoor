@@ -5089,8 +5089,10 @@ closes on Escape (held while the dialog's own Cancel is disabled), and
 returns focus to the opener. It follows `NoteActionsDialog.tsx`'s focus-in,
 Tab-wrap and Escape behaviour and adds what that dialog does not: focus
 return to the opener, pulling stray focus back inside, and focusing the
-dialog itself when it holds no focusable control. While Help is open beside
-it (#430, from the folder picker's link), its backdrop gives up Help's width,
+dialog itself when it holds no focusable control. It portals its backdrop
+onto `document.body` (#448), so a dialog opened from the sticky Settings
+index is not trapped in that index's stacking context. While Help is open
+beside it (#430, from the folder picker's link), its backdrop gives up Help's width,
 Escape closes Help before the dialog, and Tab is not held inside, the What's
 new dialog's rules. A Vault's own page (#338) reads the registry revision
 fresh at the click for Pause, Resume and Disconnect, which carry no form
