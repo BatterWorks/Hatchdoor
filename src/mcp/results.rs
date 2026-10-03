@@ -109,6 +109,48 @@ pub struct ModelChoiceResult {
 }
 
 // ---------------------------------------------------------------------------
+// The bundled manual (ADR-38)
+// ---------------------------------------------------------------------------
+
+/// One manual page's address and title.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DocsPageSummary {
+    /// The page name to pass to `read_docs`.
+    pub name: String,
+    pub title: String,
+}
+
+/// `read_docs`: one manual page as Markdown. Called with no page, it is the
+/// Home page, and `pages` lists every page in the manual.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadDocsResult {
+    pub name: String,
+    pub title: String,
+    /// The page's Markdown, its links to other pages pointing at page names.
+    pub markdown: String,
+    /// Every page in the manual, Home first. Present only on the index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<Vec<DocsPageSummary>>,
+}
+
+/// One `search_docs` match.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SearchDocsHit {
+    /// The page name to pass to `read_docs`.
+    pub name: String,
+    pub title: String,
+    /// A line of the page that matched, cut short when long.
+    pub excerpt: String,
+}
+
+/// `search_docs`: the best-matching manual pages, best first. Empty when
+/// nothing matched.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SearchDocsResult {
+    pub results: Vec<SearchDocsHit>,
+}
+
+// ---------------------------------------------------------------------------
 // Capability report and write receipts owned by the MCP surface
 // ---------------------------------------------------------------------------
 
@@ -418,6 +460,8 @@ output_schemas! {
     "list_note_attachments" => NoteAttachmentsResult,
     "get_attachment" => GetAttachmentResult,
     "get_frontmatter" => GetFrontmatterResult,
+    "read_docs" => ReadDocsResult,
+    "search_docs" => SearchDocsResult,
     "batch" => BatchResult,
     // Management tools
     "create_vault" => CreateVaultResult,
@@ -499,12 +543,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 46,
-            "3 setup + 15 read + 1 batch + 9 management + 18 write tools"
+            total, 48,
+            "3 setup + 15 read + 2 manual + 1 batch + 9 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 46, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 48, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

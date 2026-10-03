@@ -1,7 +1,8 @@
-//! Vault-scoped MCP read tools, plus the eight Vault collection management
-//! tools. These are deliberately thin in-process adapters over the same
-//! shared cores used by HTTP: MCP owns JSON-RPC framing, while scope parsing,
-//! projections, and error shapes stay in the core.
+//! Vault-scoped MCP read tools, the eight Vault collection management
+//! tools, and the two that read the bundled manual. These are deliberately
+//! thin in-process adapters over the same shared cores used by HTTP: MCP owns
+//! JSON-RPC framing, while scope parsing, projections, and error shapes stay
+//! in the core.
 //!
 //! Since #188 no tool here proxies an HTTP handler. Each read parses its
 //! arguments, calls `VaultReadCore`, `VaultSearchCore`, or (for the
@@ -782,6 +783,81 @@ pub(super) async fn list_vaults_tool(
     management_result::<results::ListVaultsResult>(listing)
 }
 
+/// The code `read_docs` answers with when no bundled page has the name asked
+/// for.
+const DOCS_PAGE_NOT_FOUND: &str = "docs_page_not_found";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadDocsArgs {
+    #[serde(default)]
+    page: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchDocsArgs {
+    query: String,
+}
+
+/// The bundled manual (ADR-38): the index with no `page`, otherwise that one
+/// page. It reads nothing but the binary, so it needs no Vault, no index and
+/// no offload.
+pub(super) fn read_docs_tool(arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: ReadDocsArgs = parse("read_docs", arguments)?;
+    let Some(name) = args.page else {
+        let pages = crate::docs_bundle::pages()
+            .iter()
+            .map(|page| results::DocsPageSummary {
+                name: page.name.clone(),
+                title: page.title.clone(),
+            })
+            .collect();
+        return Ok(docs_page_result(crate::docs_bundle::home(), Some(pages)));
+    };
+    let name = super::non_empty_argument("page", name)?;
+    Ok(match crate::docs_bundle::page(&name) {
+        Some(page) => docs_page_result(page, None),
+        None => structured_error(VaultOperationError::new(
+            DOCS_PAGE_NOT_FOUND,
+            format!(
+                "No manual page is named {name:?}. Call read_docs with no page for the list of pages, or search_docs to find one."
+            ),
+            None,
+            false,
+        )),
+    })
+}
+
+fn docs_page_result(
+    page: &crate::docs_bundle::ManualPage,
+    pages: Option<Vec<results::DocsPageSummary>>,
+) -> Value {
+    tool_result(&results::ReadDocsResult {
+        name: page.name.clone(),
+        title: page.title.clone(),
+        markdown: page.markdown.clone(),
+        pages,
+    })
+}
+
+/// Word search over the bundled manual (ADR-38). No embedding model is
+/// involved, so it answers before any model has downloaded.
+pub(super) fn search_docs_tool(arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: SearchDocsArgs = parse("search_docs", arguments)?;
+    let query = super::non_empty_argument("query", args.query)?;
+    Ok(tool_result(&results::SearchDocsResult {
+        results: crate::docs_bundle::search(&query)
+            .into_iter()
+            .map(|hit| results::SearchDocsHit {
+                name: hit.page.name.clone(),
+                title: hit.page.title.clone(),
+                excerpt: hit.excerpt,
+            })
+            .collect(),
+    }))
+}
+
 /// Registry writes go straight to the Vault collection management core, the
 /// same one the HTTP routes call. The create operation is the sole control
 /// without a `vault_id`: the shared registry generates the immutable ID
@@ -1133,6 +1209,8 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         query_notes_tool_schema(),
         evaluate_saved_query_tool_schema(),
         json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"read_docs", "description":"Read Hatchdoor's own manual, the one bundled with this running version. With no page, returns the Home page plus the name and title of every page; with a page name, returns that page as Markdown, its links to other pages pointing at page names you can pass back here. Takes no Vault and works during model setup. A name that matches no page is the structured docs_page_not_found error.", "inputSchema":{"type":"object","properties":{"page":{"type":"string","minLength":1,"description":"A page name from the index or a link, such as guides/how-to-set-up-a-git-backed-vault. Omit it for the index."}},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_docs", "description":"Search Hatchdoor's own manual by plain, case-insensitive word matching: pages whose title matches rank first, then pages whose headings match, then body text. Returns up to five pages, best first, each with its name, title and a matching line; read a page with read_docs. Takes no Vault, uses no search model and works during model setup. A query that matches nothing returns an empty list.", "inputSchema":{"type":"object","properties":{"query":{"type":"string","minLength":1}},"required":["query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
     ]
 }
 

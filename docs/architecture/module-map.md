@@ -1101,6 +1101,51 @@ mode is on, which the redeeming adapter re-reads per request.
 **Validation:** `cargo test transfer_link`, `cargo test transfer` in the server
 router tests, followed by the full backend checks.
 
+### Bundled manual
+
+**Status:** Added by #421 (ADR-38).
+
+**Kind:** product capability/domain core.
+
+**Owned paths:** `src/docs_bundle.rs`.
+
+**Public contract:** `pages()` (Home first, then path order), `home()`,
+`page(name)`, and `search(query)`, which returns at most `SEARCH_RESULTS`
+pages; `ManualPage` (`name`, `title`, `markdown`) and `ManualSearchHit` (`page`, `excerpt`). A page's name is its path under
+`docs/user-vault` with each folder's ordering number dropped and every segment
+put through the note slug rule, so `03 Reference/MCP tools reference.md` is
+`reference/mcp-tools-reference`. `page` ignores case, surrounding slashes and a
+`#heading` fragment. A page's `markdown` has no frontmatter, and every wikilink
+outside code is a Markdown link to a page name, plus a `#heading` anchor in the
+note slug rule when the link names a heading. `search` is case-insensitive word
+matching with a trailing plural `s` folded and common words such as `how` and
+`the` dropped from the query. Pages rank by how many query words their title
+holds, then their headings outside code, then how often the words appear
+anywhere, code included; a query that matches nothing returns nothing.
+
+**Consumers:** the MCP `read_docs` and `search_docs` tools
+(`src/mcp/tools/read.rs`).
+
+**Consumed dependencies:** `vault::slugify` for page names and anchors, and
+`cache::parse::{frontmatter_span, parse_fence_marker}` to strip frontmatter and
+leave code blocks alone.
+
+**Coordination paths:** `src/lib.rs`, `Dockerfile` and `.dockerignore` (the
+image build must see `docs/user-vault` for `include_str!`), and
+`scripts/check-docs-freshness.mjs` (the `bundled-manual` surface, and
+`docs/user-vault/` as shipped content).
+
+**Invariants:** every Markdown file under `docs/user-vault` is bundled and
+nothing else is (`every_manual_page_is_bundled`, `only_markdown_is_bundled`);
+every link on every page resolves to a bundled page and heading
+(`every_link_on_every_page_resolves_to_a_bundled_page`); the manual is never a
+Vault, a registry entry, a cache row or an embedding, so it never appears in
+note search, the tree, stats, the graph or a Vault list; nothing writes to it;
+it needs no Vault, index or model, so it answers during model setup.
+
+**Validation:** `cargo test docs_bundle`, `cargo test mcp`, and
+`docker build` for the image's view of `docs/user-vault`.
+
 ### Folder listing
 
 **Kind:** product capability/adapter (the first filesystem read outside any
@@ -2043,13 +2088,15 @@ to answer that verdict under one acquisition with the publication it labels
 (issue #223). `parse` is currently public and
 also supplies parsing/hash behavior to vault indexing, and its
 `frontmatter_span`/`parse_frontmatter_metadata` parsing to the shared write
-layer's frontmatter merge. It is also the single home of the Markdown
+layer's frontmatter merge, and `frontmatter_span` to the Bundled manual, which
+strips each page's frontmatter. It is also the single home of the Markdown
 code-region scanner: the crate-private `for_non_code_line`, which walks the
 lines Markdown renders as prose, and `parse_fence_marker`, which recognizes a
 fence delimiter. The Vault link reader and the asset-reference rewriter consume
 `for_non_code_line`; the backlink, section, and asset-reference rewriters
 consume `parse_fence_marker` for their own line-rebuilding loops, which must
-preserve line endings and so cannot use the visiting form. It lives here
+preserve line endings and so cannot use the visiting form, as does the Bundled
+manual's wikilink rewrite. It lives here
 because tag extraction, link extraction, and rewriting have to agree on what
 counts as code: an indexer that reads a hashtag inside a fenced block as a tag
 while a rewrite refuses to touch it makes a Vault-wide tag rename look
@@ -3182,7 +3229,15 @@ search model. `list_vaults` gains `recovery_branch` and the
 `publish_recovery` capability through the shared `VaultSummary`. Catalogue
 grows to 46, purely additive. ADR-35 adds `index_turn` to the same summary,
 and the `list_vaults` description says what `running` and `waiting` mean;
-additive.
+additive. #421 (ADR-38) adds `read_docs` and `search_docs`, two read-only tools
+over the Bundled manual that take no Vault. They are dispatched ahead of the
+environment-cleanup and model-setup gates, answer under read or write
+permission alike, and stay out of `READ_OPS` like `list_vaults`, so `batch`
+refuses them as items. `read_docs` answers `ReadDocsResult` (the Home page plus
+every page's name and title with no argument, one page otherwise) and refuses a
+name that matches no page with the structured `docs_page_not_found` error;
+`search_docs` answers `SearchDocsResult`. Both instruction variants name them.
+Catalogue grows to 48, purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -3326,8 +3381,9 @@ read core's own `VaultReads` offload rather than a per-adapter prologue.
 **Consumed dependencies:** `AppState`, the four Vault-qualified cores
 (`VaultReadCore`/`VaultReads`, `VaultSearchCore`, the Vault mutation core, and
 Vault collection management), Vault registry/runtime, model setup, attachment
-limits, the live configuration snapshot bound at each request, and the Legacy
-single-Vault import's recovery state (`AppState.legacy_migration_recovery`,
+limits, the live configuration snapshot bound at each request, the Bundled
+manual (`docs_bundle::{pages, home, page, search}`) for the two docs tools,
+and the Legacy single-Vault import's recovery state (`AppState.legacy_migration_recovery`,
 read through `LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE`,
 `can_start_with_no_vaults`, and `message`) for the environment-cleanup refusal
 (#327). No HTTP

@@ -14,4 +14,6 @@ README.md
 docs
 !docs/
 docs/*
+!docs/user-vault/
+!docs/user-vault/**
 AGENTS.md
