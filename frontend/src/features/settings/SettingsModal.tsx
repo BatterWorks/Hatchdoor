@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 import { useHelp } from "../help";
 
@@ -19,7 +20,12 @@ const FOCUSABLE_SELECTOR =
  *
  * `closeDisabled` holds Escape while the dialog is doing something its own
  * Cancel button is disabled for. A backdrop click deliberately does not
- * close: the creation form holds typed input a stray click would lose. */
+ * close: the creation form holds typed input a stray click would lose.
+ *
+ * The backdrop mounts on `document.body` (#448). Add a Vault opens from the
+ * Settings index, which is `position: sticky` and so a stacking context of
+ * its own: rendered in place, the dialog stacked only within the sidebar and
+ * the main column's buttons painted over it. */
 export function SettingsModal({
   label,
   onClose,
@@ -98,7 +104,7 @@ export function SettingsModal({
     };
   }, []);
 
-  return (
+  return createPortal(
     <div
       className={`settings-modal-back${help.isOpen ? " is-beside-help" : ""}`}
       role="presentation"
@@ -113,6 +119,7 @@ export function SettingsModal({
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

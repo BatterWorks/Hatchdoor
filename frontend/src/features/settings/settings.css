@@ -715,6 +715,32 @@
   color: var(--bg);
 }
 
+/* A group whose labels are too long to sit side by side on a phone (#448):
+   Add a Vault's "Where is this Vault?" needs about 375px on one line, which
+   pushed the dialog past a 390px screen. At 640px and narrower its options stack inside
+   the same bordered box, each still on one line and divided from the next,
+   so they keep reading as one set. Wrapping a label instead would not. */
+@media (max-width: 640px) {
+  /* Both classes, so this ties `.settings-row > :nth-child(2)` on specificity
+     and wins on order: that rule's `justify-self: end` would otherwise hold
+     the stacked group at its own width against the row's right edge. */
+  .settings-segmented.settings-segmented-stackable {
+    display: grid;
+    grid-template-columns: 1fr;
+    justify-self: stretch;
+  }
+
+  .settings-segmented-stackable button {
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+    text-align: left;
+  }
+
+  .settings-segmented-stackable button:last-child {
+    border-bottom: none;
+  }
+}
+
 /* ── the plaque ─────────────────────────────────────────────────────────── */
 
 .settings-rows[data-empty="true"] + .settings-plaque {

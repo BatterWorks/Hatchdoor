@@ -1457,6 +1457,37 @@ describe("VaultSettingsIndex — the creation flow entry point (#153)", () => {
     ).toBeVisible();
   });
 
+  // The index is `position: sticky`, so a dialog left inside it stacks only
+  // within the sidebar and the page's main column paints over it (#448).
+  it("mounts the creation dialog outside the sticky settings index", async () => {
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 0,
+          collection_revision: 0,
+          vaults: [],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+    });
+
+    const { container } = render(
+      <aside className="settings-index">
+        <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />
+      </aside>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add a Vault" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Add a Vault" });
+    expect(container.querySelector(".settings-index")).not.toContainElement(
+      dialog,
+    );
+    expect(dialog.closest(".settings-modal-back")?.parentElement).toBe(
+      document.body,
+    );
+  });
+
   it("renders no Add a Vault affordance in demo mode", async () => {
     mockRoutes({
       "/api/v1/vaults": () =>
