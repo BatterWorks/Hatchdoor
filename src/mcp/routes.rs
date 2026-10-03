@@ -365,6 +365,7 @@ mod tests {
             transfer_links: Default::default(),
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
+            agent_connections: Default::default(),
             shutdown: Default::default(),
         }
     }
@@ -1179,6 +1180,70 @@ mod tests {
             message["result"]["structuredContent"]["note"]["slug"],
             "home"
         );
+    }
+
+    /// #426: a modern client names itself in every request's `_meta`, and the
+    /// call records that name.
+    #[tokio::test]
+    async fn a_modern_tool_call_records_the_client_name() {
+        let (state, _tmp) = test_state();
+        assert_eq!(state.agent_connections.latest(), None);
+        let mut meta = modern_meta("2026-07-28", true);
+        meta["io.modelcontextprotocol/clientInfo"] =
+            json!({"name": "codex-mcp-client", "title": "Codex", "version": "1"});
+        let raw = modern_post(
+            transport(&state),
+            "tools/call",
+            Some("list_vaults"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"_meta": meta, "name":"list_vaults", "arguments":{}}
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(message["result"]["isError"], false, "{message}");
+        let recorded = state.agent_connections.latest().expect("call recorded");
+        assert_eq!(recorded.name, "Codex", "the display title wins over the id");
+        assert!(recorded.connected_at.ends_with('Z'));
+    }
+
+    /// #426: a legacy client names itself once, in `initialize`; the later
+    /// call, which carries no `_meta`, still records that name. The handshake
+    /// alone records nothing: only a tool call counts as a connection.
+    #[tokio::test]
+    async fn a_legacy_initialize_then_call_records_the_client_name() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+        assert_eq!(state.agent_connections.latest(), None);
+        let response = rpc(
+            &app,
+            &session,
+            json!({
+                "jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"list_vaults","arguments":{}}
+            }),
+        )
+        .await;
+        let message = response_message(response).await;
+        assert_eq!(message["result"]["isError"], false, "{message}");
+        assert_eq!(
+            state.agent_connections.latest().map(|record| record.name),
+            Some("golden-test".into())
+        );
+    }
+
+    /// #426: the record is never offered back over MCP itself.
+    #[tokio::test]
+    async fn the_last_agent_is_not_exposed_over_mcp() {
+        let (state, _tmp) = test_state();
+        let _ = call_tool(&state, "list_vaults", json!({})).await;
+        assert!(state.agent_connections.latest().is_some());
+        let listed = tools_list_result(&state).await.to_string();
+        assert!(!listed.contains("last_agent"));
+        assert!(!listed.contains("golden-test"));
     }
 
     /// The `isError: true` leg of the error-semantics matrix, golden-tested at

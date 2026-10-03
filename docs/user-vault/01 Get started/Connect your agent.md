@@ -126,6 +126,8 @@ The agent should begin with `list_vaults`, use `search_notes`, and call
 `get_note` only after it has identified the note. It should retain the returned
 Vault ID; there is no implicit default Vault for MCP work.
 
+To check that the connection worked, open **Settings** → **Agent access (MCP)** in Hatchdoor. Once the agent has used a tool, the section names it and says how long ago, for example "Claude Code connected 2 minutes ago". If it still says "No agent has connected yet", the agent never got through: check the address, and that the client sends the MCP password and not the web token.
+
 Continue to [[Search and change notes with your agent]] when that read-only
 test works.
 

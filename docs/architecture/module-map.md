@@ -108,7 +108,9 @@ that production inventory are still checked for stale paths and duplicates.
   (`runtime_config`), folder listing (`vault_mount_root`, the configured
   `VAULT_PATH`), instance state (`instance_versions`, the version record
   `run_server` takes once from `instance_state` before the legacy import or
-  anything else can write a registry), or process lifecycle (`shutdown`).
+  anything else can write a registry, and `agent_connections`, the last MCP
+  client log loaded from the same store, written by `mcp/adapter.rs` and read
+  by `handlers/settings.rs`), or process lifecycle (`shutdown`).
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -916,7 +918,8 @@ store adds no service, framework, or speculative trait (ADR-02/13).
 
 ### Instance state
 
-**Status:** Added by #424 (ADR-40 decision 6, ADR-42).
+**Status:** Added by #424 (ADR-40 decision 6, ADR-42); the last agent
+connection added by #426.
 
 **Kind:** infrastructure/persistent operational state.
 
@@ -927,19 +930,28 @@ store adds no service, framework, or speculative trait (ADR-02/13).
 `InstanceStateStore` (`new`, `beside_registry`, `path`, `record_start`,
 `section`, `write_section`), `VersionRecord` (`current`, `previous`,
 `fresh_install`, `after_start`, and a `Default` of the running version with no
-history), and `base_version`, which reads `2.8.0 (dev abc123)` as `2.8.0`. The versioned `state/instance.json` format: a
+history), `base_version`, which reads `2.8.0 (dev abc123)` as `2.8.0`,
+`AgentConnection` (`name`, `connected_at` in RFC 3339 UTC),
+and `AgentConnectionLog` (`load`, `latest`, `observe`, `save`, and a
+`Default` that keeps the record in memory only). The versioned `state/instance.json` format: a
 `schema_version` beside named sections, each a JSON value owned by one
 feature. `versions` is this module's own: `current`, `previous` and
 `fresh_install`, all base versions. `previous` moves only when the base
 version changes; with no record, a registry or stored settings on disk means
 an upgrade from `UNRECORDED_UPGRADE_FROM` (2.7.0), with no previous version
 when the running one is 2.7.0 itself, and neither means a fresh install of the
-running version. Other sections belong to the features that
-write them through `write_section` (#426, #425).
+running version. `last_agent` is this module's too: the last MCP client's
+cleaned name and the time of its call. `observe` updates it in memory and
+reports a save as due only when the name changed or a minute has passed since
+the last save. Other sections belong to the features that write them through
+`write_section` (#425).
 
 **Consumers:** the runtime composition root, which records the start before
 the legacy import and holds the record in `AppState::instance_versions`, and
-through it `src/handlers/whats_new.rs`.
+through it `src/handlers/whats_new.rs`; the composition root also loads
+`AppState::agent_connections` from the same store, which
+`src/mcp/adapter.rs` feeds on every tool call and `src/handlers/settings.rs`
+reads.
 
 **Consumed dependencies:** `config::version_string` for the default record.
 
@@ -950,7 +962,11 @@ directory that cannot be written never blocks startup. A file whose
 `schema_version` exceeds this build's is treated as no record and never
 written. Every read-modify-write is serialized by one lock that clones share,
 and the file is replaced by write-to-temporary-then-rename in its own
-directory. It never touches a Vault and never contacts the network.
+directory. It never touches a Vault and never contacts the network. The last
+agent record holds only a client name, cleaned of control and invisible
+formatting characters and cut to 100 characters, and a time: never tool names,
+arguments, results, addresses or tokens. A save that fails is logged and the
+record stays in memory.
 
 **Validation:** `cargo test instance_state`, `cargo test
 server::tests::a_start_with`, `node scripts/check-module-map.mjs`, followed by
@@ -3469,7 +3485,9 @@ read core's own `VaultReads` offload rather than a per-adapter prologue.
 Vault collection management), Vault registry/runtime, model setup, attachment
 limits, the live configuration snapshot bound at each request, the Bundled
 manual (`docs_bundle::{pages, home, page, search}`) for the two docs tools,
-and the Legacy single-Vault import's recovery state (`AppState.legacy_migration_recovery`,
+Instance state's `AgentConnectionLog` (`AppState.agent_connections`), fed the
+client's name from rmcp's `RequestContext::client_info()` on every
+`tools/call` (#426), and the Legacy single-Vault import's recovery state (`AppState.legacy_migration_recovery`,
 read through `LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE`,
 `can_start_with_no_vaults`, and `message`) for the environment-cleanup refusal
 (#327). No HTTP
@@ -3489,6 +3507,9 @@ The MCP bearer token is accepted by the multipart attachment endpoint only while
 MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
 request, and attachment authorization never retains a rotated MCP token.
+Recording the last agent keeps only the client's `title` (or `name` when it
+has none) and the time, never fails or slows the call (a due save runs on a
+blocking task), and the record is never offered back over MCP (#426).
 
 Since #186 every one of the write tools, eighteen since #258, has ADR-19's shape: it
 validates its own arguments and then calls the Vault-qualified mutation core
@@ -4850,6 +4871,11 @@ same-named types, and `VaultSummary`'s `source` field, now typed rather than
 `unknown`; consumed by this section and by
 `frontend/src/app/vaultSlotLogic.ts`, already listed under Vault chrome's
 own `types.ts` coordination entry).
+
+The **Agent access (MCP)** section shows the settings response's read-only
+`last_agent` (`LastAgentConnection` in `frontend/src/types.ts`) as "<name>
+connected <relative time>" through `formatWhen`, or "No agent has connected
+yet" (#426).
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than

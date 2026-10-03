@@ -14,7 +14,7 @@ Read by Compose on the host, not by the Hatchdoor binary — these decide what g
 | --- | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | `/data/vault` | Markdown notes and attachments |
 | `HOST_CACHE_PATH` | `./data/cache` | `/data/cache` | SQLite search cache and `settings.json` |
-| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), and which Hatchdoor version ran before this one (`instance.json`) |
+| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), which Hatchdoor version ran before this one and which agent last connected (`instance.json`) |
 | `HOST_MODELS_PATH` | `./models` | `/models` | Downloaded embedding model and the Gemma-terms acceptance record |
 
 See [[Understand where your data lives]] for what to back up.
@@ -30,7 +30,7 @@ Read once at process startup via `AppConfig::from_env`. Docker Compose fixes mos
 | `HOST` | `127.0.0.1` | The interface the process binds to. The standard Compose file fixes this at `0.0.0.0` inside the container so Docker's port publishing can reach it — see [[The security model]] for why that makes a web token mandatory. |
 | `PORT` | `42824` | The port the process listens on. |
 | `HATCHDOOR_SETTINGS_FILE` | next to `HATCHDOOR_CACHE_DB`, named `settings.json` | Relocates the live-settings file outside the default cache directory. |
-| `HATCHDOOR_VAULT_REGISTRY_PATH` | `/data/state/vaults.json` | Relocates the Vault registry. `just dev-start` points this at `.dev/state/vaults.json` automatically for local development. `vault-runtime.json`, which remembers when each Git-backed Vault last checked its remote, is written beside it. That file is bookkeeping, not configuration: deleting it costs one extra check per Vault at the next start and nothing else. `instance.json`, beside it too, remembers the version that ran before the current one. Deleting it makes the next start count as an upgrade from 2.7.0, or as a fresh install when there is no Vault list and no stored settings. |
+| `HATCHDOOR_VAULT_REGISTRY_PATH` | `/data/state/vaults.json` | Relocates the Vault registry. `just dev-start` points this at `.dev/state/vaults.json` automatically for local development. `vault-runtime.json`, which remembers when each Git-backed Vault last checked its remote, is written beside it. That file is bookkeeping, not configuration: deleting it costs one extra check per Vault at the next start and nothing else. `instance.json`, beside it too, remembers the version that ran before the current one and the last agent that connected over MCP, with when. Deleting it makes the next start count as an upgrade from 2.7.0, or as a fresh install when there is no Vault list and no stored settings, and Settings says no agent has connected until one calls again. |
 
 ## Web access (environment-only)
 
@@ -60,6 +60,8 @@ These live in `settings.json`, not `.env` — leave them unset in `.env` to mana
 | `HATCHDOOR_MCP_BEARER_TOKEN` | unset | instant | The MCP password, required even for read-only access — see [[The security model]]. Enabling `HATCHDOOR_MCP_ENABLED` without this set is a startup validation error if pinned in `.env`. |
 | `HATCHDOOR_MCP_ALLOWED_ORIGINS` | `http://127.0.0.1,http://localhost` | instant | Origin allow-list checked on every MCP request, as a defense against DNS-rebinding attacks. Mainly relevant to a browser-based MCP client, not a CLI agent. |
 | `HATCHDOOR_PUBLIC_URL` | unset | instant | The address people and agents reach this server at, such as `https://notes.example.com`, shown in Settings as **Public address**. Transfer links, which let an agent download or upload a file with no token, are built on it (see [[The security model#Transfer links]]). When set it always wins. Unset, links use the address the agent reached the server on, as a proxy reports it in `Forwarded` or `X-Forwarded-Proto`/`X-Forwarded-Host`, else the request's own `http://` and `Host`. Set it when a proxy sends none of those headers or serves Hatchdoor under a path. Must be an absolute `http://` or `https://` address without a query; a trailing slash is dropped. |
+
+Above these settings, **Agent access (MCP)** names the last agent that used a tool and how long ago, or says "No agent has connected yet". It is not a setting: Hatchdoor records it on its own and keeps only the name the agent gives itself and the time.
 
 **Uploads**
 

@@ -1227,6 +1227,7 @@ pub(crate) mod test_support {
             transfer_links: Default::default(),
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
+            agent_connections: Default::default(),
             shutdown: Default::default(),
         };
         (state, worker, directory)

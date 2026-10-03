@@ -73,6 +73,9 @@ pub struct AppState {
     /// Which versions this instance has run, recorded once at startup
     /// (`instance_state`, ADR-40 decision 6).
     pub instance_versions: Arc<crate::instance_state::VersionRecord>,
+    /// The last MCP client that called a tool, and when (#426). Written by the
+    /// MCP adapter, read by the settings response.
+    pub agent_connections: Arc<crate::instance_state::AgentConnectionLog>,
     /// Fired once when the process starts shutting down. The HTTP server
     /// stops accepting on it, and every response that would otherwise stay
     /// open forever ends on it (#353).

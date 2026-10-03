@@ -515,3 +515,10 @@ export type MermaidApi = {
   }) => void;
   render: (id: string, chart: string) => Promise<{ svg: string }>;
 };
+
+/** The last MCP client that called a tool, from the settings response (#426).
+ * `connected_at` is RFC 3339. Only the name and time are ever recorded. */
+export type LastAgentConnection = {
+  name: string;
+  connected_at: string;
+};

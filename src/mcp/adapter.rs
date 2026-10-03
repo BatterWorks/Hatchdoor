@@ -58,6 +58,28 @@ impl HatchdoorMcpHandler {
         let snapshot = self.state.runtime_snapshot();
         AppState::runtime_mcp_config(&snapshot)
     }
+
+    /// Remember which client called and when (#426). `client_info` reads the
+    /// request's own `_meta` on the modern revision and the `initialize`
+    /// handshake on a legacy session. Only the name and time are kept, and a
+    /// save that fails is logged by the log itself, never returned to the
+    /// caller.
+    fn record_agent_connection(&self, context: &RequestContext<RoleServer>) {
+        let name = context
+            .client_info()
+            .map(|client| {
+                client
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or(client.name)
+            })
+            .unwrap_or_default();
+        let log = &self.state.agent_connections;
+        if log.observe(&name, std::time::SystemTime::now()) {
+            let log = Arc::clone(log);
+            tokio::task::spawn_blocking(move || log.save());
+        }
+    }
 }
 
 /// The `scheme://host:port` the client reached this MCP endpoint on, which
@@ -347,6 +369,7 @@ impl ServerHandler for HatchdoorMcpHandler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        self.record_agent_connection(&context);
         let mut config = self.config().map_err(internal_config_error)?;
         config.request_origin = context
             .extensions
