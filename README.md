@@ -188,6 +188,15 @@ workstreams and where each one stands.
 
 ## Quick Start With Docker
 
+Have an AI agent with a terminal, such as Claude Code or Codex? Give it this
+one line and it installs Hatchdoor for you, asking a few questions first:
+
+```text
+Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
+```
+
+To do it by hand, follow the steps below.
+
 ### 1. Requirements
 
 You need:

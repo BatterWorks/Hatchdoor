@@ -23,6 +23,7 @@
 ### Changed
 - Hatchdoor no longer writes starter notes into a new Vault. Creating a Vault on an empty folder, through Settings, the API or an agent, now leaves the folder empty, and so does a first start on an empty `VAULT_PATH`. Notes seeded by earlier versions stay where they are; nothing in an existing Vault is changed or deleted. The Docker image no longer carries the starter notes. [#428]
 - The manual's getting-started pages, guides and concept pages are rewritten for people new to Hatchdoor. They lead with what you want to do and what to click, use the words people search for when stuck (token, password, sync, not showing up), and describe the 2.8.0 first run: no Vaults until you add one, the setup checklist, the folder picker, Help and What's new. The troubleshooting guide gains a list of symptoms and a section for notes that are not showing up, the install guide now says that Gemma uses less memory than Nomic, and asides about Hatchdoor's internals are gone. Reference pages are unchanged. [#432]
+- The agent deploy guide, served at `/docs/deploy.md`, is rewritten so a beginner can install Hatchdoor by giving their agent one line: "Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me". The agent checks for Docker, asks every question once (which computer, where the notes are, this computer or the home network, read only or changes, Gemma or Nomic, and on Linux whether it may install Docker), then installs, creates the Vault through the HTTP API, connects itself read-only with its own MCP token, proves a search works and hands over the web address and web token. It never offers internet access, never answers the model licence for you, keeps MCP settings out of `.env` so writes can still be allowed in Settings, and writes tokens only to `.env`, Hatchdoor's settings and its own client config. The guide also stops saying that declining Gemma saves memory. The README and the manual's Home page carry the one-line prompt. [#433]
 
 [#417]: https://github.com/BatterWorks/Hatchdoor/issues/417
 [#418]: https://github.com/BatterWorks/Hatchdoor/issues/418
@@ -39,6 +40,7 @@
 [#430]: https://github.com/BatterWorks/Hatchdoor/issues/430
 [#431]: https://github.com/BatterWorks/Hatchdoor/issues/431
 [#432]: https://github.com/BatterWorks/Hatchdoor/issues/432
+[#433]: https://github.com/BatterWorks/Hatchdoor/issues/433
 
 ## v2.7.0 - 2026-10-02
 
