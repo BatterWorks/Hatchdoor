@@ -23,6 +23,11 @@ const FOLDER_CODES = new Set([
 export const CONTEXTUAL_HELP = {
   /** The "No Vaults Yet" screen. */
   noVaults: { page: "get-started/connect-your-first-vault" },
+  /** Add a Vault's folder picker: a folder outside the Vault mount (#430). */
+  folderOutsideMount: {
+    page: "get-started/connect-your-first-vault",
+    heading: "add-a-folder-hatchdoor-cannot-see-yet",
+  },
   /** The workspace could not load the Vault list. */
   vaultsUnavailable: {
     page: TROUBLESHOOTING,

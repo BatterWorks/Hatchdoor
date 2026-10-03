@@ -914,6 +914,26 @@
   .whats-new-demo .wn-link { color: inherit; text-decoration: underline; text-decoration-color: var(--hot); text-underline-offset: 3px; }
   .whats-new-demo .wn-link::after { content: "\00a0\2192"; }
   .whats-new-demo .wn-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--rule); }
+  /* §36 folder picker */
+  .folder-picker-demo { width: min(470px, 100%); display: grid; gap: var(--space-2); color: var(--ink); }
+  .folder-picker-demo .fpd-box { border: 1px solid var(--rule-strong); background: var(--paper); }
+  .folder-picker-demo .fpd-crumbs { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 0.76rem; }
+  .folder-picker-demo .fpd-crumbs a { color: var(--hot); }
+  .folder-picker-demo .fpd-crumbs i { color: var(--muted); font-style: normal; }
+  .folder-picker-demo ul { list-style: none; margin: 0; padding: 0; }
+  .folder-picker-demo li { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--rule); }
+  .folder-picker-demo li:last-child { border-bottom: 0; }
+  .folder-picker-demo .fpd-row { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-2); padding: var(--space-2) var(--space-3); border-left: 3px solid transparent; font-size: 0.88rem; }
+  .folder-picker-demo .fpd-row.is-on { background: var(--hot-soft); border-left-color: var(--hot); }
+  .folder-picker-demo .fpd-row.is-off { color: var(--muted); }
+  .folder-picker-demo .fpd-this { font-style: italic; }
+  .folder-picker-demo .fpd-count { margin-left: auto; font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted); }
+  .folder-picker-demo .fpd-badge { font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 var(--space-1); border: 1px solid var(--rule-strong); color: var(--ink-soft); }
+  .folder-picker-demo .fpd-open { width: 2.5rem; display: grid; place-items: center; border-left: 1px solid var(--rule); color: var(--ink-soft); font-size: 1.2rem; }
+  .folder-picker-demo .fpd-note { flex-basis: 100%; padding: 0 var(--space-3) var(--space-2); font-size: 0.8rem; color: var(--warn-fg); }
+  .folder-picker-demo .fpd-picked { margin: 0; font-size: 0.82rem; }
+  .folder-picker-demo code { font-family: var(--font-mono); font-size: 0.76rem; }
+  .folder-picker-demo .fpd-more { color: var(--ink-soft); font-size: 0.82rem; text-decoration: underline; }
 
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Note page
@@ -1799,6 +1819,7 @@
     <a href="#menu">Popover menu</a>
     <a href="#side-panel">Side panel (Help)</a>
     <a href="#whats-new">What&rsquo;s new pop-up</a>
+    <a href="#folder-picker">Folder picker</a>
 
     <h3>Editing</h3>
     <a href="#editing">Inline editing</a>
@@ -3515,6 +3536,43 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">features/whats-new/WhatsNew.tsx</span><span class="key">features/whats-new/whats-new.css</span>
         <span class="key">.modal-backdrop.whats-new-backdrop</span><span class="key">.whats-new-backdrop.is-beside-help</span><span class="key">.modal-panel.whats-new</span><span class="key">.whats-new-head</span><span class="key">.help-eyebrow</span><span class="key">.whats-new-title</span><span class="key">.whats-new-sub</span><span class="key">.whats-new-body</span>
         <span class="key">.whats-new-action</span><span class="key">.whats-new-action-label</span><span class="key">.whats-new-release-head</span><span class="key">.whats-new-date</span><span class="key">.whats-new-list</span><span class="key">.whats-new-version-tag</span><span class="key">.help-link.whats-new-link</span><span class="key">.whats-new-foot</span>
+      </div>
+    </section>
+
+    <section class="doc-section" id="folder-picker">
+      <div class="doc-section-num">§36</div>
+      <h2>Folder picker</h2>
+      <p class="blurb"><b>Add a Vault lists the folders Hatchdoor can see, one level at a time</b> (#430). It replaces the typed folder path as the default way to choose a local folder, and it is a component of its own so the first-run checklist can show it outside the dialog. It spans the dialog&rsquo;s full width, because a list of names and counts does not fit the <a href="#settings">Settings</a> row&rsquo;s 21.5rem control column.</p>
+
+      <div class="stage">
+        <div class="folder-picker-demo">
+          <div class="fpd-box">
+            <div class="fpd-crumbs"><a href="#folder-picker">vault</a><i>/</i><span>Work</span></div>
+            <ul>
+              <li><span class="fpd-row"><span class="fpd-this">Use Work</span><span class="fpd-count">1,280 notes</span></span></li>
+              <li><span class="fpd-row"><span>Clients</span><span class="fpd-count">310 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
+              <li><span class="fpd-row is-off"><span>Recipes</span><span class="fpd-badge">Already a Vault</span><span class="fpd-count">86 notes</span></span><span class="fpd-note">Recipes is already the Vault <b>Kitchen</b>. Pick another folder.</span></li>
+              <li><span class="fpd-row is-on"><span>Projects</span><span class="fpd-count">at least 10,000 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
+            </ul>
+          </div>
+          <p class="fpd-picked">Folder <code>/data/vault/Work/Projects</code></p>
+          <span class="fpd-more">My folder isn&rsquo;t here</span>
+          <span class="fpd-more">Type a path instead</span>
+        </div>
+      </div>
+
+      <p class="blurb"><b>A bordered box holds a mono trail and the rows.</b> The trail is the mount&rsquo;s last segment, then each folder opened, separated by muted slashes; every step but the current one is a <span class="key">--hot</span> underlined link back up. The first row, in italics, picks the folder currently open and names it (<i>Use Work</i>). Each other row is one button with the name, an optional <b>Already a Vault</b> badge (mono, uppercase, a <span class="key">--rule-strong</span> border, no radius) and the note count in muted mono on the right; a folder with subfolders adds a separate square <b>&rsaquo;</b> button on a <span class="key">--rule</span> divider that opens it. The list scrolls past 16rem.</p>
+
+      <p class="blurb"><b>The picked row takes the selection treatment</b>: <span class="key">--hot-soft</span> fill and a 3px <span class="key">--hot</span> left edge, the explorer&rsquo;s own. Below the box one line names the picked path in mono. A row that is already a Vault is muted and refuses the click with a <span class="key">--warn-fg</span> line under it naming the Vault. <b>Counts</b> read &ldquo;no notes&rdquo;, &ldquo;1 note&rdquo;, &ldquo;1,280 notes&rdquo;, or &ldquo;at least 10,000 notes&rdquo; when counting stopped early. While the next level loads, the current one stays on screen with a muted &ldquo;Looking for folders&hellip;&rdquo; line, so the trail keeps working.</p>
+
+      <p class="blurb"><b>Two quiet text links sit under the list</b>, underlined in <span class="key">--ink-soft</span>: <i>My folder isn&rsquo;t here</i> opens a <a href="#settings">.settings-notice</a> explaining that Hatchdoor only sees the folders shared with it at install, with Help&rsquo;s <span class="key">.help-link</span> and &ldquo;Or ask your agent to add it.&rdquo; <i>Type a path instead</i> swaps the picker for the original Folder path row, which has <i>Pick from the list instead</i> under it. <b>When the mount holds no notes</b>, a dashed <span class="key">--rule-strong</span> panel titled &ldquo;No notes found yet&rdquo; in the display face sits above the list, with the same Help link and agent line and a <i>Look again</i> button; the list stays pickable so an empty Vault can still be started. When the mount does not exist the panel stands alone. A failed listing shows <span class="key">.settings-notice-err</span> with <i>Try again</i>.</p>
+
+      <p class="blurb"><b>Help opens beside the dialog, not over it.</b> The picker&rsquo;s Help link is the first inside a Settings dialog, so the shared shell follows the What&rsquo;s new rules from <a href="#whats-new">§35</a>: while Help is open the backdrop gives up Help&rsquo;s width (<span class="key">.settings-modal-back.is-beside-help</span>, <span class="key">right: min(32rem, 40vw)</span> and <span class="key">z-index: 45</span>, under <span class="key">.help-panel</span>&rsquo;s 50), Escape closes Help before the dialog, and Tab is no longer held inside. Below 920px Help is full screen and covers the dialog until closed.</p>
+
+      <div class="tag-row">
+        <span class="key">features/settings/FolderPicker.tsx</span><span class="key">features/settings/settings.css</span>
+        <span class="key">.folder-picker-field</span><span class="key">.folder-picker</span><span class="key">.folder-picker-box</span><span class="key">.folder-picker-crumbs</span><span class="key">.folder-picker-crumb</span><span class="key">.folder-picker-crumb-step</span><span class="key">.folder-picker-sep</span><span class="key">.folder-picker-list</span><span class="key">.folder-picker-item</span><span class="key">.folder-picker-row</span><span class="key">.folder-picker-row-this</span><span class="key">.folder-picker-name</span>
+        <span class="key">.folder-picker-badge</span><span class="key">.folder-picker-count</span><span class="key">.folder-picker-open</span><span class="key">.folder-picker-row-note</span><span class="key">.folder-picker-picked</span><span class="key">.folder-picker-status</span><span class="key">.folder-picker-more</span><span class="key">.folder-picker-note</span><span class="key">.folder-picker-empty</span><span class="key">.settings-modal-back.is-beside-help</span>
       </div>
     </section>
 

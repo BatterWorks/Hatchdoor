@@ -1,5 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 
+import { useHelp } from "../help";
+
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -10,6 +12,10 @@ const FOCUSABLE_SELECTOR =
  * Shift+Tab stay inside it, Escape closes it, and focus returns to whatever
  * opened it. `aria-modal` tells assistive tech the rest of the page is inert,
  * so keyboard focus must not be able to walk out into it.
+ *
+ * Help can open beside it from a link inside (#430). While it is open, the
+ * dialog makes room for it, Escape closes Help first, and Tab is not held
+ * inside the dialog, since Help is not modal: the What's new dialog's rules.
  *
  * `closeDisabled` holds Escape while the dialog is doing something its own
  * Cancel button is disabled for. A backdrop click deliberately does not
@@ -28,6 +34,8 @@ export function SettingsModal({
   children: ReactNode;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const help = useHelp();
+  const helpRef = useRef(help);
   // Read through refs so a parent re-render (a new `onClose` closure every
   // time) never re-runs the effect below and steals focus back to the first
   // control mid-typing.
@@ -36,6 +44,7 @@ export function SettingsModal({
   useEffect(() => {
     onCloseRef.current = onClose;
     closeDisabledRef.current = closeDisabled;
+    helpRef.current = help;
   });
 
   useEffect(() => {
@@ -56,10 +65,11 @@ export function SettingsModal({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (!closeDisabledRef.current) onCloseRef.current();
+        if (helpRef.current.isOpen) helpRef.current.closeHelp();
+        else if (!closeDisabledRef.current) onCloseRef.current();
         return;
       }
-      if (event.key !== "Tab") return;
+      if (event.key !== "Tab" || helpRef.current.isOpen) return;
       const items = focusable();
       if (items.length === 0) {
         event.preventDefault();
@@ -89,7 +99,10 @@ export function SettingsModal({
   }, []);
 
   return (
-    <div className="settings-modal-back" role="presentation">
+    <div
+      className={`settings-modal-back${help.isOpen ? " is-beside-help" : ""}`}
+      role="presentation"
+    >
       <div
         ref={dialogRef}
         className={className ? `settings-modal ${className}` : "settings-modal"}

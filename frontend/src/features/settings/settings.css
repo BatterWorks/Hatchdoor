@@ -825,6 +825,22 @@
   padding: 1.2rem 1.3rem;
 }
 
+/* Help open beside a Settings dialog (#430): the backdrop gives up Help's
+   width and drops under Help's layer, as the What's new dialog's does. The
+   width and layer follow .help-panel in features/help/help.css
+   (min(32rem, 40vw), z-index 50); below 920px Help is full screen and covers
+   the dialog until it closes. */
+.settings-modal-back.is-beside-help {
+  right: min(32rem, 40vw);
+  z-index: 45;
+}
+
+@media (max-width: 920px) {
+  .settings-modal-back.is-beside-help {
+    right: 0;
+  }
+}
+
 /* The creation flow (#153) has more rows than the plain confirmation
    dialogs this class is otherwise used for, so it alone scrolls internally
    rather than overflowing the viewport on short screens. */
@@ -917,4 +933,228 @@
 .settings-draft-actions {
   justify-content: flex-end;
   margin: 0.8rem 0 0;
+}
+
+/* ── folder picker (#430) ───────────────────────────────────────────────── */
+/* Add a Vault's folder list: one folder of the Vault mount at a time, with a
+   trail back up. Rules are scoped under `.folder-picker` because the dialog
+   renders inside the Settings index, whose `nav` and the modal's `p` rules
+   would otherwise reach in. See design-system.html §36. */
+.folder-picker-field {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.folder-picker-field > .settings-row {
+  padding: 0;
+  border-bottom: 0;
+}
+
+.folder-picker-field .settings-row-help {
+  max-width: none;
+}
+
+.folder-picker {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.folder-picker-box {
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+}
+
+.folder-picker .folder-picker-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
+.folder-picker-crumb-step {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.folder-picker-crumb {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--hot);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.folder-picker-sep {
+  color: var(--muted);
+}
+
+.folder-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.folder-picker-item {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--rule);
+}
+
+.folder-picker-item:last-child {
+  border-bottom: 0;
+}
+
+.folder-picker-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.88rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-picker-row:hover {
+  background: var(--paper-2);
+}
+
+.folder-picker-row[aria-pressed="true"] {
+  background: var(--hot-soft);
+  border-left-color: var(--hot);
+}
+
+.folder-picker-row[aria-disabled="true"] {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.folder-picker-name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.folder-picker-row-this .folder-picker-name {
+  font-style: italic;
+}
+
+.folder-picker-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.folder-picker-badge {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 0.25rem;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-soft);
+}
+
+.folder-picker-open {
+  width: 2.5rem;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.folder-picker-open:hover {
+  color: var(--hot);
+}
+
+.folder-picker .folder-picker-row-note {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0 0.75rem 0.55rem;
+  font-size: 0.8rem;
+  color: var(--warn-fg);
+}
+
+.folder-picker .folder-picker-picked,
+.folder-picker .folder-picker-status {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.folder-picker .folder-picker-status {
+  color: var(--muted);
+}
+
+.folder-picker code {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.folder-picker-more {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.82rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.folder-picker-more:hover {
+  color: var(--hot);
+}
+
+.folder-picker .folder-picker-note {
+  margin: 0;
+}
+
+.folder-picker .folder-picker-note p,
+.folder-picker .folder-picker-empty p {
+  margin: 0 0 0.5rem;
+}
+
+.folder-picker .folder-picker-note p:last-child {
+  margin-bottom: 0;
+}
+
+.folder-picker-empty {
+  display: grid;
+  justify-items: start;
+  border: 1px dashed var(--rule-strong);
+  padding: 1rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.folder-picker .folder-picker-empty-title {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 620;
+  font-size: 0.95rem;
 }
