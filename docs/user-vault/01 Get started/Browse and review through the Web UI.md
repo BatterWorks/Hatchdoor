@@ -64,6 +64,8 @@ Where you might get stuck, a **How does this work?** link opens Help at the sect
 
 After an upgrade, the first time you open Hatchdoor in a browser, a **What's new** dialog lists the highlights of every release since that browser last looked, newest first. Anything you must do because of the upgrade is pinned at the top under **Action needed**. A highlight's link opens Help at the page that explains it, beside the dialog, and **Full changelog** opens [[What's new]]. Select **Got it** or press `Escape` and that browser does not show it again until the next upgrade. Each browser keeps its own record, so a phone and a laptop each show it once. A fresh install never shows it, and neither does a browser that blocks site data, since it could not remember that you had seen it.
 
+If you turned on **Tell me about new releases** in **Settings** → **Updates**, a line at the top of the page says when a newer Hatchdoor is out, with a **What's new** link to its release notes and a **How to upgrade** link to [[How to upgrade Hatchdoor]]. Close it with **×** and that browser leaves it closed until the next release.
+
 Finish with [[Understand where your data lives]].
 
 
