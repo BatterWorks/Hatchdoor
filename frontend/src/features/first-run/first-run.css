@@ -1,0 +1,250 @@
+/* First-run checklist (#419): its own page in the note pane. Design system
+   §37. Tokens from base.css only. */
+
+.first-run {
+  max-width: 46rem;
+  margin: var(--space-6) auto;
+  padding: var(--space-6);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+.first-run p {
+  margin: 0 0 var(--space-2);
+  line-height: 1.5;
+}
+
+.first-run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.first-run-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.first-run-progress,
+.first-run-step-status {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.first-run-steps {
+  list-style: none;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.first-run-step {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.first-run-step-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.first-run-mark {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 1px solid var(--rule-strong);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.first-run-step[data-state="open"] .first-run-mark {
+  border-color: var(--hot);
+  color: var(--hot);
+}
+
+.first-run-step[data-state="done"] .first-run-mark {
+  background: var(--hot);
+  border-color: var(--hot);
+  color: var(--bg);
+}
+
+.first-run-step-title {
+  flex: 1;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.first-run-step[data-state="done"] .first-run-step-title {
+  color: var(--ink-soft);
+}
+
+.first-run-step-open {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.first-run-step-open:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--hot);
+  text-underline-offset: 3px;
+}
+
+.first-run-step-summary,
+.first-run-step-body {
+  margin: var(--space-2) 0 0 calc(1.6rem + var(--space-3));
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.first-run-step-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.first-run-step-body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.first-run-step-body p {
+  margin: 0;
+}
+
+.first-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.first-run-demo-offer {
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--rule-strong);
+}
+
+.first-run-name {
+  border-top: 0;
+}
+
+.first-run-clients {
+  flex-wrap: wrap;
+}
+
+.first-run-config {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  min-width: 0;
+}
+
+.first-run-code {
+  margin: 0;
+  width: 100%;
+  overflow-x: auto;
+  padding: var(--space-3);
+  background: var(--code-surface);
+  color: var(--code-ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.first-run-muted,
+.first-run-wait,
+.first-run-foot-note {
+  color: var(--muted);
+}
+
+.first-run-wait {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.first-run-pulse {
+  flex: none;
+  width: 0.6rem;
+  height: 0.6rem;
+  background: var(--hot);
+  animation: first-run-pulse 1.4s var(--ease) infinite;
+}
+
+@keyframes first-run-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .first-run-pulse {
+    animation: none;
+  }
+}
+
+.first-run-writes {
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--rule-strong);
+}
+
+.first-run-writes .settings-row-label {
+  display: block;
+  margin-bottom: var(--space-1);
+}
+
+.first-run-update {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.first-run-update-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.first-run-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-4);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 920px) {
+  .first-run {
+    margin: 0;
+    padding: var(--space-4);
+  }
+
+  .first-run-step-summary,
+  .first-run-step-body {
+    margin-left: 0;
+  }
+}

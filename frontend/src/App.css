@@ -11,6 +11,7 @@
 @import "./features/settings/settings.css";
 @import "./features/help/help.css";
 @import "./features/whats-new/whats-new.css";
+@import "./features/first-run/first-run.css";
 
 .write-notice {
   display: flex;

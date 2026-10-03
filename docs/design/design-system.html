@@ -935,6 +935,19 @@
   .folder-picker-demo code { font-family: var(--font-mono); font-size: 0.76rem; }
   .folder-picker-demo .fpd-more { color: var(--ink-soft); font-size: 0.82rem; text-decoration: underline; }
 
+  .first-run-demo { width: min(560px, 100%); padding: var(--space-5); background: var(--paper); border: 1px solid var(--rule-strong); color: var(--ink); }
+  .first-run-demo .frd-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--space-2); }
+  .first-run-demo .frd-head b { font-family: var(--font-display); text-transform: uppercase; letter-spacing: 0.04em; font-size: 1.2rem; }
+  .first-run-demo .frd-mono { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+  .first-run-demo ol { list-style: none; margin: var(--space-3) 0 0; padding: 0; border-top: 1px solid var(--rule); }
+  .first-run-demo li { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--rule); }
+  .first-run-demo .frd-mark { flex: none; display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border: 1px solid var(--rule-strong); font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); }
+  .first-run-demo .is-done .frd-mark { background: var(--hot); border-color: var(--hot); color: var(--bg); }
+  .first-run-demo .is-open .frd-mark { border-color: var(--hot); color: var(--hot); }
+  .first-run-demo .frd-title { flex: 1; font-family: var(--font-display); font-weight: 600; }
+  .first-run-demo .is-done .frd-title { color: var(--ink-soft); }
+  .first-run-demo pre { margin: 0 0 0 calc(1.6rem + var(--space-3)); padding: var(--space-3); background: var(--code-surface); color: var(--code-ink); font-family: var(--font-mono); font-size: 0.74rem; overflow-x: auto; }
+
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Note page
      ════════════════════════════════════════════════════════════════ */
@@ -1820,6 +1833,7 @@
     <a href="#side-panel">Side panel (Help)</a>
     <a href="#whats-new">What&rsquo;s new pop-up</a>
     <a href="#folder-picker">Folder picker</a>
+    <a href="#first-run">First-run checklist</a>
 
     <h3>Editing</h3>
     <a href="#editing">Inline editing</a>
@@ -3573,6 +3587,35 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">features/settings/FolderPicker.tsx</span><span class="key">features/settings/settings.css</span>
         <span class="key">.folder-picker-field</span><span class="key">.folder-picker</span><span class="key">.folder-picker-box</span><span class="key">.folder-picker-crumbs</span><span class="key">.folder-picker-crumb</span><span class="key">.folder-picker-crumb-step</span><span class="key">.folder-picker-sep</span><span class="key">.folder-picker-list</span><span class="key">.folder-picker-item</span><span class="key">.folder-picker-row</span><span class="key">.folder-picker-row-this</span><span class="key">.folder-picker-name</span>
         <span class="key">.folder-picker-badge</span><span class="key">.folder-picker-count</span><span class="key">.folder-picker-open</span><span class="key">.folder-picker-row-note</span><span class="key">.folder-picker-picked</span><span class="key">.folder-picker-status</span><span class="key">.folder-picker-more</span><span class="key">.folder-picker-note</span><span class="key">.folder-picker-empty</span><span class="key">.settings-modal-back.is-beside-help</span>
+      </div>
+    </section>
+
+    <section class="doc-section" id="first-run">
+      <div class="doc-section-num">&sect;37</div>
+      <h2>First-run checklist</h2>
+      <p class="blurb"><b>A fresh install opens on a checklist page, not on No Vaults Yet</b> (#419). It sits in the note pane where that empty screen would be, a single column capped at 46rem on <span class="key">--paper</span> with a <span class="key">--rule-strong</span> border, and stays until it is closed. Closed, it comes back from Help&rsquo;s home, where a <span class="key">.help-start-card</span> reads <i>Setup checklist</i>. It never shows in demo mode, and an upgraded install only sees it when reopened.</p>
+
+      <div class="stage">
+        <div class="first-run-demo">
+          <div class="frd-head"><b>Set up Hatchdoor</b><span class="frd-mono">2 of 4 done</span></div>
+          <ol>
+            <li class="is-done"><span class="frd-mark">&check;</span><span class="frd-title">Add your notes</span><span class="frd-mono">Done</span></li>
+            <li class="is-done"><span class="frd-mark">&check;</span><span class="frd-title">Choose a search model</span><span class="frd-mono">Done</span></li>
+            <li class="is-open" style="flex-wrap: wrap;"><span class="frd-mark">3</span><span class="frd-title">Connect your agent</span>
+              <pre>claude mcp add --transport http --scope user hatchdoor &hellip;</pre></li>
+            <li><span class="frd-mark">4</span><span class="frd-title">Try a search</span></li>
+          </ol>
+        </div>
+      </div>
+
+      <p class="blurb"><b>Each step is a row with a square mark.</b> The mark is 1.6rem, no radius, holding the step number in mono: muted on a <span class="key">--rule-strong</span> border while waiting, <span class="key">--hot</span> border and number for the step that is open, and a filled <span class="key">--hot</span> square with a <span class="key">--bg</span> check once done, with DONE in muted mono on the right. Only the first step not yet done opens; a waiting step&rsquo;s title is a plain button that opens it instead. A done step keeps one line of what proved it (&ldquo;Claude Code connected 2 minutes ago&rdquo;). Rows divide on <span class="key">--rule</span>; the progress count sits in the head in muted mono.</p>
+
+      <p class="blurb"><b>Inside a step, everything is borrowed.</b> Actions are Settings&rsquo; <span class="key">.settings-btn</span> and <span class="key">.settings-btn-hot</span>; the Name row and the folder picker are <a href="#folder-picker">&sect;36</a> unchanged; the client switcher is <span class="key">.settings-segmented</span>; the shown-once warning is <span class="key">.settings-notice</span>; the update check is <span class="key">.settings-toggle</span>; links are Help&rsquo;s <span class="key">.help-link</span>. Only three pieces are new: the config block (<span class="key">--code-surface</span> and <span class="key">--code-ink</span>, mono, scrolling sideways), a pulsing <span class="key">--hot</span> square beside &ldquo;Waiting for your agent to connect&rdquo; (still under reduced motion), and a dashed <span class="key">--rule-strong</span> divider above the line about allowing writes. <b>Below 920px</b> the page loses its outer margin and the step bodies their indent, so the config block gets the full width.</p>
+
+      <div class="tag-row">
+        <span class="key">features/first-run/FirstRunChecklist.tsx</span><span class="key">features/first-run/first-run.css</span>
+        <span class="key">.first-run</span><span class="key">.first-run-head</span><span class="key">.first-run-progress</span><span class="key">.first-run-steps</span><span class="key">.first-run-step</span><span class="key">.first-run-step-head</span><span class="key">.first-run-mark</span><span class="key">.first-run-step-title</span><span class="key">.first-run-step-open</span><span class="key">.first-run-step-status</span><span class="key">.first-run-step-summary</span><span class="key">.first-run-step-body</span>
+        <span class="key">.first-run-actions</span><span class="key">.first-run-name</span><span class="key">.first-run-demo-offer</span><span class="key">.first-run-muted</span><span class="key">.first-run-clients</span><span class="key">.first-run-config</span><span class="key">.first-run-code</span><span class="key">.first-run-wait</span><span class="key">.first-run-pulse</span><span class="key">.first-run-writes</span><span class="key">.first-run-update</span><span class="key">.first-run-update-head</span><span class="key">.first-run-foot</span><span class="key">.first-run-foot-note</span>
       </div>
     </section>
 

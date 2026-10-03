@@ -4234,8 +4234,10 @@ Feature tests:
 - `frontend/src/features/help/contextualLinks.test.ts`
 
 **Public contract:** `frontend/src/features/help/index.ts` is the only public
-TS/TSX entry point. `HelpProvider` (props `demoMode`, and `signedOut` while the
-token prompt is up, which lifts the panel above it) owns whether Help is open,
+TS/TSX entry point. `HelpProvider` (props `demoMode`, `signedOut` while the
+token prompt is up, which lifts the panel above it, and
+`onOpenSetupChecklist`, #419, which adds a "Setup checklist" card to Home
+that closes Help and calls it) owns whether Help is open,
 the page it shows and the pages behind Back, and mounts the panel. `useHelp()`
 returns `{ openHelp(page?, heading?), closeHelp, isOpen }`; outside a provider
 it does nothing. `page` is a manual page name such as
@@ -4275,7 +4277,8 @@ there reaches Help: the Search dialog's result rows (`.search-results`,
 styles, and Shared UI's `.state-block` and `.icon-button`.
 
 **Coordination paths:** `App.tsx` (mounts `HelpProvider` in `AppSession`, wires
-the topbar), `App.css`, `app/AppTopbar.tsx` (the `?` button on wide screens and
+the topbar, and passes `onOpenSetupChecklist` while signed in and not in demo
+mode), `App.css`, `app/AppTopbar.tsx` (the `?` button on wide screens and
 the first `…` menu item on phones), and `components/TokenPrompt.tsx` (its two
 Help links). The contextual links (#423) sit in `App.tsx` (No Vaults Yet, Vaults
 Unavailable and the registry recovery screens), `startup/StartupGate.tsx` (the
@@ -4392,6 +4395,84 @@ always the server-built GitHub release page.
 
 **Validation:** `npx vitest run src/features/update-banner`, then full
 frontend checks.
+
+### First-run checklist
+
+**Status:** Added by #419 (the #416 resolution, section C).
+
+**Kind:** product capability.
+
+**Owned paths:**
+
+- `frontend/src/features/first-run/index.ts`
+- `frontend/src/features/first-run/FirstRunChecklist.tsx`
+- `frontend/src/features/first-run/firstRun.ts`
+- `frontend/src/features/first-run/first-run.css`
+
+Feature tests:
+
+- `frontend/src/features/first-run/FirstRunChecklist.test.tsx`
+- `frontend/src/features/first-run/firstRun.test.ts`
+- `frontend/src/App.first-run.test.tsx`
+
+**Public contract:** `frontend/src/features/first-run/index.ts` is the only
+public entry point. `FirstRunChecklist` (props `vaults`, `onVaultCreated`,
+`onAddGitVault`, `onOpenSearch`) is the checklist page. `shouldShowFirstRun`
+decides whether it replaces the note pane's empty screen, `fetchFreshInstall`
+reads `fresh_install` from `GET /api/v1/whats-new`, `useFirstRunState` returns
+what this browser remembers, `reopenFirstRun` is Help's entry, and
+`recordSearchResults(query, count)` is how a search that found something ticks
+the last step. The browser remembers a dismissal under the `localStorage` key
+`hatchdoor_first_run_dismissed` and the search that proved indexing under
+`hatchdoor_first_run_search`. CSS is integrated through the `App.css`
+stylesheet aggregation seam.
+
+**Behaviour:** the page shows on a fresh install until closed, survives a
+reload, and otherwise only after Help's "Setup checklist" entry reopens it for
+the visit. Its four steps tick themselves from real state: a Vault exists
+(step 1, adding one through Settings' `FolderPicker` and `createVault`, or
+"Use a Git repository instead", which opens Add a Vault), the search model
+(always done, chosen on the startup screen), an agent has connected while MCP
+is on (step 3, polling `GET /api/settings` every 5 seconds while MCP is on and
+no agent has connected), and a search in this browser found something (step
+4). "Connect an agent" generates a password through
+`POST /api/settings/mcp-token/generate` and sends one `PATCH /api/settings`
+turning `HATCHDOOR_MCP_ENABLED` on and `HATCHDOOR_MCP_WRITE_ENABLED` off,
+leaving any key the configuration file holds untouched, and refuses outright
+when the configuration file holds MCP off or writes on; the password stays in
+the component and is shown once, inside a ready-made config for Claude Code,
+Codex, OpenClaw, Hermes or a generic client, addressed at
+`HATCHDOOR_PUBLIC_URL` or the page's own origin plus `/mcp`. "Make a new
+password" replaces it the same way. An optional row toggles
+`HATCHDOOR_UPDATE_CHECK_ENABLED`, off by default. Storage failures never throw:
+a dismissal then holds for the visit only.
+
+**Consumed dependencies:** `api/api.ts`'s `apiFetch`, the settings HTTP
+contract (the same requests Settings sends, unchanged), the What's new
+endpoint's `fresh_install` (#424), the settings response's `last_agent`
+(#426), Settings' public entry `features/settings/index.ts` (`FolderPicker`,
+`createVault`, `baseSourceForKind`, `formatWhen`, `patchSettings` and
+`generateMcpTokenCandidate`), the Vault collection client's
+`fetchRegistryRevision`, `lib/storage.ts`'s safe accessors,
+and the Help reader's `ContextualHelpLink` and `CONTEXTUAL_HELP`. It borrows
+Settings' `.settings-btn`, `.settings-row`, `.settings-segmented`,
+`.settings-notice`, `.settings-toggle` and `.folder-picker-*` styles and Help's
+`.help-link`, so a change there reaches it.
+
+**Coordination paths:** `App.tsx` (renders it on the `/` route in place of
+the zero-Vault and empty states while `shouldShowFirstRun` holds and
+`settingsEnabled`, reads `fresh_install`, records a search that found
+something, and passes `onOpenSetupChecklist` to `HelpProvider`), `App.css`,
+and the Help reader's `HelpProvider.tsx`/`HelpPanel.tsx` (the entry).
+
+**Invariants:** never shown in demo mode and never shown on its own to an
+upgraded install; the one-click connect never turns MCP writes on; the
+password is never stored in the browser; a storage failure never breaks the
+app.
+
+**Validation:** `npx vitest run src/features/first-run
+src/App.first-run.test.tsx src/features/settings src/features/help
+src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 
 ### Note reading and rendering
 
@@ -4818,6 +4899,8 @@ route tests, and full frontend checks.
 
 **Owned paths:**
 
+- `frontend/src/features/settings/index.ts`
+- `frontend/src/features/settings/settingsApi.ts`
 - `frontend/src/features/settings/SettingsPage.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.test.tsx`
@@ -4834,7 +4917,13 @@ route tests, and full frontend checks.
 - `frontend/src/features/settings/settings.css`
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
-**Public contract:** the Settings page presents a two-level Vault-management index
+**Public contract:** `frontend/src/features/settings/index.ts` is what other
+features may import (#419): `FolderPicker`, `formatWhen`, `createVault`,
+`baseSourceForKind`, and `settingsApi.ts`'s `patchSettings` and
+`generateMcpTokenCandidate`, the one definition of the `PATCH /api/settings`
+and `POST /api/settings/mcp-token/generate` requests that the Settings page and
+the First-run checklist both send. The shell still imports `SettingsPage`
+directly. The Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and
 revisioned pause/rebuild/disconnect controls through the existing Vault API.
@@ -5059,7 +5148,9 @@ what the daily request sends (#425); the banner itself is the Update banner's.
 Add a Vault's local-folder choice (#430) defaults to `FolderPicker.tsx`, a
 flat list of the Vault mount with drill-in and a breadcrumb, which reports the
 picked folder's absolute path (`root` joined with its relative `path`); it
-takes `value` and `onPick` only, so it renders outside the dialog too.
+takes `value` and `onPick` only, so it renders outside the dialog too; the
+First-run checklist's step 1 is its other consumer (#419), with
+`vaultCreation.ts`'s `createVault` and `baseSourceForKind`.
 **Type a path instead** swaps in the unchanged Folder path field; both edit
 the same path draft, and the create request is the same `POST /api/v1/vaults`.
 Its "My folder isn't here" and empty-mount Help links read

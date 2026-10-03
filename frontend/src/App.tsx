@@ -78,6 +78,14 @@ import {
   useHelp,
 } from "./features/help";
 import { SearchDialog, useSearch } from "./features/search";
+import {
+  fetchFreshInstall,
+  FirstRunChecklist,
+  recordSearchResults,
+  reopenFirstRun,
+  shouldShowFirstRun,
+  useFirstRunState,
+} from "./features/first-run";
 import { UpdateBanner } from "./features/update-banner";
 import { WhatsNew } from "./features/whats-new";
 
@@ -190,6 +198,26 @@ function VaultWorkspace({
   // Without `!vaultsLoading` here, the sidebar footer's Settings link would
   // render and stay clickable for that entire fetch on a demo instance.
   const settingsEnabled = !vaultsLoading && !demoMode;
+  // The first-run checklist (#419): on a fresh install (#424) until closed,
+  // or once reopened from Help, and never in demo mode.
+  const firstRun = useFirstRunState();
+  const [freshInstall, setFreshInstall] = useState(false);
+  useEffect(() => {
+    if (!settingsEnabled) return;
+    const controller = new AbortController();
+    void fetchFreshInstall(controller.signal).then((fresh) => {
+      if (!controller.signal.aborted) setFreshInstall(fresh);
+    });
+    return () => controller.abort();
+  }, [settingsEnabled]);
+  const showFirstRun =
+    settingsEnabled &&
+    shouldShowFirstRun({
+      demoMode,
+      freshInstall,
+      dismissed: firstRun.dismissed,
+      reopened: firstRun.reopened,
+    });
   // A demo_read_only refusal is the one write error rendered in the app's
   // own words rather than the server's (#152). `writeEnabled` already stays
   // false once the collection knows it is on a demo instance, and re-derives
@@ -230,6 +258,13 @@ function VaultWorkspace({
     searchInputRef,
     openSearchForTag,
   } = useSearch();
+  // A search that found something proves the notes are indexed, which ticks
+  // the checklist's last step in this browser.
+  useEffect(() => {
+    if (!searchLoading && !searchError && searchResults.length > 0) {
+      recordSearchResults(searchQuery, searchResults.length);
+    }
+  }, [searchLoading, searchError, searchResults, searchQuery]);
   const {
     noteActionDialog,
     noteActionError,
@@ -940,6 +975,17 @@ function VaultWorkspace({
                     message={registryRecovery.message}
                     onTryAgain={() => void loadVaults()}
                   />
+                ) : showFirstRun ? (
+                  <FirstRunChecklist
+                    vaults={vaults}
+                    onVaultCreated={() => void loadVaults()}
+                    onAddGitVault={() =>
+                      navigate("/settings", {
+                        state: { openVaultCreation: true },
+                      })
+                    }
+                    onOpenSearch={() => setSearchOpen(true)}
+                  />
                 ) : vaults.length === 0 ? (
                   <ZeroVaultState
                     demoMode={demoMode}
@@ -1199,6 +1245,7 @@ export function App() {
 }
 
 function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
+  const navigate = useNavigate();
   const [authRequired, setAuthRequired] = useState(false);
   const collection = useVaultCollection();
   const hasRegistryRecovery = Boolean(collection.recovery);
@@ -1222,7 +1269,18 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
   }, []);
 
   return (
-    <HelpProvider demoMode={collection.demoMode} signedOut={authRequired}>
+    <HelpProvider
+      demoMode={collection.demoMode}
+      signedOut={authRequired}
+      onOpenSetupChecklist={
+        authRequired || collection.loading || collection.demoMode
+          ? undefined
+          : () => {
+              reopenFirstRun();
+              navigate("/");
+            }
+      }
+    >
       {authRequired ? (
         <TokenPrompt
           onSubmit={(token) => {

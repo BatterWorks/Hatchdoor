@@ -18,11 +18,15 @@ export function HelpProvider({
   children,
   demoMode = false,
   signedOut = false,
+  onOpenSetupChecklist,
 }: {
   children: ReactNode;
   demoMode?: boolean;
   /** The token prompt is up; Help then sits above it. */
   signedOut?: boolean;
+  /** Reopens the first-run checklist (#419). Home lists a "Setup checklist"
+   * entry only when this is given. */
+  onOpenSetupChecklist?: () => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [fullWidth, setFullWidth] = useState(false);
@@ -93,6 +97,14 @@ export function HelpProvider({
           fullWidth={fullWidth}
           demoMode={demoMode}
           aboveDialogs={signedOut}
+          onOpenSetupChecklist={
+            onOpenSetupChecklist
+              ? () => {
+                  closeHelp();
+                  onOpenSetupChecklist();
+                }
+              : undefined
+          }
           onNavigate={navigate}
           onBack={back}
           onHome={() => navigate({ page: HELP_HOME })}
