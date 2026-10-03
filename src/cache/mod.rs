@@ -5,8 +5,6 @@ mod queries;
 mod schema;
 pub(crate) mod vault_snapshots;
 
-pub(crate) use schema::is_recognized_legacy_cache;
-
 pub use populate::BuildOptions;
 pub(crate) use populate::{BuildHandles, IndexYield};
 pub use queries::SemanticHit;

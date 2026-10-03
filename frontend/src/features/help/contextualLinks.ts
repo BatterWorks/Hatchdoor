@@ -28,10 +28,10 @@ export const CONTEXTUAL_HELP = {
     page: TROUBLESHOOTING,
     heading: "the-workspace-says-vaults-unavailable",
   },
-  /** The registry recovery screen, either kind. */
+  /** The registry recovery screen. */
   registryRecovery: {
     page: "concepts/vault-lifecycle-states",
-    heading: "two-different-things-both-called-recovery",
+    heading: "registry-recovery",
   },
   /** The model-choice screen in `StartupGate`. */
   modelChoice: {

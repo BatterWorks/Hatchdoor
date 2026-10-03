@@ -3,7 +3,6 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor,
   within,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -215,7 +214,7 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     expect(await screen.findByText("No Vaults Yet")).toBeVisible();
   });
 
-  it("offers Try again alone for an unreadable registry, with no Start with no Vaults action", async () => {
+  it("offers Try again for an unreadable registry", async () => {
     mockDiscovery({
       collection_revision: 0,
       vaults: [],
@@ -235,115 +234,6 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
       ),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "Start with no Vaults" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("offers Try again and a confirmed Start with no Vaults for a failed legacy upgrade", async () => {
-    mockDiscovery({
-      registry_revision: 0,
-      collection_revision: 0,
-      vaults: [],
-      legacy_migration_recovery: {
-        code: "legacy_migration_required",
-        message: "legacy Vault path is not a readable directory",
-      },
-      demo_mode: false,
-    });
-    renderApp();
-
-    expect(await screen.findByText("Vault Registry Unavailable")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Start with no Vaults" }),
-    );
-
-    expect(
-      await screen.findByRole("dialog", { name: "Start with no Vaults" }),
-    ).toBeVisible();
-    expect(
-      screen.getByText(
-        "Notes and history are untouched, old settings will be ignored from now on, and the folder must be added by hand.",
-      ),
-    ).toBeVisible();
-  });
-
-  it("explains stale migrated environment settings without exposing Vault actions", async () => {
-    mockDiscovery({
-      registry_revision: 1,
-      collection_revision: 0,
-      vaults: [],
-      legacy_migration_recovery: {
-        code: "legacy_environment_cleanup_required",
-        message:
-          "Your Vault was imported successfully. Remove HATCHDOOR_EXCLUDE from your .env and start Hatchdoor again.",
-      },
-      demo_mode: false,
-    });
-    renderApp();
-
-    expect(await screen.findByText("Restart Required")).toBeVisible();
-    expect(
-      screen.getByText(/Your Vault was imported successfully/),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "Try again" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Start with no Vaults" }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(/Nothing was changed/)).not.toBeInTheDocument();
-  });
-
-  it("confirming Start with no Vaults calls the endpoint and returns to the ordinary zero-Vault state", async () => {
-    let confirmed = false;
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.endsWith("/api/v1/vaults/start-with-no-vaults")) {
-          confirmed = true;
-          expect(init?.method).toBe("POST");
-          return jsonResponse({ vaults: [] });
-        }
-        if (url.endsWith("/api/v1/vaults")) {
-          return jsonResponse({
-            registry_revision: confirmed ? 1 : 0,
-            collection_revision: 0,
-            vaults: [],
-            legacy_migration_recovery: confirmed
-              ? undefined
-              : {
-                  code: "legacy_migration_required",
-                  message: "legacy Vault path is not a readable directory",
-                },
-            demo_mode: false,
-          });
-        }
-        if (url.includes("/tree") || url.includes("/recent")) {
-          return emptyEnvelope();
-        }
-        return jsonResponse({}, 404);
-      },
-    );
-    renderApp();
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Start with no Vaults" }),
-    );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Start with no Vaults",
-    });
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Start with no Vaults" }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("No Vaults Yet")).toBeVisible();
-    });
-    expect(
-      screen.queryByText("Vault Registry Unavailable"),
-    ).not.toBeInTheDocument();
   });
 });
 
@@ -567,22 +457,6 @@ describe("How does this work? links on the start states (#423)", () => {
     } as VaultDiscoveryResponse);
     renderWithHelp();
     await clickLinkUnder("Vault Registry Unavailable");
-    expectOpened(CONTEXTUAL_HELP.registryRecovery);
-  });
-
-  it("links a legacy recovery that needs a restart to the same section", async () => {
-    mockDiscovery({
-      registry_revision: 1,
-      collection_revision: 0,
-      vaults: [],
-      legacy_migration_recovery: {
-        code: "legacy_environment_cleanup_required",
-        message: "Remove HATCHDOOR_EXCLUDE from your .env.",
-      },
-      demo_mode: false,
-    });
-    renderWithHelp();
-    await clickLinkUnder("Restart Required");
     expectOpened(CONTEXTUAL_HELP.registryRecovery);
   });
 

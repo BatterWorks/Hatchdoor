@@ -76,11 +76,7 @@ export function scopeFallbackMessage(
   scope: VaultScope,
   collection: Pick<
     VaultCollectionState,
-    | "readState"
-    | "vaults"
-    | "allVaults"
-    | "recovery"
-    | "legacyMigrationRecovery"
+    "readState" | "vaults" | "allVaults" | "recovery"
   >,
 ): string | null {
   if (
@@ -88,7 +84,6 @@ export function scopeFallbackMessage(
     collection.readState === "loading" ||
     collection.readState === "error" ||
     collection.recovery ||
-    collection.legacyMigrationRecovery ||
     collection.vaults.length === 0
   ) {
     return null;

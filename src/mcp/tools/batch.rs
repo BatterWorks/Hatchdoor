@@ -77,8 +77,8 @@ use super::super::protocol::{JsonRpcFailure, OUTCOME_FIELD, tool_success};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
 use super::write::WRITE_OPS;
 use super::{
-    READ_OPS, WRITE_DISABLED_CODE, WRITE_DISABLED_MESSAGE, dispatch_read_tool,
-    environment_cleanup_refusal, write, write_tool_annotations,
+    READ_OPS, WRITE_DISABLED_CODE, WRITE_DISABLED_MESSAGE, dispatch_read_tool, write,
+    write_tool_annotations,
 };
 
 /// The write ops that carry both `slug` and `expected_content_hash` — the
@@ -431,11 +431,8 @@ async fn dispatch_one(
     match op {
         _ if READ_OPS.contains(&op) => dispatch_read_tool(state, config, op, arguments).await,
         _ if WRITE_OPS.contains(&op) => {
-            // Both refusals carry a stable string code (#327), like every
+            // The refusal carries a stable string code (#327), like every
             // other item error: an item is data, not a JSON-RPC error.
-            if let Some(refusal) = environment_cleanup_refusal(&state) {
-                return Err(structured_item_failure(&refusal));
-            }
             if !config.write_enabled {
                 return Err(structured_item_failure(
                     &crate::vault_error::VaultOperationError::new(

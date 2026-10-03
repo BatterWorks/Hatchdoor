@@ -235,26 +235,6 @@ describe("the Vault collection client's list", () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.recovery?.kind).toBe("corrupt");
-    expect(result.current.legacyMigrationRecovery).toBeNull();
-  });
-
-  it("keeps a failed legacy upgrade distinct from an unreadable registry", async () => {
-    mockCollection([], {
-      extraDiscovery: {
-        legacy_migration_recovery: {
-          code: "legacy_migration_required",
-          message: "legacy Vault path is not a readable directory",
-        },
-      },
-    });
-
-    const { result } = renderHook(() => useVaultCollection());
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.legacyMigrationRecovery?.code).toBe(
-      "legacy_migration_required",
-    );
-    expect(result.current.recovery).toBeNull();
   });
 });
 

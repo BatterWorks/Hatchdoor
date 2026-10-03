@@ -153,9 +153,11 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
     ("HATCHDOOR_UPDATE_CHECK_ENABLED", "instant", "switch"),
     // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
-    // the schema as first-boot import inputs: #185 deleted the instance-wide
-    // lane whose behaviour they drove, and `vault_migration.rs` consumes them
-    // until #82 closes. Two startup checks still parse them — the demo-mode
+    // the schema although #185 deleted the instance-wide lane whose behaviour
+    // they drove and #427 removed the import that consumed them; startup
+    // still purges the retired Git-lane keys from stored settings and refuses
+    // an install that stores any of them without a registry
+    // (`vault_migration.rs`). Two startup checks still parse them — the demo-mode
     // posture refusal and `HATCHDOOR_EXCLUDE`'s pattern validation, both in
     // `server.rs` — but nothing reads them per operation. The two author keys
     // are the exception: the collection lane's Git turns read them per turn as
@@ -275,8 +277,8 @@ pub async fn patch_settings_handler(
 
     // Every save takes one path. The instance-wide versioning-task lifecycle
     // this handler used to run for a `HATCHDOOR_GIT_*` change is gone with the
-    // legacy single-Vault lane (issue #185); those keys are first-boot import
-    // inputs now, except `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, which the
+    // legacy single-Vault lane (issue #185); nothing reads those keys per
+    // operation now, except `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, which the
     // collection lane's Git turns read per turn and therefore need no restart
     // and no lifecycle work here.
     let result = state
@@ -567,7 +569,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: std::sync::Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),

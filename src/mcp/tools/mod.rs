@@ -30,41 +30,6 @@ pub(super) const WRITE_DISABLED_MESSAGE: &str =
 /// an agent can branch on rather than the JSON-RPC number.
 pub(super) const WRITE_DISABLED_CODE: &str = "mcp_writes_disabled";
 
-/// The environment-cleanup recovery refusal (#327), when one is pending.
-///
-/// While `.env` still carries retired per-Vault keys, the HTTP composition
-/// root refuses every state-changing request with this same code. `/mcp` is
-/// exempt from that method-based guard, because every MCP request, reads and
-/// the handshake included, is a POST: the MCP surface refuses its own
-/// state-changing tools here instead, so an agent still reaches `list_vaults`
-/// (which explains the recovery) and gets a structured code for the rest.
-/// A pending *legacy migration* recovery that may start with no Vaults is not
-/// refused here, matching the HTTP guard; its own cores refuse what they must.
-pub(super) fn environment_cleanup_refusal(
-    state: &AppState,
-) -> Option<crate::vault_error::VaultOperationError> {
-    let recovery = state
-        .legacy_migration_recovery
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()?;
-    (!recovery.can_start_with_no_vaults()).then(|| {
-        crate::vault_error::VaultOperationError::new(
-            crate::vault_migration::LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE,
-            recovery.message(),
-            None,
-            false,
-        )
-    })
-}
-
-/// Whether a tool may run while [`environment_cleanup_refusal`] is pending:
-/// the reads, collection discovery, and `batch` (which refuses its own write
-/// items). Everything else changes state.
-fn runs_during_environment_cleanup(name: &str) -> bool {
-    READ_OPS.contains(&name) || matches!(name, "list_vaults" | "batch")
-}
-
 /// Runs one `tools/call`. A structured error for a code the manual explains
 /// gains a `docs` field naming the page (#423); `batch` item errors sit inside
 /// a successful call and are never touched.
@@ -101,21 +66,13 @@ async fn dispatch_tools_call(
     }
 
     // The bundled manual (ADR-38) takes no Vault and needs no model, so it
-    // answers ahead of the environment-cleanup and model-setup gates, under
+    // answers ahead of the model-setup gate, under
     // read and write permission alike. Like `list_vaults` it stays out of
     // `READ_OPS`, so a `batch` item never names it.
     match name {
         "read_docs" => return read::read_docs_tool(arguments),
         "search_docs" => return read::search_docs_tool(arguments),
         _ => {}
-    }
-
-    if !runs_during_environment_cleanup(name)
-        && let Some(refusal) = environment_cleanup_refusal(&state)
-    {
-        return Ok(tool_structured_error(
-            serde_json::to_value(&refusal).unwrap_or_else(|_| json!({ "code": refusal.code })),
-        ));
     }
 
     // While model setup is still pending, only the explicit model-setup calls
@@ -504,7 +461,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),

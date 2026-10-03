@@ -1,40 +1,32 @@
-//! One-time import of proven legacy single-Vault deployments.
+//! What is left of the legacy single-Vault import (ADR-40, #427).
+//!
+//! The import itself is gone: a deployment with no registry starts with an
+//! empty one, whatever `VAULT_PATH` holds. Two startup steps outlive it. Every
+//! start on an existing registry purges the retired Git-lane keys from stored
+//! settings, so a plaintext Git token never survives there. And a start with
+//! no registry but stored single-Vault keys refuses, because that is an
+//! install from 2.4.x or earlier that never ran the import, and opening it on
+//! zero Vaults would look like lost notes.
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
 
-use crate::config::{legacy_vault_environment_key_kind, parse_exclude_patterns};
-use crate::git::config::{GitMode, non_empty_setting, parse_mode};
 use crate::runtime_config::{RuntimeConfig, SettingSource};
-use crate::vault_registry::{
-    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, HttpsCredentials, NewVaultDefinition,
-    VaultCommitIdentity, VaultGitMode, VaultId, VaultRegistryError, VaultRegistrySnapshot,
-    VaultRegistryState, VaultRegistryStore, VaultSource,
-};
+use crate::vault_registry::{VaultRegistryError, VaultRegistryState, VaultRegistryStore};
 
-const LEGACY_STORED_KEYS: [&str; 9] = [
-    "HATCHDOOR_EXCLUDE",
-    "HATCHDOOR_GIT_SYNC_ENABLED",
-    "HATCHDOOR_GIT_HTTPS_TOKEN",
-    "HATCHDOOR_GIT_REMOTE",
-    "HATCHDOOR_GIT_BRANCH",
-    "HATCHDOOR_GIT_HTTPS_USERNAME",
-    "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
-    "HATCHDOOR_GIT_AUTHOR_NAME",
-    "HATCHDOOR_GIT_AUTHOR_EMAIL",
-];
+/// Where an install too old to upgrade directly is sent.
+pub const LEGACY_MIGRATION_DOC_URL: &str =
+    "https://github.com/BatterWorks/Hatchdoor/blob/main/docs/migrations/legacy-single-vault.md";
 
-/// The migrated keys no post-migration code reads: the retired instance-wide
-/// Git lane's inputs, the token among them. Once any registry exists they are
-/// inert, so every boot on an existing registry removes them again (#325): a
-/// crash or transient failure between the import's registry commit and its
-/// one-shot cleanup must not leave a plaintext token in settings for good.
-/// `HATCHDOOR_EXCLUDE` and the two author keys are left alone because they
-/// still have live readers (the commit-identity fallback among them).
-const RETIRED_LEGACY_STORED_KEYS: [&str; 6] = [
+/// The retired instance-wide Git lane's inputs, the token among them. Nothing
+/// reads them once a registry exists, so every start on one removes them
+/// again (#325). For the same reason, any of them stored on an install
+/// without a registry means a single-Vault release wrote them and the 2.5.0
+/// to 2.7.x import never ran. `HATCHDOOR_EXCLUDE` and the two author keys are
+/// neither purged nor evidence of an old install, because they are still live
+/// settings a current install may store (the commit-identity fallback among
+/// them).
+const RETIRED_GIT_LANE_STORED_KEYS: [&str; 6] = [
     "HATCHDOOR_GIT_SYNC_ENABLED",
     "HATCHDOOR_GIT_HTTPS_TOKEN",
     "HATCHDOOR_GIT_REMOTE",
@@ -43,98 +35,25 @@ const RETIRED_LEGACY_STORED_KEYS: [&str; 6] = [
     "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
 ];
 
-/// Legacy deployment inputs captured once before collection runtime starts.
-#[derive(Clone, PartialEq, Eq)]
-pub struct LegacyMigrationInput {
-    pub vault_path: PathBuf,
-    pub cache_db_path: PathBuf,
-    pub environment: BTreeMap<String, String>,
-}
-
-impl fmt::Debug for LegacyMigrationInput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LegacyMigrationInput")
-            .field("vault_path", &self.vault_path)
-            .field("cache_db_path", &self.cache_db_path)
-            .field(
-                "environment_keys",
-                &self.environment.keys().collect::<Vec<_>>(),
-            )
-            .finish()
-    }
-}
-
-/// Observable result of inspecting and, when proven safe, importing legacy state.
+/// Why startup could not settle the registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LegacyMigrationOutcome {
-    NoLegacyDeployment,
-    ExistingRegistry {
-        state: VaultRegistryState,
-        ignored_environment_keys: Vec<String>,
-    },
-    Imported {
-        snapshot: VaultRegistrySnapshot,
-        vault_id: VaultId,
-        cleanup_warnings: Vec<String>,
-        ignored_environment_keys: Vec<String>,
-    },
-    Recovery {
-        recovery: LegacyMigrationRecovery,
-        ignored_environment_keys: Vec<String>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacyMigrationRecovery {
-    code: &'static str,
-    message: String,
-}
-
-impl LegacyMigrationRecovery {
-    pub const CODE: &'static str = "legacy_migration_required";
-    pub const ENVIRONMENT_CLEANUP_CODE: &'static str = "legacy_environment_cleanup_required";
-
-    pub fn code(&self) -> &'static str {
-        self.code
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    pub fn environment_cleanup(message: impl Into<String>) -> Self {
-        Self {
-            code: Self::ENVIRONMENT_CLEANUP_CODE,
-            message: message.into(),
-        }
-    }
-
-    pub fn can_start_with_no_vaults(&self) -> bool {
-        self.code == Self::CODE
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(message: impl Into<String>) -> Self {
-        Self {
-            code: Self::CODE,
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LegacyMigrationError {
-    ConfirmationRequired,
+pub enum RegistryStartupError {
+    /// No registry, but stored retired Git-lane settings only a single-Vault
+    /// release wrote (ADR-40 decision 3). Nothing was written.
+    UnconvertedLegacyInstall,
     Registry(VaultRegistryError),
     Storage(String),
 }
 
-impl fmt::Display for LegacyMigrationError {
+impl fmt::Display for RegistryStartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ConfirmationRequired => formatter.write_str(
-                "starting with no Vaults requires explicit confirmation because legacy state will no longer be imported",
+            Self::UnconvertedLegacyInstall => write!(
+                formatter,
+                "This install still has the single-Vault setup of Hatchdoor 2.4.x or earlier, \
+                 which this version cannot convert. Upgrade to a 2.5.0 to 2.7.x release first and \
+                 start it once, so it moves your Vault into the Vault registry, then upgrade to \
+                 2.8.0 or later. Nothing was changed. See {LEGACY_MIGRATION_DOC_URL}"
             ),
             Self::Registry(error) => error.fmt(formatter),
             Self::Storage(message) => formatter.write_str(message),
@@ -142,43 +61,35 @@ impl fmt::Display for LegacyMigrationError {
     }
 }
 
-impl std::error::Error for LegacyMigrationError {}
+impl std::error::Error for RegistryStartupError {}
 
-impl From<VaultRegistryError> for LegacyMigrationError {
+impl From<VaultRegistryError> for RegistryStartupError {
     fn from(error: VaultRegistryError) -> Self {
         Self::Registry(error)
     }
 }
 
-pub fn migrate_legacy_vault(
+/// Load the registry for this start, writing an empty one when none exists.
+///
+/// Runs after the instance-state record (#424), which reads whether a
+/// registry was already on disk, and before any Vault runtime starts.
+pub fn prepare_registry(
     registry: &VaultRegistryStore,
     runtime_config: &RuntimeConfig,
-    input: LegacyMigrationInput,
-) -> Result<LegacyMigrationOutcome, LegacyMigrationError> {
-    let ignored_environment_keys = ignored_legacy_environment_keys(&input.environment);
+) -> Result<VaultRegistryState, RegistryStartupError> {
     match fs::symlink_metadata(registry.path()) {
         Ok(_) => {
-            // Only the settings half of the legacy cleanup is retried here. The
-            // disposable-cache half is deliberately one-shot: once a registry
-            // exists, `cache_db_path` is the live multi-Vault cache, which
-            // `is_recognized_legacy_cache` cannot tell apart from a legacy one,
-            // so deleting it on every start would wipe the live index. A legacy
-            // cache left by an interrupted import holds no secret and is
-            // adopted and rebuilt by `SqliteCache::open` on that same boot.
-            if let Err(error) = runtime_config.remove_stored(RETIRED_LEGACY_STORED_KEYS) {
+            if let Err(error) = runtime_config.remove_stored(RETIRED_GIT_LANE_STORED_KEYS) {
                 tracing::warn!(
                     %error,
-                    "could not remove retired legacy Git settings; retrying on the next start"
+                    "could not remove retired Git settings; retrying on the next start"
                 );
             }
-            return Ok(LegacyMigrationOutcome::ExistingRegistry {
-                state: registry.load()?,
-                ignored_environment_keys,
-            });
+            return Ok(registry.load()?);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(LegacyMigrationError::Storage(format!(
+            return Err(RegistryStartupError::Storage(format!(
                 "could not inspect Vault registry path '{}': {error}",
                 registry.path().display()
             )));
@@ -186,351 +97,14 @@ pub fn migrate_legacy_vault(
     }
 
     let snapshot = runtime_config.snapshot();
-    let discard_legacy_cache = crate::cache::is_recognized_legacy_cache(&input.cache_db_path);
-    let evidence = match legacy_evidence(&input, &snapshot, discard_legacy_cache) {
-        Ok(evidence) => evidence,
-        Err(message) => {
-            return Ok(recovery(message, ignored_environment_keys));
-        }
-    };
-    if !evidence {
-        return Ok(LegacyMigrationOutcome::NoLegacyDeployment);
-    }
-
-    if !input.vault_path.is_dir() {
-        return Ok(recovery(
-            format!(
-                "legacy Vault path '{}' is not a readable directory; correct VAULT_PATH or confirm Start with no Vaults",
-                input.vault_path.display()
-            ),
-            ignored_environment_keys,
-        ));
-    }
-
-    let (source, https_credentials) = match legacy_source(&input.vault_path, &snapshot) {
-        Ok(source) => source,
-        Err(message) => return Ok(recovery(message, ignored_environment_keys)),
-    };
-    let name = input
-        .vault_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Migrated vault")
-        .to_string();
-    let exclude_patterns =
-        parse_exclude_patterns(snapshot.required("HATCHDOOR_EXCLUDE").unwrap_or_default());
-    let definition = NewVaultDefinition {
-        name,
-        enabled: true,
-        source,
-        exclude_patterns,
-        https_credentials,
-        archive_folder: None,
-        commit_identity: legacy_commit_identity(&snapshot),
-    };
-    let imported = match registry.add(0, definition) {
-        Ok(snapshot) => snapshot,
-        Err(VaultRegistryError::InvalidDefinition(error)) => {
-            return Ok(recovery(
-                format!(
-                    "legacy Vault configuration could not be converted safely: {error}; correct it or confirm Start with no Vaults"
-                ),
-                ignored_environment_keys,
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let vault_id = imported
-        .vault_ids()
-        .next()
-        .expect("a successful legacy import creates exactly one Vault");
-
-    let mut cleanup_warnings = Vec::new();
-    if let Err(error) = runtime_config.remove_stored(LEGACY_STORED_KEYS) {
-        cleanup_warnings.push(format!(
-            "Vault registry committed, but migrated settings cleanup failed: {error}"
-        ));
-    }
-    if discard_legacy_cache {
-        for path in cache_files(&input.cache_db_path) {
-            if let Err(error) = remove_if_present(&path) {
-                cleanup_warnings.push(format!(
-                    "Vault registry committed, but disposable cache cleanup failed for '{}': {error}",
-                    path.display()
-                ));
-            }
-        }
-    }
-
-    Ok(LegacyMigrationOutcome::Imported {
-        snapshot: imported,
-        vault_id,
-        cleanup_warnings,
-        ignored_environment_keys,
-    })
-}
-
-/// The commit identity a legacy deployment configured, as an ordinary Vault
-/// definition field. `HATCHDOOR_GIT_DEBOUNCE_SECONDS` has no counterpart here
-/// on purpose: #148's AC4 retired the "wait N seconds after the last edit"
-/// concept with no successor, because the multi-Vault write pipeline coalesces
-/// through a fixed watcher debounce that no per-Vault setting feeds. A value
-/// left over in the environment is obsolete, not unconvertible.
-fn legacy_commit_identity(
-    snapshot: &crate::runtime_config::ConfigSnapshot,
-) -> Option<VaultCommitIdentity> {
-    let configured = |key: &str| {
+    if RETIRED_GIT_LANE_STORED_KEYS.iter().any(|key| {
         snapshot
             .setting(key)
-            .filter(|setting| setting.source != SettingSource::Default)
-            .map(|setting| setting.value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    let name = configured("HATCHDOOR_GIT_AUTHOR_NAME");
-    let email = configured("HATCHDOOR_GIT_AUTHOR_EMAIL");
-    if name.is_none() && email.is_none() {
-        return None;
+            .is_some_and(|setting| setting.source == SettingSource::Stored)
+    }) {
+        return Err(RegistryStartupError::UnconvertedLegacyInstall);
     }
-    Some(VaultCommitIdentity {
-        name: name.unwrap_or_else(|| "Hatchdoor".to_string()),
-        email: email.unwrap_or_else(|| "hatchdoor@localhost".to_string()),
-    })
-}
-
-fn legacy_source(
-    vault_path: &Path,
-    snapshot: &crate::runtime_config::ConfigSnapshot,
-) -> Result<(VaultSource, Option<HttpsCredentials>), String> {
-    let mode = parse_mode(
-        snapshot
-            .required("HATCHDOOR_GIT_SYNC_ENABLED")
-            .unwrap_or("false"),
-    )
-    .map_err(|error| format!("{error} Correct it or confirm Start with no Vaults"))?;
-    match mode {
-        None => Ok((
-            VaultSource::Local {
-                path: vault_path.to_path_buf(),
-            },
-            None,
-        )),
-        Some(GitMode::Local) => {
-            open_exact_legacy_repository(vault_path)?;
-            Ok((
-                VaultSource::ExistingGit {
-                    repository_path: vault_path.to_path_buf(),
-                    repository_url: None,
-                    branch: non_empty_setting(snapshot, "HATCHDOOR_GIT_BRANCH"),
-                    vault_subdirectory: None,
-                    mode: VaultGitMode::LocalHistory,
-                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
-                },
-                None,
-            ))
-        }
-        Some(GitMode::Remote) => {
-            let repository = open_exact_legacy_repository(vault_path)?;
-            let remote_name = non_empty_setting(snapshot, "HATCHDOOR_GIT_REMOTE")
-                .unwrap_or_else(|| "origin".to_string());
-            let remote = repository.find_remote(&remote_name).map_err(|error| {
-                format!(
-                    "legacy Git remote '{remote_name}' could not be inspected: {error}; correct it or confirm Start with no Vaults"
-                )
-            })?;
-            let repository_url = remote.url().map_err(|error| {
-                format!(
-                    "legacy Git remote '{remote_name}' has no readable URL: {error}; correct it or confirm Start with no Vaults"
-                )
-            })?;
-            let token = non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_TOKEN");
-            let https_credentials = token.map(|token| HttpsCredentials {
-                username: non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_USERNAME")
-                    .unwrap_or_else(|| "hatchdoor".to_string()),
-                token,
-            });
-            Ok((
-                VaultSource::ExistingGit {
-                    repository_path: vault_path.to_path_buf(),
-                    repository_url: Some(repository_url.to_string()),
-                    branch: non_empty_setting(snapshot, "HATCHDOOR_GIT_BRANCH"),
-                    vault_subdirectory: None,
-                    mode: VaultGitMode::TwoWay,
-                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
-                },
-                https_credentials,
-            ))
-        }
-    }
-}
-
-fn open_exact_legacy_repository(vault_path: &Path) -> Result<git2::Repository, String> {
-    let repository = git2::Repository::open(vault_path).map_err(|error| {
-        format!(
-            "legacy Git Vault '{}' is not a readable repository: {error}; correct it or confirm Start with no Vaults",
-            vault_path.display()
-        )
-    })?;
-    if repository.is_bare() || repository.workdir().is_none() {
-        return Err(
-            "legacy Git Vault must be a non-bare working tree; correct it or confirm Start with no Vaults"
-                .to_string(),
-        );
-    }
-    Ok(repository)
-}
-
-fn recovery(
-    message: impl Into<String>,
-    ignored_environment_keys: Vec<String>,
-) -> LegacyMigrationOutcome {
-    LegacyMigrationOutcome::Recovery {
-        recovery: LegacyMigrationRecovery {
-            code: LegacyMigrationRecovery::CODE,
-            message: message.into(),
-        },
-        ignored_environment_keys,
-    }
-}
-
-fn legacy_evidence(
-    input: &LegacyMigrationInput,
-    snapshot: &crate::runtime_config::ConfigSnapshot,
-    recognized_cache: bool,
-) -> Result<bool, String> {
-    Ok(has_markdown(&input.vault_path)?
-        || recognized_cache
-        || has_git_history_with_explicit_config(&input.vault_path, snapshot)
-        || LEGACY_STORED_KEYS.iter().any(|key| {
-            snapshot
-                .setting(key)
-                .is_some_and(|setting| setting.source == SettingSource::Stored)
-        })
-        || deliberately_configured_vault_path(&input.environment))
-}
-
-fn has_git_history_with_explicit_config(
-    vault_path: &Path,
-    snapshot: &crate::runtime_config::ConfigSnapshot,
-) -> bool {
-    let explicit_git_config = LEGACY_STORED_KEYS
-        .iter()
-        .filter(|key| key.starts_with("HATCHDOOR_GIT_"))
-        .any(|key| {
-            snapshot
-                .setting(key)
-                .is_some_and(|setting| setting.source != SettingSource::Default)
-        });
-    if !explicit_git_config {
-        return false;
-    }
-    git2::Repository::open(vault_path)
-        .ok()
-        .is_some_and(|repository| {
-            !repository.is_bare()
-                && repository.workdir().is_some()
-                && repository
-                    .head()
-                    .ok()
-                    .and_then(|head| head.target())
-                    .is_some()
-        })
-}
-
-fn has_markdown(vault_path: &Path) -> Result<bool, String> {
-    if !vault_path.exists() {
-        return Ok(false);
-    }
-    for entry in walkdir::WalkDir::new(vault_path)
-        .follow_root_links(true)
-        .follow_links(false)
-    {
-        let entry = entry.map_err(|error| {
-            format!(
-                "could not inspect legacy Vault '{}': {error}",
-                vault_path.display()
-            )
-        })?;
-        if entry.file_type().is_file()
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn deliberately_configured_vault_path(environment: &BTreeMap<String, String>) -> bool {
-    let Some(value) = environment
-        .get("VAULT_PATH")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-    let normalized = lexical_path(Path::new(value));
-    normalized != Path::new("vault") && normalized != Path::new("/data/vault")
-}
-
-fn lexical_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                let can_pop = normalized
-                    .file_name()
-                    .is_some_and(|name| name != std::ffi::OsStr::new(".."));
-                if can_pop {
-                    normalized.pop();
-                } else if !normalized.has_root() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
-}
-
-fn cache_files(path: &Path) -> [PathBuf; 3] {
-    let mut wal: OsString = path.as_os_str().to_owned();
-    wal.push("-wal");
-    let mut shm: OsString = path.as_os_str().to_owned();
-    shm.push("-shm");
-    [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
-}
-
-fn remove_if_present(path: &Path) -> Result<(), std::io::Error> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-pub fn start_with_no_vaults(
-    registry: &VaultRegistryStore,
-    confirmed: bool,
-) -> Result<crate::vault_registry::VaultRegistrySnapshot, LegacyMigrationError> {
-    if !confirmed {
-        return Err(LegacyMigrationError::ConfirmationRequired);
-    }
-    registry.initialize_empty(0).map_err(Into::into)
-}
-
-fn ignored_legacy_environment_keys(environment: &BTreeMap<String, String>) -> Vec<String> {
-    environment
-        .iter()
-        .filter(|(key, value)| {
-            !value.trim().is_empty() && legacy_vault_environment_key_kind(key).is_some()
-        })
-        .map(|(key, _)| key.clone())
-        .collect()
+    Ok(VaultRegistryState::Ready(registry.initialize_empty(0)?))
 }
 
 #[cfg(test)]
@@ -539,103 +113,19 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{
-        LegacyMigrationError, LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault,
-        start_with_no_vaults,
-    };
+    use super::{RegistryStartupError, prepare_registry};
     use crate::runtime_config::{Environment, RuntimeConfig, live_settings_defaults};
     use crate::vault_registry::{
-        DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, VaultRegistryState, VaultRegistryStore, VaultSource,
+        NewVaultDefinition, VaultRegistryState, VaultRegistryStore, VaultSource,
     };
 
-    fn write_recognized_legacy_cache(path: &std::path::Path) {
-        std::fs::create_dir_all(path.parent().expect("cache parent")).expect("cache directory");
-        let connection = rusqlite::Connection::open(path).expect("legacy cache");
-        connection
-            .execute_batch(
-                "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);\n\
-                 INSERT INTO metadata(key, value) VALUES ('schema_version', '8');\n\
-                 CREATE TABLE notes(\n\
-                    slug TEXT, title TEXT, normalized_title TEXT, relative_path TEXT,\n\
-                    absolute_path TEXT, content TEXT, content_hash TEXT, indexed_at INTEGER\n\
-                 );\n\
-                 CREATE TABLE note_links(source_slug TEXT, target_slug TEXT);\n\
-                 CREATE TABLE headings(note_slug TEXT);\n\
-                 CREATE TABLE tags(note_slug TEXT);\n\
-                 CREATE VIRTUAL TABLE note_fts USING fts5(title, relative_path, content, slug);",
-            )
-            .expect("legacy cache metadata");
-    }
-
-    fn write_recognized_v1_cache(path: &std::path::Path) {
-        std::fs::create_dir_all(path.parent().expect("cache parent")).expect("cache directory");
-        let connection = rusqlite::Connection::open(path).expect("legacy v1 cache");
-        connection
-            .execute_batch(
-                "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);\n\
-                 INSERT INTO metadata(key, value) VALUES ('schema_version', '1');\n\
-                 CREATE TABLE notes(\n\
-                    id INTEGER PRIMARY KEY, slug TEXT, title TEXT, relative_path TEXT,\n\
-                    absolute_path TEXT, content TEXT, content_hash TEXT, indexed_at INTEGER\n\
-                 );\n\
-                 CREATE TABLE note_links(source_slug TEXT, target_slug TEXT);\n\
-                 CREATE TABLE headings(note_slug TEXT);\n\
-                 CREATE TABLE tags(note_slug TEXT);\n\
-                 CREATE VIRTUAL TABLE note_fts USING fts5(title, relative_path, content, slug);",
-            )
-            .expect("legacy v1 schema");
-    }
-
-    fn initialize_legacy_repository(path: &std::path::Path) -> git2::Repository {
-        std::fs::create_dir_all(path).expect("repository directory");
-        std::fs::write(path.join("README.md"), b"# Existing Vault\n").expect("tracked Markdown");
-        let repository = git2::Repository::init(path).expect("legacy repository");
-        repository.set_head("refs/heads/main").expect("main branch");
-        let mut index = repository.index().expect("index");
-        index
-            .add_path(std::path::Path::new("README.md"))
-            .expect("stage note");
-        index.write().expect("write index");
-        let tree_id = index.write_tree().expect("tree");
-        let tree = repository.find_tree(tree_id).expect("find tree");
-        let signature =
-            git2::Signature::now("Legacy User", "legacy@example.com").expect("signature");
-        repository
-            .commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                "legacy history",
-                &tree,
-                &[],
-            )
-            .expect("legacy commit");
-        drop(tree);
-        repository
-    }
-
-    fn commit_readme(repository: &git2::Repository, message: &str) -> git2::Oid {
-        let mut index = repository.index().expect("index");
-        index
-            .add_path(std::path::Path::new("README.md"))
-            .expect("stage README");
-        index.write().expect("write index");
-        let tree_id = index.write_tree().expect("tree");
-        let tree = repository.find_tree(tree_id).expect("find tree");
-        let parent_id = repository.head().expect("HEAD").target().expect("commit");
-        let parent = repository.find_commit(parent_id).expect("parent");
-        let signature =
-            git2::Signature::now("Legacy User", "legacy@example.com").expect("signature");
-        repository
-            .commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                message,
-                &tree,
-                &[&parent],
-            )
-            .expect("commit")
+    fn runtime_config(settings_path: &std::path::Path) -> RuntimeConfig {
+        RuntimeConfig::load(
+            settings_path,
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration")
     }
 
     fn directory_bytes(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
@@ -656,179 +146,137 @@ mod tests {
             .collect()
     }
 
+    fn ready_vault_count(state: &VaultRegistryState) -> usize {
+        match state {
+            VaultRegistryState::Ready(snapshot) => snapshot.vault_ids().count(),
+            VaultRegistryState::Recovery(recovery) => {
+                panic!("registry in recovery: {}", recovery.message())
+            }
+        }
+    }
+
+    /// The stock Compose setup: Markdown already in the mounted folder, no
+    /// registry yet. The folder is never registered and never written to.
     #[test]
-    fn fresh_default_directory_does_not_trigger_migration() {
+    fn a_fresh_start_with_markdown_in_the_mount_writes_an_empty_registry() {
         let root = tempdir().expect("temporary deployment");
         let vault_path = root.path().join("vault");
-        std::fs::create_dir(&vault_path).expect("empty default Vault directory");
+        std::fs::create_dir_all(vault_path.join("Projects")).expect("vault folder");
+        std::fs::write(vault_path.join("Welcome.md"), b"# Mine\n").expect("note");
+        std::fs::write(vault_path.join("Projects/Plan.md"), b"[[Welcome]]\n").expect("note");
+        let before = directory_bytes(&vault_path);
         let registry_path = root.path().join("state/vaults.json");
-        let settings_path = root.path().join("cache/settings.json");
-        let runtime_config = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
+        let registry = VaultRegistryStore::new(&registry_path);
 
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(&registry_path),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path,
-                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                environment: BTreeMap::new(),
-            },
+        let state = prepare_registry(
+            &registry,
+            &runtime_config(&root.path().join("settings.json")),
         )
-        .expect("inspect fresh deployment");
+        .expect("fresh start");
 
-        assert_eq!(outcome, LegacyMigrationOutcome::NoLegacyDeployment);
-        assert!(!registry_path.exists());
-        assert!(!settings_path.exists());
+        assert_eq!(ready_vault_count(&state), 0);
+        assert!(registry_path.exists(), "the empty registry is persisted");
+        assert_eq!(ready_vault_count(&registry.load().expect("reload")), 0);
+        assert_eq!(directory_bytes(&vault_path), before);
     }
 
     #[test]
-    fn debug_output_lists_legacy_environment_keys_without_values() {
-        let input = LegacyMigrationInput {
-            vault_path: std::path::PathBuf::from("vault"),
-            cache_db_path: std::path::PathBuf::from("cache.sqlite3"),
-            environment: BTreeMap::from([(
-                "HATCHDOOR_GIT_HTTPS_TOKEN".to_string(),
-                "super-secret-token".to_string(),
-            )]),
-        };
+    fn a_fresh_start_with_an_empty_mount_has_zero_vaults() {
+        let root = tempdir().expect("temporary deployment");
+        let vault_path = root.path().join("vault");
+        std::fs::create_dir(&vault_path).expect("empty vault folder");
+        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
 
-        let debug = format!("{input:?}");
-        assert!(debug.contains("HATCHDOOR_GIT_HTTPS_TOKEN"));
-        assert!(!debug.contains("super-secret-token"));
+        let state = prepare_registry(
+            &registry,
+            &runtime_config(&root.path().join("settings.json")),
+        )
+        .expect("fresh start");
+
+        assert_eq!(ready_vault_count(&state), 0);
+        assert_eq!(std::fs::read_dir(&vault_path).expect("read").count(), 0);
+    }
+
+    /// Live settings a current install may store, the exclusions and commit
+    /// author among them, say nothing about the install's age, so they never
+    /// trigger the refusal (a 2.8 install that lost its registry is not old).
+    #[test]
+    fn live_stored_settings_without_a_registry_still_start_empty() {
+        let root = tempdir().expect("temporary deployment");
+        let config = runtime_config(&root.path().join("settings.json"));
+        config
+            .save([
+                (
+                    "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                    "archive/".to_string(),
+                ),
+                ("HATCHDOOR_EXCLUDE".to_string(), "private/**".to_string()),
+                (
+                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                    "Current Author".to_string(),
+                ),
+                (
+                    "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
+                    "author@example.com".to_string(),
+                ),
+            ])
+            .expect("stored settings");
+        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
+
+        let state = prepare_registry(&registry, &config).expect("fresh start");
+
+        assert_eq!(ready_vault_count(&state), 0);
     }
 
     #[test]
-    fn lexically_equivalent_default_paths_do_not_prove_a_legacy_deployment() {
-        for configured_path in [
-            "vault/",
-            "./vault",
-            "notes/../vault",
-            "/data/vault/",
-            "/data/./vault",
-            "/data/notes/../vault",
-        ] {
+    fn stored_retired_git_lane_keys_without_a_registry_refuse_and_change_nothing() {
+        for key in super::RETIRED_GIT_LANE_STORED_KEYS {
             let root = tempdir().expect("temporary deployment");
-            let vault_path = root.path().join("vault");
-            std::fs::create_dir(&vault_path).expect("empty default Vault directory");
+            let settings_path = root.path().join("settings.json");
+            let config = runtime_config(&settings_path);
+            config
+                .save([(key.to_string(), "legacy-value".to_string())])
+                .expect("stored legacy setting");
+            let settings_before = std::fs::read(&settings_path).expect("settings file");
             let registry_path = root.path().join("state/vaults.json");
-            let runtime_config = RuntimeConfig::load(
-                root.path().join("cache/settings.json"),
-                Environment::empty(),
-                live_settings_defaults(),
-            )
-            .expect("runtime configuration");
 
-            let outcome = migrate_legacy_vault(
-                &VaultRegistryStore::new(&registry_path),
-                &runtime_config,
-                LegacyMigrationInput {
-                    vault_path,
-                    cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                    environment: BTreeMap::from([(
-                        "VAULT_PATH".to_string(),
-                        configured_path.to_string(),
-                    )]),
-                },
-            )
-            .expect("inspect equivalent default");
+            let error =
+                prepare_registry(&VaultRegistryStore::new(&registry_path), &config).expect_err(key);
 
             assert_eq!(
-                outcome,
-                LegacyMigrationOutcome::NoLegacyDeployment,
-                "{configured_path}"
+                error,
+                RegistryStartupError::UnconvertedLegacyInstall,
+                "{key}"
             );
-            assert!(!registry_path.exists(), "{configured_path}");
+            assert!(!registry_path.exists(), "{key}: no registry is written");
+            assert_eq!(
+                std::fs::read(&settings_path).expect("settings file"),
+                settings_before,
+                "{key}: stored settings are left for the 2.7.x import"
+            );
         }
     }
 
     #[test]
-    fn any_existing_registry_permanently_suppresses_legacy_import() {
-        let root = tempdir().expect("temporary deployment");
-        let registry_path = root.path().join("state/vaults.json");
-        let registry = VaultRegistryStore::new(&registry_path);
-        registry
-            .initialize_empty(0)
-            .expect("intentional empty registry");
-        let registry_bytes = std::fs::read(&registry_path).expect("registry bytes");
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        std::fs::create_dir_all(cache_db_path.parent().expect("cache parent"))
-            .expect("cache directory");
-        std::fs::write(&cache_db_path, b"legacy cache must remain").expect("legacy cache fixture");
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
+    fn the_refusal_names_the_upgrade_path_and_the_migration_document() {
+        let message = RegistryStartupError::UnconvertedLegacyInstall.to_string();
 
-        let outcome = migrate_legacy_vault(
-            &registry,
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: root.path().join("missing-deliberate-vault"),
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::from([
-                    (
-                        "VAULT_PATH".to_string(),
-                        root.path()
-                            .join("missing-deliberate-vault")
-                            .display()
-                            .to_string(),
-                    ),
-                    ("HATCHDOOR_GIT_SYNC_ENABLED".to_string(), "true".to_string()),
-                ]),
-            },
-        )
-        .expect("existing registry wins");
-
-        let LegacyMigrationOutcome::ExistingRegistry {
-            state,
-            ignored_environment_keys,
-        } = outcome
-        else {
-            panic!("expected existing registry outcome");
-        };
-        assert!(matches!(state, VaultRegistryState::Ready(_)));
-        assert_eq!(
-            ignored_environment_keys,
-            vec!["HATCHDOOR_GIT_SYNC_ENABLED", "VAULT_PATH"]
-        );
-        assert_eq!(
-            std::fs::read(&registry_path).expect("registry retained"),
-            registry_bytes
-        );
-        assert_eq!(
-            std::fs::read(&cache_db_path).expect("cache retained"),
-            b"legacy cache must remain"
+        assert!(message.contains("2.5.0 to 2.7.x"), "{message}");
+        assert!(message.contains("2.8.0"), "{message}");
+        assert!(
+            message.contains(super::LEGACY_MIGRATION_DOC_URL),
+            "{message}"
         );
     }
 
-    /// #325: the import's settings cleanup used to run exactly once, so a
-    /// crash between the registry commit and `remove_stored` left the legacy
-    /// plaintext token in settings for good. Every boot on an existing
-    /// registry now removes the retired Git keys again, leaving settings that
-    /// still have live readers alone.
     #[test]
-    fn an_existing_registry_retries_the_retired_legacy_settings_cleanup() {
+    fn an_existing_registry_purges_the_retired_git_lane_keys_and_keeps_the_rest() {
         let root = tempdir().expect("temporary deployment");
-        let registry_path = root.path().join("state/vaults.json");
-        let registry = VaultRegistryStore::new(&registry_path);
-        registry
-            .initialize_empty(0)
-            .expect("registry committed before the crash");
+        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
+        registry.initialize_empty(0).expect("existing registry");
         let settings_path = root.path().join("cache/settings.json");
-        let runtime_config = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        runtime_config
+        let config = runtime_config(&settings_path);
+        config
             .save([
                 (
                     "HATCHDOOR_GIT_HTTPS_TOKEN".to_string(),
@@ -844,29 +292,14 @@ mod tests {
                     "archive/".to_string(),
                 ),
             ])
-            .expect("settings left behind by the interrupted cleanup");
+            .expect("settings left behind by an interrupted cleanup");
 
-        migrate_legacy_vault(
-            &registry,
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: root.path().join("vault"),
-                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("existing registry wins");
+        prepare_registry(&registry, &config).expect("existing registry");
 
         let stored = std::fs::read_to_string(&settings_path).expect("settings file");
         assert!(!stored.contains("legacy-secret-token"), "{stored}");
         assert!(!stored.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{stored}");
-        let restarted = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration after cleanup");
-        let snapshot = restarted.snapshot();
+        let snapshot = runtime_config(&settings_path).snapshot();
         assert_eq!(
             snapshot
                 .required("HATCHDOOR_GIT_AUTHOR_NAME")
@@ -882,692 +315,61 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_registry_never_deletes_the_live_cache() {
+    fn an_existing_registry_with_vaults_loads_exactly_as_before() {
         let root = tempdir().expect("temporary deployment");
-        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
-        registry
-            .initialize_empty(0)
-            .expect("registry committed on an earlier boot");
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        drop(crate::cache::SqliteCache::open(&cache_db_path, 768).expect("live cache"));
-        assert!(
-            crate::cache::is_recognized_legacy_cache(&cache_db_path),
-            "the live cache is indistinguishable from a legacy one, which is why the cache cleanup is never retried"
-        );
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-
-        migrate_legacy_vault(
-            &registry,
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: root.path().join("vault"),
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("existing registry wins");
-
-        assert!(cache_db_path.is_file(), "the live cache survives a restart");
-    }
-
-    #[test]
-    fn starting_with_no_vaults_requires_confirmation_and_persists_intent() {
-        let root = tempdir().expect("temporary deployment");
+        let vault_path = root.path().join("notes");
+        std::fs::create_dir_all(&vault_path).expect("vault folder");
+        std::fs::write(vault_path.join("Note.md"), b"# Note\n").expect("note");
         let registry_path = root.path().join("state/vaults.json");
         let registry = VaultRegistryStore::new(&registry_path);
-
-        assert_eq!(
-            start_with_no_vaults(&registry, false).expect_err("confirmation required"),
-            LegacyMigrationError::ConfirmationRequired
-        );
-        assert!(!registry_path.exists());
-
-        let snapshot = start_with_no_vaults(&registry, true).expect("confirmed empty registry");
-        assert_eq!(snapshot.revision(), 1);
-        assert_eq!(snapshot.vault_ids().len(), 0);
-        assert!(registry_path.exists());
-    }
-
-    #[test]
-    fn markdown_evidence_imports_local_vault_before_cleaning_disposable_state() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("My Notes");
-        std::fs::create_dir_all(vault_path.join("projects")).expect("Vault directory");
-        let note_path = vault_path.join("projects/roadmap.md");
-        std::fs::write(&note_path, b"# Roadmap\n\nKeep this authoritative.\n")
-            .expect("legacy Markdown");
-        let note_bytes = std::fs::read(&note_path).expect("note before migration");
-
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        write_recognized_legacy_cache(&cache_db_path);
-        std::fs::write(cache_db_path.with_extension("sqlite3-wal"), b"stale wal")
-            .expect("WAL fixture");
-        std::fs::write(cache_db_path.with_extension("sqlite3-shm"), b"stale shm")
-            .expect("SHM fixture");
-
-        let settings_path = root.path().join("cache/settings.json");
-        let runtime_config = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        runtime_config
-            .save([
-                (
-                    "HATCHDOOR_EXCLUDE".to_string(),
-                    "private/**, tmp/**".to_string(),
-                ),
-                ("HATCHDOOR_GIT_SYNC_ENABLED".to_string(), "off".to_string()),
-                (
-                    "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
-                    "archive/".to_string(),
-                ),
-            ])
-            .expect("legacy stored settings");
-
-        let registry_path = root.path().join("state/vaults.json");
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(&registry_path),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: vault_path.clone(),
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("safe legacy import");
-
-        let LegacyMigrationOutcome::Imported {
-            snapshot,
-            vault_id,
-            cleanup_warnings,
-            ..
-        } = outcome
-        else {
-            panic!("expected imported outcome");
-        };
-        assert!(cleanup_warnings.is_empty(), "{cleanup_warnings:?}");
-        assert_eq!(snapshot.revision(), 1);
-        let definition = snapshot.definition(vault_id).expect("imported definition");
-        assert_eq!(definition.name(), "My Notes");
-        assert!(definition.enabled());
-        assert_eq!(
-            definition.source(),
-            &VaultSource::Local {
-                path: vault_path.clone()
-            }
-        );
-        assert_eq!(definition.exclude_patterns(), ["private/**", "tmp/**"]);
-        assert_eq!(
-            std::fs::read(&note_path).expect("note retained"),
-            note_bytes
-        );
-        assert!(registry_path.exists());
-        assert!(!cache_db_path.exists());
-        assert!(!cache_db_path.with_extension("sqlite3-wal").exists());
-        assert!(!cache_db_path.with_extension("sqlite3-shm").exists());
-
-        let restarted = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration after cleanup");
-        assert_eq!(
-            restarted
-                .snapshot()
-                .required("HATCHDOOR_EXCLUDE")
-                .expect("exclude"),
-            ""
-        );
-        assert_eq!(
-            restarted
-                .snapshot()
-                .required("HATCHDOOR_GIT_SYNC_ENABLED")
-                .expect("git mode"),
-            "false"
-        );
-        assert_eq!(
-            restarted
-                .snapshot()
-                .required("HATCHDOOR_ARCHIVE_PREFIX")
-                .expect("unrelated setting"),
-            "archive/"
-        );
-    }
-
-    #[test]
-    fn local_git_mode_becomes_existing_local_history_without_touching_repository() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("versioned-notes");
-        let repository = initialize_legacy_repository(&vault_path);
-        let head_before = repository.head().expect("HEAD").target().expect("commit");
-        let config_before = std::fs::read(vault_path.join(".git/config")).expect("git config");
-        let settings_path = root.path().join("cache/settings.json");
-        let runtime_config = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        runtime_config
-            .save([(
-                "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                "local".to_string(),
-            )])
-            .expect("legacy local Git setting");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: vault_path.clone(),
-                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("local Git import");
-
-        let LegacyMigrationOutcome::Imported {
-            snapshot, vault_id, ..
-        } = outcome
-        else {
-            panic!("expected imported outcome");
-        };
-        assert_eq!(
-            snapshot.definition(vault_id).expect("definition").source(),
-            &VaultSource::ExistingGit {
-                repository_path: vault_path.clone(),
-                repository_url: None,
-                branch: Some("main".to_string()),
-                vault_subdirectory: None,
-                mode: crate::vault_registry::VaultGitMode::LocalHistory,
-                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
-            }
-        );
-        let reopened = git2::Repository::open(&vault_path).expect("repository retained");
-        assert_eq!(
-            reopened.head().expect("HEAD retained").target(),
-            Some(head_before)
-        );
-        assert_eq!(
-            std::fs::read(vault_path.join(".git/config")).expect("git config retained"),
-            config_before
-        );
-    }
-
-    #[test]
-    fn migration_preserves_dirty_branches_conflicts_commits_and_unpushed_work_byte_for_byte() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("complex-git-state");
-        let repository = initialize_legacy_repository(&vault_path);
-        let initial_id = repository.head().expect("HEAD").target().expect("initial");
-        let initial = repository.find_commit(initial_id).expect("initial commit");
-        repository
-            .branch("feature", &initial, false)
-            .expect("additional branch");
-        repository
-            .reference(
-                "refs/remotes/origin/main",
-                initial_id,
-                true,
-                "legacy remote-tracking fixture",
-            )
-            .expect("remote-tracking ref");
-
-        std::fs::write(vault_path.join("README.md"), b"# Local unpushed change\n")
-            .expect("local change");
-        let local_id = commit_readme(&repository, "local unpushed commit");
-
-        let initial_tree = initial.tree().expect("initial tree");
-        let remote_blob = repository
-            .blob(b"# Conflicting remote change\n")
-            .expect("remote blob");
-        let mut remote_tree = repository
-            .treebuilder(Some(&initial_tree))
-            .expect("remote tree builder");
-        remote_tree
-            .insert("README.md", remote_blob, 0o100644)
-            .expect("remote README");
-        let remote_tree_id = remote_tree.write().expect("remote tree");
-        drop(remote_tree);
-        let remote_tree = repository
-            .find_tree(remote_tree_id)
-            .expect("find remote tree");
-        let signature =
-            git2::Signature::now("Remote User", "remote@example.com").expect("remote signature");
-        let remote_id = repository
-            .commit(
-                None,
-                &signature,
-                &signature,
-                "conflicting remote commit",
-                &remote_tree,
-                &[&initial],
-            )
-            .expect("remote commit");
-        let annotated = repository
-            .find_annotated_commit(remote_id)
-            .expect("annotated remote commit");
-        repository
-            .merge(&[&annotated], None, None)
-            .expect("leave genuine merge conflict");
-        std::fs::write(vault_path.join("untracked-draft.md"), b"unsaved draft\n")
-            .expect("untracked work");
-
-        assert_eq!(repository.state(), git2::RepositoryState::Merge);
-        assert!(
-            repository
-                .index()
-                .expect("conflicted index")
-                .has_conflicts()
-        );
-        assert_eq!(
-            repository.head().expect("local HEAD").target(),
-            Some(local_id)
-        );
-        let vault_before = directory_bytes(&vault_path);
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        runtime_config
-            .save([(
-                "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                "local".to_string(),
-            )])
-            .expect("legacy local mode");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: vault_path.clone(),
-                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("conflicted repository import");
-
-        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
-        assert_eq!(directory_bytes(&vault_path), vault_before);
-        let reopened = git2::Repository::open(&vault_path).expect("repository retained");
-        assert_eq!(reopened.state(), git2::RepositoryState::Merge);
-        assert!(
-            reopened
-                .index()
-                .expect("conflicted index retained")
-                .has_conflicts()
-        );
-        assert_eq!(
-            reopened.head().expect("HEAD retained").target(),
-            Some(local_id)
-        );
-        assert_eq!(
-            reopened
-                .refname_to_id("refs/heads/feature")
-                .expect("feature branch retained"),
-            initial_id
-        );
-        assert_eq!(
-            reopened
-                .refname_to_id("refs/remotes/origin/main")
-                .expect("unpushed baseline retained"),
-            initial_id
-        );
-    }
-
-    #[test]
-    fn remote_git_mode_maps_https_remote_branch_and_optional_credentials_read_only() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("remote-notes");
-        let repository = initialize_legacy_repository(&vault_path);
-        repository
-            .remote("upstream", "https://example.com/team/notes.git")
-            .expect("legacy HTTPS remote");
-        let head_before = repository.head().expect("HEAD").target().expect("commit");
-        let config_before = std::fs::read(vault_path.join(".git/config")).expect("git config");
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        runtime_config
-            .save([
-                ("HATCHDOOR_GIT_SYNC_ENABLED".to_string(), "true".to_string()),
-                ("HATCHDOOR_GIT_REMOTE".to_string(), "upstream".to_string()),
-                ("HATCHDOOR_GIT_BRANCH".to_string(), "main".to_string()),
-                (
-                    "HATCHDOOR_GIT_HTTPS_USERNAME".to_string(),
-                    "bot".to_string(),
-                ),
-                (
-                    "HATCHDOOR_GIT_HTTPS_TOKEN".to_string(),
-                    "secret".to_string(),
-                ),
-            ])
-            .expect("legacy remote settings");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: vault_path.clone(),
-                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("remote Git import");
-
-        let LegacyMigrationOutcome::Imported {
-            snapshot, vault_id, ..
-        } = outcome
-        else {
-            panic!("expected imported outcome");
-        };
-        let definition = snapshot.definition(vault_id).expect("definition");
-        assert_eq!(
-            definition.source(),
-            &VaultSource::ExistingGit {
-                repository_path: vault_path.clone(),
-                repository_url: Some("https://example.com/team/notes.git".to_string()),
-                branch: Some("main".to_string()),
-                vault_subdirectory: None,
-                mode: crate::vault_registry::VaultGitMode::TwoWay,
-                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
-            }
-        );
-        assert!(definition.credential_configured());
-        let reopened = git2::Repository::open(&vault_path).expect("repository retained");
-        assert_eq!(
-            reopened.head().expect("HEAD retained").target(),
-            Some(head_before)
-        );
-        assert_eq!(
-            std::fs::read(vault_path.join(".git/config")).expect("git config retained"),
-            config_before
-        );
-    }
-
-    #[test]
-    fn recognized_cache_alone_proves_legacy_deployment_but_arbitrary_sqlite_does_not() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("vault");
-        std::fs::create_dir(&vault_path).expect("empty default Vault");
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        std::fs::create_dir_all(cache_db_path.parent().expect("cache parent"))
-            .expect("cache directory");
-        rusqlite::Connection::open(&cache_db_path)
-            .expect("unrecognized SQLite file")
-            .execute_batch(
-                "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);\n\
-                 INSERT INTO metadata(key, value) VALUES ('schema_version', '8');\n\
-                 CREATE TABLE unrelated(value TEXT);",
-            )
-            .expect("lookalike metadata fixture");
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        let registry_path = root.path().join("state/vaults.json");
-
-        assert_eq!(
-            migrate_legacy_vault(
-                &VaultRegistryStore::new(&registry_path),
-                &runtime_config,
-                LegacyMigrationInput {
-                    vault_path: vault_path.clone(),
-                    cache_db_path: cache_db_path.clone(),
-                    environment: BTreeMap::new(),
+        let committed = registry
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Notes".to_string(),
+                    enabled: true,
+                    source: VaultSource::Local {
+                        path: vault_path.clone(),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
-            .expect("inspect unrelated SQLite"),
-            LegacyMigrationOutcome::NoLegacyDeployment
-        );
-        assert!(cache_db_path.exists());
-        assert!(!registry_path.exists());
+            .expect("registered Vault");
+        let registry_before = std::fs::read(&registry_path).expect("registry bytes");
+        let vault_before = directory_bytes(&vault_path);
 
-        std::fs::remove_file(&cache_db_path).expect("replace unrelated SQLite");
-        write_recognized_legacy_cache(&cache_db_path);
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(&registry_path),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path,
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::new(),
-            },
+        let state = prepare_registry(
+            &registry,
+            &runtime_config(&root.path().join("settings.json")),
         )
-        .expect("recognized cache import");
-        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
-        assert!(registry_path.exists());
-        assert!(!cache_db_path.exists());
+        .expect("existing registry");
+
+        assert_eq!(state, VaultRegistryState::Ready(committed));
+        assert_eq!(
+            std::fs::read(&registry_path).expect("registry"),
+            registry_before
+        );
+        assert_eq!(directory_bytes(&vault_path), vault_before);
     }
 
+    /// An existing registry wins even when single-Vault keys are still stored:
+    /// that install already ran the import, and only the retired Git-lane keys
+    /// are purged.
     #[test]
-    fn genuine_schema_v1_cache_proves_an_empty_legacy_vault() {
+    fn an_existing_registry_is_never_refused_for_stored_single_vault_keys() {
         let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("vault");
-        std::fs::create_dir(&vault_path).expect("empty legacy Vault");
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        write_recognized_v1_cache(&cache_db_path);
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
+        let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
+        registry.initialize_empty(0).expect("existing registry");
+        let config = runtime_config(&root.path().join("settings.json"));
+        config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "private/**".to_string())])
+            .expect("stored exclusion");
 
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path,
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("schema v1 import");
+        let state = prepare_registry(&registry, &config).expect("existing registry wins");
 
-        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
-        assert!(!cache_db_path.exists());
-    }
-
-    #[test]
-    fn markdown_import_never_deletes_an_unrecognized_cache_path() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("vault");
-        std::fs::create_dir(&vault_path).expect("Vault directory");
-        std::fs::write(vault_path.join("note.md"), b"# Legacy note\n").expect("Markdown evidence");
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        std::fs::create_dir_all(cache_db_path.parent().expect("cache parent"))
-            .expect("cache directory");
-        std::fs::write(&cache_db_path, b"not a Hatchdoor cache").expect("unrecognized cache");
-        let cache_before = std::fs::read(&cache_db_path).expect("cache bytes");
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path,
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("Markdown import");
-
-        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
-        assert_eq!(
-            std::fs::read(cache_db_path).expect("unrecognized cache retained"),
-            cache_before
-        );
-    }
-
-    #[test]
-    fn unsafe_conversion_enters_stable_recovery_without_mutating_legacy_state() {
-        let root = tempdir().expect("temporary deployment");
-        let vault_path = root.path().join("legacy-notes");
-        std::fs::create_dir(&vault_path).expect("Vault directory");
-        let note_path = vault_path.join("note.md");
-        std::fs::write(&note_path, b"# Keep me\n").expect("legacy note");
-        let cache_db_path = root.path().join("cache/hatchdoor-cache.sqlite3");
-        write_recognized_legacy_cache(&cache_db_path);
-        let settings_path = root.path().join("cache/settings.json");
-        let runtime_config = RuntimeConfig::load(
-            &settings_path,
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        // Remote versioning over a directory that is not a repository at all:
-        // nothing here can be converted into a Vault definition.
-        runtime_config
-            .save([(
-                "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                "remote".to_string(),
-            )])
-            .expect("unconvertible legacy setting");
-        let settings_before = std::fs::read(&settings_path).expect("settings bytes");
-        let cache_before = std::fs::read(&cache_db_path).expect("cache bytes");
-        let registry_path = root.path().join("state/vaults.json");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(&registry_path),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path,
-                cache_db_path: cache_db_path.clone(),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("recovery outcome");
-        let LegacyMigrationOutcome::Recovery { recovery, .. } = outcome else {
-            panic!("expected recovery outcome");
-        };
-        assert_eq!(recovery.code(), "legacy_migration_required");
-        assert!(
-            recovery.message().contains("not a readable repository"),
-            "unexpected message: {}",
-            recovery.message()
-        );
-        assert!(!registry_path.exists());
-        assert_eq!(
-            std::fs::read(&note_path).expect("note retained"),
-            b"# Keep me\n"
-        );
-        assert_eq!(
-            std::fs::read(&cache_db_path).expect("cache retained"),
-            cache_before
-        );
-        assert_eq!(
-            std::fs::read(&settings_path).expect("settings retained"),
-            settings_before
-        );
-    }
-
-    /// A legacy commit identity is an ordinary Vault definition field, and the
-    /// retired debounce concept blocks nothing.
-    #[test]
-    fn legacy_commit_identity_is_imported_and_retired_debounce_is_ignored() {
-        let root = tempdir().expect("temp root");
-        let vault_path = root.path().join("legacy-notes");
-        std::fs::create_dir(&vault_path).expect("Vault directory");
-        std::fs::write(vault_path.join("note.md"), b"# Keep me\n").expect("legacy note");
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-        runtime_config
-            .save([
-                (
-                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
-                    "Custom Legacy Author".to_string(),
-                ),
-                (
-                    "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
-                    "legacy@example.test".to_string(),
-                ),
-                (
-                    "HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string(),
-                    "120".to_string(),
-                ),
-            ])
-            .expect("legacy settings");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path,
-                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
-                environment: BTreeMap::new(),
-            },
-        )
-        .expect("import outcome");
-        let LegacyMigrationOutcome::Imported { snapshot, .. } = outcome else {
-            panic!("expected import, not recovery");
-        };
-        let definition = snapshot.definitions().next().expect("imported Vault");
-        let identity = definition.commit_identity().expect("imported identity");
-        assert_eq!(identity.name, "Custom Legacy Author");
-        assert_eq!(identity.email, "legacy@example.test");
-    }
-
-    /// The import never writes into the operator's folder: an empty
-    /// `VAULT_PATH` stays empty (ADR-40).
-    #[test]
-    fn importing_an_empty_vault_path_writes_no_files() {
-        let root = tempdir().expect("temp dir");
-        let vault_path = root.path().join("notes");
-        std::fs::create_dir_all(&vault_path).expect("empty vault directory");
-        let runtime_config = RuntimeConfig::load(
-            root.path().join("cache/settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration");
-
-        let outcome = migrate_legacy_vault(
-            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
-            &runtime_config,
-            LegacyMigrationInput {
-                vault_path: vault_path.clone(),
-                cache_db_path: root.path().join("cache/hatchdoor.sqlite3"),
-                environment: BTreeMap::from([(
-                    "VAULT_PATH".to_string(),
-                    vault_path.display().to_string(),
-                )]),
-            },
-        )
-        .expect("safe legacy import");
-
-        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
-        let entries: Vec<_> = std::fs::read_dir(&vault_path)
-            .expect("read the Vault directory")
-            .map(|entry| entry.expect("directory entry").file_name())
-            .collect();
-        assert!(
-            entries.is_empty(),
-            "the legacy import must not write into the Vault folder, found {entries:?}"
-        );
+        assert_eq!(ready_vault_count(&state), 0);
     }
 }

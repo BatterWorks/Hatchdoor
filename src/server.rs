@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::Extension;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -33,11 +33,10 @@ use crate::handlers::{
     health_handler, list_folders_handler, list_vaults_handler, patch_settings_handler,
     publish_recovery_branch_handler, refresh_vault_handler, retry_vault_handler,
     reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler, spa_not_found_handler,
-    start_with_no_vaults_handler, sync_vault_handler, upload_transfer_handler,
-    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
-    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
-    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
-    vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
+    sync_vault_handler, upload_transfer_handler, vault_collection_events_handler,
+    vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,
+    vault_scope_stats_handler, vault_scope_tree_handler, vault_scoped_archive_note_handler,
+    vault_scoped_asset_handler, vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
     vault_scoped_note_saved_queries_handler, vault_scoped_rename_note_handler,
@@ -51,7 +50,7 @@ use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
 use crate::vault_executor::VaultWorkExecutor;
-use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
+use crate::vault_migration::prepare_registry;
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
 use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
 #[cfg(test)]
@@ -115,10 +114,10 @@ pub fn check_web_auth_posture(
 /// `legacy_git_configured` is `HATCHDOOR_GIT_SYNC_ENABLED` resolving to a
 /// mode. Since #185 that setting drives nothing at runtime, so this is no
 /// longer the refusal that keeps a demo read-only — the registry check in
-/// [`check_demo_mode_registry_posture`] is. It is kept because the operator's
-/// `.env` and Hatchdoor's behaviour disagreeing is worth stopping over, and
-/// because the setting is still live input to the first-boot legacy import,
-/// which would register the Vault it names.
+/// [`check_demo_mode_registry_posture`] is. It is kept because the setting is
+/// still in the settings schema and can still be set in the environment, and
+/// the operator's `.env` and Hatchdoor's behaviour disagreeing is worth
+/// stopping over.
 pub fn check_demo_mode_posture(
     demo_mode: bool,
     mcp_enabled: bool,
@@ -142,42 +141,36 @@ pub fn check_demo_mode_posture(
     Ok(())
 }
 
-/// Refuse to start while per-Vault settings are still set in the environment.
-/// Once the registry owns them, an environment value is silently ignored: the
-/// operator's `.env` and Hatchdoor's actual behavior disagree, and every later
-/// change made in Settings looks overridden by a file that no longer has any
-/// effect. Stopping is the only unambiguous signal.
+/// Name per-Vault settings still set in the environment. Each Vault keeps its
+/// own settings in the registry, so an environment value is ignored: the
+/// operator's `.env` and Hatchdoor's actual behaviour disagree, and a change
+/// made in Settings looks overridden by a line that has no effect.
 ///
 /// `VAULT_PATH` is deliberately absent: Compose sets it on every deployment as
-/// the container's vault mount, so refusing on it would refuse every start.
-fn check_legacy_environment_posture(ignored_environment_keys: &[String]) -> Result<(), String> {
+/// the container's Vault mount, the root the folder picker lists.
+fn legacy_environment_warning(environment_keys: &[String]) -> Option<String> {
     use crate::config::{LegacyVaultEnvironmentKeyKind, legacy_vault_environment_key_kind};
 
-    let migrated: Vec<&str> = ignored_environment_keys
-        .iter()
-        .map(String::as_str)
-        .filter(|key| {
-            legacy_vault_environment_key_kind(key) == Some(LegacyVaultEnvironmentKeyKind::Migrated)
-        })
-        .collect();
-    let retired = ignored_environment_keys
-        .iter()
-        .filter(|key| {
-            legacy_vault_environment_key_kind(key) == Some(LegacyVaultEnvironmentKeyKind::Retired)
-        })
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    if migrated.is_empty() && retired.is_empty() {
-        return Ok(());
+    let named = |kind| {
+        environment_keys
+            .iter()
+            .map(String::as_str)
+            .filter(|key| legacy_vault_environment_key_kind(key) == Some(kind))
+            .collect::<Vec<_>>()
+    };
+    let per_vault = named(LegacyVaultEnvironmentKeyKind::Migrated);
+    let retired = named(LegacyVaultEnvironmentKeyKind::Retired);
+    if per_vault.is_empty() && retired.is_empty() {
+        return None;
     }
 
     let mut message = String::new();
-    if !migrated.is_empty() {
+    if !per_vault.is_empty() {
         message.push_str(&format!(
-            "Hatchdoor has taken these settings over from your .env and stores them itself now: {}. \
-             Remove them from your .env and start Hatchdoor again. To change them from now on, use \
-             Settings, or the edit_vault MCP tool.",
-            migrated.join(", ")
+            "These variables in your .env have no effect, because each Vault keeps its own \
+             settings in Hatchdoor: {}. Remove them from your .env, and change a Vault's \
+             settings in Settings or with the edit_vault MCP tool.",
+            per_vault.join(", ")
         ));
     }
     if !retired.is_empty() {
@@ -189,7 +182,7 @@ fn check_legacy_environment_posture(ignored_environment_keys: &[String]) -> Resu
             retired.join(", ")
         ));
     }
-    Err(message)
+    Some(message)
 }
 
 /// `check_demo_mode_posture` above only inspects the legacy single-vault Git
@@ -352,10 +345,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/events",
                 get(vault_collection_events_handler),
-            )
-            .route(
-                "/api/v1/vaults/start-with-no-vaults",
-                post(start_with_no_vaults_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}",
@@ -659,10 +648,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 })
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            reject_startup_recovery_mutation,
-        ))
         .with_state(state)
 }
 
@@ -674,47 +659,6 @@ fn traced_uri(uri: &axum::http::Uri) -> String {
         Some(query) => format!("{}?{}", uri.path(), crate::auth::redact_query_token(query)),
         None => uri.path().to_string(),
     }
-}
-
-/// Environment-cleanup recovery keeps liveness and read-only explanation
-/// surfaces reachable, but it is not an alternate operating mode. Refuse all
-/// state-changing HTTP requests until the operator removes the named keys
-/// and restarts, regardless of which inner router would otherwise own them.
-///
-/// `/mcp` is exempt (#327). Streamable HTTP MCP sends the handshake, the
-/// discovery and list calls, and every read tool as a POST, so a method-based
-/// guard would kill the whole surface with a body its JSON-RPC framing cannot
-/// parse. The MCP tool dispatcher applies the same refusal per tool instead,
-/// as a structured `legacy_environment_cleanup_required` tool error
-/// (`mcp::tools::environment_cleanup_refusal`), and the transport's own auth
-/// and Origin checks still run first.
-async fn reject_startup_recovery_mutation(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let is_exempt = matches!(
-        *request.method(),
-        Method::GET | Method::HEAD | Method::OPTIONS
-    ) || request.uri().path() == "/mcp";
-    let recovery = state
-        .legacy_migration_recovery
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    if !is_exempt
-        && let Some(recovery) = recovery
-        && !recovery.can_start_with_no_vaults()
-    {
-        return crate::handlers::vaults::VaultApiError::new(
-            "legacy_environment_cleanup_required",
-            recovery.message(),
-            None,
-            false,
-        )
-        .respond(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    next.run(request).await
 }
 
 async fn startup_status_handler(State(state): State<AppState>) -> Response {
@@ -961,15 +905,18 @@ async fn reject_demo_mutation(
     next.run(request).await
 }
 
-/// Record this start in the instance state and return the version record.
 /// An install counts as existing when a Vault registry or stored settings are
-/// already on disk; with neither, this is a fresh install.
+/// already on disk; with neither, this is a fresh install. Read before startup
+/// can write a registry (ADR-40 decision 6).
+fn is_existing_install(registry_path: &std::path::Path, settings_path: &std::path::Path) -> bool {
+    registry_path.exists() || settings_path.exists()
+}
+
+/// Record this start in the instance state and return the version record.
 fn record_instance_start(
     store: &crate::instance_state::InstanceStateStore,
-    registry_path: &std::path::Path,
-    settings_path: &std::path::Path,
+    existing_install: bool,
 ) -> crate::instance_state::VersionRecord {
-    let existing_install = registry_path.exists() || settings_path.exists();
     let record = store.record_start(&crate::config::version_string(), existing_install);
     info!(
         current = %record.current,
@@ -1055,9 +1002,6 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    // Migration may persist the registry and discard a recognized legacy
-    // cache, so run it only after startup security/configuration refusals and
-    // before opening SQLite.
     // The registry fences its own state directory off Vault roots; the cache
     // directory and the settings file's directory are instance state too, so
     // no Vault may contain or sit inside them either (#325).
@@ -1075,105 +1019,34 @@ pub async fn run_server() {
                 }
             }),
     );
-    // ADR-40 decision 6: record which version runs before anything below can
-    // write a registry, so a registry or settings file on disk still means an
-    // install that existed before this start.
+    // The registry step below may write an empty registry, so it runs only
+    // after the security and configuration refusals above.
+    // ADR-40 decision 6: whether this install existed is read before anything
+    // below can write a registry, so a registry or settings file on disk still
+    // means an install that existed before this start.
+    let existing_install = is_existing_install(vault_registry.path(), &settings_path);
+    // ADR-40: a start with no registry writes an empty one, whatever
+    // `VAULT_PATH` holds; an install from 2.4.x or earlier refuses instead,
+    // before this start is recorded, so a refusal writes nothing.
+    let registry_state =
+        prepare_registry(&vault_registry, &runtime_config).unwrap_or_else(|error| {
+            error!("Vault registry startup failed: {error}");
+            std::process::exit(1);
+        });
     let instance_state =
         crate::instance_state::InstanceStateStore::beside_registry(vault_registry.path());
-    let instance_versions = Arc::new(record_instance_start(
-        &instance_state,
-        vault_registry.path(),
-        &settings_path,
-    ));
+    let instance_versions = Arc::new(record_instance_start(&instance_state, existing_install));
     // One store for every section, so their writes share its lock (#426).
     let agent_connections = Arc::new(crate::instance_state::AgentConnectionLog::load(
         instance_state.clone(),
     ));
-    let legacy_vault_path = match &config.vault_source {
-        VaultSource::Local { vault_path } => vault_path.clone(),
-    };
-    let migration = migrate_legacy_vault(
-        &vault_registry,
-        &runtime_config,
-        LegacyMigrationInput {
-            vault_path: legacy_vault_path,
-            cache_db_path: config.cache_db_path.clone(),
-            environment: std::env::vars().collect(),
-        },
-    )
-    .unwrap_or_else(|error| {
-        error!("Legacy Vault migration failed: {error}");
-        std::process::exit(1);
-    });
-    let (registry_state, legacy_migration_recovery) = match migration {
-        LegacyMigrationOutcome::NoLegacyDeployment => (
-            vault_registry.load().unwrap_or_else(|error| {
-                error!("Vault registry startup failed: {error}");
-                std::process::exit(1);
-            }),
-            None,
-        ),
-        LegacyMigrationOutcome::ExistingRegistry {
-            state,
-            ignored_environment_keys,
-        } => {
-            let recovery = check_legacy_environment_posture(&ignored_environment_keys)
-                .err()
-                .map(crate::vault_migration::LegacyMigrationRecovery::environment_cleanup);
-            if let Some(recovery) = &recovery {
-                warn!(
-                    code = recovery.code(),
-                    message = recovery.message(),
-                    "Legacy environment cleanup requires an operator restart"
-                );
-            }
-            (state, recovery)
-        }
-        LegacyMigrationOutcome::Imported {
-            snapshot,
-            vault_id,
-            cleanup_warnings,
-            ignored_environment_keys,
-        } => {
-            info!(%vault_id, "Imported legacy deployment into the Vault registry");
-            for warning in cleanup_warnings {
-                warn!("{warning}");
-            }
-            let recovery = check_legacy_environment_posture(&ignored_environment_keys)
-                .err()
-                .map(|message| {
-                    crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(format!(
-                        "Your Vault was imported successfully. {message}"
-                    ))
-                });
-            if let Some(recovery) = &recovery {
-                warn!(
-                    code = recovery.code(),
-                    message = recovery.message(),
-                    "Imported Vault is waiting for legacy environment cleanup and restart"
-                );
-            }
-            (VaultRegistryState::Ready(snapshot), recovery)
-        }
-        LegacyMigrationOutcome::Recovery {
-            recovery,
-            ignored_environment_keys,
-        } => {
-            warn!(
-                code = recovery.code(),
-                message = recovery.message(),
-                keys = ?ignored_environment_keys,
-                "Legacy Vault migration requires operator recovery"
-            );
-            (
-                vault_registry.load().unwrap_or_else(|error| {
-                    error!("Vault registry startup failed: {error}");
-                    std::process::exit(1);
-                }),
-                Some(recovery),
-            )
-        }
-    };
+    let environment_keys = std::env::vars()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    if let Some(message) = legacy_environment_warning(&environment_keys) {
+        warn!("{message}");
+    }
 
     if let VaultRegistryState::Ready(snapshot) = &registry_state
         && let Err(message) = check_demo_mode_registry_posture(config.demo_mode, snapshot)
@@ -1181,8 +1054,6 @@ pub async fn run_server() {
         error!("{message}");
         std::process::exit(1);
     }
-
-    let startup_recovery_active = legacy_migration_recovery.is_some();
 
     let sqlite = Arc::new(
         SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
@@ -1239,29 +1110,20 @@ pub async fn run_server() {
             ),
         ),
     ));
-    match (&registry_state, legacy_migration_recovery.as_ref()) {
-        (_, Some(recovery)) => warn!(
-            code = recovery.code(),
-            "Startup recovery is active; no Vault runtimes were activated"
-        ),
-        (VaultRegistryState::Ready(snapshot), None) => {
+    match &registry_state {
+        VaultRegistryState::Ready(snapshot) => {
             vaults
                 .reconcile_and_reconstruct(&vault_registry, snapshot, &vault_work, &managed_git)
                 .await
         }
-        (VaultRegistryState::Recovery(recovery), None) => warn!(
+        VaultRegistryState::Recovery(recovery) => warn!(
             message = recovery.message(),
             "Vault registry requires operator recovery; no Vault runtimes were activated"
         ),
     }
     let runtime = VaultRuntime::new(config.vault_source.clone());
     let startup = StartupTracker::new(runtime);
-    if startup_recovery_active {
-        startup.runtime().set_unavailable(
-            "startup_recovery_required",
-            "Startup recovery is required before Vaults can be activated",
-        );
-    } else if selected_model == SelectedModel::TermsRequired {
+    if selected_model == SelectedModel::TermsRequired {
         startup.set_terms_required();
     } else {
         startup.set_scanning();
@@ -1274,7 +1136,6 @@ pub async fn run_server() {
         vault_work: vault_work.clone(),
         managed_git: managed_git.clone(),
         commit_cooldown: commit_cooldown.clone(),
-        legacy_migration_recovery: Arc::new(std::sync::RwLock::new(legacy_migration_recovery)),
         startup_sqlite: sqlite.clone(),
         mcp_tools_changed,
         embedder,
@@ -1399,7 +1260,7 @@ pub async fn run_server() {
     // Startup deliberately spawns no watcher of its own: audit findings
     // C01-F02/C01-F03 were detached replacement watchers accumulating from
     // exactly that, with no handle to cancel.
-    if !startup_recovery_active && selected_model != SelectedModel::TermsRequired {
+    if selected_model != SelectedModel::TermsRequired {
         spawn_model_startup(state.clone(), selected_model);
     }
 
@@ -1508,21 +1369,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compose_vault_path_alone_never_refuses_a_start() {
-        // Every Compose deployment sets VAULT_PATH; refusing on it would
-        // refuse every one of them.
-        check_legacy_environment_posture(&["VAULT_PATH".to_string()])
-            .expect("VAULT_PATH is not a per-Vault setting");
+    fn compose_vault_path_alone_is_never_warned_about() {
+        // Every Compose deployment sets VAULT_PATH, as the root the folder
+        // picker lists; warning on it would warn on every one of them.
+        assert_eq!(
+            legacy_environment_warning(&["VAULT_PATH".to_string()]),
+            None
+        );
     }
 
     #[test]
-    fn a_settled_registry_refuses_to_start_beside_stale_per_vault_variables() {
-        let message = check_legacy_environment_posture(&[
+    fn per_vault_variables_left_in_the_environment_are_named() {
+        let message = legacy_environment_warning(&[
             "VAULT_PATH".to_string(),
             "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
             "HATCHDOOR_EXCLUDE".to_string(),
         ])
-        .expect_err("stale per-Vault variables refuse the start");
+        .expect("stale per-Vault variables are named");
         assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
         assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
         assert!(!message.contains("VAULT_PATH"), "{message}");
@@ -1530,15 +1393,11 @@ mod tests {
     }
 
     #[test]
-    fn a_retired_debounce_variable_is_named_as_obsolete_rather_than_migrated() {
-        let message =
-            check_legacy_environment_posture(&["HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string()])
-                .expect_err("an obsolete variable still has to go");
-        assert!(
-            message.contains("no longer does anything"),
-            "a retired setting must not be described as taken over: {message}"
-        );
-        assert!(!message.contains("taken these settings over"), "{message}");
+    fn a_retired_debounce_variable_is_named_as_obsolete() {
+        let message = legacy_environment_warning(&["HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string()])
+            .expect("an obsolete variable still has to go");
+        assert!(message.contains("no longer does anything"), "{message}");
+        assert!(!message.contains("each Vault keeps its own"), "{message}");
     }
 
     #[tokio::test]
@@ -2080,7 +1939,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
@@ -2167,7 +2025,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
@@ -4230,105 +4087,6 @@ mod tests {
             .expect("initialize issues Mcp-Session-Id")
     }
 
-    /// #327: environment-cleanup recovery used to refuse every POST, so the
-    /// whole MCP surface, handshake included, answered with a bare 503 body
-    /// no JSON-RPC client can parse. `/mcp` now reaches the dispatcher, which
-    /// serves the reads and refuses each state-changing tool with the same
-    /// structured code the HTTP API uses.
-    #[tokio::test]
-    async fn environment_cleanup_recovery_answers_mcp_in_json_rpc_with_a_structured_code() {
-        let (_unused_app, _tmp, state) = app_for_tests_with_state();
-        state
-            .runtime_config
-            .save([
-                ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
-                (
-                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
-                    "true".to_string(),
-                ),
-                (
-                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
-                    "mcp-secret".to_string(),
-                ),
-            ])
-            .expect("configure write-enabled MCP");
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") = Some(
-            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
-                "Remove HATCHDOOR_EXCLUDE and restart.",
-            ),
-        );
-        let app = build_router(state, None);
-
-        // The handshake is a POST and must still succeed.
-        initialize_mcp_session(&app, "mcp-secret").await;
-
-        // Discovery explains the recovery.
-        let listed = mcp_tool_call(&app, "mcp-secret", "list_vaults", serde_json::json!({})).await;
-        assert_eq!(listed["result"]["isError"], false, "{listed}");
-        assert_eq!(
-            listed["result"]["structuredContent"]["legacy_migration_recovery"]["code"],
-            "legacy_environment_cleanup_required"
-        );
-
-        // Every state-changing tool is refused with the structured code.
-        let vault_id = crate::vault_registry::VaultId::generate()
-            .expect("generate Vault id")
-            .to_string();
-        for (name, arguments) in [
-            (
-                "create_vault",
-                serde_json::json!({"name": "New", "source": {"kind": "local", "path": "/tmp/x"}}),
-            ),
-            (
-                "create_note",
-                serde_json::json!({"vault_id": vault_id, "relative_path": "A.md", "content": "x"}),
-            ),
-            ("accept_gemma_terms", serde_json::json!({})),
-        ] {
-            let refused = mcp_tool_call(&app, "mcp-secret", name, arguments).await;
-            assert!(refused.get("error").is_none(), "{name}: {refused}");
-            assert_eq!(refused["result"]["isError"], true, "{name}: {refused}");
-            assert_eq!(
-                refused["result"]["structuredContent"]["code"],
-                "legacy_environment_cleanup_required",
-                "{name}: {refused}"
-            );
-        }
-
-        // A batch's write items are refused the same way, item by item.
-        let batch = mcp_tool_call(
-            &app,
-            "mcp-secret",
-            "batch",
-            serde_json::json!({"operations": [{"op": "create_note", "arguments": {
-                "vault_id": vault_id, "relative_path": "A.md", "content": "x"
-            }}]}),
-        )
-        .await;
-        assert_eq!(
-            batch["result"]["structuredContent"]["items"][0]["error"]["code"],
-            "legacy_environment_cleanup_required",
-            "{batch}"
-        );
-
-        // Non-MCP mutations keep the HTTP refusal.
-        let http = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(http.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
     #[tokio::test]
     async fn mcp_route_accepts_an_authenticated_write_request_above_axums_default_limit() {
         // Axum's default request-body limit is 2 MiB. A valid write-enabled MCP
@@ -5357,9 +5115,8 @@ mod tests {
     }
 
     /// #185 deleted the instance-wide Git lane, so the legacy
-    /// `HATCHDOOR_GIT_SYNC_ENABLED` key is a first-boot import input with no
-    /// runtime reader. Saving it still persists (the legacy importer reads
-    /// it) but must no longer ask for a consequence confirmation and must no
+    /// `HATCHDOOR_GIT_SYNC_ENABLED` key has no runtime reader. Saving it still
+    /// persists (it stays in the settings schema) but must no longer ask for a consequence confirmation and must no
     /// longer create a repository as a side effect of a settings save.
     #[tokio::test]
     async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
@@ -7988,50 +7745,14 @@ mod tests {
         assert_eq!(body["demo_mode"], true);
     }
 
+    /// #427 removed the legacy import's recovery: discovery no longer carries
+    /// its field, and the confirmed Start with no Vaults route is gone.
     #[tokio::test]
-    async fn vaults_v1_discovery_reports_legacy_migration_recovery_distinctly_from_registry_recovery()
-     {
-        // #150: an unreadable registry file and a failed legacy import look
-        // different to the browser, even though the registry itself loads
-        // fine (empty, revision 0) in the legacy-migration-recovery case.
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["registry_revision"], 0);
-        assert_eq!(body["vaults"], serde_json::json!([]));
-        assert!(body["recovery"].is_null());
-        assert_eq!(
-            body["legacy_migration_recovery"]["code"],
-            "legacy_migration_required"
-        );
-        assert_eq!(
-            body["legacy_migration_recovery"]["message"],
-            "legacy Vault path is not a readable directory"
-        );
-    }
-
-    #[tokio::test]
-    async fn vaults_v1_discovery_omits_legacy_migration_recovery_when_absent() {
+    async fn vaults_v1_discovery_has_no_legacy_migration_recovery() {
         let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults")
@@ -8041,14 +7762,9 @@ mod tests {
             .await
             .expect("response");
         let body = json_body(response).await;
-        assert!(body["legacy_migration_recovery"].is_null());
-    }
+        assert!(body.get("legacy_migration_recovery").is_none(), "{body}");
 
-    #[tokio::test]
-    async fn start_with_no_vaults_requires_a_pending_recovery() {
-        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
-
-        let response = app
+        let removed = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults/start-with-no-vaults")
@@ -8059,169 +7775,14 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "legacy_migration_recovery_not_pending");
-    }
-
-    #[tokio::test]
-    async fn environment_cleanup_recovery_hides_vaults_and_refuses_mutations() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") = Some(
-            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
-                "Remove HATCHDOOR_EXCLUDE and restart.",
+        assert!(
+            matches!(
+                removed.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
             ),
+            "{}",
+            removed.status()
         );
-
-        let discovery = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let body = json_body(discovery).await;
-        assert_eq!(body["vaults"], serde_json::json!([]));
-        assert_eq!(
-            body["legacy_migration_recovery"]["code"],
-            "legacy_environment_cleanup_required"
-        );
-
-        let mutation = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(mutation.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            json_body(mutation).await["code"],
-            "legacy_environment_cleanup_required"
-        );
-    }
-
-    #[tokio::test]
-    async fn start_with_no_vaults_requires_explicit_confirmation() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":false}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "confirmation_required");
-        // Refused, not silently discarded: the recovery flag survives.
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn start_with_no_vaults_confirmed_writes_an_empty_registry_and_clears_recovery() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["registry_revision"], 1);
-        assert!(body["vault"].is_null());
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_none()
-        );
-
-        // Discovery now reads back the ordinary, no-longer-pending state.
-        let discovery = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let body = json_body(discovery).await;
-        assert!(body["recovery"].is_null());
-        assert!(body["legacy_migration_recovery"].is_null());
-        assert_eq!(body["vaults"], serde_json::json!([]));
-    }
-
-    #[tokio::test]
-    async fn start_with_no_vaults_is_refused_in_demo_mode() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "demo_read_only");
     }
 
     #[tokio::test]
@@ -9839,7 +9400,7 @@ mod tests {
                 std::fs::write(directory.path().join(file), "{}").expect("write");
             }
             let store = crate::instance_state::InstanceStateStore::beside_registry(&registry);
-            let record = record_instance_start(&store, &registry, &settings);
+            let record = record_instance_start(&store, is_existing_install(&registry, &settings));
             assert_eq!(record.current, running);
             match existing {
                 None => {

@@ -56,7 +56,6 @@ import { GraphPage } from "./components/graph/GraphPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
-import { StartWithNoVaultsDialog } from "./components/StartWithNoVaultsDialog";
 import { useNoteActions } from "./hooks/useNoteActions";
 import { useVaultTree } from "./hooks/useVaultTree";
 import { resolvePrimaryVaultId, useVaultScope } from "./hooks/useVaultScope";
@@ -105,7 +104,6 @@ function VaultWorkspace({
   >(() => getStoredExpandedFolders());
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [scopeSheetOpen, setScopeSheetOpen] = useState(false);
-  const [startWithNoVaultsOpen, setStartWithNoVaultsOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
@@ -129,15 +127,12 @@ function VaultWorkspace({
     readState: collectionReadState,
     error: collectionError,
     recovery: registryRecovery,
-    legacyMigrationRecovery,
     noteCounts: vaultNoteCounts,
     revision: collectionRevision,
     refresh: loadVaults,
   } = useVaultCollection();
   const vaultProjection = useVaultProjection();
-  const hasRegistryRecovery = Boolean(
-    registryRecovery || legacyMigrationRecovery,
-  );
+  const hasRegistryRecovery = Boolean(registryRecovery);
   const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
 
   const {
@@ -945,32 +940,6 @@ function VaultWorkspace({
                     message={registryRecovery.message}
                     onTryAgain={() => void loadVaults()}
                   />
-                ) : legacyMigrationRecovery ? (
-                  <BrokenStartState
-                    title={
-                      legacyMigrationRecovery.code ===
-                      "legacy_environment_cleanup_required"
-                        ? "Restart Required"
-                        : undefined
-                    }
-                    message={legacyMigrationRecovery.message}
-                    onTryAgain={
-                      legacyMigrationRecovery.code ===
-                      "legacy_migration_required"
-                        ? () => void loadVaults()
-                        : undefined
-                    }
-                    onStartWithNoVaults={
-                      legacyMigrationRecovery.code ===
-                      "legacy_migration_required"
-                        ? () => setStartWithNoVaultsOpen(true)
-                        : undefined
-                    }
-                    unchangedNotice={
-                      legacyMigrationRecovery.code ===
-                      "legacy_migration_required"
-                    }
-                  />
                 ) : vaults.length === 0 ? (
                   <ZeroVaultState
                     demoMode={demoMode}
@@ -1140,16 +1109,6 @@ function VaultWorkspace({
           onDelete={() => void handleDeleteNote()}
         />
       ) : null}
-
-      {startWithNoVaultsOpen ? (
-        <StartWithNoVaultsDialog
-          onClose={() => setStartWithNoVaultsOpen(false)}
-          onConfirmed={() => {
-            setStartWithNoVaultsOpen(false);
-            void loadVaults();
-          }}
-        />
-      ) : null}
     </div>
   );
 }
@@ -1242,9 +1201,7 @@ export function App() {
 function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
   const [authRequired, setAuthRequired] = useState(false);
   const collection = useVaultCollection();
-  const hasRegistryRecovery = Boolean(
-    collection.recovery || collection.legacyMigrationRecovery,
-  );
+  const hasRegistryRecovery = Boolean(collection.recovery);
   // Only a discovery that answered can say there are no Vaults; a failed one
   // (`readState` "error") knows nothing either way.
   const hasNoVaults =
@@ -1357,22 +1314,18 @@ function ZeroVaultState({
   );
 }
 
-/** A broken start (#150): the registry file itself is unreadable, or a
- * failed legacy import needs recovery. Both open the ordinary workspace
- * with this same documented error block rather than a full-screen gate. */
+/** A broken start (#150): the registry file itself is unreadable, or
+ * discovery failed. Both open the ordinary workspace with this same
+ * documented error block rather than a full-screen gate. */
 function BrokenStartState({
   title = "Vault Registry Unavailable",
   message,
   onTryAgain,
-  onStartWithNoVaults,
-  unchangedNotice = true,
   manual = CONTEXTUAL_HELP.registryRecovery,
 }: {
   title?: string;
   message: string;
   onTryAgain?: () => void;
-  onStartWithNoVaults?: () => void;
-  unchangedNotice?: boolean;
   /** The manual page that explains this start (#423). */
   manual?: HelpLocation;
 }) {
@@ -1380,13 +1333,9 @@ function BrokenStartState({
     <StateBlock
       tone="error"
       title={title}
-      description={`${message}${unchangedNotice ? " Nothing was changed, and your Markdown is untouched." : ""}`}
+      description={`${message} Nothing was changed, and your Markdown is untouched.`}
       actionLabel={onTryAgain ? "Try again" : undefined}
       onAction={onTryAgain}
-      secondaryActionLabel={
-        onStartWithNoVaults ? "Start with no Vaults" : undefined
-      }
-      onSecondaryAction={onStartWithNoVaults}
       help={<ContextualHelpLink to={manual} />}
     />
   );

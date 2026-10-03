@@ -98,18 +98,21 @@ that production inventory are still checked for stale paths and duplicates.
   constructs `AppState`, builds routes, and starts background work. Unsafe
   public startup without web authentication remains a refusal; its error
   includes a freshly generated, non-persisted recovery token for the operator
-  to place in `.env`.
+  to place in `.env`. Per-Vault variables left in the environment
+  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*`) are named in one startup warning;
+  they no longer hold the instance in a restricted recovery mode (#427).
 - `AppState` carries shared runtime state. Every field has a production
   reader, and each is one of: collection runtime (`vault_registry`, `vaults`,
   `vault_work`, `managed_git`, `startup_sqlite`, `embedder`,
   `runtime_embedder`, `mcp_tools_changed`), startup or posture
-  (`legacy_migration_recovery`, `model_setup`, `model_setup_started`,
+  (`model_setup`, `model_setup_started`,
   `web_auth_enabled`, `demo_mode`, `startup`), live configuration
   (`runtime_config`), folder listing (`vault_mount_root`, the configured
   `VAULT_PATH`), instance state (`instance_versions`, the version record
-  `run_server` takes once from `instance_state` before the legacy import or
-  anything else can write a registry, and `agent_connections`, the last MCP
-  client log loaded from the same store, written by `mcp/adapter.rs` and read
+  `run_server` takes once from `instance_state` after
+  `vault_migration::prepare_registry`, with whether the install existed read
+  before that step can write a registry, so a refused start records nothing,
+  and `agent_connections`, the last MCP client log loaded from the same store, written by `mcp/adapter.rs` and read
   by `handlers/settings.rs`), or process lifecycle (`shutdown`).
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
@@ -152,10 +155,9 @@ that production inventory are still checked for stale paths and duplicates.
   turn scans. Unlike the graph it ignores the watcher epoch: a checkout
   cloned again under the same block is answered from the old scan until the
   next Index turn, and a file gone from disk is refused before the check.
-  `AppState::vault_registry`, `AppState::vaults`, and
-  `AppState::legacy_migration_recovery` expose the authoritative definition
-  store, activated per-Vault control blocks, and safe legacy-recovery state to
-  later shared-core adapters. `AppState::vault_work` and
+  `AppState::vault_registry` and `AppState::vaults` expose the authoritative
+  definition store and activated per-Vault control blocks to later shared-core
+  adapters. `AppState::vault_work` and
   `AppState::managed_git` expose the same background-work coordinator and
   managed-Git scheduler `run_server()` wires into the one dispatch loop, so an
   HTTP adapter (`handlers/vaults.rs`) can reconcile a registry mutation into
@@ -670,9 +672,9 @@ backend checks.
 `settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
 lock-free configuration view to bind at the start of an operation;
 `RuntimeConfig::save` serializes writes, persists first, then publishes the
-new view. `RuntimeConfig::remove_stored` lets the one-time legacy migration
-remove only settings already copied into the Vault registry, persisting before
-publishing and leaving environment pins and unrelated values untouched.
+new view. `RuntimeConfig::remove_stored` lets the registry's startup step
+purge the retired Git-lane keys, persisting before publishing and leaving
+environment pins and unrelated values untouched.
 `RuntimeConfig::validate_and_save` runs a caller-supplied decision
 against the snapshot current at the moment the write lock is taken and only
 persists on success, so validation and persistence serialize behind the same
@@ -760,8 +762,11 @@ checks.
 
 - `src/vault_registry.rs`
 - `src/vault_registry/tests.rs`
+- `src/vault_migration.rs` (the registry's startup step)
 
-**Public contract:** `DEFAULT_VAULT_REGISTRY_PATH`,
+**Public contract:** `DEFAULT_VAULT_REGISTRY_PATH`, the startup step
+`vault_migration::{prepare_registry, RegistryStartupError,
+LEGACY_MIGRATION_DOC_URL}`,
 `REGISTRY_SCHEMA_VERSION`, canonical `VaultId` generation and parsing,
 `VaultRegistryStore`, immutable `VaultRegistrySnapshot` values, explicit
 `VaultRegistryState::Ready` versus `Recovery`, structured recovery/error
@@ -786,7 +791,7 @@ that returns plaintext credentials for one Vault ID (`None` for both an
 absent Vault and one with none configured, so it cannot be used to probe
 existence) for the managed-Git Git-turn dispatch boundary's internal use only
 — never exposed to HTTP, MCP, or any other external-facing surface,
-explicit confirmed-empty initialization for migration recovery, and the
+explicit empty initialization (`initialize_empty`), and the
 versioned `/data/state/vaults.json` format. An absent file
 is a complete revision-0 zero-Vault state and is not created by reads; only a
 definite `NotFound` counts as absent, and any other read or stat failure is a
@@ -819,9 +824,29 @@ absent. The same issue makes `HttpsCredentials`' input username optional:
 token alone, and validation now rejects only an empty token, not an empty
 username.
 
-**Consumers:** the legacy single-Vault import consumes the registry load, add,
-and confirmed-empty initialization contracts. Runtime composition loads the
-registry after migration and `VaultCollectionRuntime` consumes its safe
+`vault_migration::prepare_registry` is the registry's startup step, all that
+remains of the legacy single-Vault import #427 removed (ADR-40). A start that
+finds a registry purges the retired Git-lane keys from stored settings
+(`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
+`_BRANCH`, `_DEBOUNCE_SECONDS`), logging and retrying on the next start on
+failure, so a plaintext Git token never survives there (#325), then loads it.
+A start that finds none refuses with
+`RegistryStartupError::UnconvertedLegacyInstall` when stored settings still
+carry any of those retired Git-lane keys, which only a single-Vault release
+wrote: that install is from 2.4.x or earlier, and the
+message sends it through a 2.5.0 to 2.7.x release and names
+`docs/migrations/legacy-single-vault.md`. Otherwise it writes an empty
+registry, whatever `VAULT_PATH` holds. It never reads, registers, or writes
+the `VAULT_PATH` folder, and the refusal writes nothing at all.
+`HATCHDOOR_EXCLUDE` and the author keys never trigger it, because a current
+install stores them too.
+
+**Consumers:** runtime composition calls `vault_migration::prepare_registry`
+after the security refusals and before recording the start or opening the
+cache, and loads the registry through it; that step consumes `load` and
+`initialize_empty`, and live configuration's `remove_stored` and snapshot.
+Runtime composition then passes the snapshot on, and
+`VaultCollectionRuntime` consumes its safe
 projections and resolved paths; the Vault work executor's managed-Git Git-turn
 dispatch (`dispatch_git_turn`) is the one consumer of the crate-private
 `https_credentials` accessor, and also resolves `commit_identity` through
@@ -861,8 +886,9 @@ Markdown and SQLite remains disposable (ADR-01); the store adds no service,
 framework, or speculative trait (ADR-02/13); filesystem behavior assumes no
 runtime shell and remains usable by the rootless image (ADR-12).
 
-**Validation:** `cargo test vault_registry`,
-`node scripts/check-module-map.mjs`, followed by the full backend checks.
+**Validation:** `cargo test vault_registry`, `cargo test vault_migration`,
+`cargo test runtime_config`, `node scripts/check-module-map.mjs`, followed by
+the full backend checks.
 
 ### Vault durable runtime state
 
@@ -946,8 +972,10 @@ reports a save as due only when the name changed or a minute has passed since
 the last save. Other sections belong to the features that write them through
 `write_section` (#425).
 
-**Consumers:** the runtime composition root, which records the start before
-the legacy import and holds the record in `AppState::instance_versions`, and
+**Consumers:** the runtime composition root, which reads whether the install
+existed before `vault_migration::prepare_registry` can write a registry,
+records the start once that step succeeds, and holds the record in
+`AppState::instance_versions`, and
 through it `src/handlers/whats_new.rs`; the composition root also loads
 `AppState::agent_connections` from the same store, which
 `src/mcp/adapter.rs` feeds on every tool call and `src/handlers/settings.rs`
@@ -1014,75 +1042,6 @@ nothing is downloaded or installed. Tests never reach the network.
 
 **Validation:** `cargo test update_check`, `cargo test handlers::settings`,
 followed by the full backend checks.
-
-### Legacy single-Vault import
-
-**Kind:** infrastructure/migration boundary.
-
-**Owned paths:** `src/vault_migration.rs`.
-
-**Public contract:** `LegacyMigrationInput`, `LegacyMigrationOutcome`,
-`LegacyMigrationRecovery`, `LegacyMigrationError`, `migrate_legacy_vault`, and
-`start_with_no_vaults`. Inspection returns a deterministic no-deployment,
-existing-registry, imported, or stable `legacy_migration_required` recovery
-outcome. Any existing registry, including an intentionally empty one,
-permanently suppresses legacy import, and every inspection that finds one
-removes the stored retired Git-lane keys again (`HATCHDOOR_GIT_SYNC_ENABLED`,
-`_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`, `_BRANCH`, `_DEBOUNCE_SECONDS`),
-logging and retrying on the next start on failure, so a crash between an
-import's registry commit and its one-shot cleanup cannot leave the plaintext
-token in settings (#325); `HATCHDOOR_EXCLUDE` and the author keys keep their
-live readers and are left alone. A safe import copies legacy exclusions,
-Git behavior, credentials, and commit identity into the ordinary Vault
-definition; the retired write-debounce value has no successor. An import never
-writes into the Vault folder: an empty `VAULT_PATH` stays empty (ADR-40).
-Confirmed Start with no Vaults writes an ordinary revisioned zero-Vault
-registry.
-
-**Consumers:** startup runtime composition calls this isolated adapter before
-opening the disposable cache and activating Vault runtimes. Safe imports become
-ordinary enabled definitions; migration or environment-cleanup recovery activates no Vault and remains in
-`AppState` for later setup/management surfaces. The MCP dispatcher
-(`src/mcp/tools/mod.rs` `environment_cleanup_refusal`, reached from
-`handle_tools_call` and `batch`'s per-item write gate) reads
-`AppState.legacy_migration_recovery` and uses
-`LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE`, `can_start_with_no_vaults`,
-and `message` to refuse state-changing tools during environment-cleanup
-recovery (#327).
-
-**Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs`
-turns migrated or now-ignored per-Vault environment keys into a restricted,
-non-secret startup recovery response after a committed import or existing registry;
-`docker-compose.yml`, `.env.example`, `README.md`, and
-`docs/migrations/legacy-single-vault.md` document and persist the registry
-required by the migration contract.
-
-**Consumed dependencies:** the Vault collection registry owns definitions and
-atomic persistence; live configuration owns precedence and stored-setting
-cleanup; `src/config.rs` owns exclusion parsing; the cache boundary owns
-read-only legacy-schema recognition; `git2` and filesystem metadata provide
-inspection only.
-
-**Invariants:** detection requires positive legacy evidence, so a fresh empty
-default does not migrate. Registry persistence completes before migrated
-settings or a recognized disposable cache are removed. Inspection never seeds,
-moves, edits, clones, pulls, commits, pushes, checks out, or merges legacy
-content or Git state. Unsafe conversion leaves all legacy state unchanged and
-returns recovery. After a successful registry commit, non-empty
-`HATCHDOOR_EXCLUDE` and `HATCHDOOR_GIT_*` environment values are named in a
-restricted recovery UI until removed and the process is restarted; health and
-the web shell remain reachable, but Vault runtime activation and mutation are
-withheld. The composition root's method guard exempts `/mcp`, whose reads and
-handshake are all POSTs; the MCP dispatcher refuses its own state-changing
-tools and batch write items with a structured
-`legacy_environment_cleanup_required` tool error instead (#327). `VAULT_PATH` remains valid deployment configuration.
-The development-only managed-startup variable family is rejected before it can
-silently select another source. Markdown remains authoritative and downgrade
-across the registry cutover is unsupported.
-
-**Validation:** `cargo test vault_migration`, `cargo test vault_registry`,
-`cargo test runtime_config`, `cargo test cache`,
-`node scripts/check-module-map.mjs`, followed by the full backend checks.
 
 ### Web authentication
 
@@ -2023,8 +1982,7 @@ backend checks.
 
 **Public contract:** `VaultCollectionManagement`, the collection wire types
 (`VaultSummary`, `VaultDiscoveryResponse`, `VaultMutationResponse`,
-`VaultScheduleResponse`, `RegistryRecoveryInfo`,
-`LegacyMigrationRecoveryInfo`), the two definition inputs
+`VaultScheduleResponse`, `RegistryRecoveryInfo`), the two definition inputs
 (`CreateVaultRequest`, `EditVaultRequest`, with `HttpsCredentialsInput` and
 the three-state `HttpsCredentialsPatch`), and `parse_vault_id`. This is the
 one place a Vault definition changes, so it owns the sequence every change
@@ -2033,8 +1991,7 @@ foreground-mutation safe boundary, then answer from a single collection
 snapshot so the reported `collection_revision` and the returned Vault's status
 can never disagree — plus `list` (with its authenticated and demo
 projections), `create`, `edit`, `set_enabled`, `disconnect`, the manual
-`sync`/`retry`/`refresh` controls, and the confirmed `start_with_no_vaults`
-recovery. Since #267 `sync`/`retry` choose the operation from what the Vault
+`sync`/`retry`/`refresh` controls. Since #267 `sync`/`retry` choose the operation from what the Vault
 actually has: a remote sync through `ManagedGitScheduler` for a Vault with a
 remote, and a `VaultWorkKind::Commit` request (plus a clear of that Vault's
 `git::CommitCooldown`, because an operator asking explicitly is exactly the
@@ -2077,24 +2034,10 @@ turn and notifies a definition change, because `VaultDefinition` equality
 cannot observe a credential value change (#97's and #98's reopening
 findings).
 
-Discovery reports two independent recovery signals. `recovery` means the
-persisted registry file itself is unreadable; `legacy_migration_recovery`
-(`{code: "legacy_migration_required", message}`) means the registry loaded fine
-(empty, revision 0) but automatic legacy import could not prove the deployment
-and is still pending (#150), in which case no Vaults are listed at all.
-While either recovery flag is set, `create` is refused with the pending
-recovery's own code (`legacy_migration_required` or
-`legacy_environment_cleanup_required`), so a created Vault can never give the
-registry state that wedges the flag (#325). The credential-replacement retry
-skips a disabled Vault, which would otherwise gain a Git schedule entry that
-disconnect never deactivates (#325).
-`start_with_no_vaults` is the confirmed action for the second: it requires a
-pending failed import and an explicit `confirm`, commits an ordinary empty
-revision-1 registry (refusing `registry_revision_conflict` if the registry
-already holds real state), reconciles like every other commit here, and clears
-the flag. Because clearing it must work without a restart, `AppState` holds it
-as `Arc<StdRwLock<Option<LegacyMigrationRecovery>>>` rather than a plain
-`Option` fixed at construction.
+Discovery reports registry recovery as `recovery` when the persisted registry
+file itself is unreadable, and lists no Vaults then (#150). The
+credential-replacement retry skips a disabled Vault, which would otherwise
+gain a Git schedule entry that disconnect never deactivates (#325).
 
 **Scope:** #187 moved this out of `handlers/vaults.rs`, where the seven MCP
 management tools reached it by calling handler functions with hand-built axum
@@ -2106,10 +2049,8 @@ reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
 notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
 `vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
-`vault_migration::start_with_no_vaults`,
 `vault::{vault_link_style, count_link_forms}`, `VaultControlBlock::{vault_path,
-authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode` and the pending
-`legacy_migration_recovery` flag.
+authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode`.
 
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
 `mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
@@ -2225,9 +2166,7 @@ occupies in the note, for the Vault-wide tag rename (`vault/write/tags.rs`,
 #242) to edit. Both read prose through the same line walker as
 `for_non_code_line`, so the rename cannot touch a hashtag the index would not
 store, or miss one it would. A tag split by an inline code span is recognised
-but has no range, because no single run of text spells it. The crate-private
-`is_recognized_legacy_cache` inspection seam owns the supported legacy schema
-fingerprint and opens existing files read-only for the one-time migration.
+but has no range, because no single run of text spells it.
 `ReadSnapshot` is the crate-private pinned-read seam used where participant
 metadata and cache queries must observe one published generation.
 
@@ -2238,8 +2177,7 @@ FTS5, and sqlite-vec.
 Index dispatch, the Vault-qualified mutation core (which reaches
 `mark_vault_snapshot_behind_write` only through runtime composition's
 `VaultControlBlock::mark_snapshot_behind_write`, #324), Vault-qualified read projections, the Vault-qualified search
-core, handlers, MCP reads, evaluation tooling, diagnostics, and the one-time
-legacy single-Vault migration's read-only evidence check.
+core, handlers, MCP reads, evaluation tooling, and diagnostics.
 
 **Coordination paths:** `src/app_state.rs`, `src/vault_runtime.rs`,
 `src/vault_read.rs`, `src/search/**`, `src/vault/index.rs`, `src/chunk/**`,
@@ -2511,10 +2449,9 @@ nothing to commit. Only the last
 three are on a live path; `validate_repo`, `init_local_repo`, and
 `has_uncommitted_changes` lost their production callers with the settings
 lifecycle and the boot-time legacy validation in #185 and are retained
-deliberately by that ticket's explicit keep list, against #82's removal of the
-legacy import. The crate-private
-`parse_mode` and `non_empty_setting` helpers keep startup and one-time
-migration interpretation identical. `resolve_commit_identity` (issue #130)
+deliberately by that ticket's explicit keep list. The crate-private
+`parse_mode` and `non_empty_setting` helpers serve the startup parse of the
+legacy settings for the demo posture check. `resolve_commit_identity` (issue #130)
 resolves one Vault's own configured `VaultCommitIdentity`
 (`vault_registry.rs`) if set, else the instance-wide
 `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` defaults; the Vault
@@ -2857,7 +2794,7 @@ credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
 `https_credentials` accessor (managed-Git turns only; never exposed further).
 
 **Consumers:** server startup, write adapters, status handlers/tools,
-`AppState`, and the one-time legacy single-Vault migration parser.
+and `AppState`.
 `ManagedGitScheduler`/`run_managed_git_turn` are consumed by the Vault work
 executor (`src/vault_executor.rs::dispatch_git_turn`) and by runtime
 composition (`reconcile_and_reconstruct`, which activates/deactivates a
@@ -3033,8 +2970,10 @@ Every save takes one path: the legacy versioning-task lifecycle branch (stop
 the task, preflight the repository, respawn) went with the task itself in
 #185. `HATCHDOOR_GIT_SYNC_ENABLED`, `_REMOTE`, `_BRANCH`, `_HTTPS_USERNAME`,
 `_HTTPS_TOKEN`, `_DEBOUNCE_SECONDS`, and `HATCHDOOR_EXCLUDE` remain in the
-schema as first-boot import inputs (`vault_migration.rs` consumes them until
-#82 closes). No per-operation code reads them; two `server.rs` startup checks
+schema although #427 removed the import that consumed them; the registry's
+startup step purges the Git-lane ones from stored settings and refuses an
+install without a registry that still stores any of them. No per-operation
+code reads them; two `server.rs` startup checks
 still parse them — `check_demo_mode_posture` and `HATCHDOOR_EXCLUDE`'s pattern
 validation — and both only refuse a start.
 `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` remain
@@ -3043,9 +2982,8 @@ a change to them still reaches the next turn without a restart.
 
 `vaults.rs` is the HTTP adapter over **Vault collection management**: it owns
 the `/api/v1/vaults` routes — discovery, collection management (create/edit/
-enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh, the
-confirmed `start-with-no-vaults` recovery, and the collection-wide SSE event
-stream — and nothing else. Since #187 each route parses its own path, query,
+enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh, and
+the collection-wide SSE event stream — and nothing else. Since #187 each route parses its own path, query,
 and body, calls `vault_management::VaultCollectionManagement` once, and maps
 the typed response or the structured `VaultOperationError` onto a status code
 and a JSON body. The registry commit, the runtime reconciliation, the
@@ -3065,13 +3003,11 @@ duplicating them.
 
 The status mapping is the whole of this adapter's error contract, asserted
 directly by `every_management_error_code_keeps_its_historical_status`:
-`invalid_vault_id`/`invalid_vault_definition`/`confirmation_required` are
+`invalid_vault_id`/`invalid_vault_definition` are
 `400`; `vault_not_found` is `404`; the registry-state conflicts
 (`duplicate_vault_name`, `vault_path_overlap`, the two identity-change
-refusals, `registry_revision_conflict`,
-`legacy_migration_recovery_not_pending`, `vault_disabled`,
-`capability_unavailable`) are `409`; `vault_registry_recovery_required`,
-`legacy_environment_cleanup_required`, `legacy_migration_required`, and
+refusals, `registry_revision_conflict`, `vault_disabled`,
+`capability_unavailable`) are `409`; `vault_registry_recovery_required` and
 `vault_unavailable` are `503`; and
 `internal_error`/`registry_revision_exhausted` are `500`. On top of that the
 adapter adds the two statuses the core does not model: `201` for a creation and
@@ -3379,7 +3315,7 @@ grows to 46, purely additive. ADR-35 adds `index_turn` to the same summary,
 and the `list_vaults` description says what `running` and `waiting` mean;
 additive. #421 (ADR-38) adds `read_docs` and `search_docs`, two read-only tools
 over the Bundled manual that take no Vault. They are dispatched ahead of the
-environment-cleanup and model-setup gates, answer under read or write
+model-setup gate, answer under read or write
 permission alike, and stay out of `READ_OPS` like `list_vaults`, so `batch`
 refuses them as items. `read_docs` answers `ReadDocsResult` (the Home page plus
 every page's name and title with no argument, one page otherwise) and refuses a
@@ -3540,10 +3476,7 @@ limits, the live configuration snapshot bound at each request, the Bundled
 manual (`docs_bundle::{pages, home, page, search}`) for the two docs tools,
 Instance state's `AgentConnectionLog` (`AppState.agent_connections`), fed the
 client's name from rmcp's `RequestContext::client_info()` on every
-`tools/call` (#426), and the Legacy single-Vault import's recovery state (`AppState.legacy_migration_recovery`,
-read through `LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE`,
-`can_start_with_no_vaults`, and `message`) for the environment-cleanup refusal
-(#327). No HTTP
+`tools/call` (#426). No HTTP
 adapter is consumed: since #188 no file under `src/mcp/` imports
 `crate::handlers`, and ADR-19's MCP-to-handler proxying debt is retired.
 
@@ -3680,7 +3613,6 @@ boundaries are currently documentation-enforced.
 - `frontend/src/hooks/useTheme.ts`
 - `frontend/src/hooks/useVaultScope.ts`
 - `frontend/src/lib/storage.ts`
-- `frontend/src/components/StartWithNoVaultsDialog.tsx`
 
 **Contract and responsibility:** bootstraps React/router/PWA, composes feature
 hooks and routes, owns responsive shell state, navigation, persistent shell
@@ -3804,13 +3736,8 @@ description reads "This demo has no Vaults loaded." in that state (#152),
 never the ordinary "Add a Vault…" sentence with nothing left to act on it)
 versus a broken start:
 The collection client
-also exposes `recovery` (the persisted registry file is unreadable) and
-`legacyMigrationRecovery` (the registry loaded fine but a failed safe
-legacy import needs recovery) — mutually exclusive, both rendering the same
-documented error block with a `Try again` action (a plain re-fetch), and
-`legacyMigrationRecovery` additionally offering `components/StartWithNoVaultsDialog.tsx`'s
-once-confirmed `Start with no Vaults` action against the new
-`POST /api/v1/vaults/start-with-no-vaults` endpoint.
+also exposes `recovery` (the persisted registry file is unreadable), rendered
+as the documented error block with a `Try again` action (a plain re-fetch).
 
 A demo instance is a faithful Hatchdoor with the operator removed, not one
 with its controls greyed out (#152): `App.tsx`'s `"/settings"` route renders
@@ -3888,7 +3815,7 @@ depends on real cascade behavior that jsdom does not reproduce.
 It exposes the collection snapshot (`readState`, the derived read state
 `loading`/`error`/`empty`/`partial`/`ready`; `vaults`, the enabled browsing
 list; `allVaults`, the registry list Vault management renders; `demoMode`,
-`loading`, `error`, `recovery`, `legacyMigrationRecovery`, `registryRevision`,
+`loading`, `error`, `recovery`, `registryRevision`,
 `revision`, `noteCounts`, `noteCountsPartial`), `refresh`,
 `fetchRegistryRevision`, and the demo-aware slot projection (`slotFor`,
 `describeScope`).
@@ -3896,7 +3823,7 @@ list; `allVaults`, the registry list Vault management renders; `demoMode`,
 `readState` (#333) is what a surface branches on to tell a failed read from an
 empty collection. `error` means discovery failed and none has ever succeeded;
 `empty` means discovery answered with no enabled Vaults (a broken registry is
-also `empty`, and `recovery`/`legacyMigrationRecovery` say which); `partial`
+also `empty`, and `recovery` says which); `partial`
 means the list is known but `noteCountsPartial` is set, because the stats read
 failed, answered `partial`, or left out an enabled Vault; `ready` means
 everything answered. A refresh that fails after a successful discovery keeps
@@ -4980,9 +4907,6 @@ When `GET /api/v1/vaults` reports `recovery` (the registry file itself is
 unreadable, #150), `VaultSettingsIndex.tsx` replaces its whole `Vaults`
 group with the same documented error block `App.tsx`'s note-pane shows,
 omitting `Add a Vault`; `This server` is a separate group and keeps working.
-`legacyMigrationRecovery` is deliberately not surfaced here — the registry
-loads fine (empty) in that case, so the group renders its ordinary
-zero-Vault state.
 
 `VaultCreation.tsx`'s `VaultCreationDialog` (issue #153) is the one creation
 flow both `Add a Vault` entry points open: the settings index's own button

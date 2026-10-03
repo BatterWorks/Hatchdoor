@@ -45,7 +45,7 @@ const GIT_FAILING: ErrorDocs = ErrorDocs {
 };
 const RECOVERY: ErrorDocs = ErrorDocs {
     page: VAULT_STATES,
-    heading: Some("two-different-things-both-called-recovery"),
+    heading: Some("registry-recovery"),
 };
 
 /// Every code that names a page, and the page.
@@ -104,8 +104,6 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
         },
     ),
     ("vault_registry_recovery_required", RECOVERY),
-    ("legacy_migration_required", RECOVERY),
-    ("legacy_environment_cleanup_required", RECOVERY),
 ];
 
 /// The page that explains `code`, if the manual has one.

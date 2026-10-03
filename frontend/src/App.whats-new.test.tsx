@@ -42,7 +42,6 @@ function collection(demoMode: boolean) {
     readState: "empty",
     error: null,
     recovery: null,
-    legacyMigrationRecovery: null,
     allVaults: [],
     registryRevision: 0,
     revision: null,

@@ -10,6 +10,8 @@ services:
       # overrides belong in .env only when they intentionally pin a setting.
       HOST: 0.0.0.0
       PORT: "42824"
+      # The folder Hatchdoor can see. A fresh install starts with no Vaults;
+      # nothing in this folder becomes one until you add it.
       VAULT_PATH: /data/vault
       HATCHDOOR_CACHE_DB: /data/cache/hatchdoor-cache.sqlite3
     ports:

@@ -1,7 +1,6 @@
 import { apiFetch, withAccessToken } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
 import type {
-  LegacyMigrationRecovery,
   VaultDiscoveryResponse,
   VaultId,
   VaultRegistryRecovery,
@@ -19,10 +18,8 @@ import type {
  * `allVaults` is the registry list, disabled Vaults included, which only Vault
  * management has any business rendering.
  *
- * `recovery` (the persisted registry file itself is unreadable) and
- * `legacyMigrationRecovery` (the registry loaded fine, empty, but a failed safe
- * legacy import still needs recovery) are mutually exclusive broken-start
- * conditions (#150): both leave the lists empty, but only one is ever set.
+ * `recovery` means the persisted registry file itself is unreadable (#150).
+ * It leaves the lists empty.
  *
  * `revision` is the collection revision the state reflects: seeded from the
  * discovery response and advanced by the SSE stream. `null` until a discovery
@@ -39,7 +36,7 @@ import type {
  *   never render as the zero-Vault state or be taken as evidence that a stored
  *   Vault has left the collection.
  * - `empty`: discovery succeeded with no enabled Vaults (a broken registry is
- *   also `empty`; `recovery`/`legacyMigrationRecovery` say which).
+ *   also `empty`; `recovery` says which).
  * - `partial`: the Vault list is known but the note counts are not all
  *   current: the stats read failed, or answered without some Vault.
  * - `ready`: everything answered.
@@ -63,7 +60,6 @@ export type VaultCollectionState = {
   loading: boolean;
   error: string | null;
   recovery: VaultRegistryRecovery | null;
-  legacyMigrationRecovery: LegacyMigrationRecovery | null;
   registryRevision: number | null;
   revision: number | null;
   noteCounts: Record<VaultId, number>;
@@ -78,7 +74,6 @@ const EMPTY_STATE: VaultCollectionState = {
   loading: true,
   error: null,
   recovery: null,
-  legacyMigrationRecovery: null,
   registryRevision: null,
   revision: null,
   noteCounts: {},
@@ -218,10 +213,6 @@ async function loadCollection(forGeneration: number): Promise<void> {
       vaults: enabled,
       demoMode: discovery.demo_mode,
       recovery: reuseIfUnchanged(state.recovery, recovery),
-      legacyMigrationRecovery: reuseIfUnchanged(
-        state.legacyMigrationRecovery,
-        discovery.legacy_migration_recovery ?? null,
-      ),
       registryRevision: discovery.registry_revision ?? null,
       // Seed the baseline, once, from the read the vaults themselves came
       // from. The stream reports the server's current revision the moment it

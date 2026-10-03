@@ -114,7 +114,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_GIT_BRANCH` | instant | text |
 
 > [!note]
-> The six `HATCHDOOR_GIT_*`/`HATCHDOOR_EXCLUDE` keys and `HATCHDOOR_ARCHIVE_PREFIX` are legacy: they exist to import a pre-registry single-Vault deployment's `.env` once. For a Vault created directly in the registry (via `POST /api/v1/vaults` or `create_vault`), the equivalent per-Vault fields — `source` (branch/mode/poll interval), `https_credentials`, `commit_identity`, `archive_folder`, `exclude_patterns` — are the only place that setting lives; nothing here overrides them.
+> The six `HATCHDOOR_GIT_*`/`HATCHDOOR_EXCLUDE` keys and `HATCHDOOR_ARCHIVE_PREFIX` are legacy: they configured a single-Vault deployment before the Vault registry existed, and releases 2.5.0 to 2.7.x imported them once. This version no longer imports them. For a Vault created directly in the registry (via `POST /api/v1/vaults` or `create_vault`), the equivalent per-Vault fields — `source` (branch/mode/poll interval), `https_credentials`, `commit_identity`, `archive_folder`, `exclude_patterns` — are the only place that setting lives; nothing here overrides them.
 
 ## MCP transport
 
@@ -132,7 +132,6 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | GET | `/api/v1/vaults` | List every Vault definition plus `registry_revision`/`collection_revision`. In demo mode, only enabled Vaults, each `source` is omitted (never exposes host paths or remote URLs to a public visitor), and the `capabilities` block is rewritten for a visitor (see below). |
 | POST | `/api/v1/vaults` | Create a Vault. Body: `CreateVaultRequest` (below). `201` with the new definition. |
 | GET | `/api/v1/vaults/events` | Server-Sent Events stream of collection-revision changes (`vault-collection-revision` events carrying `collection_revision`, affected `vault_ids`, and a change `category`). Carries no Note content. |
-| POST | `/api/v1/vaults/start-with-no-vaults` | One-shot recovery action, reachable only when a failed legacy `.env` import left the instance pending recovery. Body: `{"confirm": true}`. |
 | PATCH | `/api/v1/vaults/{vault_id}` | Replace a Vault's definition wholesale (not a partial patch — resend every field you want to keep). Body: `EditVaultRequest`. |
 | DELETE | `/api/v1/vaults/{vault_id}` | Disconnect a Vault from the registry. Deletes no files, checkout, Git history, or credentials outside the registry record itself. |
 | POST | `/api/v1/vaults/{vault_id}/enable` | Enable a disabled Vault. Query: `expected_registry_revision`. |
