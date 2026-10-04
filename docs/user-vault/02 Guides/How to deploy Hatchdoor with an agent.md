@@ -8,7 +8,7 @@ This page is written for an AI agent that can run commands on your computer, suc
 
 > Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
 
-The agent first checks whether Docker is installed. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, and which search model to use. After you answer, it does the rest without stopping. The one exception is a Linux computer that asks for your password before administrator commands: the agent cannot type it, so it stops once and gives you one line to run yourself. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
+The agent first checks whether Docker is installed. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, and which search model to use. After you answer, it does the rest without stopping. The one exception is a Linux computer that asks for your password before administrator commands: the agent cannot type it, so it stops once and gives you one line to run yourself. On a Mac or a Windows PC without Docker, it first asks you to install Docker Desktop yourself; if that restarts your computer, give your agent the same line again afterwards. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
 
 To do the same by hand, follow [[Install Hatchdoor with Docker Compose]], [[Connect your first Vault]] and [[Connect your agent]].
 
@@ -37,12 +37,12 @@ docker compose version
 sudo -n true 2>/dev/null && echo "sudo: no password" || echo "sudo: asks for a password"  # Linux only
 ```
 
-On Windows, run these in a WSL terminal, or check that Docker Desktop is installed and running.
+On Windows, the commands on this page are written for Bash and run unchanged in Git Bash, which has `curl`, `openssl` and `sed`. Use it if your tool gives you a Bash shell. In PowerShell, translate each command, and keep your variable names distinct: PowerShell treats `$HD` and `$hd` as the same variable. Either way, leave out the `sudo`, `chown` and `setfacl` lines.
 
 - `docker info` prints a version: Docker is ready.
 - `docker info` fails with a permission error on Linux: Docker is installed. Run every `docker` command on this page with `sudo`.
 - `docker info` says it cannot connect, but the `docker` command exists: Docker is installed and stopped. On Linux, start it with `sudo systemctl start docker`. On macOS or Windows, ask the user to open Docker Desktop, as part of the questions below.
-- `docker` is not found, or `docker compose version` fails: Docker or its Compose plugin is missing. On Linux, ask question 6 below. On macOS or Windows, the user installs Docker Desktop: give them https://www.docker.com/products/docker-desktop/ and tell them to download it, install it, open it, accept its terms, and tell you when it shows that the engine is running. Wait, then run `docker info` again.
+- `docker` is not found, or `docker compose version` fails: Docker or its Compose plugin is missing. On Linux, ask question 6 below. On macOS or Windows, the user installs Docker Desktop, and that comes before the questions: installing it can restart the computer and end this conversation, and answers given now would be lost. Give them https://www.docker.com/products/docker-desktop/ and tell them to download it, install it, open it and accept its terms. Say what to expect on Windows: the installer may ask for a restart, and Docker Desktop may then report that WSL is not installed and show a command to run, followed by a second restart. Ask them to come back when Docker Desktop shows that the engine is running, and to start you again with the same one line if this conversation is gone by then. Then run `docker info` again and go on to the questions.
 
 On Linux, the last line says whether `sudo` asks for a password. If it does, you cannot run `sudo` yourself: steps 3 and 4 then go the way "When `sudo` asks for a password" below describes.
 
@@ -81,7 +81,7 @@ You cannot type the user's password, so you cannot run any `sudo` command yourse
    - A last line that prints that it finished.
 
    Running it a second time must do no harm.
-3. Tell the user in one message what the script does, and that it asks for their password because you cannot type it. Ask them to open a new terminal window, run this line, and tell you when it says it finished:
+3. Tell the user in one message what the script does, and that it asks for their password because you cannot type it. Ask them to open a new terminal window, run this line, and tell you when it says it finished. It has to be a terminal of their own: a command run through you, such as one typed after Claude Code's `!`, gives `sudo` nowhere to ask for the password.
 
    ```bash
    sudo bash ~/hatchdoor/admin-steps.sh
@@ -165,6 +165,8 @@ If the notes are an existing folder, set `NOTES` to its full path (the example i
 NOTES='/home/alex/Notes'
 printf 'HOST_VAULT_PATH=%s\n' "$NOTES" >> .env
 ```
+
+On Windows, write the folder with forward slashes, such as `C:/Users/alex/Documents/Notes`.
 
 Hatchdoor runs as user `65532`, not as the user. On Linux, give that user its folders:
 
