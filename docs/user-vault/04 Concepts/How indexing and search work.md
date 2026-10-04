@@ -14,6 +14,8 @@ The SQLite cache is a rebuildable projection of the Vault's Markdown, never a se
 
 A file watcher notices any create, edit, or delete under the Vault: Markdown, attachments, and `.hatchdoor-layer` markers alike, since a marker change reclassifies notes without touching their content. Changes are debounced: a burst of saves within about half a second coalesces into one reindex pass, with a five-second ceiling so a genuinely busy editing session can't defer freshness forever.
 
+A change made outside Hatchdoor, in Obsidian or any other program, normally shows within seconds. Some folders send Hatchdoor no change events at all, and a Windows folder used through Docker Desktop is the common case. So once a minute Hatchdoor also compares each Vault's folder with what it saw the time before, by file names, sizes and modification times, and reindexes when something was added, changed or removed. On those folders an outside change shows within about a minute. There is nothing to turn on and no setting for it.
+
 A save made through Hatchdoor itself, from the browser or an agent, doesn't wait for the watcher: the save asks for the reindex directly and marks the Vault's search `stale` until it lands, so it's picked up even where the watcher can't see changes. If the operating system reports that it dropped file events, the next pass rescans the whole Vault rather than trusting the gap.
 
 > [!note]

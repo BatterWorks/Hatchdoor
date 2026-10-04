@@ -92,7 +92,7 @@ Work down this list. Most of the time it is the first or second item.
 - **The file is not a note.** Only files ending in `.md` are notes. Hidden folders such as `.obsidian`, `.trash` and `.hatchdoor-trash` are left out, as is anything matching the Vault's **Ignore these files and folders** setting.
 - **The note is in a layer.** A folder with a `.hatchdoor-layer` file in it is left out of ordinary search on purpose. Its notes still appear in the sidebar. See [[The layer system]].
 - **The note is in a folder Hatchdoor cannot see.** Hatchdoor only sees the folders shared with it at install time. See [[Connect your first Vault#Add a folder Hatchdoor cannot see yet]].
-- **You edited it outside Hatchdoor a moment ago.** An edit made in another app can take a few seconds to show up.
+- **You edited it outside Hatchdoor a moment ago.** An edit made in another app can take a few seconds to show up, or about a minute when your notes are in a Windows folder used through Docker Desktop.
 
 ## A Vault won't index or stays in a bad state
 
