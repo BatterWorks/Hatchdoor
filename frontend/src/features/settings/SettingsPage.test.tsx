@@ -9,7 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
-import { CONTEXTUAL_HELP } from "../help";
+import { CONTEXTUAL_HELP, type ContextualHelp, helpLinkName } from "../help";
 import { HelpContext } from "../help/useHelp";
 import { SettingsPage } from "./SettingsPage";
 
@@ -492,11 +492,11 @@ describe("How does this work? links (#423)", () => {
     return view;
   }
 
-  function clickLinkIn(container: Element | null) {
+  function clickLinkIn(container: Element | null, to: ContextualHelp) {
     expect(container).not.toBeNull();
     fireEvent.click(
       within(container as HTMLElement).getByRole("button", {
-        name: "How does this work?",
+        name: helpLinkName(to),
       }),
     );
   }
@@ -508,7 +508,7 @@ describe("How does this work? links (#423)", () => {
     [/Updates/, CONTEXTUAL_HELP.upgrade],
   ] as const)("links the %s section to its page", async (name, target) => {
     const { container } = await openSection(name);
-    clickLinkIn(container.querySelector(".settings-sec-head"));
+    clickLinkIn(container.querySelector(".settings-sec-head"), target);
     expect(openHelp).toHaveBeenLastCalledWith(
       target.page,
       "heading" in target ? target.heading : undefined,
@@ -551,6 +551,7 @@ describe("How does this work? links (#423)", () => {
       screen
         .getByText("HATCHDOOR_MCP_WRITE_ENABLED")
         .closest(".settings-plaque-row"),
+      CONTEXTUAL_HELP.agentWrites,
     );
     expect(openHelp).toHaveBeenLastCalledWith(
       CONTEXTUAL_HELP.agentWrites.page,
@@ -571,11 +572,29 @@ describe("How does this work? links (#423)", () => {
         name: "Tell me about new releases",
       }),
     ).toHaveAttribute("aria-pressed", "false");
-    clickLinkIn(row);
+    clickLinkIn(row, CONTEXTUAL_HELP.updateCheck);
     expect(openHelp).toHaveBeenLastCalledWith(
       CONTEXTUAL_HELP.updateCheck.page,
       CONTEXTUAL_HELP.updateCheck.heading,
     );
+  });
+
+  it("names each help link in a section after what it explains (#460)", async () => {
+    await openSection(/Agent access/);
+    const links = screen.getAllByRole("button", {
+      name: /^How does this work\?/,
+    });
+    const names = links.map((link) => link.getAttribute("aria-label"));
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "How does this work? Connecting your agent",
+        "How does this work? Letting your agent change notes",
+      ]),
+    );
+    expect(new Set(names).size).toBe(names.length);
+    for (const link of links) {
+      expect(link).toHaveTextContent(/^How does this work\?$/);
+    }
   });
 
   it("links the write switch to the page on letting agents change notes", async () => {
@@ -583,7 +602,7 @@ describe("How does this work? links (#423)", () => {
     const row = screen
       .getByText("Let assistants change notes")
       .closest(".settings-row");
-    clickLinkIn(row);
+    clickLinkIn(row, CONTEXTUAL_HELP.agentWrites);
     expect(openHelp).toHaveBeenLastCalledWith(
       CONTEXTUAL_HELP.agentWrites.page,
       undefined,

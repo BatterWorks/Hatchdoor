@@ -10,7 +10,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App as RootApp, VaultApp as App } from "./App";
 import { LAST_NOTE_KEY } from "./app/constants";
-import { CONTEXTUAL_HELP } from "./features/help";
+import {
+  CONTEXTUAL_HELP,
+  type ContextualHelp,
+  helpLinkName,
+} from "./features/help";
 import { HelpContext } from "./features/help/useHelp";
 import { discoveryResponse, THREE_VAULTS } from "./test/fixtures/vaults";
 import type { VaultDiscoveryResponse } from "./types";
@@ -402,11 +406,11 @@ describe("How does this work? links on the start states (#423)", () => {
     );
   }
 
-  async function clickLinkUnder(title: string) {
+  async function clickLinkUnder(title: string, to: ContextualHelp) {
     const block = (await screen.findByText(title)).closest(".state-block");
     fireEvent.click(
       within(block as HTMLElement).getByRole("button", {
-        name: "How does this work?",
+        name: helpLinkName(to),
       }),
     );
   }
@@ -426,7 +430,7 @@ describe("How does this work? links on the start states (#423)", () => {
       demo_mode: false,
     });
     renderWithHelp();
-    await clickLinkUnder("No Vaults Yet");
+    await clickLinkUnder("No Vaults Yet", CONTEXTUAL_HELP.noVaults);
     expectOpened(CONTEXTUAL_HELP.noVaults);
   });
 
@@ -440,7 +444,7 @@ describe("How does this work? links on the start states (#423)", () => {
     renderWithHelp();
     await screen.findByText("No Vaults Yet");
     expect(
-      screen.queryByRole("button", { name: "How does this work?" }),
+      screen.queryByRole("button", { name: /^How does this work\?/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -456,7 +460,10 @@ describe("How does this work? links on the start states (#423)", () => {
       demo_mode: false,
     } as VaultDiscoveryResponse);
     renderWithHelp();
-    await clickLinkUnder("Vault Registry Unavailable");
+    await clickLinkUnder(
+      "Vault Registry Unavailable",
+      CONTEXTUAL_HELP.registryRecovery,
+    );
     expectOpened(CONTEXTUAL_HELP.registryRecovery);
   });
 
@@ -465,7 +472,10 @@ describe("How does this work? links on the start states (#423)", () => {
       jsonResponse({ code: "internal_error", message: "Bad gateway" }, 502),
     );
     renderWithHelp();
-    await clickLinkUnder("Vaults Unavailable");
+    await clickLinkUnder(
+      "Vaults Unavailable",
+      CONTEXTUAL_HELP.vaultsUnavailable,
+    );
     expectOpened(CONTEXTUAL_HELP.vaultsUnavailable);
   });
 });

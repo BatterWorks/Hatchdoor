@@ -233,7 +233,9 @@ describe("StartupGate's How does this work? link (#423)", () => {
     );
 
     fireEvent.click(
-      screen.getByRole("button", { name: "How does this work?" }),
+      screen.getByRole("button", {
+        name: "How does this work? Choosing a search model",
+      }),
     );
 
     expect(openHelp).toHaveBeenCalledWith(

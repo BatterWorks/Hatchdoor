@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
-import { CONTEXTUAL_HELP } from "../help";
+import { CONTEXTUAL_HELP, type ContextualHelp, helpLinkName } from "../help";
 import { HelpContext } from "../help/useHelp";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 import {
@@ -1901,11 +1901,11 @@ describe("How does this work? links (#423)", () => {
     return view;
   }
 
-  function clickLinkIn(container: Element | null) {
+  function clickLinkIn(container: Element | null, to: ContextualHelp) {
     expect(container).not.toBeNull();
     fireEvent.click(
       within(container as HTMLElement).getByRole("button", {
-        name: "How does this work?",
+        name: helpLinkName(to),
       }),
     );
   }
@@ -1929,7 +1929,10 @@ describe("How does this work? links (#423)", () => {
 
   it("links a healthy Vault's page to managing Vaults", async () => {
     const { container } = await renderDetail(baseVault(local));
-    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    clickLinkIn(
+      container.querySelector(".settings-vault-condition"),
+      CONTEXTUAL_HELP.vaultSettings,
+    );
     expectOpened(CONTEXTUAL_HELP.vaultSettings);
   });
 
@@ -1937,7 +1940,10 @@ describe("How does this work? links (#423)", () => {
     const { container } = await renderDetail(
       baseVault(local, { enabled: false, activation: "disabled" }),
     );
-    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    clickLinkIn(
+      container.querySelector(".settings-vault-condition"),
+      CONTEXTUAL_HELP.vaultPaused,
+    );
     expectOpened(CONTEXTUAL_HELP.vaultPaused);
   });
 
@@ -1954,7 +1960,10 @@ describe("How does this work? links (#423)", () => {
         },
       }),
     );
-    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    clickLinkIn(
+      container.querySelector(".settings-vault-condition"),
+      CONTEXTUAL_HELP.vaultFolder,
+    );
     expectOpened(CONTEXTUAL_HELP.vaultFolder);
   });
 
@@ -1969,7 +1978,10 @@ describe("How does this work? links (#423)", () => {
         },
       }),
     );
-    clickLinkIn(container.querySelector(".settings-vault-condition"));
+    clickLinkIn(
+      container.querySelector(".settings-vault-condition"),
+      CONTEXTUAL_HELP.vaultUnavailable,
+    );
     expectOpened(CONTEXTUAL_HELP.vaultUnavailable);
   });
 
@@ -1977,7 +1989,10 @@ describe("How does this work? links (#423)", () => {
     const { container } = await renderDetail(
       baseVault(twoWay, { git: "ready" }),
     );
-    clickLinkIn(container.querySelector(".settings-git-console"));
+    clickLinkIn(
+      container.querySelector(".settings-git-console"),
+      CONTEXTUAL_HELP.gitSetup,
+    );
     expectOpened(CONTEXTUAL_HELP.gitSetup);
   });
 
@@ -1992,12 +2007,15 @@ describe("How does this work? links (#423)", () => {
         },
       }),
     );
-    clickLinkIn(container.querySelector(".settings-git-console"));
+    clickLinkIn(
+      container.querySelector(".settings-git-console"),
+      CONTEXTUAL_HELP.gitFailing,
+    );
     expectOpened(CONTEXTUAL_HELP.gitFailing);
     expect(
       within(
         container.querySelector(".settings-vault-condition") as HTMLElement,
-      ).queryByRole("button", { name: "How does this work?" }),
+      ).queryByRole("button", { name: /^How does this work\?/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -2012,7 +2030,10 @@ describe("How does this work? links (#423)", () => {
         },
       }),
     );
-    clickLinkIn(container.querySelector(".settings-git-console"));
+    clickLinkIn(
+      container.querySelector(".settings-git-console"),
+      CONTEXTUAL_HELP.gitConflict,
+    );
     expectOpened(CONTEXTUAL_HELP.gitConflict);
   });
 
@@ -2036,7 +2057,7 @@ describe("How does this work? links (#423)", () => {
       ),
     );
     await screen.findByText("Vault Registry Unavailable");
-    clickLinkIn(document.body);
+    clickLinkIn(document.body, CONTEXTUAL_HELP.registryRecovery);
     expectOpened(CONTEXTUAL_HELP.registryRecovery);
   });
 });
