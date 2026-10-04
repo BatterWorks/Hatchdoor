@@ -68,11 +68,15 @@ Only with a yes to question 6. Follow the page for the user's distribution at ht
 sudo systemctl enable --now docker
 ```
 
+Install only what Docker's page lists. The yes to question 6 covers Docker and nothing else, `setfacl` included: step 4 says what to do without it.
+
 Do not add the user to the `docker` group; that is a change they did not ask for. Use `sudo docker` instead.
 
 ## 4. Install Hatchdoor
 
 For another computer, run the commands in this step there, over SSH. API calls in step 5 run from wherever you are.
+
+Your tool may run each command in a new shell, where the variables and functions an earlier command set are gone. Keep the lines that set one in the same command as the lines that use it: `NOTES` in this step, `REV` and `MCP_TOKEN` in step 5, `SID` and `mcp` in step 6. `HD` and `WEB_TOKEN` are used all through steps 5 and 6, so set them again at the start of each command with the two lines step 5 opens with. Never write a token to a temporary file to carry it from one command to the next.
 
 Create the deployment folder:
 
@@ -142,7 +146,7 @@ On Linux with an existing notes folder, also let user `65532` read and write it,
 sudo setfacl -R -m u:65532:rwX -m d:u:65532:rwX "$NOTES"
 ```
 
-Many Linux systems do not have `setfacl` installed. If it is missing, leave the folder's permissions alone; do not install it or change the folder's owner. Hatchdoor can usually still read the notes, so search works, but neither the browser nor an agent can change them. Say so in the hand-over. macOS and Windows need neither command; Docker Desktop handles access.
+Many Linux systems do not have `setfacl` installed. If it is missing, leave the folder's permissions alone; do not install it or change the folder's owner. Hatchdoor can usually still read the notes, so search works, but neither the browser nor an agent can change them. Step 5 shows whether that happened, and step 7 says how to tell the user. macOS and Windows need neither command; Docker Desktop handles access.
 
 Start Hatchdoor:
 
@@ -190,6 +194,8 @@ curl -sf -X PATCH "$HD/api/settings" \
       }}'
 ```
 
+The MCP token exists only in the `MCP_TOKEN` variable until your client configuration holds it. If your variables do not last between commands, save it there in this same command, once the `curl` has succeeded: for Claude Code, that is the `claude mcp add` line from step 6. When you need the token again, read it from that configuration into a variable, as `WEB_TOKEN` is read from `.env`. Do not use a command that prints it, such as `claude mcp get`.
+
 **Create the Vault.** A fresh install has none, and Hatchdoor never creates one by itself. Every change to the Vault list must name the list's current `registry_revision`, so read it first:
 
 ```bash
@@ -234,7 +240,7 @@ Then read the Vault list once more:
 curl -sf "$HD/api/v1/vaults" -H "Authorization: Bearer $WEB_TOKEN"
 ```
 
-The Vault should show `"search": "ready"`. `"local_content": "read_write"` means notes can be changed, `"read_only"` means they cannot (see the `setfacl` note above). A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
+The Vault should show `"search": "ready"`. `"local_content": "read_write"` means Hatchdoor can write to the notes folder. `"read_only"` means it can read the folder but not write to it, so neither the browser nor an agent can change notes, whatever the answer to question 4 was (see the `setfacl` note above). Step 7 has the lines to give the user in that case. A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
 
 ## 6. Connect yourself and prove it works
 
@@ -296,6 +302,17 @@ I can <only read your notes | read and change your notes>.
 To let me change notes later: Settings > Agent access (MCP) > Let assistants change notes.
 
 To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
+```
+
+If the Vault list in step 5 showed `"local_content": "read_only"`, the two lines about changing notes would mislead: allowing changes in Settings is not enough when Hatchdoor cannot write to the folder. Replace them with these, ending the last line the way the answer to question 4 went:
+
+```text
+Hatchdoor can search and show your notes, but it cannot write to <notes folder>.
+So for now notes cannot be changed in the browser or by me.
+To edit notes in the browser: give user 65532 write access to that folder. See
+Help > How to troubleshoot common problems > Permission denied reading or writing the Vault.
+For me to change notes as well: Settings > Agent access (MCP) > Let assistants change notes
+must also be on. <It is off, as you asked. | It is already on, as you asked.>
 ```
 
 For a private Git repository, add that its access token is stored in Hatchdoor's Vault list, in `data/state` of the deployment folder, and can be replaced in the Vault's settings. Add one line for anything you could not finish, such as a notes folder Hatchdoor cannot read or a client that needs the MCP token in an environment variable.
