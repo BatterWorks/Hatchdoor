@@ -38,7 +38,8 @@ use crate::git::{
 use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
 use crate::startup::{IndexingParticipant, IndexingProgressSnapshot, StartupTracker};
 use crate::vault_registry::{
-    VaultGitMode, VaultId, VaultRegistryStore, VaultSource as RegistryVaultSource,
+    VaultGitMode, VaultId, VaultRegistryState, VaultRegistryStore,
+    VaultSource as RegistryVaultSource,
 };
 use crate::vault_runtime::{
     CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
@@ -377,11 +378,12 @@ impl VaultWorkExecutor {
         // reading, even if it failed partway.
         self.startup
             .refresh_indexing_participants(indexing_participants(&self.vaults));
-        if collection_indexes_settled(&self.vaults) {
-            self.startup.set_ready();
-            self.model_setup_started.store(false, Ordering::Release);
-            info!("Vault collection indexing complete");
-        }
+        settle_startup(
+            &self.startup,
+            &self.vaults,
+            &self.registry,
+            &self.model_setup_started,
+        );
     }
 
     /// Ask for another Index turn of `vault_id` after a backoff, unless this
@@ -408,16 +410,78 @@ impl VaultWorkExecutor {
     }
 }
 
-/// Startup is Ready once every active Vault's Index turn has *settled*:
-/// searchable (`Ready` or `Stale`), or finished with a failure that Vault now
-/// reports as its own, or with no local Markdown to index at all. A Vault
-/// that failed is settled, not pending: waiting for it to succeed let one
-/// broken Vault, or one without a directory, hold the whole instance out of
-/// readiness (#326). An empty collection is never Ready: there is nothing
-/// that could have finished indexing.
+/// Latch startup `Ready` if the instance is ready now: the search model is
+/// set up, the Vault registry loaded normally, and every active Vault's first
+/// index has settled ([`collection_indexes_settled`]). Latching also releases
+/// the model-setup claim, so a later retry can load the model again.
+///
+/// An Index turn's outcome asks this through
+/// [`VaultWorkExecutor::publish_outcome`]. The composition root asks at the
+/// moments no Index turn covers (#453): when model setup finishes, and,
+/// through [`settle_startup_on_collection_changes`], when the collection
+/// changes. With no active Vault no Index turn ever runs, so those are the
+/// only moments an instance without Vaults can become ready.
+pub(crate) fn settle_startup(
+    startup: &StartupTracker,
+    vaults: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    model_setup_started: &AtomicBool,
+) {
+    if startup.collection_indexes_ready() || startup.model_setup_pending() {
+        return;
+    }
+    if !collection_indexes_settled(vaults) {
+        return;
+    }
+    // A registry awaiting operator recovery, or one that cannot be read,
+    // activates no Vault. That is not an instance with no Vaults: it can
+    // serve nothing until it is recovered. Active Vaults came from a
+    // registry that loaded, so only their absence needs the question asked.
+    if vaults.active_vault_ids().is_empty()
+        && !matches!(registry.load(), Ok(VaultRegistryState::Ready(_)))
+    {
+        return;
+    }
+    // Model setup may have begun since the check above; the tracker refuses
+    // the latch then, and the claim stays with that setup.
+    if startup.settle_ready() {
+        model_setup_started.store(false, Ordering::Release);
+        info!("Startup ready: no active Vault is waiting on its first index");
+    }
+}
+
+/// Ask [`settle_startup`] again whenever the Vault collection changes, until
+/// the task is aborted. Disabling or disconnecting the last Vault still in
+/// its first index leaves nothing to wait for, and no Index turn outcome is
+/// sure to follow the change.
+///
+/// Subscribes when called, not when first polled, so no change between the
+/// call and the task's first run is missed.
+pub(crate) fn settle_startup_on_collection_changes(
+    startup: StartupTracker,
+    vaults: VaultCollectionRuntime,
+    registry: VaultRegistryStore,
+    model_setup_started: Arc<AtomicBool>,
+) -> impl Future<Output = ()> {
+    let mut revisions = vaults.subscribe_revisions();
+    async move {
+        while revisions.changed().await.is_ok() {
+            settle_startup(&startup, &vaults, &registry, &model_setup_started);
+        }
+    }
+}
+
+/// Every active Vault's Index turn has *settled*: searchable (`Ready` or
+/// `Stale`), or finished with a failure that Vault now reports as its own, or
+/// with no local Markdown to index at all. A Vault that failed is settled,
+/// not pending: waiting for it to succeed let one broken Vault, or one
+/// without a directory, hold the whole instance out of readiness (#326). A
+/// collection with no active Vault is settled: nothing is waiting on its
+/// first index (#453).
 fn collection_indexes_settled(vaults: &VaultCollectionRuntime) -> bool {
-    let participants = indexing_participants(vaults);
-    !participants.is_empty() && participants.iter().all(|participant| participant.settled)
+    indexing_participants(vaults)
+        .iter()
+        .all(|participant| participant.settled)
 }
 
 /// Every active Vault with its settled state, by the rule

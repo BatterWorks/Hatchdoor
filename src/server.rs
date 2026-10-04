@@ -781,9 +781,14 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) -> b
     true
 }
 
+/// The name the startup status gives the model being downloaded or loaded.
+fn startup_model_name(selected: SelectedModel) -> &'static str {
+    selected.id().unwrap_or("search model")
+}
+
 fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
     let tracker = state.startup.clone();
-    let model_name = selected.id().unwrap_or("search model");
+    let model_name = startup_model_name(selected);
     tracker.set_downloading(model_name, None, None);
     info!(
         model = model_name,
@@ -847,20 +852,7 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
         .await;
 
         match load_result {
-            Ok(Ok(())) => {
-                // Lifecycle reconstruction may have queued Index work before
-                // the shared embedder finished loading. Re-request every
-                // active Vault through the same coalescing FIFO now that its
-                // candidate snapshots can be built.
-                for vault_id in state.vaults.active_vault_ids() {
-                    state.vault_work.request(vault_id, VaultWorkKind::Index);
-                }
-                // The Vault collection owns indexing now. Its Index turn
-                // publishes a structure-only generation before embedding, so
-                // browsing becomes available without a second, legacy
-                // single-Vault build contending for the same SQLite writer.
-                tracker.set_scanning();
-            }
+            Ok(Ok(())) => finish_model_setup(&state),
             Ok(Err(error)) => {
                 state.model_setup_started.store(false, Ordering::Release);
                 tracker.set_model_setup_failed();
@@ -873,6 +865,30 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
             }
         }
     });
+}
+
+/// What a loaded search model hands over to: the Vault collection's indexing,
+/// and startup readiness when nothing is left to index.
+fn finish_model_setup(state: &AppState) {
+    // Lifecycle reconstruction may have queued Index work before the shared
+    // embedder finished loading. Re-request every active Vault through the
+    // same coalescing FIFO now that its candidate snapshots can be built.
+    for vault_id in state.vaults.active_vault_ids() {
+        state.vault_work.request(vault_id, VaultWorkKind::Index);
+    }
+    // The Vault collection owns indexing now. Its Index turn publishes a
+    // structure-only generation before embedding, so browsing becomes
+    // available without a second, legacy single-Vault build contending for
+    // the same SQLite writer.
+    state.startup.set_scanning();
+    // With no active Vault no Index turn follows to settle startup, so it is
+    // asked here (#453).
+    crate::vault_executor::settle_startup(
+        &state.startup,
+        &state.vaults,
+        &state.vault_registry,
+        &state.model_setup_started,
+    );
 }
 
 async fn reject_demo_model_setup(
@@ -1126,7 +1142,11 @@ pub async fn run_server() {
     if selected_model == SelectedModel::TermsRequired {
         startup.set_terms_required();
     } else {
-        startup.set_scanning();
+        // A selected model is not set up until it has loaded, which
+        // `spawn_model_startup` below starts. Reading as set up before then
+        // would let an instance with nothing to index settle `Ready` without
+        // a search model (#453).
+        startup.set_downloading(startup_model_name(selected_model), None, None);
     }
     let commit_cooldown = Arc::new(crate::git::CommitCooldown::new());
     let shutdown_vaults = vaults.clone();
@@ -1198,6 +1218,15 @@ pub async fn run_server() {
             }
         }
     });
+    // Startup readiness is also asked when the collection changes: the last
+    // Vault still in its first index can leave the active set (#453).
+    let startup_settle_task =
+        tokio::spawn(crate::vault_executor::settle_startup_on_collection_changes(
+            state.startup.clone(),
+            state.vaults.clone(),
+            state.vault_registry.clone(),
+            state.model_setup_started.clone(),
+        ));
     let watcher_index_task = watcher_changes.map(|mut changes| {
         let watcher_work = vault_work.clone();
         let watcher_vaults = state.vaults.clone();
@@ -1277,6 +1306,7 @@ pub async fn run_server() {
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
     commit_cooldown_tick_task.abort();
+    startup_settle_task.abort();
     if let Some(task) = update_check_task {
         task.abort();
     }
@@ -4594,6 +4624,120 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status(), StatusCode::OK);
+    }
+
+    async fn ready_status(state: &AppState) -> StatusCode {
+        build_router(state.clone(), None)
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn startup_state(state: &AppState) -> String {
+        let response = build_router(state.clone(), None)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/startup-status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        payload["state"].as_str().expect("state").to_string()
+    }
+
+    /// A fresh install has no Vaults (ADR-40), so no Index turn follows model
+    /// setup. `/ready` turns 200 when the model has loaded (#453).
+    #[tokio::test]
+    async fn ready_endpoint_turns_ready_after_model_setup_with_no_vaults() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state.startup.set_terms_required();
+        assert_eq!(ready_status(&state).await, StatusCode::SERVICE_UNAVAILABLE);
+        state
+            .startup
+            .set_downloading("EmbeddingGemma 300M Q4", None, None);
+        assert_eq!(ready_status(&state).await, StatusCode::SERVICE_UNAVAILABLE);
+
+        finish_model_setup(&state);
+
+        assert_eq!(ready_status(&state).await, StatusCode::OK);
+        assert_eq!(startup_state(&state).await, "ready");
+        assert!(
+            !state.model_setup_started.load(Ordering::Acquire),
+            "the model-setup claim is released, as it is when a Vault's first index settles"
+        );
+    }
+
+    /// The first Vault added after readiness does not take the instance back
+    /// out of it: `/ready` stays 200 while that Vault indexes (#453, #326).
+    #[tokio::test]
+    async fn ready_endpoint_stays_ready_when_the_first_vault_is_added() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        state.startup.set_downloading("search model", None, None);
+        finish_model_setup(&state);
+        assert_eq!(ready_status(&state).await, StatusCode::OK);
+
+        let vault_id = create_vault_with_files(
+            &app,
+            "First",
+            &tmp.path().join("first"),
+            &[("One.md", "# One\n\nfirst note")],
+            0,
+        )
+        .await;
+        assert_eq!(state.vaults.active_vault_ids().len(), 1);
+        assert_eq!(
+            ready_status(&state).await,
+            StatusCode::OK,
+            "{vault_id} has not indexed yet, and the instance is still ready"
+        );
+
+        // Its first Index turn, run the way the dispatch loop runs it.
+        let executor = VaultWorkExecutor::from_state(&state);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.run_next(|request| executor.run(request)),
+        )
+        .await
+        .expect("the new Vault's Index turn is queued")
+        .expect("Index turn");
+        executor.publish_outcome(&outcome);
+        outcome.result.expect("Index turn succeeds");
+
+        assert_eq!(ready_status(&state).await, StatusCode::OK);
+        assert_eq!(startup_state(&state).await, "ready");
+    }
+
+    /// A registry that needs operator recovery activates no Vault and can
+    /// serve nothing: `/ready` keeps answering 503 after the model loads, so
+    /// a waiting script does not carry on (#453).
+    #[tokio::test]
+    async fn ready_endpoint_stays_not_ready_while_the_registry_needs_recovery() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        let registry_path = state.vault_registry.path().to_path_buf();
+        std::fs::create_dir_all(registry_path.parent().expect("state directory"))
+            .expect("create state directory");
+        std::fs::write(&registry_path, "not a registry").expect("write a corrupt registry");
+        assert!(matches!(
+            state.vault_registry.load().expect("load registry"),
+            VaultRegistryState::Recovery(_)
+        ));
+        state.startup.set_downloading("search model", None, None);
+
+        finish_model_setup(&state);
+
+        assert_eq!(ready_status(&state).await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(startup_state(&state).await, "scanning");
     }
 
     /// Once the collection has settled, a later Index turn's progress is one
