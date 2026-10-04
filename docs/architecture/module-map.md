@@ -198,7 +198,10 @@ that production inventory are still checked for stale paths and duplicates.
   The built-in `--healthcheck` selects a local target in the listener's address
   family, preserving the IPv6 listener path in the shell-free runtime image.
 - `StartupTracker` exposes startup/model/indexing readiness. `/ready` answers
-  from it. `report_indexing_progress` is how an Index turn reports progress,
+  from it. The instance is ready when the search model is set up, the Vault
+  registry loaded normally, and every active Vault's first index has settled;
+  no active Vault at all satisfies the last condition, and a registry awaiting
+  operator recovery never does (#453). `report_indexing_progress` is how an Index turn reports progress,
   and it never moves a tracker that has already settled `Ready`: a routine
   reindex is one Vault's upkeep, reported on that Vault, not an instance
   readiness change (#326). Each report names its Vault and carries every
@@ -270,6 +273,16 @@ that production inventory are still checked for stale paths and duplicates.
   active collection Vault's Index turn has settled (see
   `collection_indexes_settled` below), and stays Ready through later
   rebuilds and single-Vault failures; only model setup leaves it (#326).
+  `server.rs` asks `vault_executor::settle_startup` when a model finishes
+  loading, because with no active Vault no Index turn follows to ask, and
+  runs `settle_startup_on_collection_changes` for the life of the process. A
+  selected model reads as `downloading` from process start until it has
+  loaded, so nothing settles Ready without a search model (#453). On a
+  restart whose Vaults all kept a searchable snapshot, that makes the
+  instance Ready when the model loads rather than after the first catch-up
+  Index turn. `StartupTracker::settle_ready` is the latch: it moves to Ready
+  only from scanning or indexing, under the tracker's one write lock, so a
+  model setup that began after the caller looked is never overwritten.
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
   an independently cancellable handle. A qualifying filesystem event opens a
   quiet window that later events restart, bounded by a fixed ceiling
@@ -472,10 +485,19 @@ saved setting still reaches the next turn without a restart — that is where
 `git_author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
 commit identity, overridden per Vault by
 `git::config::resolve_commit_identity`) and `HATCHDOOR_EMBED_LAYERS` are read.
-`collection_indexes_settled` is the startup readiness rule: startup becomes
-Ready once every active Vault's Index turn has settled — searchable (`Ready`
-or `Stale`), failed with the failure on that Vault's own status, or with no
-local Markdown to index — and an empty collection is never Ready. A single
+`settle_startup` latches startup Ready, and is the one place that does:
+`publish_outcome` asks it after an Index turn, and runtime composition asks
+it when model setup finishes and, through
+`settle_startup_on_collection_changes`, whenever the collection changes. It
+refuses while model setup is pending (terms outstanding, a download in
+flight, a failed setup) and, when no Vault is active, while the Vault
+registry needs operator recovery or cannot be read (#453). The registry is
+read only in that case: active Vaults came from a registry that loaded. `collection_indexes_settled` is the Vault half of that rule:
+every active Vault's Index turn has settled — searchable (`Ready` or
+`Stale`), failed with the failure on that Vault's own status, or with no
+local Markdown to index. A collection with no active Vault is settled, so an
+instance with no Vaults, or with every Vault disabled, is ready once its
+model is set up (#453). A single
 Vault's failure never marks the instance failed (#326). The same settled
 rule, as `indexing_participants`, goes to the startup tracker with every
 first-run Index progress report and again after each finished turn, so the

@@ -28,6 +28,7 @@
 
 ### Fixed
 - The **Add a Vault** dialog no longer has the open Settings section's buttons drawn over it on a wide screen, and it now fits a phone screen. Every Settings dialog now draws above the whole page, and on screens 640px wide or narrower the **Where is this Vault?** choices stack one above the other, each on one line, instead of pushing the dialog past both edges of the screen. [#448]
+- `/ready` now answers `200` on an instance with no Vaults. A new install starts with none, so it kept answering `503 not ready`, and `/api/startup-status` kept reporting `scanning`, long after the search model had loaded, and a script or agent waiting on `/ready` hung until someone added a Vault. Hatchdoor is now ready as soon as the search model is set up and no active Vault is waiting on its first index, which covers a fresh install, a restart with no Vaults, an install whose Vaults are all disabled, and disabling or disconnecting the last Vault still in its first index. A Vault registry that needs operator recovery still keeps `/ready` at `503`. After a restart, an instance whose Vaults were all indexed before is ready when the model has loaded, without waiting for its first catch-up index. [#453]
 
 [#417]: https://github.com/BatterWorks/Hatchdoor/issues/417
 [#418]: https://github.com/BatterWorks/Hatchdoor/issues/418
@@ -47,6 +48,7 @@
 [#433]: https://github.com/BatterWorks/Hatchdoor/issues/433
 [#434]: https://github.com/BatterWorks/Hatchdoor/issues/434
 [#448]: https://github.com/BatterWorks/Hatchdoor/issues/448
+[#453]: https://github.com/BatterWorks/Hatchdoor/issues/453
 [#460]: https://github.com/BatterWorks/Hatchdoor/issues/460
 
 ## v2.7.0 - 2026-10-02

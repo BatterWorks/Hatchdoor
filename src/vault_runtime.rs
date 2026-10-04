@@ -326,6 +326,31 @@ impl VaultRuntime {
         self.set_phase(VaultPhase::Ready);
     }
 
+    /// Move the phase to `Ready` from `Validating`, `Scanning` or `Indexing`
+    /// only, and say whether it moved. Decided under the one write lock, so
+    /// a caller that judged the collection settled cannot overwrite a model
+    /// setup that began, or failed, after it looked.
+    pub fn settle_ready(&self) -> bool {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .expect("vault runtime snapshot poisoned");
+        if !matches!(
+            snapshot.phase,
+            VaultPhase::Validating | VaultPhase::Scanning | VaultPhase::Indexing
+        ) {
+            return false;
+        }
+        snapshot.phase = VaultPhase::Ready;
+        snapshot.capabilities = VaultCapabilities::derive(snapshot.mode, snapshot.phase);
+        snapshot.model = None;
+        snapshot.downloaded_bytes = None;
+        snapshot.total_bytes = None;
+        snapshot.indexing = None;
+        snapshot.error = None;
+        true
+    }
+
     pub fn set_unavailable(&self, code: impl Into<String>, message: impl Into<String>) {
         let mut snapshot = self
             .snapshot

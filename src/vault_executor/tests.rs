@@ -2341,6 +2341,190 @@ fn a_vault_without_a_directory_does_not_hold_the_collection_unsettled() {
     assert!(collection_indexes_settled(&vaults));
 }
 
+fn loaded_registry(registry: &VaultRegistryStore) -> VaultRegistrySnapshot {
+    match registry.load().expect("load registry") {
+        VaultRegistryState::Ready(snapshot) => snapshot,
+        VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    }
+}
+
+/// 2.8.0 starts with no Vaults (ADR-40), so no Index turn ever runs to settle
+/// startup. Once the model is set up there is nothing left to wait for (#453).
+#[test]
+fn an_instance_with_no_vaults_is_ready_once_the_model_is_set_up() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let vaults = VaultCollectionRuntime::new();
+    let startup = StartupTracker::scanning();
+    let model_setup_started = AtomicBool::new(true);
+
+    assert!(collection_indexes_settled(&vaults));
+    settle_startup(&startup, &vaults, &registry, &model_setup_started);
+
+    assert!(startup.collection_indexes_ready());
+    assert_eq!(startup.status().state, "ready");
+    assert!(
+        !model_setup_started.load(Ordering::Acquire),
+        "settling releases the model-setup claim, as it does after an Index turn"
+    );
+}
+
+/// A Vault that is disabled is not active, so an instance whose Vaults are
+/// all disabled waits on nothing either (#453).
+#[test]
+fn an_instance_whose_vaults_are_all_disabled_is_ready_once_the_model_is_set_up() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = add_local_vault(&registry, &loaded_registry(&registry), "Only", vault_path);
+    let disabled = registry
+        .disable(added.revision(), vault_id_named(&added, "Only"))
+        .expect("disable the Vault");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &disabled);
+    let startup = StartupTracker::scanning();
+
+    settle_startup(&startup, &vaults, &registry, &AtomicBool::new(true));
+
+    assert!(startup.collection_indexes_ready());
+}
+
+/// A registry that needs operator recovery activates no Vault, but it is not
+/// an empty instance: nothing can be served until it is recovered, so a
+/// script waiting on `/ready` must keep waiting (#453).
+#[test]
+fn a_registry_awaiting_recovery_is_not_ready_although_no_vault_is_active() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry_path = directory.path().join("state/vaults.json");
+    std::fs::create_dir_all(registry_path.parent().expect("state directory"))
+        .expect("create state directory");
+    std::fs::write(&registry_path, "not a registry").expect("write a corrupt registry");
+    let registry = VaultRegistryStore::new(registry_path);
+    assert!(matches!(
+        registry.load().expect("load registry"),
+        VaultRegistryState::Recovery(_)
+    ));
+    let vaults = VaultCollectionRuntime::new();
+    let startup = StartupTracker::scanning();
+    let model_setup_started = AtomicBool::new(true);
+
+    settle_startup(&startup, &vaults, &registry, &model_setup_started);
+
+    assert!(!startup.collection_indexes_ready());
+    assert_eq!(startup.status().state, "scanning");
+    assert!(model_setup_started.load(Ordering::Acquire));
+}
+
+/// Model setup gates readiness whatever the Vault count: with terms
+/// outstanding, a download in flight or a failed setup, an instance with no
+/// Vaults is not ready. It becomes ready when the model has loaded (#453).
+#[test]
+fn an_instance_with_no_vaults_is_not_ready_while_model_setup_is_pending() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let vaults = VaultCollectionRuntime::new();
+    let startup = StartupTracker::terms_required();
+    let model_setup_started = AtomicBool::new(true);
+    let settle = || settle_startup(&startup, &vaults, &registry, &model_setup_started);
+
+    settle();
+    assert_eq!(startup.status().state, "terms_required");
+
+    startup.set_downloading("EmbeddingGemma 300M Q4", Some(1), Some(2));
+    settle();
+    assert_eq!(startup.status().state, "downloading");
+
+    startup.set_model_setup_failed();
+    settle();
+    assert_eq!(startup.status().state, "failed");
+    assert!(model_setup_started.load(Ordering::Acquire));
+
+    // What a finished model setup does before it asks.
+    startup.set_scanning();
+    settle();
+    assert_eq!(startup.status().state, "ready");
+}
+
+/// The last Vault still in its first index leaving the active set leaves
+/// nothing to wait for. No Index turn reports that, so the collection's own
+/// change does (#453).
+#[tokio::test]
+async fn disabling_the_only_vault_still_in_its_first_index_settles_startup() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = add_local_vault(&registry, &loaded_registry(&registry), "Only", vault_path);
+    let vault_id = vault_id_named(&added, "Only");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &added);
+    vaults
+        .runtime(vault_id)
+        .expect("active Vault")
+        .set_search_status(VaultSearchStatus::Indexing, None)
+        .expect("publish indexing search status");
+    let startup = StartupTracker::scanning();
+    let model_setup_started = Arc::new(AtomicBool::new(true));
+    // While the Vault is active and unsettled, asking settles nothing.
+    settle_startup(&startup, &vaults, &registry, &model_setup_started);
+    assert!(!startup.collection_indexes_ready());
+    let watching = tokio::spawn(settle_startup_on_collection_changes(
+        startup.clone(),
+        vaults.clone(),
+        registry.clone(),
+        model_setup_started,
+    ));
+
+    let disabled = registry
+        .disable(added.revision(), vault_id)
+        .expect("disable the Vault");
+    vaults.reconcile(&registry, &disabled);
+
+    wait_until_ready(&startup).await;
+    watching.abort();
+}
+
+/// Disconnecting it does the same: the Vault leaves the registry, and the
+/// collection with it (#453).
+#[tokio::test]
+async fn disconnecting_the_only_vault_still_in_its_first_index_settles_startup() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = add_local_vault(&registry, &loaded_registry(&registry), "Only", vault_path);
+    let vault_id = vault_id_named(&added, "Only");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &added);
+    let startup = StartupTracker::scanning();
+    let watching = tokio::spawn(settle_startup_on_collection_changes(
+        startup.clone(),
+        vaults.clone(),
+        registry.clone(),
+        Arc::new(AtomicBool::new(true)),
+    ));
+    assert!(!startup.collection_indexes_ready());
+
+    let disconnected = registry
+        .disconnect(added.revision(), vault_id)
+        .expect("disconnect the Vault");
+    vaults.reconcile(&registry, &disconnected);
+
+    wait_until_ready(&startup).await;
+    watching.abort();
+}
+
+async fn wait_until_ready(startup: &StartupTracker) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !startup.collection_indexes_ready() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("startup settles once the collection has no Vault in its first index");
+}
+
 /// The executor binds the settings snapshot at the *start of each turn*, not
 /// once when it is constructed: a save between two turns reaches the second
 /// one, and the turn already running keeps the view it started with.
