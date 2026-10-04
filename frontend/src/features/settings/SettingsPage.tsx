@@ -13,7 +13,7 @@ import { apiFetch } from "../../api/api";
 import {
   CONTEXTUAL_HELP,
   ContextualHelpLink,
-  type HelpLocation,
+  type ContextualHelp,
 } from "../help";
 import type { LastAgentConnection, VaultSummary } from "../../types";
 import {
@@ -109,7 +109,7 @@ const COPY: Record<
     /** A quiet line under the help, for a fact the help sentence cannot hold. */
     note?: string;
     /** The manual page that explains this setting on its own (#423). */
-    manual?: HelpLocation;
+    manual?: ContextualHelp;
   }
 > = {
   HATCHDOOR_ARCHIVE_PREFIX: {

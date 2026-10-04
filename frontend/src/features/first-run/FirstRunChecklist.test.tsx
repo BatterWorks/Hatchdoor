@@ -93,7 +93,7 @@ function step(name: string): HTMLElement {
 function introHelpLink(): HTMLElement {
   const intro = screen.getByText(/^Four steps from nothing/);
   return within(intro.nextElementSibling as HTMLElement).getByRole("button", {
-    name: "How does this work?",
+    name: "How does this work? Adding your notes",
   });
 }
 
@@ -318,6 +318,25 @@ describe("FirstRunChecklist", () => {
       screen.getByRole("button", { name: "Close the checklist" }),
     );
     expect(window.localStorage.getItem(DISMISSED_KEY)).toBe("1");
+  });
+
+  it("names each of its four help links after what it explains (#460)", async () => {
+    serve({ "GET /api/settings": settings() });
+    renderChecklist([healthyVault("Recipes")]);
+    await screen.findByRole("button", { name: "Connect an agent" });
+
+    const links = screen.getAllByRole("button", {
+      name: /^How does this work\?/,
+    });
+    expect(links.map((link) => link.getAttribute("aria-label"))).toEqual([
+      "How does this work? Adding your notes",
+      "How does this work? Connecting your agent",
+      "How does this work? Letting your agent change notes",
+      "How does this work? Hearing about new releases",
+    ]);
+    for (const link of links) {
+      expect(link).toHaveTextContent(/^How does this work\?$/);
+    }
   });
 
   it("offers the update check off, and turns it on when asked", async () => {

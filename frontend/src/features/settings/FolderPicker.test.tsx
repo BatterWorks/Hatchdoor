@@ -155,7 +155,9 @@ describe("FolderPicker", () => {
     expect(screen.getByText("/data/vault")).toBeInTheDocument();
     expect(screen.getByText(/Or ask your agent to add it/)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "How does this work?" }),
+      screen.getByRole("button", {
+        name: "How does this work? Adding a folder Hatchdoor cannot see",
+      }),
     ).toBeInTheDocument();
   });
 
@@ -200,7 +202,9 @@ describe("FolderPicker", () => {
       screen.getByText("Hatchdoor can’t see this folder yet."),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "How does this work?" }),
+      screen.getByRole("button", {
+        name: "How does this work? Adding a folder Hatchdoor cannot see",
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Or ask your agent to add it."),

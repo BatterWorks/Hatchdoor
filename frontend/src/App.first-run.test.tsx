@@ -79,7 +79,7 @@ function renderApp() {
 function introHelpLink(): HTMLElement {
   const intro = screen.getByText(/^Four steps from nothing/);
   return within(intro.nextElementSibling as HTMLElement).getByRole("button", {
-    name: "How does this work?",
+    name: "How does this work? Adding your notes",
   });
 }
 

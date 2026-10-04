@@ -4232,6 +4232,7 @@ Feature tests:
 - `frontend/src/features/help/HelpPanel.test.tsx`
 - `frontend/src/features/help/helpPages.test.ts`
 - `frontend/src/features/help/contextualLinks.test.ts`
+- `frontend/src/features/help/ContextualHelpLink.test.tsx`
 
 **Public contract:** `frontend/src/features/help/index.ts` is the only public
 TS/TSX entry point. `HelpProvider` (props `demoMode`, `signedOut` while the
@@ -4245,13 +4246,18 @@ it does nothing. `page` is a manual page name such as
 `heading` is a heading anchor in the note slug rule; the panel scrolls to it.
 `HELP_PAGES` names the pages other features open Help at. Since #423,
 `CONTEXTUAL_HELP` is the one table of where each "How does this work?" link
-opens Help (`{page, heading?}` per screen or condition), with
+opens Help (`{page, heading?, topic}` per screen or condition, typed
+`ContextualHelp`; since #460 `topic` is a few plain words naming what the link
+explains, required and different for every entry), with
 `vaultConditionHelp(vault, paused)` and `gitConsoleHelp(vault)` choosing the
 entry for a Vault's condition line and Git console, and `ContextualHelpLink`
-(prop `to`) is the link itself, a `.help-link` button. `contextualLinks.test.ts`
-reads `docs/user-vault` from disk and fails when a page or heading in the table
-is missing. Help CSS is integrated through the `App.css` stylesheet aggregation
-seam.
+(prop `to`, a `ContextualHelp`) is the link itself, a `.help-link` button that
+reads "How does this work?" and whose accessible name is those words followed
+by the topic. `helpLinkName(to)` returns that name, for tests that look a link
+up by it. `contextualLinks.test.ts` reads `docs/user-vault` from disk and fails
+when a page or heading in the table is missing, or when a topic is blank or
+used twice. Help CSS is integrated through the `App.css` stylesheet
+aggregation seam.
 
 **Behaviour:** Help is an overlay beside the work (the #417 resolution): fixed
 to the right under the topbar, the screen underneath keeps its width, full

@@ -73,7 +73,7 @@ import {
 import {
   CONTEXTUAL_HELP,
   ContextualHelpLink,
-  type HelpLocation,
+  type ContextualHelp,
   HelpProvider,
   useHelp,
 } from "./features/help";
@@ -1385,7 +1385,7 @@ function BrokenStartState({
   message: string;
   onTryAgain?: () => void;
   /** The manual page that explains this start (#423). */
-  manual?: HelpLocation;
+  manual?: ContextualHelp;
 }) {
   return (
     <StateBlock

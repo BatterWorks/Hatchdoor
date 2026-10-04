@@ -4,6 +4,8 @@ export { HELP_PAGES, type HelpLocation } from "./helpPages";
 export { ContextualHelpLink } from "./ContextualHelpLink";
 export {
   CONTEXTUAL_HELP,
+  type ContextualHelp,
   gitConsoleHelp,
+  helpLinkName,
   vaultConditionHelp,
 } from "./contextualLinks";

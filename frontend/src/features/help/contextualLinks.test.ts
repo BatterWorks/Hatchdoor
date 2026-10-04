@@ -68,6 +68,24 @@ describe("CONTEXTUAL_HELP", () => {
     },
   );
 
+  it.each(Object.entries(CONTEXTUAL_HELP))(
+    "%s has a topic for its accessible name",
+    (_key, target) => {
+      // Read through a plain string so a blank topic fails here even though
+      // the type check already refuses a missing one.
+      const topic: string = target.topic;
+      expect(topic.trim()).not.toBe("");
+      expect(topic).toBe(topic.trim());
+    },
+  );
+
+  it("gives every target a different topic, so no two links on a screen share a name", () => {
+    const topics = Object.values(CONTEXTUAL_HELP).map((target) =>
+      target.topic.toLowerCase(),
+    );
+    expect(new Set(topics).size).toBe(topics.length);
+  });
+
   it("names pages the way the server does", () => {
     expect(pages.has("guides/how-to-troubleshoot-common-problems")).toBe(true);
     expect(pages.has("whats-new")).toBe(true);
