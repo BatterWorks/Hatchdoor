@@ -38,11 +38,11 @@ Search always looks in every Vault that is turned on, whichever one the selector
 
 On a Vault Hatchdoor can write to, you can edit notes in the browser. **New note** creates a note. Click any paragraph, heading, list item or table row to edit it in place; [[How to edit notes with the live editor]] covers it in full.
 
-If those controls are missing, the Vault is read-only or the instance is a public demo. If they carry a warning that the Vault's filesystem cannot swap two files in one step, editing still works; [[Install Hatchdoor with Docker Compose#If your notes are on ZFS or a FUSE mount]] explains what that costs.
+If those controls are missing, the Vault is read-only or the instance is a public demo. If they carry a warning that the Vault's filesystem cannot swap two files in one step, editing still works; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains what that costs.
 
 Your notes stay plain Markdown files, so you can still open them in Obsidian or any other Markdown app at the same time. Hatchdoor understands both wikilinks and Markdown links between notes, and writes new links in whichever style your Vault already uses.
 
-A note's text is always read straight from its file. Its links and backlinks show an edit made in Hatchdoor straight away. An edit made elsewhere, such as in Obsidian or by a Git sync, can take a few seconds to show up there.
+A note's text is always read straight from its file. Its links and backlinks show an edit made in Hatchdoor straight away. An edit made elsewhere, such as in Obsidian or by a Git sync, can take a few seconds to show up there, or about a minute when your notes are in a Windows folder used through Docker Desktop.
 
 A note can also hold a saved query: a fenced `base` block that lists matching notes, such as every subscription that has not ended yet. The note page draws it as a table, worked out afresh each time you open the note, and each row links to its note. Click a column heading to sort by it; a reload forgets the sort. The table is never written into the file, so another Markdown app shows the block itself. [[Supported Markdown reference]] lists what a saved query can say.
 

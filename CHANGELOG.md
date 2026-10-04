@@ -27,6 +27,7 @@
 - A screen reader now says what each **How does this work?** link explains. The link reads the same on screen everywhere, so on a screen with several of them, such as the setup checklist or Settings, every one used to be announced with the same words. Each is now announced as the question followed by its topic, for example "How does this work? Adding your notes" or "How does this work? Letting your agent change notes". The words on screen do not change, and with voice control you still say "How does this work?". [#460]
 
 ### Fixed
+- Notes changed from Windows now show up when Hatchdoor runs under Docker Desktop. A Windows folder shared with the container sends no file change events, so a note added, edited or deleted in another program never reached the file tree or search until a restart or a manual refresh, while the Vault still reported its watcher as running. Hatchdoor now also compares every Vault's folder with what it last saw once a minute, by file names, sizes and modification times, and reindexes when something changed, so an outside change shows within about a minute on any folder that sends no events and within seconds everywhere else, as before. There is no setting for it. The install page now also says that a Windows folder under Docker Desktop uses the two-step save, which it used to describe for ZFS and FUSE only. [#458]
 - The **Add a Vault** dialog no longer has the open Settings section's buttons drawn over it on a wide screen, and it now fits a phone screen. Every Settings dialog now draws above the whole page, and on screens 640px wide or narrower the **Where is this Vault?** choices stack one above the other, each on one line, instead of pushing the dialog past both edges of the screen. [#448]
 - `/ready` now answers `200` on an instance with no Vaults. A new install starts with none, so it kept answering `503 not ready`, and `/api/startup-status` kept reporting `scanning`, long after the search model had loaded, and a script or agent waiting on `/ready` hung until someone added a Vault. Hatchdoor is now ready as soon as the search model is set up and no active Vault is waiting on its first index, which covers a fresh install, a restart with no Vaults, an install whose Vaults are all disabled, and disabling or disconnecting the last Vault still in its first index. A Vault registry that needs operator recovery still keeps `/ready` at `503`. After a restart, an instance whose Vaults were all indexed before is ready when the model has loaded, without waiting for its first catch-up index. [#453]
 
@@ -49,6 +50,7 @@
 [#434]: https://github.com/BatterWorks/Hatchdoor/issues/434
 [#448]: https://github.com/BatterWorks/Hatchdoor/issues/448
 [#453]: https://github.com/BatterWorks/Hatchdoor/issues/453
+[#458]: https://github.com/BatterWorks/Hatchdoor/issues/458
 [#460]: https://github.com/BatterWorks/Hatchdoor/issues/460
 
 ## v2.7.0 - 2026-10-02

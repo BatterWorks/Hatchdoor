@@ -80,6 +80,7 @@ Copy this for a new record:
 | 40 | [A fresh install starts with zero Vaults](#adr-40--a-fresh-install-starts-with-zero-vaults) | Accepted; decisions 1 to 4 implemented in #427, decision 6 in #424 | Don't register a Vault nobody added, don't write starter notes into a user's folder, and don't open on zero Vaults while stored settings still carry the retired single-Vault keys |
 | 41 | [Hatchdoor lists the folders it can see, inside its Vault mount only](#adr-41--hatchdoor-lists-the-folders-it-can-see-inside-its-vault-mount-only) | Accepted | Don't follow a symlink, leave the Vault root, return file names or content, or serve the listing in demo mode |
 | 42 | [Every release ships plain highlights](#adr-42--every-release-ships-plain-highlights) | Accepted | Don't release without 3 to 6 highlight lines, action-needed items first |
+| 43 | [A timed folder re-scan backs up the file watcher](#adr-43--a-timed-folder-re-scan-backs-up-the-file-watcher) | Accepted; implemented in #458 | Don't make the re-scan a setting, don't detect filesystems to decide where it runs, and don't give it its own route to an index or commit turn |
 
 > Records 01–13 were reconstructed and adopted on 2026-07-19 from the codebase,
 > the CHANGELOG audit fixes (`F-01`…`F-17`), and the semantic-search evaluation.
@@ -99,6 +100,7 @@ Copy this for a new record:
 > Record 36 was added on 2026-10-02 for #402, #403 and #404.
 > Record 37 was added on 2026-10-02 for #408.
 > Records 38–42 were added on 2026-10-02 for #420, from the resolution of #416 and its addendum.
+> Record 43 was added on 2026-10-05 from the triage of #458.
 
 ---
 
@@ -554,3 +556,15 @@ Copy this for a new record:
   3. **Approval covers them.** The maintainer's approval of the release title and notes (ADR-36 decision 4) covers the highlights, and an edit after approval means asking again. The release runbook says so.
 - **Consequences:** Every release reaches a beginner as a few plain lines, with anything they must do first, and an agent can read the same lines over MCP. Each release costs the maintainer one more short text to read before approving. Six lines cannot list everything, so a release with many visible changes has to choose; the changelog stays the full record. Releasing without highlights, or with more than six lines, needs a superseding record.
 - **Evidence:** issue #416 (resolution, section B, and the addendum on highlights and What's new); #424 (highlights and release script), #418 (pop-up). Today: `scripts/release-prepare.mjs`; `docs/maintenance/release-runbook.md`; `CHANGELOG.md` (`## Unreleased`).
+
+## ADR-43 — A timed folder re-scan backs up the file watcher
+
+- **Status:** Accepted, implemented in #458. Supersedes nothing. The re-scan reports through the watcher's existing change channel, so ADR-18, ADR-23 and ADR-31 bind the turns it causes exactly as they bind a watcher event's.
+- **Context:** Hatchdoor learned about changes made outside it from one source: file change events from the kernel, through `notify`'s `RecommendedWatcher`, which is inotify on Linux. Some filesystems deliver no such events for changes made on their other side. A Windows folder shared into a Linux container by Docker Desktop is the common case, and it is the normal setup for every Windows user. There the watcher starts without error and the Vault reports `watcher: running`, while a note added, changed or removed from Windows never reaches the tree or search. In the 2.8.0 deploy rehearsal (#434, run 4) a note added from Windows was still missing after four minutes, with nothing on screen saying so. Two remedies were weighed. Detecting the filesystem and switching those Vaults to polling fixes the cases already known and silently misses every case nobody has met yet, which is the same failure again. Re-scanning every Vault on a timer needs no knowledge of the filesystem at all.
+- **Decision:**
+  1. **Kernel events stay the fast path.** Nothing about the watcher, its debounce or its ceiling changes, and a change the kernel reports is still acted on within seconds.
+  2. **Every Vault with a running watcher is also re-scanned on a timer.** The re-scan compares file names, sizes and modification times against the previous round, never file contents, and reports a difference on the same channel a watcher event uses. It applies the watcher's own rule for what counts as a change, and it lives and dies with the Vault's watcher handle. The first round only sets the baseline.
+  3. **The interval is 60 seconds, fixed.** It is a constant beside the watcher's debounce, with no setting and no environment variable (ADR-14): noticing outside changes is the behaviour, not a preference.
+  4. **No filesystem detection.** The re-scan runs on every Vault, including those where kernel events work.
+- **Consequences:** `watcher: running` is true again on every filesystem: an outside change is noticed within about a minute at worst. The cost is one metadata walk per Vault per minute, paid on filesystems that never needed it, and an unchanged Vault causes no index or commit turn however long it runs. Where kernel events do work, a change is reported twice, once by its event and once by the next round, so it gets a second index turn that finds nothing to embed. A change that keeps a file's size and lands inside the same modification-time tick as the previous one is invisible to the re-scan; kernel events and Hatchdoor's own write reports cover it wherever they exist. Making the interval configurable, skipping the re-scan on some filesystems, or giving it a route to turns other than the change channel needs a superseding record.
+- **Evidence:** issue #458 and its triage; #434 run 4 for the failure; `src/vault_watcher.rs` (`RESCAN_INTERVAL`, `run_vault_folder_rescan`, `fingerprint_vault_folder`, `is_vault_change_path`, and the tests named `rescan_*`); ADR-14 for no setting, ADR-23 for the commit turn a change asks for, ADR-26 for the two-step save the same folders use.

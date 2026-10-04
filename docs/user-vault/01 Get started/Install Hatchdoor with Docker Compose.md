@@ -150,15 +150,23 @@ In step 3, rootless Podman needs `podman unshare chown -R 65532:65532 data model
 
 Agents download and upload files through short-lived links that carry the server's address. Behind a proxy that adds HTTPS, Hatchdoor learns the address agents used from the proxy's `Forwarded` header, or its `X-Forwarded-Proto` and `X-Forwarded-Host` headers. Caddy, Traefik and Nginx Proxy Manager send them by default. Plain nginx and openresty need `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header X-Forwarded-Host $http_host;` (`$http_host` keeps a non-standard port, `$host` drops it) in the `location` block. If your proxy cannot send them, or serves Hatchdoor under a path such as `/notes`, set **Public address** in **Settings** → **Agent access (MCP)** instead.
 
-## If your notes are on ZFS or a FUSE mount
+## If your notes are in a Windows folder, on ZFS or on a FUSE mount
 
-Most people can skip this. It matters only if your notes folder is on ZFS older than OpenZFS 2.2 (Ubuntu 22.04's standard kernel ships 2.1.5) or on a FUSE mount. ext4, XFS, btrfs and ZFS 2.2 or later are all fine. Check with `zfs version` if you are unsure.
+Read this if your notes folder is one of these:
+
+- A Windows folder used through Docker Desktop, such as `C:/Users/alex/Documents/Notes`. That is the normal setup on Windows, so it applies to every Windows install.
+- ZFS older than OpenZFS 2.2 (Ubuntu 22.04's standard kernel ships 2.1.5). Check with `zfs version` if you are unsure.
+- A FUSE mount.
+
+On Linux with ext4, XFS, btrfs or ZFS 2.2 or later you can skip it.
 
 Hatchdoor normally saves a note by writing the new version beside the old one and swapping the two in a single step. That swap is what lets it notice that you also saved the same note in Obsidian at the same moment, and refuse rather than overwrite your change. Those filesystems cannot do the swap.
 
 Your notes still work there: you can edit, move, rename, archive and delete them. Hatchdoor checks the note and then replaces it, in two steps. Saving over a note that changed since it was read is still refused. What you lose is one narrow case: if another program saves the note in the instant between Hatchdoor's check and its replacement, that change is overwritten instead of reported. If you are the only one editing, or use one app at a time, this costs you nothing.
 
 You do not have to set anything. Hatchdoor tests the filesystem when it opens a Vault, writes one line to its log for each Vault that cannot do the swap, and shows the same warning above the note in the browser.
+
+A Windows folder has one more difference. It does not tell Hatchdoor when a note changes from the Windows side, so a note you add or edit in another program shows up within about a minute instead of within seconds. See [[How indexing and search work#What happens when a note changes]].
 
 ---
 

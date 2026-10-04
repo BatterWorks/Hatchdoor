@@ -294,6 +294,19 @@ that production inventory are still checked for stale paths and duplicates.
   gone with the rest of the legacy lane (#185). An event flagged `Rescan`
   (the kernel's queue overflowed and events were lost) always qualifies, since
   an Index turn is already the full rescan it asks for (#324).
+- The same handle owns a folder re-scan (ADR-43, #458). Every
+  `RESCAN_INTERVAL` (60 seconds, fixed, no setting) it walks the Vault, off the
+  async workers, and digests each entry's path, kind, size and modification
+  time, never file contents. A digest that differs from the previous round's
+  sends the Vault ID on the same channel a kernel event uses, so there is no
+  second route to an Index or Commit turn. It decides what counts through
+  `is_vault_change_path`, the one rule `should_refresh_for_event` also uses:
+  the cache database and its sidecars, `.git` and noise paths never count, a
+  layer marker does. The first round only sets the baseline, an unchanged
+  Vault never reports, and a round that cannot read the Vault root or
+  anything under it logs a warning, keeps the previous baseline and tries
+  again next round. Cancelling
+  the handle stops the re-scan with the watcher.
 - The watcher is not the only producer of that intent. The mutation core
   reports every successful foreground write on the same channel through
   `VaultControlBlock::report_write`, and before that labels the Vault's
@@ -1835,12 +1848,12 @@ link graph, and the Index turn's retained `IndexedAssets`.
   are the one exception the maintainer accepted (#361): after an edit made
   outside Hatchdoor they may lag disk until the watcher reports the change,
   at most `WATCH_MAX_DEBOUNCE` after the burst began. A Hatchdoor write never
-  lags, and a Vault with no running watcher never serves a kept graph. The
-  bound is only as good as the watcher: an edit inotify never sees (another
-  host writing to a network mount, a subdirectory past `max_user_watches`, a
-  Vault root replaced underneath it) leaves the graph stale until the next
-  Hatchdoor write or watcher replacement, the same limit search indexing
-  already has.
+  lags, and a Vault with no running watcher never serves a kept graph. An
+  edit inotify never sees (another host writing to a network mount, a
+  Windows folder under Docker Desktop, a subdirectory past
+  `max_user_watches`) is reported by the watcher's folder re-scan instead,
+  so there the lag is at most `RESCAN_INTERVAL` (ADR-43), the same bound
+  search indexing has.
 - Every selected or returned note identity includes an immutable Vault ID; no
   default or sole-Vault inference exists.
 - One-Vault snapshots are explicit about stale availability, unavailable
