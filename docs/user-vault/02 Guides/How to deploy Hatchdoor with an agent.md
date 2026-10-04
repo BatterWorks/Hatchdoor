@@ -8,7 +8,7 @@ This page is written for an AI agent that can run commands on your computer, suc
 
 > Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
 
-The agent first checks whether Docker is installed. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, and which search model to use. After you answer, it does the rest without stopping. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
+The agent first checks whether Docker is installed. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, and which search model to use. After you answer, it does the rest without stopping. The one exception is a Linux computer that asks for your password before administrator commands: the agent cannot type it, so it stops once and gives you one line to run yourself. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
 
 To do the same by hand, follow [[Install Hatchdoor with Docker Compose]], [[Connect your first Vault]] and [[Connect your agent]].
 
@@ -34,6 +34,7 @@ uname -s                                   # Linux or Darwin (macOS)
 cat /etc/os-release 2>/dev/null | head -3  # Linux distribution
 docker info --format '{{.ServerVersion}}'  # Docker installed and running?
 docker compose version
+sudo -n true 2>/dev/null && echo "sudo: no password" || echo "sudo: asks for a password"  # Linux only
 ```
 
 On Windows, run these in a WSL terminal, or check that Docker Desktop is installed and running.
@@ -42,6 +43,8 @@ On Windows, run these in a WSL terminal, or check that Docker Desktop is install
 - `docker info` fails with a permission error on Linux: Docker is installed. Run every `docker` command on this page with `sudo`.
 - `docker info` says it cannot connect, but the `docker` command exists: Docker is installed and stopped. On Linux, start it with `sudo systemctl start docker`. On macOS or Windows, ask the user to open Docker Desktop, as part of the questions below.
 - `docker` is not found, or `docker compose version` fails: Docker or its Compose plugin is missing. On Linux, ask question 6 below. On macOS or Windows, the user installs Docker Desktop: give them https://www.docker.com/products/docker-desktop/ and tell them to download it, install it, open it, accept its terms, and tell you when it shows that the engine is running. Wait, then run `docker info` again.
+
+On Linux, the last line says whether `sudo` asks for a password. If it does, you cannot run `sudo` yourself: steps 3 and 4 then go the way "When `sudo` asks for a password" below describes.
 
 If the user picks another computer in question 1, run the same checks there over SSH once they have answered. You cannot check that computer before asking, so when it runs Linux, question 6 is always part of the interview: its yes or no covers Docker being missing there too.
 
@@ -56,9 +59,38 @@ Ask all of these in one message, with the defaults shown, so the user can answer
 5. **Which search model?** There is no default; the user must choose:
    - **Gemma**: searches in many languages and uses less memory, about 0.5 GB while indexing. Using it means accepting Google's Gemma terms, at https://ai.google.dev/gemma/terms.
    - **Nomic**: English only, uses about 1.3 GB while indexing, no terms to accept.
-6. **Only when Docker or its Compose plugin is missing on Linux, or the user may pick another Linux computer:** may I install Docker if it is missing, following Docker's official instructions for your distribution? It needs the administrator (`sudo`) password on that computer.
+6. **Only when Docker or its Compose plugin is missing on Linux, or the user may pick another Linux computer:** may I install Docker if it is missing, following Docker's official instructions for your distribution? Installing it needs administrator rights on that computer.
 
-After the user answers, do not stop to ask anything else until the hand-over in step 7, unless something fails that you cannot fix.
+If `sudo` asks for a password on this computer, add one sentence to the questions message: you cannot type their password, so part-way through you will give them one line to run in a terminal of their own.
+
+After the user answers, do not stop to ask anything else until the hand-over in step 7, unless something fails that you cannot fix. The one planned stop is that line, on a Linux computer whose `sudo` asks for a password.
+
+## When `sudo` asks for a password
+
+This section applies on Linux when `sudo -n true` failed in step 1. Skip it otherwise, and on macOS and Windows.
+
+You cannot type the user's password, so you cannot run any `sudo` command yourself. Never ask for the password, and never change how `sudo` works. Put every command of steps 3 and 4 that needs `sudo` into one script, and have the user run it once:
+
+1. Do the parts of step 4 that need no `sudo` first: the deployment folder, `compose.yaml` and `.env`.
+2. Write the script into the deployment folder as `admin-steps.sh`. The user runs it as the administrator, so leave `sudo` off its lines, and write every path in full: the script does not run in your shell or your folder. Start it with `set -e`. Then, in this order:
+   - Docker's installation commands, only if Docker is missing and the answer to question 6 was yes.
+   - `systemctl enable --now docker`.
+   - The `chown` line from step 4.
+   - The `setfacl` line from step 4, only if `setfacl` is installed.
+   - `docker compose up -d`, after a `cd` into the deployment folder.
+   - A last line that prints that it finished.
+
+   Running it a second time must do no harm.
+3. Tell the user in one message what the script does, and that it asks for their password because you cannot type it. Ask them to open a new terminal window, run this line, and tell you when it says it finished:
+
+   ```bash
+   sudo bash ~/hatchdoor/admin-steps.sh
+   ```
+
+   For another computer, the line is `ssh -t alex@homeserver 'sudo bash ~/hatchdoor/admin-steps.sh'`.
+4. When they say it finished, carry on with step 5. If it failed, ask for the last lines it printed, fix the script and ask them to run it again.
+
+The script holds no token and may stay in the folder. If a later `docker` command needs `sudo`, for example to read the logs after a failure, ask the user to run it the same way.
 
 ## 3. Install Docker, if needed
 
