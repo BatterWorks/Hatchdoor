@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -73,6 +74,15 @@ function renderApp() {
   );
 }
 
+/** The checklist's own help link, in the paragraph under its intro text. The
+ * steps and the update-check block carry more links with the same name. */
+function introHelpLink(): HTMLElement {
+  const intro = screen.getByText(/^Four steps from nothing/);
+  return within(intro.nextElementSibling as HTMLElement).getByRole("button", {
+    name: "How does this work?",
+  });
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   resetFirstRunForTests();
@@ -92,9 +102,10 @@ describe("the first-run checklist in the app (#419)", () => {
       await screen.findByRole("heading", { name: "Set up Hatchdoor" }),
     ).toBeVisible();
     expect(screen.queryByText("No Vaults Yet")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "How does this work?" }),
-    ).toBeVisible();
+    // The update-check block arrives with the settings response and brings a
+    // second help link, so wait for it before picking out the intro's.
+    await screen.findByText("Optional: tell me when there is a new version");
+    expect(introHelpLink()).toBeVisible();
   });
 
   it("still shows after a restart, until it is closed", async () => {

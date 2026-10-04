@@ -88,6 +88,15 @@ function step(name: string): HTMLElement {
   return screen.getByRole("heading", { name }).closest("li")!;
 }
 
+/** The checklist's own help link, in the paragraph under its intro text. The
+ * steps and the update-check block carry more links with the same name. */
+function introHelpLink(): HTMLElement {
+  const intro = screen.getByText(/^Four steps from nothing/);
+  return within(intro.nextElementSibling as HTMLElement).getByRole("button", {
+    name: "How does this work?",
+  });
+}
+
 beforeEach(() => {
   calls = [];
   window.localStorage.clear();
@@ -118,9 +127,10 @@ describe("FirstRunChecklist", () => {
       screen.getByRole("button", { name: "Use a Git repository instead" }),
     );
     expect(props.onAddGitVault).toHaveBeenCalled();
-    expect(
-      screen.getByRole("button", { name: "How does this work?" }),
-    ).toBeVisible();
+    // The update-check block arrives with the settings response and brings a
+    // second help link, so wait for it before picking out the intro's.
+    await screen.findByText("Optional: tell me when there is a new version");
+    expect(introHelpLink()).toBeVisible();
   });
 
   it("adds a picked folder as a Vault, named after the folder", async () => {
