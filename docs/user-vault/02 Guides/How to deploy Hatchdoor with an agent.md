@@ -290,13 +290,15 @@ curl -sf -X POST "$HD/api/v1/vaults" \
 until curl -sf "$HD/ready" >/dev/null; do sleep 5; done
 ```
 
+The wait is long on Windows. There the model can take 20 minutes or more to load after its download has finished, and longer on a slow computer. All that time `/ready` answers `503`, the Vault shows `"search": "unavailable"`, the container uses little memory, and the only new line in `docker logs hatchdoor` says the search model is still being set up. That is slow, not stuck. Keep waiting: if your tool ends a command that runs too long, run the same wait again. Do not restart the container and do not delete the model files, because either one starts the loading over. Stop waiting only when the Vault list shows an error, or the log shows one about the model that is not that line.
+
 Then read the Vault list once more:
 
 ```bash
 curl -sf "$HD/api/v1/vaults" -H "Authorization: Bearer $WEB_TOKEN"
 ```
 
-The Vault should show `"search": "ready"`. `"local_content": "read_write"` means Hatchdoor can write to the notes folder. `"read_only"` means it can read the folder but not write to it, so neither the browser nor an agent can change notes, whatever the answer to question 4 was (see the `setfacl` note above). Step 7 has the lines to give the user in that case. A Git Vault is the exception to reading this field: it shows `"local_content": "read_write"` and still refuses every change, because it is `pull_only`. Go by the fact that you created the Vault from a Git repository, and use the Git lines in step 7. A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
+The Vault should show `"search": "ready"`. `"local_content": "read_write"` means Hatchdoor can write to the notes folder. `"read_only"` means it can read the folder but not write to it, so neither the browser nor an agent can change notes, whatever the answer to question 4 was (see the `setfacl` note above). Step 7 has the lines to give the user in that case. A Git Vault is the exception to reading this field: it shows `"local_content": "read_write"` and still refuses every change, because it is `pull_only`. Go by the fact that you created the Vault from a Git repository, and use the Git lines in step 7. On Windows the log also warns that compare-and-swap is unavailable on the Vault's filesystem. Every Windows folder used through Docker Desktop gets that warning. It needs no action and no line in the hand-over; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains it. A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
 
 ## 6. Connect yourself and prove it works
 
@@ -378,6 +380,16 @@ To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
 ```
 
 When the address is a home-network address, it is the one [[#Finding the home-network address]] gave you. If you had to pick it from several, add one line under "Open it at" that names the others, such as `If that does not open, try: http://10.0.0.5:42824`.
+
+On Windows, a home-network address does not open from another device until the user allows it. When Hatchdoor starts, Windows shows a **Windows Security** window that asks whether to allow networks to access **Docker Desktop Backend**. It can sit behind other windows, and you can neither see it nor answer it. So when the address is a home-network address and Hatchdoor runs on Windows, add these lines under "Open it at":
+
+```text
+  Windows asks once whether to allow "Docker Desktop Backend" on your networks.
+  Look for a Windows Security window and choose Allow. Until you do, the address
+  above opens on this computer only. If you chose Cancel: Windows Security >
+  Firewall & network protection > Allow an app through firewall, and tick
+  Docker Desktop Backend.
+```
 
 If the Vault list in step 5 showed `"local_content": "read_only"`, the two lines about changing notes would mislead: allowing changes in Settings is not enough when Hatchdoor cannot write to the folder. Replace them with these, ending the last line the way the answer to question 4 went:
 
