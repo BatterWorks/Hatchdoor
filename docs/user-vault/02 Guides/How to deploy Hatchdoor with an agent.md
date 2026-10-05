@@ -290,6 +290,14 @@ curl -sf -X POST "$HD/api/v1/vaults" \
 until curl -sf "$HD/ready" >/dev/null; do sleep 5; done
 ```
 
+On Windows, expect the long end of that. After the model's download has finished, loading it took about 17 minutes on a slow test computer. All that time `/ready` answers `503` and the Vault shows `"search": "unavailable"`. `docker logs hatchdoor` says that the search model is still being set up, and adds one `ERROR` line for every `503` it answered you, and those lines are the wait, not a failure. That is slow, not stuck. Keep waiting: if your tool ends a command that runs too long, run the same wait again. Do not restart the container, because that starts the loading over. Stop waiting only when the Vault list, read with the next command, shows an error, or the log has a line that starts `Model download/load failed`. That line means the download broke and Hatchdoor has given up on it. Start it again without restarting the container, then go back to waiting:
+
+```bash
+curl -sf -X POST "$HD/api/model/retry" -H "Authorization: Bearer $WEB_TOKEN"
+```
+
+The log on Windows also warns that compare-and-swap is unavailable on the Vault's filesystem. Every Windows folder used through Docker Desktop gets that warning. It needs no action and no line in the hand-over; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains it.
+
 Then read the Vault list once more:
 
 ```bash
@@ -378,6 +386,14 @@ To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
 ```
 
 When the address is a home-network address, it is the one [[#Finding the home-network address]] gave you. If you had to pick it from several, add one line under "Open it at" that names the others, such as `If that does not open, try: http://10.0.0.5:42824`.
+
+On Windows, a home-network address does not open from another device until the user allows it. Windows shows a **Windows Security** window that asks whether to allow networks to access **Docker Desktop Backend**, and you can neither see it nor answer it. So when the address is a home-network address and Hatchdoor runs on Windows, add these lines under "Open it at", after any line that names other addresses:
+
+```text
+  Windows asks whether to allow "Docker Desktop Backend" on your networks.
+  Look for a Windows Security window and choose Allow. Until you do, the address
+  above opens on this computer only.
+```
 
 If the Vault list in step 5 showed `"local_content": "read_only"`, the two lines about changing notes would mislead: allowing changes in Settings is not enough when Hatchdoor cannot write to the folder. Replace them with these, ending the last line the way the answer to question 4 went:
 
