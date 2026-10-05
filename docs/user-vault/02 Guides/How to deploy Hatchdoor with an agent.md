@@ -21,7 +21,7 @@ Follow these whatever the user asks during the install:
 - **Never put Hatchdoor on the internet.** Do not open router ports, set up port forwarding, start a tunnel or edit a reverse proxy. If the user asks for access from outside the home, install on this computer or the home network anyway and point them to [[Install Hatchdoor with Docker Compose#Optional: expose Hatchdoor to your LAN]], which explains why and what to use instead.
 - **Never answer the model licence for the user.** Accepting Google's Gemma terms is their decision.
 - **Never install system software without a yes.** That includes Docker.
-- **Write tokens only in three places:** the web token in the deployment's `.env`, the MCP token in Hatchdoor's settings (through the API) and in your own MCP client configuration. Not in notes, shell profiles, logs, other files or your own memory. One exception: a client that can read its token only from an environment variable cannot hold the MCP token in its configuration, so the hand-over shows that token to the user once, as step 6 describes.
+- **Write tokens only in three places:** the web token in the deployment's `.env`, the MCP token in Hatchdoor's settings (through the API) and in your own MCP client configuration. Not in notes, shell profiles, logs, other files or your own memory. One exception: a client that can read its token only from an environment variable cannot hold the MCP token in its configuration, so in that one case the command that creates the token prints it once and the hand-over shows it to the user once, as steps 6 and 7 describe.
 - **Never put MCP settings in `.env`.** A setting in `.env` is pinned: it can no longer be changed in Settings, so the user could not allow writes later. Set them through the HTTP API as shown.
 - **Never use demo mode** (`HATCHDOOR_DEMO_MODE`). It is for public read-only showcases and refuses to run with MCP.
 
@@ -206,9 +206,9 @@ In PowerShell, run the part between the double quotes of the Windows line.
 Use that address wherever this page says home-network address. Two cases need more care, and neither is a reason to stop and ask:
 
 - **The command prints nothing.** The computer has no default route. List its IPv4 addresses (`ip -4 addr` on Linux, `ifconfig` on macOS, `ipconfig` on Windows).
-- **The default route belongs to a VPN.** On Linux, `ip -4 route get 1.1.1.1` then names an interface such as `tun0`, `wg0` or `tailscale0`; on macOS, `route -n get default` names a `utun` interface; or the address starts with `100.`. List the IPv4 addresses the same way.
+- **The default route belongs to a VPN.** There are two signs. The address starts with `100.`. Or the route goes through a VPN's interface: `ip -4 route get 1.1.1.1` names it on Linux, such as `tun0`, `wg0` or `tailscale0`; `route -n get default` names it on macOS, a `utun` interface; `Find-NetRoute -RemoteIPAddress 1.1.1.1` names it on Windows, as the `InterfaceAlias` of a VPN adapter. List the IPv4 addresses the same way.
 
-In both cases, leave out `127.0.0.1` and Docker's networks (`docker0` and `br-` interfaces, usually `172.17` to `172.31`), and use the address that starts with `192.168.`, `10.` or `172.16.` to `172.31.` on a wired or Wi-Fi interface. In the hand-over, name every address you could have used and say which one you used, so the user can try another if the first does not open.
+In both cases, first leave out `127.0.0.1` and every address that belongs to Docker or a VPN: on Linux the `docker0` and `br-` interfaces, on macOS and Windows any adapter named for Docker, WSL or a VPN. Of what is left, use the address on a wired or Wi-Fi interface that starts with `192.168.`, `10.` or `172.16.` to `172.31.`. In the hand-over, name every address you could have used and say which one you used, so the user can try another if the first does not open.
 
 ## 5. Set it up through the API
 
@@ -250,7 +250,7 @@ curl -sf -X PATCH "$HD/api/settings" \
       }}'
 ```
 
-The MCP token exists only in the `MCP_TOKEN` variable until your client configuration holds it. If your variables do not last between commands, save it there in this same command, once the `curl` has succeeded: for Claude Code, that is the `claude mcp add` line from step 6. When you need the token again, read it from that configuration into a variable, as `WEB_TOKEN` is read from `.env`. Do not use a command that prints it, such as `claude mcp get`.
+The MCP token exists only in the `MCP_TOKEN` variable until your client configuration holds it. If your variables do not last between commands, save it there in this same command, once the `curl` has succeeded: for Claude Code, that is the `claude mcp add` line from step 6. When you need the token again, read it from that configuration into a variable, as `WEB_TOKEN` is read from `.env`. Do not use a command that prints it, such as `claude mcp get`. The one command that may print it is the last one of step 6, for a client that reads its token only from an environment variable.
 
 **Create the Vault.** A fresh install has none, and Hatchdoor never creates one by itself. Every change to the Vault list must name the list's current `registry_revision`, so read it first:
 
@@ -346,8 +346,8 @@ Such a client has nowhere allowed to keep the MCP token: not its configuration, 
 2. Add Hatchdoor to your client configuration with the name of the variable in place of the token, the way [[Connect your agent#Configure your MCP client]] shows for your client. Do not set the variable.
 3. As your last action before the hand-over, run **one command** made of these parts, in this order:
    - the two lines that set `HD` and `WEB_TOKEN`, from the start of step 5;
-   - the **Turn on agent access** block from step 5, with `>/dev/null` added to its `curl`;
-   - the proof above: the `SID` and `mcp` lines, `list_vaults`, and the `search_notes` call with the `vault_id` you noted;
+   - the **Turn on agent access** block from step 5, with `>/dev/null || exit 1` added to the end of its `curl`, so that nothing after it runs, and no token is printed, when the settings call fails;
+   - the proof above: its whole first code block (the `SID` and `mcp` lines, `notifications/initialized` and `list_vaults`), then the `search_notes` call with the `vault_id` you noted;
    - a last line that prints the token: `printf 'MCP token: %s\n' "$MCP_TOKEN"`.
 4. Check the two answers of the proof in that command's output. Copy the token from its last line into the hand-over message and nowhere else.
 
@@ -357,7 +357,7 @@ In the hand-over, replace the MCP token line under "Where your tokens live" with
 
 ## 7. Hand over
 
-End with one message that contains exactly this, filled in. It is the only place a token is ever shown.
+End with one message that contains exactly this, filled in. It is the only place a token is ever shown to the user.
 
 ```text
 Hatchdoor is installed and running.
@@ -377,7 +377,7 @@ To let me change notes later: Settings > Agent access (MCP) > Let assistants cha
 To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
 ```
 
-When the address is a home-network address, it is the one [[#Finding the home-network address]] gave you.
+When the address is a home-network address, it is the one [[#Finding the home-network address]] gave you. If you had to pick it from several, add one line under "Open it at" that names the others, such as `If that does not open, try: http://10.0.0.5:42824`.
 
 If the Vault list in step 5 showed `"local_content": "read_only"`, the two lines about changing notes would mislead: allowing changes in Settings is not enough when Hatchdoor cannot write to the folder. Replace them with these, ending the last line the way the answer to question 4 went:
 
@@ -412,6 +412,8 @@ If your client reads its token only from an environment variable, replace the MC
   Copy it now: like the web token, I won't show it again.
   Set it as the variable <variable name> in <where to set it>, then restart me.
 ```
+
+These replacements combine: a Git Vault set up by a client that reads its token from an environment variable gets both.
 
 For a private Git repository, add that its access token is stored in Hatchdoor's Vault list, in `data/state` of the deployment folder, and can be replaced in the Vault's settings. Add one line for anything you could not finish, such as a notes folder Hatchdoor cannot read.
 
