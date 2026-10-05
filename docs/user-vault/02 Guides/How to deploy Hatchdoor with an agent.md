@@ -21,7 +21,7 @@ Follow these whatever the user asks during the install:
 - **Never put Hatchdoor on the internet.** Do not open router ports, set up port forwarding, start a tunnel or edit a reverse proxy. If the user asks for access from outside the home, install on this computer or the home network anyway and point them to [[Install Hatchdoor with Docker Compose#Optional: expose Hatchdoor to your LAN]], which explains why and what to use instead.
 - **Never answer the model licence for the user.** Accepting Google's Gemma terms is their decision.
 - **Never install system software without a yes.** That includes Docker.
-- **Write tokens only in three places:** the web token in the deployment's `.env`, the MCP token in Hatchdoor's settings (through the API) and in your own MCP client configuration. Not in notes, shell profiles, logs, other files or your own memory.
+- **Write tokens only in three places:** the web token in the deployment's `.env`, the MCP token in Hatchdoor's settings (through the API) and in your own MCP client configuration. Not in notes, shell profiles, logs, other files or your own memory. One exception: a client that can read its token only from an environment variable cannot hold the MCP token in its configuration, so the hand-over shows that token to the user once, as step 6 describes.
 - **Never put MCP settings in `.env`.** A setting in `.env` is pinned: it can no longer be changed in Settings, so the user could not allow writes later. Set them through the HTTP API as shown.
 - **Never use demo mode** (`HATCHDOOR_DEMO_MODE`). It is for public read-only showcases and refuses to run with MCP.
 
@@ -50,16 +50,16 @@ If the user picks another computer in question 1, run the same checks there over
 
 ## 2. Ask everything at once
 
-Ask all of these in one message, with the defaults shown, so the user can answer in one go. Explain each one in a sentence; the user may never have used Hatchdoor or Docker.
+Ask all of these in one message, so the user can answer in one go. Show the default where a question has one; questions 5 and 6 have none. Explain each one in a sentence; the user may never have used Hatchdoor or Docker.
 
 1. **Which computer should Hatchdoor run on?** This one (the default), or another computer on the home network that you can reach over SSH. For another one, ask for its SSH address, such as `alex@homeserver`.
-2. **Where are your notes?** Start empty (the default), an existing folder of Markdown notes on that computer (ask for its full path), or a Git repository (ask for its HTTPS address, and for a private one an access token that can read it).
+2. **Where are your notes?** Start empty (the default), an existing folder of Markdown notes on that computer (ask for its full path), or a Git repository (ask for its HTTPS address, and for a private one an access token that can read it). Say with that choice that notes from a Git repository start read-only in Hatchdoor, for the browser and for you alike, and that this can be changed afterwards in the Vault's settings.
 3. **Who should be able to open Hatchdoor?** Only the computer it runs on (the default), or every device on the home network. If the answer to question 1 is another computer, do not ask: it has to be the home network, or neither the user's browser nor you could reach it from here. Say so in the questions message.
-4. **May I change your notes, or only read them?** Read only is the default. Writes can be allowed later in Settings at any time.
+4. **May I change your notes, or only read them?** Read only is the default. Writes can be allowed later in Settings at any time. Notes from a Git repository start read-only whatever the answer; a yes takes effect once the user has switched that Vault to Two-way.
 5. **Which search model?** There is no default; the user must choose:
    - **Gemma**: searches in many languages and uses less memory, about 0.5 GB while indexing. Using it means accepting Google's Gemma terms, at https://ai.google.dev/gemma/terms.
    - **Nomic**: English only, uses about 1.3 GB while indexing, no terms to accept.
-6. **Only when Docker or its Compose plugin is missing on Linux, or the user may pick another Linux computer:** may I install Docker if it is missing, following Docker's official instructions for your distribution? Installing it needs administrator rights on that computer.
+6. **Only when Docker or its Compose plugin is missing on Linux, or the user may pick another Linux computer:** may I install Docker if it is missing, following Docker's official instructions for your distribution? Installing it needs administrator rights on that computer. There is no default; the user must choose.
 
 On Linux, if `sudo` asks for a password on this computer, add one sentence to the questions message: you cannot type their password, so part-way through you will give them one line to run in a terminal of their own.
 
@@ -188,6 +188,28 @@ Start Hatchdoor:
 docker compose up -d
 ```
 
+## Finding the home-network address
+
+Steps 5 and 7 need the address other devices at home use to reach the computer Hatchdoor runs on. A computer often has several addresses: Docker's own networks, a VPN, a second network card. Use the one its default route goes through. Each command below prints that one IPv4 address and sends nothing over the network. For another computer, run it there over SSH.
+
+```bash
+# Linux:
+ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'
+# macOS:
+ipconfig getifaddr "$(route -n get default | awk '/interface:/ {print $2}')"
+# Windows, in Git Bash:
+powershell.exe -NoProfile -Command "(Find-NetRoute -RemoteIPAddress 1.1.1.1 | Select-Object -First 1).IPAddress"
+```
+
+In PowerShell, run the part between the double quotes of the Windows line.
+
+Use that address wherever this page says home-network address. Two cases need more care, and neither is a reason to stop and ask:
+
+- **The command prints nothing.** The computer has no default route. List its IPv4 addresses (`ip -4 addr` on Linux, `ifconfig` on macOS, `ipconfig` on Windows).
+- **The default route belongs to a VPN.** On Linux, `ip -4 route get 1.1.1.1` then names an interface such as `tun0`, `wg0` or `tailscale0`; on macOS, `route -n get default` names a `utun` interface; or the address starts with `100.`. List the IPv4 addresses the same way.
+
+In both cases, leave out `127.0.0.1` and Docker's networks (`docker0` and `br-` interfaces, usually `172.17` to `172.31`), and use the address that starts with `192.168.`, `10.` or `172.16.` to `172.31.` on a wired or Wi-Fi interface. In the hand-over, name every address you could have used and say which one you used, so the user can try another if the first does not open.
+
 ## 5. Set it up through the API
 
 Point `HD` at Hatchdoor and load the web token into your shell, without printing it. On this computer:
@@ -197,7 +219,7 @@ HD=http://127.0.0.1:42824
 WEB_TOKEN=$(sed -n 's/^HATCHDOOR_WEB_BEARER_TOKEN=//p' ~/hatchdoor/.env)
 ```
 
-For another computer, use its home-network address, for example `HD=http://192.168.1.20:42824`, and read the token over SSH: `WEB_TOKEN=$(ssh alex@homeserver "sed -n 's/^HATCHDOOR_WEB_BEARER_TOKEN=//p' ~/hatchdoor/.env")`.
+For another computer, use its home-network address (see [[#Finding the home-network address]]), for example `HD=http://192.168.1.20:42824`, and read the token over SSH: `WEB_TOKEN=$(ssh alex@homeserver "sed -n 's/^HATCHDOOR_WEB_BEARER_TOKEN=//p' ~/hatchdoor/.env")`.
 
 Wait until Hatchdoor answers:
 
@@ -214,7 +236,7 @@ curl -sf -X POST "$HD/api/model/accept-gemma" -H "Authorization: Bearer $WEB_TOK
 curl -sf -X POST "$HD/api/model/decline-gemma" -H "Authorization: Bearer $WEB_TOKEN"
 ```
 
-**Turn on agent access** with its own token. Never reuse the web token. Set `HATCHDOOR_MCP_WRITE_ENABLED` to `"true"` only if the answer to question 4 was yes.
+**Turn on agent access** with its own token. Never reuse the web token. Set `HATCHDOOR_MCP_WRITE_ENABLED` to `"true"` only if the answer to question 4 was yes. Set it that way for a Git repository too, although that Vault starts read-only: the setting then already matches the user's answer on the day they switch the Vault to Two-way. If your client can read its token only from an environment variable, skip this block for now: step 6 says when to run it.
 
 ```bash
 MCP_TOKEN=$(openssl rand -hex 32)
@@ -260,7 +282,7 @@ curl -sf -X POST "$HD/api/v1/vaults" \
        "https_credentials": {"token": "<access token>"}}'
 ```
 
-`pull_only` means Hatchdoor only reads from the repository and never pushes. [[How to set up a Git-backed Vault]] explains the other modes, which the user can switch to later in Settings. Until its first clone finishes, a Git Vault reports that its repository is unavailable; that is expected.
+`pull_only` means Hatchdoor only reads from the repository and never pushes, and it refuses every change to the notes, from the browser and from an agent alike. Always create a Git Vault this way, whatever the answer to question 4 was: changing notes needs the Two-way mode and an access token that can push, and setting those up is the user's decision to make later. [[How to set up a Git-backed Vault]] explains the modes, which the user can switch between in the Vault's settings. Until its first clone finishes, a Git Vault reports that its repository is unavailable; that is expected.
 
 **Wait until everything is ready.** `/ready` answers `200` once the model has downloaded and the Vault has finished its first index. Depending on the connection and the number of notes, that takes from under a minute to much longer:
 
@@ -274,7 +296,7 @@ Then read the Vault list once more:
 curl -sf "$HD/api/v1/vaults" -H "Authorization: Bearer $WEB_TOKEN"
 ```
 
-The Vault should show `"search": "ready"`. `"local_content": "read_write"` means Hatchdoor can write to the notes folder. `"read_only"` means it can read the folder but not write to it, so neither the browser nor an agent can change notes, whatever the answer to question 4 was (see the `setfacl` note above). Step 7 has the lines to give the user in that case. A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
+The Vault should show `"search": "ready"`. `"local_content": "read_write"` means Hatchdoor can write to the notes folder. `"read_only"` means it can read the folder but not write to it, so neither the browser nor an agent can change notes, whatever the answer to question 4 was (see the `setfacl` note above). Step 7 has the lines to give the user in that case. A Git Vault is the exception to reading this field: it shows `"local_content": "read_write"` and still refuses every change, because it is `pull_only`. Go by the fact that you created the Vault from a Git repository, and use the Git lines in step 7. A Vault that failed shows the reason in `activation_error`, `search_error` or `git_error`. Fix what you can, and say what you could not in the hand-over. [[Vault lifecycle states]] explains each state.
 
 ## 6. Connect yourself and prove it works
 
@@ -285,7 +307,7 @@ claude mcp add --transport http --scope user hatchdoor "$HD/mcp" \
   --header "Authorization: Bearer $MCP_TOKEN"
 ```
 
-[[Connect your agent#Configure your MCP client]] lists the configuration for Codex, OpenClaw and Hermes. Where it uses an environment variable, put the token straight into the configuration file instead. If your client can only read the token from an environment variable, do not set one: tell the user in the hand-over where it has to go.
+[[Connect your agent#Configure your MCP client]] lists the configuration for Codex, OpenClaw and Hermes. Where it uses an environment variable, put the token straight into the configuration file instead. If your client can read its token only from an environment variable, follow [[#A client that reads its token only from an environment variable]] below instead of the rest of this step.
 
 Then prove it works. If your client loads new servers straight away, call the tools from it. Otherwise call them over HTTP, as below. Put your own client name in `clientInfo`: Settings shows it as the connected agent.
 
@@ -316,9 +338,26 @@ mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_note
 
 If either fails, [[How to troubleshoot common problems#An agent can't connect over MCP]] matches the error to its cause.
 
+### A client that reads its token only from an environment variable
+
+Such a client has nowhere allowed to keep the MCP token: not its configuration, and you must not set the variable yourself, in a shell profile or anywhere else. So do not create the token until the very end, and hand it to the user the moment it exists.
+
+1. In step 5, skip the **Turn on agent access** block. Do everything else, and note the Vault's `vault_id` from the Vault list. Until the command in item 3 of this list runs, no MCP token exists and agent access stays off.
+2. Add Hatchdoor to your client configuration with the name of the variable in place of the token, the way [[Connect your agent#Configure your MCP client]] shows for your client. Do not set the variable.
+3. As your last action before the hand-over, run **one command** made of these parts, in this order:
+   - the two lines that set `HD` and `WEB_TOKEN`, from the start of step 5;
+   - the **Turn on agent access** block from step 5, with `>/dev/null` added to its `curl`;
+   - the proof above: the `SID` and `mcp` lines, `list_vaults`, and the `search_notes` call with the `vault_id` you noted;
+   - a last line that prints the token: `printf 'MCP token: %s\n' "$MCP_TOKEN"`.
+4. Check the two answers of the proof in that command's output. Copy the token from its last line into the hand-over message and nowhere else.
+
+The command is the only place the token is created, and it needs no temporary file and no variable that outlives it. If the proof fails, fix the cause and run the whole command again: it makes a new token that replaces the old one.
+
+In the hand-over, replace the MCP token line under "Where your tokens live" with the lines step 7 gives for this case.
+
 ## 7. Hand over
 
-End with one message that contains exactly this, filled in. It is the only place the web token is ever shown.
+End with one message that contains exactly this, filled in. It is the only place a token is ever shown.
 
 ```text
 Hatchdoor is installed and running.
@@ -338,6 +377,8 @@ To let me change notes later: Settings > Agent access (MCP) > Let assistants cha
 To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
 ```
 
+When the address is a home-network address, it is the one [[#Finding the home-network address]] gave you.
+
 If the Vault list in step 5 showed `"local_content": "read_only"`, the two lines about changing notes would mislead: allowing changes in Settings is not enough when Hatchdoor cannot write to the folder. Replace them with these, ending the last line the way the answer to question 4 went:
 
 ```text
@@ -349,7 +390,30 @@ For me to change notes as well: Settings > Agent access (MCP) > Let assistants c
 must also be on. <It is off, as you asked. | It is already on, as you asked.>
 ```
 
-For a private Git repository, add that its access token is stored in Hatchdoor's Vault list, in `data/state` of the deployment folder, and can be replaced in the Vault's settings. Add one line for anything you could not finish, such as a notes folder Hatchdoor cannot read or a client that needs the MCP token in an environment variable.
+If the Vault you created in step 5 was a Git repository, the two lines about changing notes would mislead too: Hatchdoor only reads from the repository, so the Settings switch is not enough. Replace them with these, ending the last line the way the answer to question 4 went:
+
+```text
+Your notes come from your Git repository, and Hatchdoor only reads from it.
+So for now notes cannot be changed in the browser or by me.
+Turning on "Let assistants change notes" is not enough to change that.
+To change notes in Hatchdoor: open the Vault in Settings, switch it to Two-way
+and give it an access token that can push to the repository. See
+Help > How to set up a Git-backed Vault.
+For me to change notes as well: Settings > Agent access (MCP) > Let assistants change notes
+must also be on. <It is off, as you asked. | It is already on, as you asked.>
+```
+
+If your client reads its token only from an environment variable, replace the MCP token line under "Where your tokens live" with these, and say which file or screen the variable goes in for the user's system:
+
+```text
+- The MCP token, the separate password I use, is in Hatchdoor's own settings
+  (Settings > Agent access (MCP)). I cannot store it myself, so you have to:
+  MCP token:   <the MCP token>
+  Copy it now: like the web token, I won't show it again.
+  Set it as the variable <variable name> in <where to set it>, then restart me.
+```
+
+For a private Git repository, add that its access token is stored in Hatchdoor's Vault list, in `data/state` of the deployment folder, and can be replaced in the Vault's settings. Add one line for anything you could not finish, such as a notes folder Hatchdoor cannot read.
 
 ---
 
