@@ -290,7 +290,13 @@ curl -sf -X POST "$HD/api/v1/vaults" \
 until curl -sf "$HD/ready" >/dev/null; do sleep 5; done
 ```
 
-On Windows, expect the long end of that. After the model's download has finished, loading it took about 17 minutes on a slow test computer. All that time `/ready` answers `503` and the Vault shows `"search": "unavailable"`. `docker logs hatchdoor` says that the search model is still being set up, and adds one `ERROR` line for every `503` it answered you, and those lines are the wait, not a failure. That is slow, not stuck. Keep waiting: if your tool ends a command that runs too long, run the same wait again. Do not restart the container, because that starts the loading over. Stop waiting only when the Vault list, read with the next command, shows an error. The log on Windows also warns that compare-and-swap is unavailable on the Vault's filesystem. Every Windows folder used through Docker Desktop gets that warning. It needs no action and no line in the hand-over; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains it.
+On Windows, expect the long end of that. After the model's download has finished, loading it took about 17 minutes on a slow test computer. All that time `/ready` answers `503` and the Vault shows `"search": "unavailable"`. `docker logs hatchdoor` says that the search model is still being set up, and adds one `ERROR` line for every `503` it answered you, and those lines are the wait, not a failure. That is slow, not stuck. Keep waiting: if your tool ends a command that runs too long, run the same wait again. Do not restart the container, because that starts the loading over. Stop waiting only when the Vault list, read with the next command, shows an error, or the log has a line that starts `Model download/load failed`. That line means the download broke and Hatchdoor has given up on it. Start it again without restarting the container, then go back to waiting:
+
+```bash
+curl -sf -X POST "$HD/api/model/retry" -H "Authorization: Bearer $WEB_TOKEN"
+```
+
+The log on Windows also warns that compare-and-swap is unavailable on the Vault's filesystem. Every Windows folder used through Docker Desktop gets that warning. It needs no action and no line in the hand-over; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains it.
 
 Then read the Vault list once more:
 
