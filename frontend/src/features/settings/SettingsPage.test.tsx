@@ -181,13 +181,14 @@ function vault(name: string, enabled = true) {
 const INSTALL_ID = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8";
 
 /** The report as the server sends it: already indented text. */
-function usageReport(enabled: boolean) {
+function usageReport(enabled: boolean, lastSentAt: string | null = null) {
   const id = enabled
     ? INSTALL_ID
     : "(created when the usage report is turned on)";
   return {
     enabled,
     install_id: enabled ? INSTALL_ID : null,
+    last_sent_at: enabled ? lastSentAt : null,
     report: `{\n  "type": "event",\n  "payload": {\n    "id": "${id}",\n    "data": {\n      "schema": 1\n    }\n  }\n}`,
   };
 }
@@ -196,6 +197,7 @@ function mockPage(
   vaults = [vault("Field notes")],
   onPatch?: (updates: Record<string, string>) => void,
   lastAgent: { name: string; connected_at: string } | null = null,
+  loadedUsageReport = usageReport(false),
 ) {
   mockedApiFetch.mockImplementation(async (input, init) => {
     const url = String(input);
@@ -217,7 +219,7 @@ function mockPage(
       return json({
         settings,
         last_agent: lastAgent,
-        usage_report: usageReport(false),
+        usage_report: loadedUsageReport,
       });
     if (url === "/api/v1/vaults")
       return json({
@@ -506,8 +508,8 @@ describe("SettingsPage", () => {
 describe("How does this work? links (#423)", () => {
   const openHelp = vi.fn();
 
-  async function openSection(name: RegExp) {
-    mockPage();
+  async function openSection(name: RegExp, mock: () => void = mockPage) {
+    mock();
     const view = render(
       <HelpContext.Provider
         value={{ openHelp, closeHelp: () => {}, isOpen: false }}
@@ -645,6 +647,33 @@ describe("How does this work? links (#423)", () => {
     );
     expect(within(block).getByText("Install ID")).toBeInTheDocument();
     expect(within(block).getAllByText(INSTALL_ID).length).toBeGreaterThan(0);
+  });
+
+  it("says no report has been sent yet once the usage report is on (#478)", async () => {
+    await openSection(/Usage report/);
+    expect(screen.getByTestId("usage-report")).not.toHaveTextContent(
+      "Last report",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send a usage report" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save usage report" }));
+
+    await screen.findByText("The next report");
+    expect(screen.getByTestId("usage-report-last-sent")).toHaveTextContent(
+      "Last report None sent yet",
+    );
+  });
+
+  it("shows when the last usage report was sent while it is on (#478)", async () => {
+    const sentAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+    await openSection(/Usage report/, () =>
+      mockPage(undefined, undefined, null, usageReport(true, sentAt)),
+    );
+
+    const line = screen.getByTestId("usage-report-last-sent");
+    expect(line).toHaveTextContent("Last report 3 hours ago");
+    expect(line.querySelector("time")).toHaveAttribute("datetime", sentAt);
   });
 
   it("shows the usage report only in its own section", async () => {

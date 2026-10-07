@@ -66,9 +66,18 @@ A field is never added quietly. A new field means a new `schema` number, a chang
 
 The install ID is a random number made the first time the report is turned on. It is made from nothing on your machine: no host name, no hardware address, no path. Its only job is to let reports from the same install be counted once. Because the same ID goes with every report, the report is pseudonymous: it does not name you, but two reports from your install can be told to be from the same install.
 
-While the report is on, Settings shows the ID, and Hatchdoor keeps it in `instance.json` in its state folder, with the last day an agent called, the last day the web app was used, and the last day each kind of agent connected. That is everything Hatchdoor keeps for the report.
+While the report is on, Settings shows the ID, and Hatchdoor keeps it in `instance.json` in its state folder, with the last day an agent called, the last day the web app was used, the last day each kind of agent connected, and the time the last report was sent. That is everything Hatchdoor keeps for the report.
 
 Turning the report off deletes all of it at once, the ID included. Turning it on again makes a new ID, so the new reports cannot be tied to the old ones.
+
+## When it is sent
+
+- **The first report** goes within a minute of turning the report on.
+- **After that**, at most one report in any 24 hours. Hatchdoor keeps the time of the last report that got through, so restarting it does not send another.
+- **If a report does not get through**, Hatchdoor tries again an hour later. It gives each try ten seconds and never holds up startup or anything you are doing. Nothing is saved to send later: a report describes the install as it is now, so a day that was missed stays missed. A failure is written to the log only at debug level.
+- **While the report is off**, Hatchdoor never contacts the collector at all.
+
+While the report is on, **Settings** → **Usage report** shows **Last report** with how long ago the last one got through, or **None sent yet**. The time counts for one install ID: turn the report off and on again and the new ID sends its first report within a minute.
 
 ## Where the report goes
 
@@ -76,7 +85,7 @@ The report goes to `https://telemetry-hatchdoor.battercloud.cc`, a name used for
 
 Like the Hatchdoor demo and documentation sites, that address is reached through Cloudflare. Every web request carries the sender's IP address, and this one does too. The address is discarded before anything is stored, so it is never kept beside your install ID.
 
-The request carries the user-agent `Hatchdoor`, with no version.
+Each report is one `POST` to `https://telemetry-hatchdoor.battercloud.cc/v1/report`. It carries the user-agent `Hatchdoor`, with no version, and the report shown in Settings as its body. Hatchdoor reads nothing from the answer beyond whether the report got through, and does not follow a redirect to another address. No setting sends the report anywhere else.
 
 ## Turn it on or off
 

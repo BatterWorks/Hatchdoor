@@ -46,6 +46,8 @@ type UsageReportStatus = {
   enabled: boolean;
   install_id: string | null;
   report: string;
+  /** When the collector last accepted a report, while the report is on. */
+  last_sent_at: string | null;
 };
 
 type Consequence = "reindex";
@@ -978,6 +980,25 @@ export function SettingsPage({
                   <p className="settings-report-id">
                     <span>Install ID</span>
                     <code>{usageReport.install_id}</code>
+                  </p>
+                ) : null}
+                {usageReport.enabled && usageReport.install_id ? (
+                  <p
+                    className="settings-report-id"
+                    data-testid="usage-report-last-sent"
+                  >
+                    <span>Last report</span>{" "}
+                    {usageReport.last_sent_at ? (
+                      <time
+                        dateTime={usageReport.last_sent_at}
+                        title={usageReport.last_sent_at}
+                      >
+                        {formatWhen(usageReport.last_sent_at) ??
+                          usageReport.last_sent_at}
+                      </time>
+                    ) : (
+                      <span>None sent yet</span>
+                    )}
                   </p>
                 ) : null}
                 <p className="settings-plaque-head">
