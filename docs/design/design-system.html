@@ -9,7 +9,7 @@
      families (frontend/src/assets/fonts). -->
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500;1,6..72,600&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <style>
   /* ════════════════════════════════════════════════════════════════
      TOKENS — Forge palette (light & dark)
@@ -1979,7 +1979,7 @@
     <section class="doc-section" id="typography">
       <div class="doc-section-num">§02</div>
       <h2>Typography scale</h2>
-      <p class="blurb">Three families do the work. <b>Display</b> (Bricolage variable wdth + wght) for title, chrome, labels. <b>Serif</b> (Newsreader) for body prose, h2 sections, blockquote, callout body. <b>Sans</b> (Inter Tight) for lede, list items, table, metadata. <b>Mono</b> (JetBrains Mono) for code and the small kbd / pill / eyebrow markers.</p>
+      <p class="blurb">Four families do the work. <b>Display</b> (Bricolage variable wdth + wght) for title, chrome, labels. <b>Serif</b> (Newsreader) for body prose, h2 sections, blockquote, callout body. <b>Sans</b> (Inter Tight) for lede, list items, table, metadata. <b>Mono</b> (JetBrains Mono) for code and the small kbd / pill / eyebrow markers. Weights run 400 to 800 for Display and Mono, 400 to 600 for Serif (upright and italic) and 400 to 700 for Sans. The app declares the same ranges in <code>frontend/src/assets/fonts/fonts.css</code>, and a style that asks for more gets a weight the browser fakes, so change the two together.</p>
 
       <div class="stage paper">
         <div class="scale-grid"><div class="scale-name">ty-title</div><div class="scale-spec">disp 700/wdth85<br>clamp 2.4–3.6rem</div><div class="scale-sample"><h1 class="ty-title" style="font-size:2.2rem;">Field notes <span class="wide">from</span> the orchard</h1></div></div>

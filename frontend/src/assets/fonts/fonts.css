@@ -56,7 +56,7 @@
 @font-face {
   font-family: "Newsreader";
   font-style: italic;
-  font-weight: 400 500;
+  font-weight: 400 600;
   font-display: swap;
   src: url("./newsreader/newsreader-italic-vietnamese.woff2") format("woff2");
   unicode-range:
@@ -69,7 +69,7 @@
 @font-face {
   font-family: "Newsreader";
   font-style: italic;
-  font-weight: 400 500;
+  font-weight: 400 600;
   font-display: swap;
   src: url("./newsreader/newsreader-italic-latin-ext.woff2") format("woff2");
   unicode-range:
@@ -82,7 +82,7 @@
 @font-face {
   font-family: "Newsreader";
   font-style: italic;
-  font-weight: 400 500;
+  font-weight: 400 600;
   font-display: swap;
   src: url("./newsreader/newsreader-italic-latin.woff2") format("woff2");
   unicode-range:
@@ -215,7 +215,7 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
   src: url("./jetbrains-mono/jetbrains-mono-cyrillic-ext.woff2") format("woff2");
   unicode-range:
@@ -226,7 +226,7 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
   src: url("./jetbrains-mono/jetbrains-mono-cyrillic.woff2") format("woff2");
   unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
@@ -236,7 +236,7 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
   src: url("./jetbrains-mono/jetbrains-mono-greek.woff2") format("woff2");
   unicode-range:
@@ -247,7 +247,7 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
   src: url("./jetbrains-mono/jetbrains-mono-vietnamese.woff2") format("woff2");
   unicode-range:
@@ -260,7 +260,7 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
   src: url("./jetbrains-mono/jetbrains-mono-latin-ext.woff2") format("woff2");
   unicode-range:
@@ -273,7 +273,7 @@
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 400 800;
   font-display: swap;
   src: url("./jetbrains-mono/jetbrains-mono-latin.woff2") format("woff2");
   unicode-range:
