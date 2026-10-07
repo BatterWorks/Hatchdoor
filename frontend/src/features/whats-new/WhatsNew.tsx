@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 
 import { UiButton } from "../../components/ui";
@@ -63,7 +69,10 @@ export function WhatsNew() {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
+  // A layout effect, so the dialog holds focus before it is painted. A
+  // passive effect runs after, which leaves it on screen without focus for a
+  // moment (#468).
+  useLayoutEffect(() => {
     if (notice) {
       dialogRef.current?.focus();
     }
@@ -72,8 +81,10 @@ export function WhatsNew() {
   // Tab stays inside the dialog, as in the app's other modals, except while
   // Help is open beside it: Help is not modal, so focus may move into it.
   // On the document, so a Tab after focus left the dialog brings it back.
+  // A layout effect for the same reason as the focus above: the trap is in
+  // place before the dialog is painted.
   const helpOpen = help.isOpen;
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dialog = dialogRef.current;
     if (!notice || helpOpen || !dialog) {
       return;
