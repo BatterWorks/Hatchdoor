@@ -23,7 +23,7 @@ Read these documents in order:
 3. [`docs/roadmap/vault-lifecycle.md`](../roadmap/vault-lifecycle.md)
 4. [`docs/adr/README.md`](../adr/README.md), especially ADR-01, ADR-03, ADR-07,
    ADR-10, ADR-12, and ADR-13
-5. [Managed Git Vault Lifecycle, PR #18](https://github.com/BattermanZ/Hatchdoor/pull/18),
+5. [Managed Git Vault Lifecycle, PR #18](https://github.com/BatterWorks/Hatchdoor/pull/18),
    including its review discussion
 
 Treat the architecture and plan as draft working documents. Do not silently

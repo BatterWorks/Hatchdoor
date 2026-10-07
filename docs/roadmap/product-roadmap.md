@@ -84,7 +84,7 @@ _Horizon: unversioned ("at some point"). No implementation started._
 **Problem:** a first-time user lands in Hatchdoor with no onboarding.
 
 Direction: build a first-run onboarding flow, tracked as
-[#9](https://github.com/BattermanZ/Hatchdoor/issues/9).
+[#9](https://github.com/BatterWorks/Hatchdoor/issues/9).
 
 _Horizon: unversioned ("at some point"); slipped past v2.6.0, which shipped
 without it. No implementation started._

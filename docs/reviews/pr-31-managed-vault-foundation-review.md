@@ -2,7 +2,7 @@
 
 > Historical review record.
 
-- PR: [#31 — Establish managed Git vault lifecycle foundation](https://github.com/BattermanZ/Hatchdoor/pull/31)
+- PR: [#31 — Establish managed Git vault lifecycle foundation](https://github.com/BatterWorks/Hatchdoor/pull/31)
 - Reviewed head: `9fe7f77988bbd5243e0e6920b5b3fb445f107906`
 - Target branch: `development`
 - Review date: 2026-07-26
