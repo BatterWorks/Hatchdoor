@@ -1126,7 +1126,9 @@
   font-size: 0.82rem;
 }
 
+/* One sentence with the Vault's name inside it, so not the strip's grid. */
 .folder-picker .folder-picker-new-off {
+  display: block;
   color: var(--muted);
 }
 

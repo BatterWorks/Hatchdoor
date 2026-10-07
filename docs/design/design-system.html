@@ -919,6 +919,7 @@
   .whats-new-demo .wn-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--rule); }
   /* §36 folder picker */
   .folder-picker-demo { width: min(470px, 100%); display: grid; gap: var(--space-2); color: var(--ink); }
+  .folder-picker-demo + .folder-picker-demo { margin-top: var(--space-5); }
   .folder-picker-demo .fpd-box { border: 1px solid var(--rule-strong); background: var(--paper); }
   .folder-picker-demo .fpd-crumbs { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 0.76rem; }
   .folder-picker-demo .fpd-crumbs a { color: var(--hot); }
@@ -937,7 +938,7 @@
   .folder-picker-demo .fpd-picked { margin: 0; font-size: 0.82rem; }
   .folder-picker-demo code { font-family: var(--font-mono); font-size: 0.76rem; }
   .folder-picker-demo .fpd-new { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--rule); font-size: 0.82rem; }
-  .folder-picker-demo .fpd-new.is-off { color: var(--muted); }
+  .folder-picker-demo .fpd-new.is-off { display: block; color: var(--muted); }
   .folder-picker-demo .fpd-new-open { color: var(--hot); }
   .folder-picker-demo .fpd-new-label { color: var(--ink-soft); }
   .folder-picker-demo .fpd-new-input { padding: var(--space-2) var(--space-2); border: 1px solid var(--rule-strong); background: var(--paper); font-family: var(--font-mono); }
