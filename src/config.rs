@@ -9,15 +9,51 @@ use tracing_subscriber::EnvFilter;
 
 use crate::vault_runtime::VaultSource;
 
-/// The version reported to clients and logs. Nightly images bake the source
-/// commit in through the `HATCHDOOR_GIT_SHA` compile-time env var (fed by the
-/// Docker build arg of the same name); release builds leave it unset and
-/// report the plain crate version.
+/// Whether this build is a published release. A build is one only when it
+/// was told so: the image build passed its `VERSION` build argument, compiled
+/// in as `HATCHDOOR_RELEASE_VERSION`, and it names this crate's own version.
+/// A nightly image and a build from source are not, whatever else they pass.
+fn is_release_build() -> bool {
+    is_release(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("HATCHDOOR_RELEASE_VERSION"),
+    )
+}
+
+fn is_release(crate_version: &str, build_argument: Option<&str>) -> bool {
+    build_argument.map(str::trim) == Some(crate_version)
+}
+
+/// The version reported to clients and logs. A release reports the plain
+/// crate version, even when its image build passed the commit for the
+/// image's `revision` label. Any other build that was passed a commit,
+/// through the `HATCHDOOR_GIT_SHA` compile-time env var (fed by the `GIT_SHA`
+/// build argument), reports it as `2.8.0 (dev abc123)`.
 pub fn version_string() -> String {
-    match option_env!("HATCHDOOR_GIT_SHA") {
-        Some(sha) if !sha.is_empty() => format!("{} (dev {sha})", env!("CARGO_PKG_VERSION")),
-        _ => env!("CARGO_PKG_VERSION").to_string(),
+    describe_version(
+        env!("CARGO_PKG_VERSION"),
+        is_release_build(),
+        option_env!("HATCHDOOR_GIT_SHA"),
+    )
+}
+
+fn describe_version(crate_version: &str, release: bool, commit: Option<&str>) -> String {
+    match commit.map(str::trim) {
+        Some(commit) if !release && !commit.is_empty() => {
+            format!("{crate_version} (dev {commit})")
+        }
+        _ => crate_version.to_string(),
     }
+}
+
+/// The build's channel, for the usage report (ADR-45): `stable` for a
+/// release and `dev` for every other build.
+pub fn build_channel() -> &'static str {
+    channel_word(is_release_build())
+}
+
+fn channel_word(release: bool) -> &'static str {
+    if release { "stable" } else { "dev" }
 }
 
 /// How this build was packaged, for the usage report (ADR-45): `docker` or
@@ -256,6 +292,41 @@ mod tests {
             "source"
         );
         assert_eq!(image_word(None), "source");
+    }
+
+    #[test]
+    fn a_build_is_a_release_only_when_told_its_own_version() {
+        assert!(is_release("2.8.0", Some("2.8.0")));
+        assert!(is_release("2.8.0", Some(" 2.8.0 ")));
+        assert!(!is_release("2.8.0", Some("v2.8.0")));
+        assert!(!is_release("2.8.0", None));
+        assert!(!is_release("2.8.0", Some("")));
+        assert!(!is_release("2.8.0", Some("2.8.1")));
+        assert!(!is_release("2.8.0", Some("2.8")));
+        assert!(!is_release("2.8.0", Some("latest")));
+    }
+
+    #[test]
+    fn a_release_shows_a_plain_version_and_only_another_build_shows_its_commit() {
+        // A release, built with or without the commit the image label needs.
+        assert_eq!(describe_version("2.8.0", true, Some("abc123")), "2.8.0");
+        assert_eq!(describe_version("2.8.0", true, None), "2.8.0");
+        // A nightly image.
+        assert_eq!(
+            describe_version("2.8.0", false, Some("abc123")),
+            "2.8.0 (dev abc123)"
+        );
+        // Built from source with nothing passed.
+        assert_eq!(describe_version("2.8.0", false, None), "2.8.0");
+        assert_eq!(describe_version("2.8.0", false, Some("")), "2.8.0");
+    }
+
+    #[test]
+    fn the_channel_is_stable_for_a_release_and_dev_for_every_other_build() {
+        assert_eq!(channel_word(true), "stable");
+        assert_eq!(channel_word(false), "dev");
+        // This test binary was built with no build arguments.
+        assert_eq!(build_channel(), "dev");
     }
 
     #[test]

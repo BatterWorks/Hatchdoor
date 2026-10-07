@@ -38,13 +38,16 @@ COPY --chown=builder:builder Cargo.toml Cargo.lock ./
 COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/user-vault ./docs/user-vault
 ARG GIT_SHA=""
+# The release version. A build is a release, and reports `stable`, only when
+# this names the version in Cargo.toml.
+ARG VERSION=""
 # `docker` or `podman`, for the opt-in usage report; empty reports `source`.
 ARG HATCHDOOR_IMAGE=""
 # Cache mounts are not image layers: export the binary before unmounting target.
 RUN --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-git-${TARGETPLATFORM},target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-target-${TARGETPLATFORM},target=/app/target,sharing=locked,uid=1000,gid=1000 \
-    HATCHDOOR_GIT_SHA=$GIT_SHA HATCHDOOR_IMAGE=$HATCHDOOR_IMAGE cargo build --locked --release --bin hatchdoor \
+    HATCHDOOR_GIT_SHA=$GIT_SHA HATCHDOOR_RELEASE_VERSION=$VERSION HATCHDOOR_IMAGE=$HATCHDOOR_IMAGE cargo build --locked --release --bin hatchdoor \
     && mkdir -p /app/artifacts \
     && cp /app/target/release/hatchdoor /app/artifacts/hatchdoor
 
