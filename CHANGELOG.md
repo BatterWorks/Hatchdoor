@@ -34,6 +34,7 @@
 - The **Add a Vault** dialog no longer has the open Settings section's buttons drawn over it on a wide screen, and it now fits a phone screen. Every Settings dialog now draws above the whole page, and on screens 640px wide or narrower the **Where is this Vault?** choices stack one above the other, each on one line, instead of pushing the dialog past both edges of the screen. [#448]
 - `/ready` now answers `200` on an instance with no Vaults. A new install starts with none, so it kept answering `503 not ready`, and `/api/startup-status` kept reporting `scanning`, long after the search model had loaded, and a script or agent waiting on `/ready` hung until someone added a Vault. Hatchdoor is now ready as soon as the search model is set up and no active Vault is waiting on its first index, which covers a fresh install, a restart with no Vaults, an install whose Vaults are all disabled, and disabling or disconnecting the last Vault still in its first index. A Vault registry that needs operator recovery still keeps `/ready` at `503`. After a restart, an instance whose Vaults were all indexed before is ready when the model has loaded, without waiting for its first catch-up index. [#453]
 - The What's new dialog now holds keyboard focus from the moment it appears. It used to be drawn first and take focus an instant later, and the rule that keeps `Tab` inside it started at that same later moment, so a key pressed in between went to the page behind it. [#468]
+- Loading the EmbeddingGemma search model no longer looks up its own folder thousands of times. Each load made between 13,000 and 22,000 path lookups on the models folder, more the deeper the folder sits, which costs nothing on a local disk but took about 17 minutes on a Windows install under Docker Desktop, where every lookup is a round trip to Windows, and it happened again on every restart. Hatchdoor now reads the model files once and hands them to the model runtime from memory, which makes none of those lookups. The time on Windows has not been measured again yet, so the deploy guide keeps its warning about the wait. The log also says what is going on now: `Search model downloaded, loading it` when the download is done, `Search model is still loading` every 30 seconds with the time so far, and `Search model loaded` with how long it took. The cost is memory: with EmbeddingGemma loaded Hatchdoor now holds about 110 MB more, 675 MB instead of 565 MB on a small test Vault. Search results and existing indexes are unchanged. [#469]
 
 [#417]: https://github.com/BatterWorks/Hatchdoor/issues/417
 [#418]: https://github.com/BatterWorks/Hatchdoor/issues/418
@@ -59,6 +60,7 @@
 [#460]: https://github.com/BatterWorks/Hatchdoor/issues/460
 [#463]: https://github.com/BatterWorks/Hatchdoor/issues/463
 [#468]: https://github.com/BatterWorks/Hatchdoor/issues/468
+[#469]: https://github.com/BatterWorks/Hatchdoor/issues/469
 [#482]: https://github.com/BatterWorks/Hatchdoor/issues/482
 
 ## v2.7.0 - 2026-10-02

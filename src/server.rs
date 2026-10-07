@@ -817,22 +817,32 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                         };
                         model_setup.fetch_gemma_at_pinned_revision(progress)?;
                     }
-                    match selected {
-                        SelectedModel::Gemma => Ok(Arc::new(
-                            FastembedEmbedder::embedding_gemma_300m_q4_in(model_dir.clone())?,
-                        )),
-                        SelectedModel::Nomic => Ok(Arc::new(FastembedEmbedder::nomic_v1_5_in(
-                            model_dir.clone(),
-                        )?)),
-                        SelectedModel::TermsRequired => {
-                            Err("model terms have not been accepted".to_string())
-                        }
-                    }
+                    // The load covers recording the files' digests, which
+                    // reads every model file again and is as slow as the load
+                    // itself on a slow share.
+                    log_model_load(
+                        selected,
+                        MODEL_STILL_LOADING_EVERY,
+                        || -> Result<Arc<dyn Embedder>, String> {
+                            let embedder: Arc<dyn Embedder> = match selected {
+                                SelectedModel::Gemma => {
+                                    Arc::new(FastembedEmbedder::embedding_gemma_300m_q4_in(
+                                        model_dir.clone(),
+                                    )?)
+                                }
+                                SelectedModel::Nomic => {
+                                    Arc::new(FastembedEmbedder::nomic_v1_5_in(model_dir.clone())?)
+                                }
+                                SelectedModel::TermsRequired => {
+                                    return Err("model terms have not been accepted".to_string());
+                                }
+                            };
+                            model_setup.record_integrity(selected)?;
+                            Ok(embedder)
+                        },
+                    )
                 })();
-                match loaded.and_then(|embedder| {
-                    model_setup.record_integrity(selected)?;
-                    Ok(embedder)
-                }) {
+                match loaded {
                     Ok(embedder) => {
                         runtime.set(embedder, selected == SelectedModel::Gemma);
                         return Ok(());
@@ -865,6 +875,64 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
             }
         }
     });
+}
+
+/// How often a load that has not finished says so. A load takes seconds on a
+/// local disk and can take many minutes on a slow share (#469), where silence
+/// reads as a hang.
+const MODEL_STILL_LOADING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one model load with a log line when it starts, one every
+/// `still_loading_every` while it runs, and one with the duration when it
+/// succeeds. `still_loading_every` is a parameter so a test need not wait. A failed load is left to the caller, which logs the error.
+fn log_model_load<T>(
+    selected: SelectedModel,
+    still_loading_every: std::time::Duration,
+    load: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let model_name = startup_model_name(selected);
+    if selected == SelectedModel::Gemma {
+        info!(model = model_name, "Search model downloaded, loading it");
+    } else {
+        // FastEmbed fetches Nomic inside the same call that loads it.
+        info!(
+            model = model_name,
+            "Loading search model, after downloading it if it is not on disk yet"
+        );
+    }
+    let started = std::time::Instant::now();
+    let elapsed = || format!("{:.1}s", started.elapsed().as_secs_f64());
+    // The reporting thread starts with no subscriber of its own when the
+    // caller set one per thread, so it is carried across.
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let loaded = std::thread::scope(|scope| {
+        let (dispatch, elapsed) = (&dispatch, &elapsed);
+        scope.spawn(move || {
+            let _dispatch = tracing::dispatcher::set_default(dispatch);
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                done_rx.recv_timeout(still_loading_every)
+            {
+                info!(
+                    model = model_name,
+                    elapsed = elapsed(),
+                    "Search model is still loading"
+                );
+            }
+        });
+        // Owned by this closure so that a panicking load still drops it and
+        // lets the reporting thread end.
+        let _done = done_tx;
+        load()
+    });
+    if loaded.is_ok() {
+        info!(
+            model = model_name,
+            elapsed = elapsed(),
+            "Search model loaded"
+        );
+    }
+    loaded
 }
 
 /// What a loaded search model hands over to: the Vault collection's indexing,
@@ -1907,12 +1975,101 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use std::time::Duration;
+
     use tempfile::TempDir;
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn dispatch(&self) -> tracing::Dispatch {
+            let sink = self.clone();
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::INFO)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .compact()
+                    .with_writer(move || sink.clone())
+                    .finish(),
+            )
+        }
+
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("captured logs lock").clone())
+                .expect("UTF-8 log output")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured logs lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_model_load_logs_its_start_its_progress_and_its_duration() {
+        let logs = CapturedLogs::default();
+        let loaded = tracing::dispatcher::with_default(&logs.dispatch(), || {
+            log_model_load(SelectedModel::Gemma, Duration::from_millis(20), || {
+                std::thread::sleep(Duration::from_millis(150));
+                Ok(7)
+            })
+        });
+        assert_eq!(loaded, Ok(7));
+
+        let lines = logs.lines();
+        assert!(lines.iter().all(|line| line.contains("INFO")), "{lines:?}");
+        assert!(
+            lines[0].contains("Search model downloaded, loading it")
+                && lines[0].contains("EmbeddingGemma 300M Q4"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1..lines.len() - 1]
+                .iter()
+                .any(|line| line.contains("Search model is still loading")
+                    && line.contains("elapsed")),
+            "{lines:?}"
+        );
+        let last = lines.last().expect("a loaded line");
+        assert!(
+            last.contains("Search model loaded") && last.contains("elapsed"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_model_load_is_not_logged_as_loaded() {
+        let logs = CapturedLogs::default();
+        let loaded: Result<(), String> =
+            tracing::dispatcher::with_default(&logs.dispatch(), || {
+                log_model_load(SelectedModel::Nomic, Duration::from_secs(60), || {
+                    Err("no such file".to_string())
+                })
+            });
+        assert_eq!(loaded, Err("no such file".to_string()));
+
+        let lines = logs.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("Loading search model"), "{lines:?}");
+    }
 
     fn app_for_tests() -> (Router, TempDir) {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);

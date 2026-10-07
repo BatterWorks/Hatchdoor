@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use fastembed::{
-    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
-    UserDefinedEmbeddingModel,
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, OutputKey, Pooling, TextEmbedding,
+    TokenizerFiles, UserDefinedEmbeddingModel,
 };
+use hf_hub::api::sync::{ApiBuilder, ApiRepo};
 
 use super::Embedder;
 
@@ -149,16 +150,52 @@ impl FastembedEmbedder {
         Self::embedding_gemma_300m_q4_in(fastembed::get_cache_dir().into())
     }
 
+    /// Loads Gemma from bytes rather than by path. Its weights sit in a second
+    /// file, and given a path ONNX Runtime canonicalises that file's location
+    /// once per weight block: 13,000 or more `readlink` calls a load, each a
+    /// round trip to the host when the models folder is a Docker Desktop
+    /// share (#469). Everything FastEmbed's enum route would set for this
+    /// model is set here by hand, so the vectors are the same.
     pub fn embedding_gemma_300m_q4_in(cache_dir: PathBuf) -> Result<Self, String> {
-        let mut embedder = Self::load_in(
-            EmbeddingModel::EmbeddingGemma300MQ4,
+        const REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
+        const MAX_LENGTH: usize = 2048;
+
+        let repo = fastembed_repo(REPO, cache_dir)?;
+        let read = |file: &str| -> Result<Vec<u8>, String> {
+            let path = repo
+                .get(file)
+                .map_err(|e| format!("failed to retrieve {REPO}/{file}: {e}"))?;
+            std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))
+        };
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: read("tokenizer.json")?,
+            config_file: read("config.json")?,
+            special_tokens_map_file: read("special_tokens_map.json")?,
+            tokenizer_config_file: read("tokenizer_config.json")?,
+        };
+        let mut user_model =
+            UserDefinedEmbeddingModel::new(read("onnx/model_q4.onnx")?, tokenizer_files)
+                .with_pooling(Pooling::Mean)
+                // The graph names its weight file relative to itself.
+                .with_external_initializer(
+                    "model_q4.onnx_data".to_string(),
+                    read("onnx/model_q4.onnx_data")?,
+                );
+        user_model.output_key = Some(OutputKey::ByName("sentence_embedding"));
+        let model = TextEmbedding::try_new_from_user_defined(
+            user_model,
+            InitOptionsUserDefined::new().with_max_length(MAX_LENGTH),
+        )
+        .map_err(|e| format!("failed to load embedding model EmbeddingGemma300MQ4: {e}"))?;
+
+        let mut embedder = Self::from_text_embedding(
+            model,
             768,
-            2048,
+            MAX_LENGTH,
             "EmbeddingGemma300MQ4",
             "",
             "task: search result | query: ",
-            cache_dir,
-        )?;
+        );
         // EmbeddingGemma's retrieval training uses different query and document
         // templates. This is intentionally a model-specific document format,
         // not merely a prefix, because the note title has its own field.
@@ -282,6 +319,24 @@ impl Embedder for FastembedEmbedder {
     }
 }
 
+/// The repo handle FastEmbed's enum route would build for `cache_dir`: the same
+/// `HF_HOME` and `HF_ENDPOINT` overrides, and a download when a file is not in
+/// the cache yet.
+fn fastembed_repo(repo_id: &str, cache_dir: PathBuf) -> Result<ApiRepo, String> {
+    let cache_dir = std::env::var("HF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or(cache_dir);
+    let endpoint =
+        std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
+    let api = ApiBuilder::new()
+        .with_cache_dir(cache_dir)
+        .with_endpoint(endpoint)
+        .with_progress(false)
+        .build()
+        .map_err(|e| format!("hf-hub api init: {e}"))?;
+    Ok(api.model(repo_id.to_string()))
+}
+
 fn gemma_retrieval_document(title: &str, heading_path: Option<&str>, body: &str) -> String {
     let title = if title.trim().is_empty() {
         "none"
@@ -354,5 +409,58 @@ mod tests {
         let e = FastembedEmbedder::mxbai_large().expect("load");
         assert_eq!(e.embedding_dim(), 1024);
         assert_eq!(e.id(), "MxbaiEmbedLargeV1");
+    }
+
+    #[test]
+    fn gemma_keeps_its_identity() {
+        let e = FastembedEmbedder::embedding_gemma_300m_q4().expect("load");
+        assert_eq!(e.embedding_dim(), 768);
+        assert_eq!(
+            e.identity(),
+            "EmbeddingGemma300MQ4-768-max2048-fastembed-v5-ctx1-gemma-retrieval-v1"
+        );
+    }
+
+    #[test]
+    fn gemma_vectors_match_the_fastembed_enum_load() {
+        // The reference is FastEmbed's own enum route, which hands ONNX Runtime
+        // the model by path. Stored vectors were produced through it, so the
+        // production load must agree or an existing index goes stale (#469).
+        let reference = FastembedEmbedder::load_in(
+            EmbeddingModel::EmbeddingGemma300MQ4,
+            768,
+            2048,
+            "EmbeddingGemma300MQ4",
+            "",
+            "task: search result | query: ",
+            fastembed::get_cache_dir().into(),
+        )
+        .expect("reference load");
+        let e = FastembedEmbedder::embedding_gemma_300m_q4().expect("load");
+
+        let texts = vec![
+            e.document_input(
+                "Runbook",
+                Some("Backups > Restore"),
+                "Stop the service first.",
+            ),
+            format!("{}how do I restore a backup", e.query_prefix()),
+            // Longer than the 2,048-token limit, so truncation is compared too.
+            e.document_input("Long", None, &"restore the backup ".repeat(1200)),
+        ];
+        let expected = reference.embed(&texts).expect("reference embed");
+        let actual = e.embed(&texts).expect("embed");
+
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.len(), 768);
+            for (a, b) in actual.iter().zip(expected) {
+                assert!((a - b).abs() < 1e-5, "vector component drifted: {a} vs {b}");
+            }
+        }
+        assert_eq!(
+            e.token_count(&texts[0], true).expect("token count"),
+            reference.token_count(&texts[0], true).expect("token count")
+        );
     }
 }
