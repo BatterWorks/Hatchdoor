@@ -5224,6 +5224,7 @@ frontend typecheck, then full frontend checks.
 - `frontend/src/components/icons.tsx`
 - `frontend/src/index.css`
 - `frontend/src/App.css`
+- `frontend/src/assets/fonts/fonts.css`
 - `frontend/src/styles/base.css`
 - `frontend/src/styles/topbar.css`
 - `frontend/src/styles/ui-common.css`
@@ -5237,7 +5238,11 @@ authoritative for visual decisions across every feature stylesheet; a component
 the system does not yet cover gets its section added by the change that ships
 it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to
 `1em` and paint with `currentColor`, so callers control them through font-size
-and color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `VaultPrefix` (#140) is
+and color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `assets/fonts/fonts.css`
+(#475) declares the four families the `base.css` font tokens name, from `woff2`
+files beside it, so the app fetches no font from another host; each family's
+folder carries its licence text, and `App.css` imports the sheet first. A new
+family or weight is a design-system change, not a local one. `VaultPrefix` (#140) is
 the one marked-path-root primitive every flattened, scope-spanning surface
 uses for Vault provenance — hot ink, a middot instead of a folder `/`, and
 never eliding; consumers give the adjacent title or path the shrinking room

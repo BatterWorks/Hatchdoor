@@ -4,9 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hatchdoor — Design System (Forge)</title>
+<!-- This contributor page loads its fonts from Google on purpose: it is opened
+     from the repository, not served by an instance. The app bundles the same
+     families (frontend/src/assets/fonts). -->
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400;500;600;700;800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
   /* ════════════════════════════════════════════════════════════════
      TOKENS — Forge palette (light & dark)
@@ -1866,7 +1869,7 @@
   <main class="doc-main">
 
     <h1 class="doc-h1">Hatchdoor design <span class="wide">system</span>.</h1>
-    <p class="doc-lede">Single source of truth for the Forge direction. Every component, state, and token used by the React app — rendered so you can see exactly what gets implemented. Implementation note: copy tokens into <code>base.css</code>, swap fonts via Google Fonts, then port each component class by class.</p>
+    <p class="doc-lede">Single source of truth for the Forge direction. Every component, state, and token used by the React app — rendered so you can see exactly what gets implemented. Implementation note: copy tokens into <code>base.css</code>, use the fonts bundled in <code>frontend/src/assets/fonts</code>, then port each component class by class.</p>
 
     <!-- ───────── TOKENS ───────── -->
     <section class="doc-section" id="tokens">
