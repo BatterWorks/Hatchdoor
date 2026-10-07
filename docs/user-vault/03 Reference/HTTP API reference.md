@@ -26,7 +26,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | `/api/v1/vaults/...` reads (`GET`) | Web bearer token if configured, **unauthenticated in demo mode** |
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
 | `/api/v1/vaults/{vault_id}/attachments` (upload) | Web bearer token **or** a live MCP bearer token; same demo-mode refusal as other writes |
-| `/api/v1/folders` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
+| `/api/v1/folders` (`GET` and `POST`) | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
 | `/api/v1/whats-new` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
 | `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled — see [[#Transfer links]] |
 
@@ -185,6 +185,7 @@ In demo mode the block answers the visitor's question instead. `mutate`, `pull`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/v1/folders?path=<relative>` | List the folders directly inside one folder under the Vault mount, so a Vault can be picked instead of typed. Without `path` it lists the mount itself. |
+| POST | `/api/v1/folders` | Make one new, empty folder inside a folder under the Vault mount. See [[#Make a new folder]]. |
 
 The mount is the folder `VAULT_PATH` names: `/data/vault` in the stock Compose file, `./vault` when unset. `path` is relative to it, with `/` between folder names.
 
@@ -222,6 +223,45 @@ The listing never returns file names or file contents and changes nothing on dis
 | `400` | `folder_outside_root` | `path` starts with `/` or contains `..`. |
 | `404` | `folder_not_found` | Nothing the listing would show is at `path`: it is missing, a file, a symlink, hidden, or holds Hatchdoor's state. |
 | `422` | `folder_unreadable` | The folder exists but Hatchdoor has no permission to read it. |
+
+### Make a new folder
+
+`POST /api/v1/folders` makes one new, empty folder, so a Vault can be started without a shell. It is the only write Hatchdoor makes outside a Vault and its own state.
+
+```json
+{ "parent": "Work", "name": "Journal" }
+```
+
+- `parent` is the folder to make it in, relative to the mount like `path` above. Leave it out, or send `""`, for the mount itself. It must be a folder the listing shows.
+- `name` is the new folder's name: one path segment, kept as sent. It cannot be empty, be longer than 255 bytes, start with a dot, start or end with a space, or contain `/`, `\` or a control character.
+- Unknown fields are refused, so there is no way to ask for a chain of folders.
+
+The answer is `201` with the new folder in the shape the listing uses:
+
+```json
+{
+  "name": "Journal",
+  "path": "Work/Journal",
+  "markdown": { "count": 0, "at_least": false },
+  "vault": null,
+  "has_subfolders": false
+}
+```
+
+Join the listing's `root` and this `path` to get the `path` for `POST /api/v1/vaults`. Creating the Vault is a separate request and is unchanged: it still refuses a folder that does not exist.
+
+Exactly one directory is made and nothing is written into it. The parent is reached without following a symlink. A folder is never made inside a registered Vault, and an existing folder is never reused. Hatchdoor does not delete or rename folders, so a folder made and then not used stays on disk. This route is not available over MCP.
+
+| Status | `code` | When |
+| --- | --- | --- |
+| `400` | `folder_name_invalid` | `name` breaks a rule above, or names a folder that holds Hatchdoor's own state. |
+| `400` | `folder_outside_root` | `parent` starts with `/` or contains `..`, or resolves outside the mount. |
+| `404` | `folder_mount_not_found` | The mount folder does not exist. It is not created. |
+| `404` | `folder_parent_not_found` | Nothing the listing would show is at `parent`: it is missing, a file, a symlink, hidden, or holds Hatchdoor's state. No parent folder is created. |
+| `409` | `folder_name_taken` | A folder, file or link with that name is already there. |
+| `409` | `folder_inside_vault` | `parent` is a registered Vault or sits inside one, or the new folder would be a registered Vault's own missing folder. |
+| `422` | `folder_not_writable` | Hatchdoor could not write to `parent`: it is read-only, or the process lacks permission. |
+| `422` | `invalid_request_body` | The body is not the JSON object above. |
 
 ## What's new
 

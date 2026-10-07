@@ -521,8 +521,9 @@ export type FolderNoteCount = { count: number; at_least: boolean };
 /** The registered Vault rooted exactly at a listed folder. */
 export type FolderVaultRef = { vault_id: string; name: string };
 
-/** One folder in a `GET /api/v1/folders` answer (#429, ADR-41). `path` is
- * relative to the Vault mount, `/`-separated. */
+/** One folder in a `GET /api/v1/folders` answer (#429, ADR-41), and the
+ * whole answer of `POST /api/v1/folders` (#494, ADR-44). `path` is relative
+ * to the Vault mount, `/`-separated. */
 export type FolderListingEntry = {
   name: string;
   path: string;

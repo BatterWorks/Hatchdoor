@@ -15,7 +15,7 @@ mod whats_new;
 
 pub use api::health_handler;
 pub use docs::docs_router;
-pub use folders::list_folders_handler;
+pub use folders::{create_folder_handler, list_folders_handler};
 // No asset re-export: the contained-resource seam the MCP `get_attachment`
 // tool used to consume from here moved to the read core in #188, so no MCP
 // tool imports this module and `assets` is once again private to the HTTP

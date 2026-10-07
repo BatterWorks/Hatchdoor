@@ -330,6 +330,68 @@ describe("VaultCreationDialog — a folder picked from the list (#430)", () => {
     expect(screen.queryByLabelText("Folder path")).toBeNull();
   });
 
+  it("creates a Vault in a folder just made in the picker, with the request unchanged (#494)", async () => {
+    let folderBody: Record<string, unknown> | null = null;
+    let postedBody: Record<string, unknown> | null = null;
+    let submits = 0;
+    mockRoutes({
+      "/api/v1/folders POST": (init) => {
+        folderBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            name: "Fresh",
+            path: "Fresh",
+            markdown: { count: 0, at_least: false },
+            vault: null,
+            has_subfolders: false,
+          },
+          { status: 201 },
+        );
+      },
+      "/api/v1/vaults GET": registry,
+      "/api/v1/vaults POST": (init) => {
+        submits += 1;
+        postedBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
+      },
+    });
+    const onCreated = vi.fn();
+    render(<VaultCreationDialog onClose={() => {}} onCreated={onCreated} />);
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Field notes" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /New folder/ }));
+    const name = screen.getByLabelText(/Name of the new folder/);
+    fireEvent.change(name, { target: { value: "Fresh" } });
+    // Enter makes the folder. It must not submit the Vault form around it.
+    fireEvent.keyDown(name, { key: "Enter" });
+
+    expect(
+      await screen.findByRole("button", { name: /^Fresh/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(folderBody).toEqual({ parent: "", name: "Fresh" });
+    expect(submits).toBe(0);
+    expect(screen.getByText("/data/vault/Fresh")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
+    await vi.waitFor(() =>
+      expect(onCreated).toHaveBeenCalledWith(CREATED_VAULT),
+    );
+    expect(postedBody).toEqual({
+      expected_registry_revision: 5,
+      name: "Field notes",
+      source: { type: "local", path: "/data/vault/Fresh" },
+    });
+  });
+
   it("asks for a folder when none was picked, without contacting the server", async () => {
     mockRoutes({});
     render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);

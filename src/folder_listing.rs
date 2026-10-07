@@ -6,7 +6,12 @@
 //! never leaves it, never follows a symlink (which also rules out loops),
 //! skips hidden folders and any folder the Vault registry would refuse as a
 //! Vault, and reports folder names and Markdown counts only, never a file
-//! name or any content. Nothing here opens a file or writes anything.
+//! name or any content. The listing opens no file and writes nothing.
+//!
+//! Beside it sits the one write Hatchdoor makes outside a Vault and its own
+//! state (ADR-44): [`create_folder`] makes a single new, empty folder in a
+//! folder the listing can show, never inside a registered Vault, and writes
+//! nothing into it.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -124,6 +129,154 @@ impl FolderListingError {
     }
 }
 
+/// Why [`create_folder`] made nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderCreateError {
+    /// The name is not one plain path segment, or names a folder the listing
+    /// hides.
+    InvalidName,
+    /// Something already has that name in the parent folder.
+    NameTaken,
+    /// The Vault mount itself does not exist.
+    MountNotFound,
+    /// The parent is not a folder the listing shows: missing, a file, a
+    /// symlink, hidden, or instance state.
+    ParentNotFound,
+    /// The parent is absolute, climbs out of the mount, or resolves outside
+    /// it.
+    OutsideRoot,
+    /// The parent is a registered Vault or sits inside one, or the new folder
+    /// would land on a registered Vault's own path.
+    InsideVault,
+    /// Hatchdoor may not write to the parent folder.
+    NotWritable,
+}
+
+impl FolderCreateError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::InvalidName => "folder_name_invalid",
+            Self::NameTaken => "folder_name_taken",
+            Self::MountNotFound => "folder_mount_not_found",
+            Self::ParentNotFound => "folder_parent_not_found",
+            Self::OutsideRoot => "folder_outside_root",
+            Self::InsideVault => "folder_inside_vault",
+            Self::NotWritable => "folder_not_writable",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidName => {
+                "A folder name cannot be empty, start with a dot or a space, end with a space, or contain a slash."
+            }
+            Self::NameTaken => "A folder with this name already exists.",
+            Self::MountNotFound => {
+                "The folder Hatchdoor looks for Vaults in does not exist, so there is nowhere to make a new folder."
+            }
+            Self::ParentNotFound => {
+                "The folder to make it in is no longer there. Go back up and try again."
+            }
+            Self::OutsideRoot => FolderListingError::OutsideRoot.message(),
+            Self::InsideVault => {
+                "This folder belongs to a Vault. A new folder can only be made outside a Vault."
+            }
+            Self::NotWritable => {
+                "Hatchdoor could not make a folder here. The folder is read-only, or Hatchdoor is not allowed to write to it."
+            }
+        }
+    }
+}
+
+/// The longest name most filesystems accept for one folder, in bytes.
+const MAX_NAME_BYTES: usize = 255;
+
+/// Make one new, empty folder called `name` in the folder at `parent` under
+/// `root`, and answer with it as the listing would show it (ADR-44).
+///
+/// The parent is found by the listing's own rules, so it is a folder
+/// [`list_folders`] can show, reached without following a symlink. Exactly
+/// one directory is created and nothing is written into it. The checks run
+/// before the directory is made, not atomically with it.
+pub fn create_folder(
+    root: &Path,
+    parent: &str,
+    name: &str,
+    registry: &VaultRegistryStore,
+) -> Result<FolderEntry, FolderCreateError> {
+    let components = parse_relative(parent).map_err(parent_error)?;
+    if !is_plain_name(name) {
+        return Err(FolderCreateError::InvalidName);
+    }
+    let Some(root) = resolve_root(root).map_err(parent_error)? else {
+        return Err(FolderCreateError::MountNotFound);
+    };
+    let parent = shown_folder(&root, &components, registry).map_err(parent_error)?;
+    // The walk followed no symlink, so this only fails when a folder was
+    // swapped for a link after it was checked.
+    match parent.canonicalize() {
+        Ok(resolved) if resolved.starts_with(&root) => {}
+        Ok(_) => return Err(FolderCreateError::OutsideRoot),
+        Err(error) => return Err(parent_error(read_error(error))),
+    }
+
+    let target = parent.join(name);
+    if vault_roots(registry)
+        .iter()
+        .any(|vault| target.starts_with(vault))
+    {
+        return Err(FolderCreateError::InsideVault);
+    }
+    // A name the listing would hide as instance state is as unusable as a
+    // hidden one.
+    if !may_be_vault(registry, &target) {
+        return Err(FolderCreateError::InvalidName);
+    }
+
+    fs::create_dir(&target).map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists => FolderCreateError::NameTaken,
+        io::ErrorKind::NotFound => FolderCreateError::ParentNotFound,
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidFilename => {
+            FolderCreateError::InvalidName
+        }
+        _ => FolderCreateError::NotWritable,
+    })?;
+
+    let prefix = components.join("/");
+    Ok(FolderEntry {
+        path: if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        },
+        name: name.to_owned(),
+        markdown: MarkdownCount::default(),
+        vault: None,
+        has_subfolders: false,
+    })
+}
+
+fn parent_error(error: FolderListingError) -> FolderCreateError {
+    match error {
+        FolderListingError::OutsideRoot => FolderCreateError::OutsideRoot,
+        FolderListingError::NotFound => FolderCreateError::ParentNotFound,
+        FolderListingError::Unreadable => FolderCreateError::NotWritable,
+    }
+}
+
+/// One path segment the listing would show: not empty, not hidden (which
+/// rules out `.` and `..`), no separator or control character, and no space
+/// at either end, which some filesystems drop without saying.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
+        && name.trim() == name
+        && !is_hidden(name)
+        && !name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\') || character.is_control())
+}
+
 /// List the folder at `relative` under `root`. `registry` supplies both the
 /// already-registered Vaults and the containment rule that hides instance
 /// state.
@@ -135,31 +288,10 @@ pub fn list_folders(
 ) -> Result<FolderListing, FolderListingError> {
     let components = parse_relative(relative)?;
     let configured_root = absolute_root(root);
-    // The root is the operator's own configuration, so it is resolved once,
-    // symlinks and all. Nothing below it is followed.
-    let root = match fs::metadata(root) {
-        Ok(metadata) if metadata.is_dir() => root.canonicalize().map_err(read_error)?,
-        Ok(_) => return Ok(FolderListing::root_missing(configured_root)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(FolderListing::root_missing(configured_root));
-        }
-        Err(error) => return Err(read_error(error)),
+    let Some(root) = resolve_root(root)? else {
+        return Ok(FolderListing::root_missing(configured_root));
     };
-
-    let mut target = root.clone();
-    for component in &components {
-        if is_hidden(component) {
-            return Err(FolderListingError::NotFound);
-        }
-        target.push(component);
-        let metadata = fs::symlink_metadata(&target).map_err(read_error)?;
-        if !metadata.is_dir() {
-            return Err(FolderListingError::NotFound);
-        }
-    }
-    if !components.is_empty() && !may_be_vault(registry, &target) {
-        return Err(FolderListingError::NotFound);
-    }
+    let target = shown_folder(&root, &components, registry)?;
 
     let vaults = registered_vaults(registry);
     let deadline = Instant::now() + limits.time_budget;
@@ -248,6 +380,43 @@ impl FolderListing {
     }
 }
 
+/// The Vault mount resolved, or `None` when it does not exist or is not a
+/// folder. The root is the operator's own configuration, so it is resolved
+/// once, symlinks and all. Nothing below it is followed.
+fn resolve_root(root: &Path) -> Result<Option<PathBuf>, FolderListingError> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => root.canonicalize().map(Some).map_err(read_error),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(read_error(error)),
+    }
+}
+
+/// The folder at `components` under the resolved `root`, when it is one the
+/// listing shows: every step a real folder, none hidden, none a symlink, and
+/// the folder itself not instance state.
+fn shown_folder(
+    root: &Path,
+    components: &[&str],
+    registry: &VaultRegistryStore,
+) -> Result<PathBuf, FolderListingError> {
+    let mut target = root.to_path_buf();
+    for component in components {
+        if is_hidden(component) {
+            return Err(FolderListingError::NotFound);
+        }
+        target.push(component);
+        let metadata = fs::symlink_metadata(&target).map_err(read_error)?;
+        if !metadata.is_dir() {
+            return Err(FolderListingError::NotFound);
+        }
+    }
+    if !components.is_empty() && !may_be_vault(registry, &target) {
+        return Err(FolderListingError::NotFound);
+    }
+    Ok(target)
+}
+
 /// The configured root as the absolute path a Vault definition would store.
 /// It comes from `VAULT_PATH`, an environment string, so the lossy
 /// conversion only matters for a working directory that is not UTF-8.
@@ -322,6 +491,28 @@ fn registered_vaults(registry: &VaultRegistryStore) -> Vec<(PathBuf, RegisteredV
                     name: definition.name().to_owned(),
                 },
             ))
+        })
+        .collect()
+}
+
+/// Every registered Vault's root as [`create_folder`] must respect it. Unlike
+/// [`registered_vaults`] this keeps a Vault whose folder is missing, resolved
+/// through its parent, so a new folder cannot land where that Vault expects
+/// its notes.
+fn vault_roots(registry: &VaultRegistryStore) -> Vec<PathBuf> {
+    let Ok(VaultRegistryState::Ready(snapshot)) = registry.load() else {
+        return Vec::new();
+    };
+    snapshot
+        .definitions()
+        .map(|definition| {
+            let path = registry.vault_path(&definition);
+            path.canonicalize().unwrap_or_else(|_| {
+                match (path.parent().map(Path::canonicalize), path.file_name()) {
+                    (Some(Ok(parent)), Some(name)) => parent.join(name),
+                    _ => std::path::absolute(&path).unwrap_or(path),
+                }
+            })
         })
         .collect()
 }
@@ -708,6 +899,332 @@ mod tests {
         let good = listing.folders.iter().find(|f| f.name == "Good").unwrap();
         assert_eq!(good.markdown, exact(1));
         assert!(!good.has_subfolders);
+    }
+
+    fn create(
+        fixture: &Fixture,
+        parent: &str,
+        name: &str,
+    ) -> Result<FolderEntry, FolderCreateError> {
+        create_folder(&fixture.root, parent, name, &fixture.registry)
+    }
+
+    /// Every path under the fixture's temporary directory, so a test can show
+    /// a refusal changed nothing anywhere, inside the mount or beside it.
+    fn everything(fixture: &Fixture) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![fixture._dir.path().to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                }
+                found.push(entry.path());
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn creates_one_empty_folder_at_the_mount_and_inside_a_subfolder() {
+        let fixture = fixture();
+        write(&fixture.root.join("Work/a.md"));
+        let before = everything(&fixture);
+
+        let top = create(&fixture, "", "Journal").unwrap();
+
+        assert_eq!(
+            top,
+            FolderEntry {
+                name: "Journal".to_owned(),
+                path: "Journal".to_owned(),
+                markdown: exact(0),
+                vault: None,
+                has_subfolders: false,
+            }
+        );
+        let nested = create(&fixture, "Work/", "Projects").unwrap();
+        assert_eq!(nested.name, "Projects");
+        assert_eq!(nested.path, "Work/Projects");
+
+        // Exactly the two folders, and nothing inside either.
+        let mut expected = before;
+        expected.push(fixture.root.join("Journal"));
+        expected.push(fixture.root.join("Work/Projects"));
+        expected.sort();
+        assert_eq!(everything(&fixture), expected);
+        // The listing shows what was made, as it was answered.
+        let listing = list(&fixture, "").unwrap();
+        assert_eq!(listing.folders[0], top);
+        assert_eq!(list(&fixture, "Work").unwrap().folders, [nested]);
+    }
+
+    #[test]
+    fn a_new_folder_keeps_the_name_as_typed_in_any_script() {
+        let fixture = fixture();
+        for name in ["日本語", "עברית", "📓 Notes", "Caf\u{e9}", "My Notes 2026"] {
+            let entry = create(&fixture, "", name).unwrap();
+            assert_eq!(entry.name, name);
+            assert!(fixture.root.join(name).is_dir(), "{name}");
+        }
+    }
+
+    #[test]
+    fn names_that_are_not_one_plain_segment_are_refused() {
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Work")).unwrap();
+        let before = everything(&fixture);
+        let long = "x".repeat(MAX_NAME_BYTES + 1);
+        for name in [
+            "",
+            " ",
+            ".",
+            "..",
+            ".git",
+            ".hidden",
+            "a/b",
+            "/a",
+            "a/",
+            "../up",
+            "a\\b",
+            "a\0b",
+            "line\nbreak",
+            " lead",
+            "trail ",
+            long.as_str(),
+        ] {
+            for parent in ["", "Work"] {
+                assert_eq!(
+                    create(&fixture, parent, name),
+                    Err(FolderCreateError::InvalidName),
+                    "{name:?} in {parent:?}"
+                );
+            }
+        }
+        assert_eq!(everything(&fixture), before);
+    }
+
+    #[test]
+    fn a_name_the_listing_hides_as_instance_state_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("mount");
+        fs::create_dir(&root).unwrap();
+        let registry = VaultRegistryStore::new(dir.path().join("state/vaults.json"))
+            .with_reserved_directories([root.join("cache")]);
+
+        assert_eq!(
+            create_folder(&root, "", "cache", &registry),
+            Err(FolderCreateError::InvalidName)
+        );
+        assert!(!root.join("cache").exists());
+    }
+
+    #[test]
+    fn a_taken_name_is_refused_and_the_existing_folder_is_left_alone() {
+        let fixture = fixture();
+        write(&fixture.root.join("Work/a.md"));
+        fs::write(fixture.root.join("file"), "x").unwrap();
+        std::os::unix::fs::symlink(fixture.root.join("Work"), fixture.root.join("Alias")).unwrap();
+        let before = everything(&fixture);
+
+        for name in ["Work", "file", "Alias"] {
+            assert_eq!(
+                create(&fixture, "", name),
+                Err(FolderCreateError::NameTaken),
+                "{name}"
+            );
+        }
+        assert_eq!(everything(&fixture), before);
+    }
+
+    #[test]
+    fn no_chain_of_folders_is_made_for_a_missing_parent() {
+        let fixture = fixture();
+        write(&fixture.root.join("note.md"));
+        fs::create_dir_all(fixture.root.join(".git/objects")).unwrap();
+        let before = everything(&fixture);
+
+        for parent in [
+            "Missing",
+            "Missing/Deeper",
+            "note.md",
+            ".git",
+            ".git/objects",
+        ] {
+            assert_eq!(
+                create(&fixture, parent, "New"),
+                Err(FolderCreateError::ParentNotFound),
+                "{parent}"
+            );
+        }
+        assert_eq!(everything(&fixture), before);
+    }
+
+    #[test]
+    fn a_parent_that_leaves_the_mount_is_refused() {
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Work")).unwrap();
+        let before = everything(&fixture);
+
+        for parent in [
+            "..",
+            "../..",
+            "Work/..",
+            "Work/../..",
+            "/etc",
+            "/tmp",
+            "\\etc",
+        ] {
+            assert_eq!(
+                create(&fixture, parent, "New"),
+                Err(FolderCreateError::OutsideRoot),
+                "{parent}"
+            );
+        }
+        assert_eq!(everything(&fixture), before);
+    }
+
+    #[test]
+    fn no_symlink_is_followed_to_the_parent() {
+        let fixture = fixture();
+        let outside = fixture._dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir_all(fixture.root.join("Real/Sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.root.join("Escape")).unwrap();
+        std::os::unix::fs::symlink(fixture.root.join("Real"), fixture.root.join("Alias")).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.root.join("Real/out")).unwrap();
+        let before = everything(&fixture);
+
+        for parent in ["Escape", "Alias", "Alias/Sub", "Real/out"] {
+            assert_eq!(
+                create(&fixture, parent, "New"),
+                Err(FolderCreateError::ParentNotFound),
+                "{parent}"
+            );
+        }
+        assert_eq!(everything(&fixture), before);
+    }
+
+    #[test]
+    fn a_symlinked_mount_is_resolved_once_and_written_through() {
+        let fixture = fixture();
+        let link = fixture._dir.path().join("mount-link");
+        std::os::unix::fs::symlink(&fixture.root, &link).unwrap();
+
+        let entry = create_folder(&link, "", "New", &fixture.registry).unwrap();
+
+        assert_eq!(entry.path, "New");
+        assert!(fixture.root.join("New").is_dir());
+    }
+
+    #[test]
+    fn a_parent_that_is_or_is_inside_a_vault_is_refused() {
+        let fixture = fixture();
+        write(&fixture.root.join("Work/Projects/a.md"));
+        fs::create_dir(fixture.root.join("Personal")).unwrap();
+        register(&fixture, "Work", fixture.root.join("Work"));
+        let before = everything(&fixture);
+
+        for parent in ["Work", "Work/Projects"] {
+            assert_eq!(
+                create(&fixture, parent, "New"),
+                Err(FolderCreateError::InsideVault),
+                "{parent}"
+            );
+        }
+        assert_eq!(everything(&fixture), before);
+        // Beside the Vault, and in a folder that only holds Vaults, is fine.
+        assert!(create(&fixture, "", "Another").is_ok());
+        assert!(create(&fixture, "Personal", "New").is_ok());
+    }
+
+    #[test]
+    fn a_mount_that_is_itself_a_vault_takes_no_new_folder() {
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Sub")).unwrap();
+        register(&fixture, "Mount", fixture.root.clone());
+
+        for parent in ["", "Sub"] {
+            assert_eq!(
+                create(&fixture, parent, "New"),
+                Err(FolderCreateError::InsideVault),
+                "{parent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_folder_cannot_land_on_a_vault_whose_folder_is_missing() {
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Gone")).unwrap();
+        register(&fixture, "Gone", fixture.root.join("Gone"));
+        fs::remove_dir(fixture.root.join("Gone")).unwrap();
+
+        assert_eq!(
+            create(&fixture, "", "Gone"),
+            Err(FolderCreateError::InsideVault)
+        );
+        assert!(!fixture.root.join("Gone").exists());
+    }
+
+    #[test]
+    fn a_missing_mount_is_its_own_refusal_and_is_not_created() {
+        let fixture = fixture();
+        let missing = fixture.root.join("absent");
+        for parent in ["", "anything"] {
+            assert_eq!(
+                create_folder(&missing, parent, "New", &fixture.registry),
+                Err(FolderCreateError::MountNotFound)
+            );
+        }
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn a_read_only_parent_is_not_writable() {
+        if unsafe { libc::geteuid() } == 0 {
+            // Root writes through a read-only mode, so this proves nothing.
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Locked")).unwrap();
+        for folder in [fixture.root.join("Locked"), fixture.root.clone()] {
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let results = [
+            create(&fixture, "", "New"),
+            create(&fixture, "Locked", "New"),
+        ];
+
+        for folder in [fixture.root.clone(), fixture.root.join("Locked")] {
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for result in results {
+            assert_eq!(result, Err(FolderCreateError::NotWritable));
+        }
+        assert!(!fixture.root.join("New").exists());
+        assert!(!fixture.root.join("Locked/New").exists());
+    }
+
+    #[test]
+    fn every_creation_refusal_has_its_own_stable_code() {
+        let codes = [
+            (FolderCreateError::InvalidName, "folder_name_invalid"),
+            (FolderCreateError::NameTaken, "folder_name_taken"),
+            (FolderCreateError::MountNotFound, "folder_mount_not_found"),
+            (FolderCreateError::ParentNotFound, "folder_parent_not_found"),
+            (FolderCreateError::OutsideRoot, "folder_outside_root"),
+            (FolderCreateError::InsideVault, "folder_inside_vault"),
+            (FolderCreateError::NotWritable, "folder_not_writable"),
+        ];
+        for (error, code) in codes {
+            assert_eq!(error.code(), code);
+            assert!(!error.message().contains("os error"));
+        }
     }
 
     #[test]

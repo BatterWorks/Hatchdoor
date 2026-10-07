@@ -1115,6 +1115,57 @@
   color: var(--hot);
 }
 
+/* "New folder" (#494): the last strip of the box, under the list. Closed it
+   is one quiet link; open it is a name field with the two actions. */
+.folder-picker .folder-picker-new {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.82rem;
+}
+
+.folder-picker .folder-picker-new-off {
+  color: var(--muted);
+}
+
+.folder-picker-new-open {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--hot);
+  font: inherit;
+  cursor: pointer;
+}
+
+.folder-picker-new-open:hover {
+  text-decoration: underline;
+}
+
+.folder-picker-new-label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--ink-soft);
+}
+
+.folder-picker-new-label strong {
+  overflow-wrap: anywhere;
+}
+
+.folder-picker-new-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.folder-picker .folder-picker-new-error {
+  margin: 0;
+  color: var(--err-fg);
+  line-height: 1.45;
+}
+
 .folder-picker .folder-picker-row-note {
   flex-basis: 100%;
   margin: 0;

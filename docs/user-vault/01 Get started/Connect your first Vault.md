@@ -23,7 +23,8 @@ A few things the list tells you:
 
 - **at least 10,000 notes** means Hatchdoor stopped counting early. Very large folders are cut short so the list opens quickly; the folder is still fine to pick.
 - **Already a Vault** marks a folder that is a Vault already. It cannot be picked twice. A folder inside a Vault, or one that contains a Vault, is refused when you create it, because two Vaults cannot share notes.
-- **No notes found yet** means the shared folder holds no Markdown files. Put your notes in it, then choose **Look again**. To start with an empty Vault and write your notes in Hatchdoor, pick a folder anyway.
+- **No notes found yet** means the shared folder holds no Markdown files. Put your notes in it, then choose **Look again**. To start with an empty Vault and write your notes in Hatchdoor, pick a folder anyway, or make one with **New folder**.
+- **New folder**, under the list, makes an empty folder in the folder you are looking at. See [[#Start with a new, empty folder]].
 - Hidden folders such as `.git` and `.obsidian` are never listed.
 
 If the Vault shows an error once it is added, the usual causes are:
@@ -35,6 +36,26 @@ If the Vault shows an error once it is added, the usual causes are:
 If you left `HOST_VAULT_PATH` out of `.env`, Hatchdoor sees a `vault` folder next to `compose.yaml`. It starts empty, and Hatchdoor never fills it with example notes, so a Vault made from it stays empty until you add Markdown files or write notes in Hatchdoor.
 
 An agent can add the Vault for you instead, with the `create_vault` MCP tool, once you have connected it in [[Connect your agent]].
+
+## Start with a new, empty folder
+
+You do not need a folder ready before you add a Vault. Under the **Folder** list, **New folder** makes one for you:
+
+1. Go to the folder the new one should sit in. To put it at the top, stay where the list opens.
+2. Choose **New folder**, type a name, and choose **Create folder**.
+3. The new folder appears in the list, already picked. Choose **Create Vault** to turn it into a Vault.
+
+This is handy when the shared folder holds several Vaults side by side, such as `/data/vault/Work` and `/data/vault/Journal`: each new Vault gets its own folder without leaving the browser.
+
+A few rules keep this safe:
+
+- The folder is made as soon as you choose **Create folder**. If you then cancel the form, the empty folder stays. Hatchdoor never deletes folders, so remove it yourself if you do not want it.
+- Hatchdoor only makes folders inside the shared folder, one at a time, and puts nothing in them.
+- The name cannot contain a slash, start with a dot, or start or end with a space. A name already in use is refused: pick the existing folder from the list instead.
+- **New folder** is not offered inside a folder that is already a Vault, because everything inside a Vault belongs to that Vault. A new Vault's folder has to sit outside every other Vault.
+- Only a signed-in person can do this, in the browser. An agent cannot make a folder this way, and typing a path that does not exist under **Type a path instead** is still refused.
+
+If Hatchdoor says it could not make a folder here, the shared folder is read-only or Hatchdoor is not allowed to write to it. Check that the line for the folder under `volumes:` in `compose.yaml` does not end in `:ro`, and see [[How to troubleshoot common problems#Permission denied reading or writing the Vault]] for folder permissions. If it says the folder is no longer there, something else moved or removed it: go back up the trail and try again.
 
 ## Add a folder Hatchdoor cannot see yet
 

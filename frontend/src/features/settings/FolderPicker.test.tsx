@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
@@ -64,16 +65,56 @@ const WORK = listing("Work", [
   folder("Projects", 902, {}, "Work"),
 ]);
 
-/** Answer each `GET /api/v1/folders` from `answers`, keyed by `path`. */
-function serve(answers: Record<string, FolderListing | Response>) {
-  mockedApiFetch.mockImplementation(async (input) => {
+type CreateBody = { parent: string; name: string };
+
+/** Answer each `GET /api/v1/folders` from `answers`, keyed by `path`, and
+ * each `POST` from `create`. */
+function serve(
+  answers: Record<string, FolderListing | Response>,
+  create?: (body: CreateBody) => Response | Promise<Response>,
+) {
+  mockedApiFetch.mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://hatchdoor.test");
     if (url.pathname !== "/api/v1/folders")
       throw new Error(`Unexpected API request: ${url}`);
+    if (init?.method === "POST") {
+      if (!create) throw new Error("Unexpected folder creation");
+      return create(JSON.parse(String(init.body)) as CreateBody);
+    }
     const answer = answers[url.searchParams.get("path") ?? ""];
     if (!answer) return json({ code: "folder_not_found" }, { status: 404 });
     return answer instanceof Response ? answer : json(answer);
   });
+}
+
+/** The answer `POST /api/v1/folders` gives for a folder it made. */
+const made = ({ parent, name }: CreateBody) =>
+  json(folder(name, 0, {}, parent), { status: 201 });
+
+const refusal = (status: number, code: string, message: string) => () =>
+  json({ code, message }, { status });
+
+/** The picker as its callers hold it: the picked path fed back as `value`. */
+function Held({ onPick }: { onPick?: (path: string) => void }) {
+  const [value, setValue] = useState("");
+  return (
+    <FolderPicker
+      value={value}
+      onPick={(path) => {
+        setValue(path);
+        onPick?.(path);
+      }}
+    />
+  );
+}
+
+/** Open "New folder", type `name` and confirm with the button. */
+async function makeFolder(name: string) {
+  fireEvent.click(await screen.findByRole("button", { name: /New folder/ }));
+  fireEvent.change(screen.getByLabelText(/Name of the new folder/), {
+    target: { value: name },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create folder" }));
 }
 
 afterEach(() => {
@@ -283,6 +324,233 @@ describe("FolderPicker", () => {
         "2 folders are not shown because their names cannot be read.",
       ),
     ).toBeInTheDocument();
+  });
+});
+
+describe("FolderPicker new folder (#494)", () => {
+  it("makes a folder at the mount, lists it in order, picks it and moves focus to it", async () => {
+    const create = vi.fn(made);
+    serve({ "": MOUNT }, create);
+    const onPick = vi.fn();
+    render(<Held onPick={onPick} />);
+
+    await makeFolder("  Journal  ");
+
+    const row = await screen.findByRole("button", { name: /^Journal/ });
+    expect(create).toHaveBeenCalledWith({ parent: "", name: "Journal" });
+    expect(row).toHaveAttribute("aria-pressed", "true");
+    expect(row).toHaveTextContent("no notes");
+    expect(row).toHaveFocus();
+    expect(onPick).toHaveBeenCalledWith("/data/vault/Journal");
+    expect(screen.getByText("/data/vault/Journal")).toBeInTheDocument();
+    const names = screen
+      .getAllByRole("listitem")
+      .map((item) => item.querySelector(".folder-picker-name")?.textContent);
+    expect(names).toEqual([
+      "Use vault",
+      "Archive",
+      "Journal",
+      "Recipes",
+      "Work",
+    ]);
+    // The prompt closes, ready for another.
+    expect(screen.queryByLabelText(/Name of the new folder/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /New folder/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("makes a folder inside the subfolder on screen", async () => {
+    const create = vi.fn(made);
+    serve({ "": MOUNT, Work: WORK }, create);
+    const onPick = vi.fn();
+    render(<Held onPick={onPick} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Work" }));
+    await screen.findByRole("button", { name: /^Projects/ });
+    await makeFolder("日本語 📓");
+
+    expect(
+      await screen.findByRole("button", { name: /^日本語 📓/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(create).toHaveBeenCalledWith({ parent: "Work", name: "日本語 📓" });
+    expect(onPick).toHaveBeenCalledWith("/data/vault/Work/日本語 📓");
+  });
+
+  it("is offered when the mount holds no notes, and when it holds no folders at all", async () => {
+    serve({ "": listing("", []) }, made);
+    const onPick = vi.fn();
+    render(<Held onPick={onPick} />);
+
+    await screen.findByText("No notes found yet");
+    expect(
+      screen.getByText(/pick a folder below or make a new one/),
+    ).toBeInTheDocument();
+    await makeFolder("First");
+
+    expect(
+      await screen.findByRole("button", { name: /^First/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(onPick).toHaveBeenCalledWith("/data/vault/First");
+  });
+
+  it("is not offered where the mount does not exist", async () => {
+    serve({ "": listing("", [], { root_found: false }) });
+    render(<FolderPicker value="" onPick={() => {}} />);
+
+    await screen.findByText("No notes found yet");
+    expect(screen.queryByRole("button", { name: /New folder/ })).toBeNull();
+  });
+
+  it("is replaced by a line naming the Vault inside a Vault and below it", async () => {
+    const kitchen = { vault_id: "v-1", name: "Kitchen" };
+    serve({
+      "": listing("", [
+        folder("Recipes", 86, { vault: kitchen, has_subfolders: true }),
+        folder("Work", 3),
+      ]),
+      Recipes: listing(
+        "Recipes",
+        [folder("Baking", 40, { has_subfolders: true }, "Recipes")],
+        { vault: kitchen },
+      ),
+      "Recipes/Baking": listing("Recipes/Baking", [
+        folder("Bread", 12, {}, "Recipes/Baking"),
+      ]),
+    });
+    render(<FolderPicker value="" onPick={() => {}} />);
+
+    expect(
+      await screen.findByRole("button", { name: /New folder/ }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Recipes" }));
+    await screen.findByRole("button", { name: /^Baking/ });
+    expect(screen.queryByRole("button", { name: /New folder/ })).toBeNull();
+    expect(
+      screen.getByText(/No new folder here: this folder belongs to the Vault/),
+    ).toHaveTextContent("Kitchen");
+
+    // One level further down the listing no longer names the Vault.
+    fireEvent.click(screen.getByRole("button", { name: "Open Baking" }));
+    await screen.findByRole("button", { name: /^Bread/ });
+    expect(screen.queryByRole("button", { name: /New folder/ })).toBeNull();
+    expect(screen.getByText(/No new folder here/)).toHaveTextContent("Kitchen");
+
+    // Back beside the Vault it is offered again.
+    fireEvent.click(screen.getByRole("button", { name: "vault" }));
+    expect(
+      await screen.findByRole("button", { name: /New folder/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("is not offered anywhere when the mount itself is a Vault", async () => {
+    serve({
+      "": listing("", [folder("Sub", 2, { has_subfolders: true })], {
+        vault: { vault_id: "v-9", name: "Everything" },
+      }),
+      Sub: listing("Sub", [folder("Deeper", 1, {}, "Sub")]),
+    });
+    render(<FolderPicker value="" onPick={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Sub" }));
+    await screen.findByRole("button", { name: /^Deeper/ });
+    expect(screen.queryByRole("button", { name: /New folder/ })).toBeNull();
+    expect(screen.getByText(/No new folder here/)).toHaveTextContent(
+      "Everything",
+    );
+  });
+
+  it("shows a refused name beside the field, keeps what was typed, and clears on the next keystroke", async () => {
+    serve(
+      { "": MOUNT },
+      refusal(
+        409,
+        "folder_name_taken",
+        "A folder with this name already exists.",
+      ),
+    );
+    const onPick = vi.fn();
+    render(<Held onPick={onPick} />);
+
+    await makeFolder("Work");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("A folder with this name already exists.");
+    expect(alert.querySelector("button")).toBeNull();
+    const name = screen.getByLabelText(/Name of the new folder/);
+    expect(name).toHaveValue("Work");
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(onPick).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+
+    fireEvent.change(name, { target: { value: "Work 2" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each([
+    ["folder_not_writable", 422],
+    ["folder_mount_not_found", 404],
+    ["folder_parent_not_found", 404],
+  ])(
+    "links to Help when the folder itself is the problem (%s)",
+    async (code, status) => {
+      serve(
+        { "": MOUNT },
+        refusal(status, code, "Hatchdoor could not make it."),
+      );
+      render(<Held />);
+
+      await makeFolder("Journal");
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Hatchdoor could not make it.");
+      expect(alert).not.toHaveTextContent("os error");
+      expect(
+        screen.getByRole("button", {
+          name: "How does this work? Making a new folder",
+        }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("does not ask the server for an empty name, and Cancel drops the prompt", async () => {
+    const create = vi.fn(made);
+    serve({ "": MOUNT }, create);
+    render(<Held />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /New folder/ }));
+    const name = screen.getByLabelText(/Name of the new folder/);
+    expect(name).toHaveFocus();
+    expect(
+      screen.getByRole("button", { name: "Create folder" }),
+    ).toBeDisabled();
+    fireEvent.change(name, { target: { value: "   " } });
+    fireEvent.keyDown(name, { key: "Enter" });
+    expect(create).not.toHaveBeenCalled();
+
+    fireEvent.change(name, { target: { value: "Half typed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText(/Name of the new folder/)).toBeNull();
+    const reopen = screen.getByRole("button", { name: /New folder/ });
+    expect(reopen).toHaveFocus();
+    fireEvent.click(reopen);
+    expect(screen.getByLabelText(/Name of the new folder/)).toHaveValue("");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("drops a half-typed name when the reader goes into another folder", async () => {
+    serve({ "": MOUNT, Work: WORK }, made);
+    render(<Held />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /New folder/ }));
+    fireEvent.change(screen.getByLabelText(/Name of the new folder/), {
+      target: { value: "For the mount" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open Work" }));
+    await screen.findByRole("button", { name: /^Projects/ });
+
+    expect(screen.queryByLabelText(/Name of the new folder/)).toBeNull();
   });
 });
 

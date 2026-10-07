@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ReactNode, Ref } from "react";
 
 import { CONTEXTUAL_HELP, ContextualHelpLink } from "../help";
 import type {
   FolderListing,
+  FolderListingEntry,
   FolderNoteCount,
   FolderVaultRef,
 } from "../../types";
 import {
+  createFolder,
   fetchFolderListing,
   mountFolderPath,
   noteCountLabel,
@@ -30,11 +32,184 @@ function mountIsEmpty(listing: FolderListing): boolean {
   );
 }
 
+/** The Vaults each folder met so far is rooted at, keyed by the folder's
+ * mount-relative path. A folder inside a Vault can only be reached through a
+ * listing that showed that Vault, so this is enough to know when the folder
+ * on screen belongs to one. */
+type VaultsSeen = Record<string, FolderVaultRef>;
+
+function vaultsIn(listing: FolderListing): VaultsSeen {
+  const seen: VaultsSeen = {};
+  if (listing.vault) seen[listing.path] = listing.vault;
+  for (const folder of listing.folders)
+    if (folder.vault) seen[folder.path] = folder.vault;
+  return seen;
+}
+
+/** The Vault the folder at `path` is, or sits inside. */
+function owningVault(seen: VaultsSeen, path: string): FolderVaultRef | null {
+  for (const [root, vault] of Object.entries(seen))
+    if (root === "" || path === root || path.startsWith(`${root}/`))
+      return vault;
+  return null;
+}
+
+/** The refusals that are about the server's folders rather than the name
+ * typed, so the reader needs the manual more than another try. */
+const NEEDS_HELP = new Set([
+  "folder_not_writable",
+  "folder_mount_not_found",
+  "folder_parent_not_found",
+]);
+
+/** The listing's own order, by code unit, so a new folder lands where the
+ * next listing will show it. */
+function withFolder(
+  listing: FolderListing,
+  folder: FolderListingEntry,
+): FolderListing {
+  const folders = [
+    ...listing.folders.filter((entry) => entry.path !== folder.path),
+    folder,
+  ].sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  );
+  return { ...listing, folders };
+}
+
+/** "New folder" under the list (#494, ADR-44): a name prompt that makes one
+ * empty folder in the folder on screen. Its buttons never submit, and Enter
+ * in the name is caught here, because the picker sits inside the Add a Vault
+ * form. */
+function NewFolder({
+  parentName,
+  onCreate,
+}: {
+  parentName: string;
+  onCreate: (
+    name: string,
+  ) => Promise<{ ok: true } | { ok: false; code?: string; message: string }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<{
+    code?: string;
+    message: string;
+  } | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+  const errorId = useId();
+
+  useEffect(() => {
+    if (!open && restoreFocus.current) {
+      restoreFocus.current = false;
+      trigger.current?.focus();
+    }
+  }, [open]);
+
+  const close = () => {
+    restoreFocus.current = true;
+    setOpen(false);
+    setName("");
+    setFailure(null);
+  };
+
+  const trimmed = name.trim();
+  const submit = async () => {
+    if (!trimmed || busy) return;
+    setBusy(true);
+    setFailure(null);
+    const result = await onCreate(trimmed);
+    setBusy(false);
+    if (result.ok) {
+      setOpen(false);
+      setName("");
+    } else {
+      setFailure(result);
+    }
+  };
+
+  if (!open) {
+    return (
+      <div className="folder-picker-new">
+        <button
+          ref={trigger}
+          type="button"
+          className="folder-picker-new-open"
+          onClick={() => setOpen(true)}
+        >
+          <span aria-hidden="true">+</span> New folder
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="folder-picker-new" role="group" aria-label="New folder">
+      <label className="folder-picker-new-label">
+        <span>
+          Name of the new folder in <strong>{parentName}</strong>
+        </span>
+        <input
+          className="settings-input"
+          value={name}
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={255}
+          aria-invalid={failure ? true : undefined}
+          aria-describedby={failure ? errorId : undefined}
+          onChange={(event) => {
+            setName(event.target.value);
+            setFailure(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            void submit();
+          }}
+        />
+      </label>
+      <div className="folder-picker-new-actions">
+        <button
+          type="button"
+          className="settings-btn settings-btn-hot"
+          disabled={!trimmed || busy}
+          onClick={() => void submit()}
+        >
+          {busy ? "Creating…" : "Create folder"}
+        </button>
+        <button
+          type="button"
+          className="settings-btn"
+          disabled={busy}
+          onClick={close}
+        >
+          Cancel
+        </button>
+      </div>
+      {failure ? (
+        <p id={errorId} className="folder-picker-new-error" role="alert">
+          {failure.message}
+          {failure.code && NEEDS_HELP.has(failure.code) ? (
+            <>
+              {" "}
+              <ContextualHelpLink to={CONTEXTUAL_HELP.newFolderRefused} />
+            </>
+          ) : null}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 /** One pickable folder: the whole row picks it, and a folder that is
  * already a Vault refuses the pick with a line naming that Vault. */
 function FolderRow({
   label,
   name,
+  path,
   markdown,
   vault,
   pressed,
@@ -46,6 +221,8 @@ function FolderRow({
 }: {
   label: string;
   name: string;
+  /** Mount-relative, so a folder just made can be found and focused. */
+  path: string;
   markdown: FolderNoteCount;
   vault: FolderVaultRef | null;
   pressed: boolean;
@@ -63,6 +240,7 @@ function FolderRow({
         className={
           rowClass ? `folder-picker-row ${rowClass}` : "folder-picker-row"
         }
+        data-folder-path={path}
         aria-pressed={pressed}
         aria-disabled={vault ? true : undefined}
         onClick={onPick}
@@ -103,9 +281,12 @@ export function FolderPicker({
   const [failure, setFailure] = useState<string | null>(null);
   const [blocked, setBlocked] = useState<string | null>(null);
   const [outsideOpen, setOutsideOpen] = useState(false);
+  const [vaultsSeen, setVaultsSeen] = useState<VaultsSeen>({});
   const request = useRef(0);
   const firstRow = useRef<HTMLButtonElement>(null);
   const moveFocus = useRef(false);
+  const list = useRef<HTMLUListElement>(null);
+  const created = useRef<string | null>(null);
 
   const loadLevel = useCallback(async (path: string) => {
     const id = ++request.current;
@@ -118,6 +299,7 @@ export function FolderPicker({
     if (result.ok) {
       setFailure(null);
       setListing(result.listing);
+      setVaultsSeen((seen) => ({ ...seen, ...vaultsIn(result.listing) }));
     } else {
       setFailure(result.message);
     }
@@ -133,6 +315,16 @@ export function FolderPicker({
     if (listing && moveFocus.current) {
       moveFocus.current = false;
       firstRow.current?.focus();
+    }
+    // A folder just made takes focus instead, which also scrolls it into
+    // view in a long list.
+    if (listing && created.current !== null) {
+      const path = created.current;
+      created.current = null;
+      for (const row of list.current?.querySelectorAll<HTMLElement>(
+        "[data-folder-path]",
+      ) ?? [])
+        if (row.dataset.folderPath === path) row.focus();
     }
   }, [listing]);
 
@@ -216,7 +408,7 @@ export function FolderPicker({
       <p>
         Or ask your agent to add it.
         {listing.root_found
-          ? " To start with an empty Vault, pick a folder below."
+          ? " To start with an empty Vault, pick a folder below or make a new one."
           : null}
       </p>
       <button
@@ -245,6 +437,23 @@ export function FolderPicker({
     }
     setBlocked(null);
     onPick(mountFolderPath(listing.root, relative));
+  };
+
+  const owner = owningVault(vaultsSeen, here);
+
+  const create = async (name: string) => {
+    const result = await createFolder(here, name);
+    if (!result.ok) return result;
+    const { folder } = result;
+    created.current = folder.path;
+    // The reader may have moved on while it was being made; the folder is
+    // still theirs, so it is picked either way.
+    setListing((current) =>
+      current && current.path === here ? withFolder(current, folder) : current,
+    );
+    setBlocked(null);
+    onPick(mountFolderPath(listing.root, folder.path));
+    return { ok: true as const };
   };
 
   return (
@@ -286,10 +495,11 @@ export function FolderPicker({
             );
           })}
         </nav>
-        <ul className="folder-picker-list" aria-label="Folders">
+        <ul ref={list} className="folder-picker-list" aria-label="Folders">
           <FolderRow
             label={`Use ${hereName}`}
             name={hereName}
+            path={here}
             markdown={listing.markdown}
             vault={listing.vault}
             pressed={value === herePath}
@@ -303,6 +513,7 @@ export function FolderPicker({
               key={folder.path}
               label={folder.name}
               name={folder.name}
+              path={folder.path}
               markdown={folder.markdown}
               vault={folder.vault}
               pressed={value === mountFolderPath(listing.root, folder.path)}
@@ -322,6 +533,16 @@ export function FolderPicker({
             </FolderRow>
           ))}
         </ul>
+        {owner ? (
+          <p className="folder-picker-new folder-picker-new-off">
+            No new folder here: this folder belongs to the Vault{" "}
+            <strong>{owner.name}</strong>.
+          </p>
+        ) : (
+          // Keyed by the folder on screen, so a half-typed name does not
+          // follow the reader into another folder.
+          <NewFolder key={here} parentName={hereName} onCreate={create} />
+        )}
       </div>
       {listing.skipped_invalid_names > 0 ? (
         <p className="folder-picker-status">
