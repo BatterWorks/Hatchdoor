@@ -915,8 +915,12 @@ packets.
 **Invariants:** the registry is the sole Hatchdoor-owned Vault-definition
 authority; immutable IDs are UUID v4 map keys; revision conflicts save nothing;
 names are unique case-insensitively; canonical Vault paths never overlap and
-disabled definitions continue reserving them; identity-bearing changes require
-a disabled definition plus explicit same-Vault confirmation; readable
+disabled definitions continue reserving them, and the refusal
+(`VaultDefinitionError::PathOverlap`) carries a `VaultPathOverlap` naming the
+colliding Vault, its enabled state, the `VaultPathRelation` and a count of any
+further colliding Vaults, never another Vault's folder (#495);
+identity-bearing changes require a disabled definition plus explicit
+same-Vault confirmation; readable
 non-writable directories remain valid; disconnect deletes no files or Git
 state; HTTPS credentials persist only in the private registry record and never
 appear in projections, debug output, errors, status, or repository URLs;
