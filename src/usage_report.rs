@@ -514,7 +514,7 @@ struct Activity {
 pub struct Build {
     /// The base version, such as `2.8.0`.
     pub version: String,
-    /// `dev` when the build carries a Git commit, else `stable`.
+    /// `stable` for a release, `dev` for every other build.
     pub channel: &'static str,
     /// `docker`, `podman` or `source`.
     pub image: &'static str,
@@ -528,7 +528,7 @@ impl Build {
         let version = crate::config::version_string();
         let base = crate::instance_state::base_version(&version);
         Self {
-            channel: if base == version { "stable" } else { "dev" },
+            channel: crate::config::build_channel(),
             version: base.to_string(),
             image: crate::config::build_image(),
             os: std::env::consts::OS,
@@ -1264,6 +1264,14 @@ mod tests {
             os: "linux",
             arch: "x86_64",
         }
+    }
+
+    #[test]
+    fn a_build_that_was_not_told_it_is_a_release_reports_dev() {
+        // This test binary is built with no `VERSION` build argument.
+        let build = Build::current();
+        assert_eq!(build.channel, "dev");
+        assert_eq!(build.version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

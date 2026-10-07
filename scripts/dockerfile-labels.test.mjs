@@ -61,6 +61,20 @@ test("the runtime image carries the labels that link it to the project", async (
   });
 });
 
+test("the stage that compiles the shipped binary is told the release version", async () => {
+  const dockerfile = await read("Dockerfile");
+  const builder = dockerfile
+    .split(/^FROM /m)
+    .find((stage) => /^\S+ AS rust-builder\n/.test(stage));
+  assert.ok(builder, "a `rust-builder` stage exists");
+  // Without both, every release would report itself as a development build.
+  assert.match(builder, /^ARG VERSION=""$/m);
+  assert.match(
+    builder,
+    /HATCHDOOR_RELEASE_VERSION=\$VERSION .*cargo build .*--bin hatchdoor/,
+  );
+});
+
 test("the version and revision labels come from build arguments declared in the runtime stage", async () => {
   const runtime = runtimeStage(await read("Dockerfile"));
   // An ARG declared in an earlier stage is out of scope here and would

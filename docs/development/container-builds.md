@@ -42,9 +42,9 @@ runtime image never depends on a mounted cache at runtime.
 | `CARGO_PROFILE_RELEASE_INCREMENTAL` | `false` | Opt into compiler reuse within changed release crates. |
 | `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` | `16` | Preserve Cargo's normal non-incremental release value when opting into incrementality. |
 | `CARGO_CACHE_NAMESPACE` | `hatchdoor` | Isolate persistent caches on a shared builder. |
-| `GIT_SHA` | Empty | The commit the image was built from. Compiled into the binary as build provenance and written to the `org.opencontainers.image.revision` label. |
+| `GIT_SHA` | Empty | The commit the image was built from. Written to the `org.opencontainers.image.revision` label and compiled into the binary, where a build that is not a release shows it in its version, as `2.8.0 (dev abc123)`. |
 | `HATCHDOOR_IMAGE` | Empty | How the image was built, `docker` or `podman`. Compiled into the binary, and reported as `image` by the opt-in usage report. Any other value, or none, reports `source`. |
-| `VERSION` | Empty | The release version, such as `2.8.0`, written to the `org.opencontainers.image.version` label. It does not change the version the binary reports, which comes from `Cargo.toml`. |
+| `VERSION` | Empty | The release version, such as `2.8.0`, written to the `org.opencontainers.image.version` label. It also marks the build as a release: when it equals the version in `Cargo.toml`, the binary reports that plain version and the opt-in usage report says `channel: stable`. Without it, or with any other value, the build is a development build and reports `dev`. Pass it only for a release: a nightly or test image that passes the current version would report itself as that release. The version number itself always comes from `Cargo.toml`. |
 
 ## Image labels
 

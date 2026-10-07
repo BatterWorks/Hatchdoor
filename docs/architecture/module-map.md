@@ -1269,7 +1269,9 @@ report.
 on every reconcile and every tick), `ureq` as already compiled in (ADR-39),
 the collector endpoint (the maintainer's infrastructure, set up outside this
 repository), Instance state (`InstanceStateStore`, `base_version`),
-`config::{version_string, build_image}`, the Vault collection registry (which
+`config::{version_string, build_channel, build_image}` (a build is a release,
+and its channel `stable`, only when the `VERSION` build argument names the
+crate's own version, #504), the Vault collection registry (which
 Vaults are enabled and their Git mode), the cache's
 `SqliteCache::snapshot_note_count` (one row count per enabled Vault, never
 its notes), model setup (the chosen model), and `getrandom` for the install
@@ -1278,7 +1280,9 @@ ID.
 **Coordination paths:** `src/lib.rs`, `src/app_state.rs`, `src/server.rs`,
 `src/runtime_config.rs` (the setting's default), `src/instance_state.rs`
 (`remove_section`), `src/handlers/settings.rs`, `src/mcp/adapter.rs`,
-`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument),
+`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument, and
+`VERSION`, compiled in as `HATCHDOOR_RELEASE_VERSION`, which marks a release,
+#504),
 `.env.example`, the frontend Settings page and its `settings.css`,
 `frontend/src/features/help/contextualLinks.ts`,
 `docs/design/design-system.html` (the report block and its last-report
