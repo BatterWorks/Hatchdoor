@@ -536,6 +536,52 @@ mod tests {
             .expect("create the Vault");
     }
 
+    /// #495 changed the overlap refusal's words and nothing else: the code,
+    /// the `409` and the `retryable` flag are what a client branches on, and
+    /// the message names the colliding Vault without giving away its folder.
+    #[tokio::test]
+    async fn an_overlapping_folder_is_refused_with_409_and_names_the_vault() {
+        let (state, _worker, directory) = test_state();
+        let root = directory.path().join("vaults");
+        let existing = root.join("healthy");
+        std::fs::create_dir_all(&existing).expect("vault dir");
+        create_local_vault(&state, "Healthy", existing).await;
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 1,
+                name: "Everything".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: root },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("refusal body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("refusal JSON");
+        assert_eq!(body["code"], "vault_path_overlap");
+        assert_eq!(body["retryable"], false);
+        assert!(body.get("vault_id").is_none());
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("contains the Vault \"Healthy\""),
+            "{message}"
+        );
+        assert!(
+            !message.contains(directory.path().to_str().expect("UTF-8 temp path")),
+            "{message}"
+        );
+        assert_eq!(listed_vaults(&state).await.len(), 1);
+    }
+
     async fn listed_vaults(state: &AppState) -> Vec<serde_json::Value> {
         let response = list_vaults_handler(State(state.clone())).await;
         assert_eq!(response.status(), StatusCode::OK);

@@ -561,6 +561,27 @@ impl VaultRegistrySnapshot {
     }
 }
 
+/// How a refused Vault folder relates to the registered Vault it collides
+/// with, read from the refused folder's side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultPathRelation {
+    Same,
+    Inside,
+    Contains,
+}
+
+/// The registered Vault a refused folder collides with. It carries that
+/// Vault's name and never its folder: the refusal's message reaches every
+/// surface, and another Vault's path is not part of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultPathOverlap {
+    name: String,
+    enabled: bool,
+    relation: VaultPathRelation,
+    /// Further colliding Vaults beyond the named one.
+    others: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultDefinitionError {
     InvalidName,
@@ -568,7 +589,7 @@ pub enum VaultDefinitionError {
     InvalidArchiveFolder,
     InvalidCommitIdentity,
     DuplicateName,
-    PathOverlap,
+    PathOverlap(VaultPathOverlap),
     VaultNotFound,
     IdentityChangeRequiresDisabled,
     IdentityChangeRequiresConfirmation,
@@ -591,9 +612,34 @@ impl fmt::Display for VaultDefinitionError {
             Self::DuplicateName => {
                 formatter.write_str("Vault name is already used by another definition")
             }
-            Self::PathOverlap => formatter.write_str(
-                "Vault path overlaps another connected Vault, including disabled definitions",
-            ),
+            Self::PathOverlap(overlap) => {
+                let vault = if overlap.enabled {
+                    "Vault"
+                } else {
+                    "disabled Vault"
+                };
+                let (relation, remedy) = match overlap.relation {
+                    VaultPathRelation::Same => ("is already", "choose another folder"),
+                    VaultPathRelation::Inside => ("is inside", "choose a folder outside it"),
+                    VaultPathRelation::Contains => {
+                        ("contains", "choose a folder with no Vault in it")
+                    }
+                };
+                write!(
+                    formatter,
+                    "This folder {relation} the {vault} \"{}\"",
+                    overlap.name
+                )?;
+                match overlap.others {
+                    0 => {}
+                    1 => formatter.write_str(" and 1 other Vault")?,
+                    others => write!(formatter, " and {others} other Vaults")?,
+                }
+                write!(
+                    formatter,
+                    ". Two Vaults cannot share notes, so {remedy}."
+                )
+            }
             Self::VaultNotFound => formatter.write_str("Vault definition was not found"),
             Self::IdentityChangeRequiresDisabled => formatter.write_str(
                 "Vault source, repository, branch, subdirectory, or location may change only while disabled",
@@ -758,15 +804,7 @@ impl VaultRegistryStore {
             }
         };
         let vault_path = canonical_or_normalized(&self.source_vault_path(vault_id, &source));
-        if current.vaults.iter().any(|(existing_id, record)| {
-            let existing =
-                canonical_or_normalized(&self.source_vault_path(*existing_id, &record.source));
-            paths_overlap(&vault_path, &existing)
-        }) {
-            return Err(VaultRegistryError::InvalidDefinition(
-                VaultDefinitionError::PathOverlap,
-            ));
-        }
+        self.ensure_no_path_overlap(&current.vaults, vault_id, &vault_path)?;
         let exclude_patterns = normalize_exclude_patterns(definition.exclude_patterns)?;
         let mut vaults = current.vaults;
         let https_credentials = normalize_credentials(&source, definition.https_credentials)?;
@@ -785,6 +823,48 @@ impl VaultRegistryStore {
             },
         );
         self.commit(expected_revision, vaults)
+    }
+
+    /// Refuse `vault_path` when it equals, sits inside, or contains the folder
+    /// of any registered Vault other than `vault_id` itself. Of several
+    /// colliding Vaults the refusal names the first by name, so one collection
+    /// always produces the same sentence, and counts the rest.
+    fn ensure_no_path_overlap(
+        &self,
+        vaults: &BTreeMap<VaultId, VaultRecord>,
+        vault_id: VaultId,
+        vault_path: &Path,
+    ) -> Result<(), VaultRegistryError> {
+        let mut colliding = vaults
+            .iter()
+            .filter(|(other_id, _)| **other_id != vault_id)
+            .filter_map(|(other_id, record)| {
+                let other_path =
+                    canonical_or_normalized(&self.source_vault_path(*other_id, &record.source));
+                let relation = if vault_path == other_path {
+                    VaultPathRelation::Same
+                } else if vault_path.starts_with(&other_path) {
+                    VaultPathRelation::Inside
+                } else if other_path.starts_with(vault_path) {
+                    VaultPathRelation::Contains
+                } else {
+                    return None;
+                };
+                Some((record, relation))
+            })
+            .collect::<Vec<_>>();
+        colliding.sort_by_key(|(record, _)| (vault_name_key(&record.name), record.name.clone()));
+        let Some((record, relation)) = colliding.first() else {
+            return Ok(());
+        };
+        Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::PathOverlap(VaultPathOverlap {
+                name: record.name.clone(),
+                enabled: record.enabled,
+                relation: *relation,
+                others: colliding.len() - 1,
+            }),
+        ))
     }
 
     pub fn edit(
@@ -829,18 +909,7 @@ impl VaultRegistryStore {
             ));
         }
         let vault_path = canonical_or_normalized(&self.source_vault_path(vault_id, &source));
-        if current.vaults.iter().any(|(other_id, record)| {
-            if *other_id == vault_id {
-                return false;
-            }
-            let existing_path =
-                canonical_or_normalized(&self.source_vault_path(*other_id, &record.source));
-            paths_overlap(&vault_path, &existing_path)
-        }) {
-            return Err(VaultRegistryError::InvalidDefinition(
-                VaultDefinitionError::PathOverlap,
-            ));
-        }
+        self.ensure_no_path_overlap(&current.vaults, vault_id, &vault_path)?;
         let https_credentials = match edit.https_credentials {
             HttpsCredentialUpdate::Keep
                 if source_is_remote_backed(&source) && !identity_changed =>

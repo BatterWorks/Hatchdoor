@@ -40,6 +40,7 @@
 - Polling `/ready` while Hatchdoor starts no longer fills the log with errors. Every `503 not ready` answer was written as an `ERROR` line, one per poll, so an install that waits on `/ready` as the deploy guide tells it to buried the lines that mattered under a few hundred of these. A not-ready answer from `/ready` is now logged like any other finished request, at `DEBUG`, during startup and whenever else the instance is not ready. `/ready` answers exactly as before, and a 5xx from any other address is still logged at `ERROR`. The agent deploy guide no longer tells the installing agent to expect those lines. [#472]
 - Opening Hatchdoor in a browser no longer contacts Google, and the app now shows the fonts it was designed with. Every page load asked Google for four font families, which gave Google the address of each visitor, and since 2.0.0 Google refused the request because the link was malformed, so the app fell back to whatever fonts the device had. The four families (Bricolage Grotesque, Newsreader, Inter Tight and JetBrains Mono) now ship inside the app, about 1 MB in all, of which a browser downloads only the scripts a page uses. Headings, body text, the reading view and code blocks therefore look different after this upgrade, and they look the same offline. [#475]
 - The bundled fonts now draw the app's heaviest text themselves. The bracket logo mark and the small label on the startup screen, the section numbers in Settings and bold italic words in notes ask for a weight above what the fonts were first allowed to use, and the browser would have thickened a lighter weight instead, which looks blunt. The font files already hold those weights, so nothing more is downloaded. [#491]
+- Hatchdoor now says which Vault is in the way when it refuses a folder for a new or edited Vault. The old message, "Vault path overlaps another connected Vault, including disabled definitions", named nothing, so someone who typed the top of their notes folder into **Add a Vault** could read it as "this folder can never be a Vault". The refusal now names the Vault and says how the two folders relate: the folder is already that Vault, is inside it, or contains it, as in `This folder contains the Vault "Notes". Two Vaults cannot share notes, so choose a folder with no Vault in it.` A disabled Vault is called a disabled Vault, since those are easy to forget, and when the folder contains several Vaults the message names one and counts the others. Agents get the same sentence from `create_vault` and `edit_vault`. The message never includes another Vault's folder path, and the `vault_path_overlap` code, the `409` status and the cases that are refused are unchanged. [#495]
 
 [#417]: https://github.com/BatterWorks/Hatchdoor/issues/417
 [#418]: https://github.com/BatterWorks/Hatchdoor/issues/418
@@ -72,6 +73,7 @@
 [#485]: https://github.com/BatterWorks/Hatchdoor/issues/485
 [#491]: https://github.com/BatterWorks/Hatchdoor/issues/491
 [#494]: https://github.com/BatterWorks/Hatchdoor/issues/494
+[#495]: https://github.com/BatterWorks/Hatchdoor/issues/495
 
 ## v2.7.0 - 2026-10-02
 

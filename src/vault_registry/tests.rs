@@ -174,6 +174,162 @@ fn vault_name_uniqueness_handles_case_mappings_that_expand() {
     );
 }
 
+/// The refusal's own words for a new Vault at `path`, beside the Vaults the
+/// store already holds.
+fn overlap_refusal_on_add(store: &VaultRegistryStore, revision: u64, path: PathBuf) -> String {
+    let error = store
+        .add(revision, local_definition("Newcomer", path, true))
+        .expect_err("overlapping path accepted");
+    assert!(matches!(
+        error,
+        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap(_))
+    ));
+    error.to_string()
+}
+
+#[test]
+fn an_add_refused_for_overlap_names_the_vault_and_how_the_folders_relate() {
+    let directory = tempdir().expect("temporary directory");
+    let root = directory.path().join("vaults");
+    let existing = root.join("notes");
+    let inside = existing.join("deeper");
+    std::fs::create_dir_all(&inside).expect("create Vault paths");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    store
+        .add(0, local_definition("Field Notes", existing.clone(), true))
+        .expect("add the existing Vault");
+
+    let same = overlap_refusal_on_add(&store, 1, existing);
+    let nested = overlap_refusal_on_add(&store, 1, inside);
+    let containing = overlap_refusal_on_add(&store, 1, root);
+
+    assert!(
+        same.contains("is already the Vault \"Field Notes\""),
+        "{same}"
+    );
+    assert!(
+        nested.contains("is inside the Vault \"Field Notes\""),
+        "{nested}"
+    );
+    assert!(
+        containing.contains("contains the Vault \"Field Notes\""),
+        "{containing}"
+    );
+    // Another Vault's folder is the operator's own input, but the message
+    // reaches every caller of the refusal, so it carries the name alone.
+    for message in [&same, &nested, &containing] {
+        assert!(
+            !message.contains(directory.path().to_str().expect("UTF-8 temp path")),
+            "{message}"
+        );
+        assert!(!message.contains("disabled"), "{message}");
+        assert!(!message.contains("other Vault"), "{message}");
+    }
+}
+
+#[test]
+fn an_edit_refused_for_overlap_names_the_vault_and_how_the_folders_relate() {
+    let directory = tempdir().expect("temporary directory");
+    let root = directory.path().join("vaults");
+    let existing = root.join("notes");
+    let inside = existing.join("deeper");
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir_all(&inside).expect("create Vault paths");
+    std::fs::create_dir_all(&elsewhere).expect("create the moving Vault's folder");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    store
+        .add(0, local_definition("Field Notes", existing.clone(), true))
+        .expect("add the existing Vault");
+    let committed = store
+        .add(1, local_definition("Moving", elsewhere, false))
+        .expect("add the Vault that will move");
+    let moving_id = committed
+        .definitions()
+        .find(|definition| definition.name() == "Moving")
+        .expect("moving Vault")
+        .vault_id();
+    let refusal = |path: PathBuf| {
+        let error = store
+            .edit(2, moving_id, local_edit("Moving", path, true))
+            .expect_err("overlapping path accepted");
+        assert!(matches!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap(_))
+        ));
+        error.to_string()
+    };
+
+    let same = refusal(existing);
+    let nested = refusal(inside);
+    let containing = refusal(root);
+
+    assert!(
+        same.contains("is already the Vault \"Field Notes\""),
+        "{same}"
+    );
+    assert!(
+        nested.contains("is inside the Vault \"Field Notes\""),
+        "{nested}"
+    );
+    assert!(
+        containing.contains("contains the Vault \"Field Notes\""),
+        "{containing}"
+    );
+    // The Vault being edited never collides with its own folder.
+    for message in [&same, &nested, &containing] {
+        assert!(!message.contains("Moving"), "{message}");
+        assert!(!message.contains("other Vault"), "{message}");
+    }
+}
+
+#[test]
+fn an_overlap_refusal_marks_a_disabled_vault_as_disabled() {
+    let directory = tempdir().expect("temporary directory");
+    let parent = directory.path().join("notes");
+    let nested = parent.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested Vault paths");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    store
+        .add(0, local_definition("Paused", parent, false))
+        .expect("add disabled Vault");
+
+    let message = overlap_refusal_on_add(&store, 1, nested);
+
+    assert!(
+        message.contains("is inside the disabled Vault \"Paused\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_overlap_refusal_names_one_vault_and_counts_the_others() {
+    let directory = tempdir().expect("temporary directory");
+    let root = directory.path().join("vaults");
+    for name in ["alpha", "beta", "gamma"] {
+        std::fs::create_dir_all(root.join(name)).expect("create Vault folder");
+    }
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    store
+        .add(0, local_definition("Beta", root.join("beta"), true))
+        .expect("add Beta");
+    store
+        .add(1, local_definition("alpha", root.join("alpha"), true))
+        .expect("add alpha");
+
+    let two = overlap_refusal_on_add(&store, 2, root.clone());
+    store
+        .add(2, local_definition("Gamma", root.join("gamma"), true))
+        .expect("add Gamma");
+    let three = overlap_refusal_on_add(&store, 3, root);
+
+    // Named by name order, not by the random Vault ID the registry keys on,
+    // so the same collection always produces the same sentence.
+    assert!(two.contains("contains the Vault \"alpha\""), "{two}");
+    assert!(two.contains("and 1 other Vault."), "{two}");
+    assert!(three.contains("contains the Vault \"alpha\""), "{three}");
+    assert!(three.contains("and 2 other Vaults."), "{three}");
+}
+
 #[test]
 fn disabled_definitions_continue_reserving_their_canonical_paths() {
     let directory = tempdir().expect("temporary directory");
@@ -189,10 +345,10 @@ fn disabled_definitions_continue_reserving_their_canonical_paths() {
         .add(1, local_definition("Nested", nested, true))
         .expect_err("nested path accepted");
 
-    assert_eq!(
+    assert!(matches!(
         error,
-        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
-    );
+        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap(_))
+    ));
     let VaultRegistryState::Ready(snapshot) = store.load().expect("reload registry") else {
         panic!("valid registry entered recovery");
     };
@@ -584,10 +740,10 @@ fn existing_git_symlink_subdirectory_cannot_bypass_canonical_overlap_validation(
         .add(1, local_definition("Same files", actual, true))
         .expect_err("symlink alias bypassed path overlap");
 
-    assert_eq!(
+    assert!(matches!(
         error,
-        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
-    );
+        VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap(_))
+    ));
 }
 
 #[test]

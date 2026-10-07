@@ -22,7 +22,7 @@ Hatchdoor adds the Vault and starts indexing it, which means reading every note 
 A few things the list tells you:
 
 - **at least 10,000 notes** means Hatchdoor stopped counting early. Very large folders are cut short so the list opens quickly; the folder is still fine to pick.
-- **Already a Vault** marks a folder that is a Vault already. It cannot be picked twice. A folder inside a Vault, or one that contains a Vault, is refused when you create it, because two Vaults cannot share notes.
+- **Already a Vault** marks a folder that is a Vault already. It cannot be picked twice. A folder inside a Vault, or one that contains a Vault, is refused when you create it, because two Vaults cannot share notes. The refusal names the Vault in the way, for example `This folder contains the Vault "Notes"`, so you know which one to pick a folder beside. It says so when that Vault is disabled, because a disabled Vault still keeps its folder.
 - **No notes found yet** means the shared folder holds no Markdown files. Put your notes in it, then choose **Look again**. To start with an empty Vault and write your notes in Hatchdoor, pick a folder anyway, or make one with **New folder**.
 - **New folder**, under the list, makes an empty folder in the folder you are looking at. See [[#Start with a new, empty folder]].
 - Hidden folders such as `.git` and `.obsidian` are never listed.

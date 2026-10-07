@@ -15,7 +15,7 @@ Open **Settings** → **Add a Vault**. The same form adds every Vault, first or 
 - **A folder on this server** for a plain folder, or a folder you already keep in Git yourself. Pick it from the list, or make an empty one there with **New folder**, as in [[Connect your first Vault]].
 - **A managed Git checkout** for a Git repository Hatchdoor should copy down and keep in sync. [[How to set up a Git-backed Vault]] walks through every field.
 
-Two Vaults cannot share notes, so a folder inside an existing Vault, or one containing one, is refused. A Vault also cannot overlap Hatchdoor's own data folders: the one holding `vaults.json` (`/data/state` in the container), the cache folder, or the folder of the settings file. Hatchdoor refuses such a Vault with `400 invalid_vault_definition`, whether you are creating, editing or resuming it. Managed Git checkouts are the exception, since Hatchdoor itself places them under the state folder.
+Two Vaults cannot share notes, so a folder that is already a Vault, sits inside one, or contains one is refused with `409 vault_path_overlap`. The message names the Vault in the way and how the folders relate, such as `This folder is inside the disabled Vault "Archive"`. A disabled Vault still keeps its folder. A Vault also cannot overlap Hatchdoor's own data folders: the one holding `vaults.json` (`/data/state` in the container), the cache folder, or the folder of the settings file. Hatchdoor refuses such a Vault with `400 invalid_vault_definition`, whether you are creating, editing or resuming it. Managed Git checkouts are the exception, since Hatchdoor itself places them under the state folder.
 
 > [!note]
 > A public demo instance (`HATCHDOOR_DEMO_MODE=true`) has no Settings screen, so it has no **Add a Vault** either.

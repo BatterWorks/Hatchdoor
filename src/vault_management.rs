@@ -348,7 +348,7 @@ fn definition_error(error: VaultDefinitionError, vault_id: Option<VaultId>) -> V
         // malformed input — the same request would succeed against a
         // different existing registry state.
         VaultDefinitionError::DuplicateName => "duplicate_vault_name",
-        VaultDefinitionError::PathOverlap => "vault_path_overlap",
+        VaultDefinitionError::PathOverlap(_) => "vault_path_overlap",
         VaultDefinitionError::IdentityChangeRequiresDisabled => "identity_change_requires_disabled",
         VaultDefinitionError::IdentityChangeRequiresConfirmation => {
             "identity_change_requires_confirmation"
