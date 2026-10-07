@@ -5329,6 +5329,10 @@ packet scope:
   default target produces the rootless runtime image; `verification` runs the
   default-feature locked Rust suite. BuildKit Cargo cache mounts and optional
   Cargo build controls are documented in `docs/development/container-builds.md`.
+  The `runtime` stage labels the image with its repository, licence, version
+  and commit, plus the MCP registry server name (#485);
+  `scripts/dockerfile-labels.test.mjs` keeps the labels in step with
+  `Cargo.toml`.
   Consumers are local Docker builders and external CI; no provider-specific
   configuration belongs in this contract. `docker-compose.yml` sets
   `stop_grace_period` above the Git connect plus transfer bounds in

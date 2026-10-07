@@ -42,7 +42,21 @@ runtime image never depends on a mounted cache at runtime.
 | `CARGO_PROFILE_RELEASE_INCREMENTAL` | `false` | Opt into compiler reuse within changed release crates. |
 | `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` | `16` | Preserve Cargo's normal non-incremental release value when opting into incrementality. |
 | `CARGO_CACHE_NAMESPACE` | `hatchdoor` | Isolate persistent caches on a shared builder. |
-| `GIT_SHA` | Empty | Existing application build provenance value. |
+| `GIT_SHA` | Empty | The commit the image was built from. Compiled into the binary as build provenance and written to the `org.opencontainers.image.revision` label. |
+| `VERSION` | Empty | The release version, such as `2.8.0`, written to the `org.opencontainers.image.version` label. It does not change the version the binary reports, which comes from `Cargo.toml`. |
+
+## Image labels
+
+The `runtime` stage labels every image, whatever builds it. Six [OCI labels](https://github.com/opencontainers/image-spec/blob/main/annotations.md) are fixed in the Dockerfile: `title`, `description`, `licenses`, `source`, `url` and `documentation` under `org.opencontainers.image.`. Update notifiers, scanners and Renovate read `source` to find the repository behind `battermanz/hatchdoor`. `io.modelcontextprotocol.server.name` is the name the [MCP registry](https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/package-types.mdx) compares with a `server.json` to prove who owns the image, so the two must change together.
+
+`version` and `revision` come from the `VERSION` and `GIT_SHA` build arguments and are empty strings when a build passes neither:
+
+```sh
+docker build --build-arg VERSION=2.8.0 --build-arg GIT_SHA="$(git rev-parse HEAD)" -t hatchdoor:local .
+docker inspect hatchdoor:local --format '{{json .Config.Labels}}'
+```
+
+`title`, `description`, `licenses` and `source` repeat `Cargo.toml`. `node --test scripts/dockerfile-labels.test.mjs` fails when they drift.
 
 ### Resource-limited builders
 

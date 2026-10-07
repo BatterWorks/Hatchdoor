@@ -178,6 +178,7 @@ The build machines, the internal registry and the servers that run releases are 
 `images` must:
 
 - Build and push four tags: `<version>` and `latest` from a Docker BuildKit build, and `podman-<version>` and `podman-latest` from a Podman build, each for amd64 and arm64. The two pairs are separate builds, not copies of each other.
+- Pass every build `--build-arg VERSION=<version>` and `--build-arg GIT_SHA=<the tagged commit>`. The Dockerfile writes them to the `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels, which are empty without them.
 - Copy them to Docker Hub from the fixed version tags, never from a moving tag such as `latest`.
 - Skip a tag that already points at the image it would push, and refuse if a different image already sits under the version. A published version is never overwritten.
 
