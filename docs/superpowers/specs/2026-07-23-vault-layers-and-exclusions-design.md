@@ -1,6 +1,6 @@
 # Vault Layers and Noise Exclusions — Design
 
-Issue: [#22 — configurable vault file and directory exclusions](https://github.com/BattermanZ/Hatchdoor/issues/22)
+Issue: [#22 — configurable vault file and directory exclusions](https://github.com/BatterWorks/Hatchdoor/issues/22)
 Date: 2026-07-23
 Status: Approved, pending implementation plan
 
