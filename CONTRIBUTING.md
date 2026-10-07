@@ -22,6 +22,9 @@ just check
 It runs these, stopping at the first failure:
 
 ```bash
+node scripts/check-module-map.mjs
+node scripts/check-docs-freshness.mjs --validate-table
+node --test scripts/*.test.mjs
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
@@ -133,6 +136,9 @@ Before implementation:
 
 1. Find the relevant boundary in
    [`docs/architecture/module-map.md`](docs/architecture/module-map.md).
+   `node scripts/check-module-map.mjs --owner <path>...` prints the sections
+   that own the given files, so the map need not be read whole. A path no
+   module owns falls under the map's `## Auxiliary repository paths`.
 2. Read the applicable records in
    [`docs/adr/`](docs/adr/README.md), including any linked record containing the
    full decision.
@@ -163,7 +169,8 @@ shortcuts. A task may change one when its work packet states the precise
 integration required.
 
 When adding, moving, deleting, or reclassifying production source files, update
-the module map and verify its structural coverage:
+the module map and verify its structural coverage. `just check` runs this and
+the two test commands below; each is listed for a quick run on its own:
 
 ```bash
 node scripts/check-module-map.mjs
@@ -185,6 +192,10 @@ When changing the image labels in the `Dockerfile`, or the `description`, `licen
 ```bash
 node --test scripts/dockerfile-labels.test.mjs
 ```
+
+## Review standards
+
+[`CODING_STANDARDS.md`](CODING_STANDARDS.md) holds the rules a reviewer applies to a finished diff: the judgement calls no check can make. Anything a machine can enforce belongs in `just check` instead.
 
 ## Architecture decisions
 
