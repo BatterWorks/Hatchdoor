@@ -8,6 +8,7 @@
 
 import type {
   FolderListing,
+  FolderListingEntry,
   FolderNoteCount,
   VaultSource,
   VaultSummary,
@@ -121,6 +122,37 @@ export async function fetchFolderListing(
       message: typed.message ?? "Could not list the folders Hatchdoor can see.",
     };
   return { ok: true, listing: typed as FolderListing };
+}
+
+/** A folder Hatchdoor refused to make: the server's stable `code` and its
+ * plain message. */
+export type CreateFolderRefusal = { ok: false; code?: string; message: string };
+
+export type CreateFolderResult =
+  { ok: true; folder: FolderListingEntry } | CreateFolderRefusal;
+
+/** `POST /api/v1/folders` (#494, ADR-44): make one new, empty folder called
+ * `name` in the folder at `parent`, `""` for the mount itself. */
+export async function createFolder(
+  parent: string,
+  name: string,
+): Promise<CreateFolderResult> {
+  const { ok, payload } = await requestJson("/api/v1/folders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent, name }),
+  });
+  const typed = payload as Partial<FolderListingEntry> & {
+    code?: string;
+    message?: string;
+  };
+  if (!ok || typeof typed.path !== "string" || typeof typed.name !== "string")
+    return {
+      ok: false,
+      code: typed.code,
+      message: typed.message ?? "Could not make the folder.",
+    };
+  return { ok: true, folder: typed as FolderListingEntry };
 }
 
 /** The absolute folder path a picked folder is created from: the mount's

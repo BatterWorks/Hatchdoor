@@ -52,6 +52,13 @@ export const CONTEXTUAL_HELP = {
     heading: "add-a-folder-hatchdoor-cannot-see-yet",
     topic: "Adding a folder Hatchdoor cannot see",
   },
+  /** The folder picker's "New folder": a folder Hatchdoor could not make
+   * (#494). */
+  newFolderRefused: {
+    page: "get-started/connect-your-first-vault",
+    heading: "start-with-a-new-empty-folder",
+    topic: "Making a new folder",
+  },
   /** The workspace could not load the Vault list. */
   vaultsUnavailable: {
     page: TROUBLESHOOTING,

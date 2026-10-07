@@ -919,6 +919,7 @@
   .whats-new-demo .wn-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--rule); }
   /* §36 folder picker */
   .folder-picker-demo { width: min(470px, 100%); display: grid; gap: var(--space-2); color: var(--ink); }
+  .folder-picker-demo + .folder-picker-demo { margin-top: var(--space-5); }
   .folder-picker-demo .fpd-box { border: 1px solid var(--rule-strong); background: var(--paper); }
   .folder-picker-demo .fpd-crumbs { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 0.76rem; }
   .folder-picker-demo .fpd-crumbs a { color: var(--hot); }
@@ -936,6 +937,15 @@
   .folder-picker-demo .fpd-note { flex-basis: 100%; padding: 0 var(--space-3) var(--space-2); font-size: 0.8rem; color: var(--warn-fg); }
   .folder-picker-demo .fpd-picked { margin: 0; font-size: 0.82rem; }
   .folder-picker-demo code { font-family: var(--font-mono); font-size: 0.76rem; }
+  .folder-picker-demo .fpd-new { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--rule); font-size: 0.82rem; }
+  .folder-picker-demo .fpd-new.is-off { display: block; color: var(--muted); }
+  .folder-picker-demo .fpd-new-open { color: var(--hot); }
+  .folder-picker-demo .fpd-new-label { color: var(--ink-soft); }
+  .folder-picker-demo .fpd-new-input { padding: var(--space-2) var(--space-2); border: 1px solid var(--rule-strong); background: var(--paper); font-family: var(--font-mono); }
+  .folder-picker-demo .fpd-new-actions { display: flex; gap: var(--space-2); }
+  .folder-picker-demo .fpd-btn { padding: var(--space-2) var(--space-3); border: 1px solid var(--rule-strong); font-family: var(--font-display); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; }
+  .folder-picker-demo .fpd-btn.is-hot { background: var(--hot); border-color: var(--hot); color: var(--bg); }
+  .folder-picker-demo .fpd-new-error { color: var(--err-fg); }
   .folder-picker-demo .fpd-more { color: var(--ink-soft); font-size: 0.82rem; text-decoration: underline; }
 
   .first-run-demo { width: min(560px, 100%); padding: var(--space-5); background: var(--paper); border: 1px solid var(--rule-strong); color: var(--ink); }
@@ -3573,10 +3583,35 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
               <li><span class="fpd-row is-off"><span>Recipes</span><span class="fpd-badge">Already a Vault</span><span class="fpd-count">86 notes</span></span><span class="fpd-note">Recipes is already the Vault <b>Kitchen</b>. Pick another folder.</span></li>
               <li><span class="fpd-row is-on"><span>Projects</span><span class="fpd-count">at least 10,000 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
             </ul>
+            <div class="fpd-new"><span class="fpd-new-open">+ New folder</span></div>
           </div>
           <p class="fpd-picked">Folder <code>/data/vault/Work/Projects</code></p>
           <span class="fpd-more">My folder isn&rsquo;t here</span>
           <span class="fpd-more">Type a path instead</span>
+        </div>
+        <div class="folder-picker-demo">
+          <div class="fpd-box">
+            <div class="fpd-crumbs"><a href="#folder-picker">vault</a><i>/</i><span>Work</span></div>
+            <ul>
+              <li><span class="fpd-row"><span class="fpd-this">Use Work</span><span class="fpd-count">1,280 notes</span></span></li>
+              <li><span class="fpd-row"><span>Clients</span><span class="fpd-count">310 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
+            </ul>
+            <div class="fpd-new">
+              <span class="fpd-new-label">Name of the new folder in <b>Work</b></span>
+              <span class="fpd-new-input">Projects</span>
+              <span class="fpd-new-actions"><span class="fpd-btn is-hot">Create folder</span><span class="fpd-btn">Cancel</span></span>
+              <span class="fpd-new-error">A folder with this name already exists.</span>
+            </div>
+          </div>
+        </div>
+        <div class="folder-picker-demo">
+          <div class="fpd-box">
+            <div class="fpd-crumbs"><a href="#folder-picker">vault</a><i>/</i><span>Recipes</span></div>
+            <ul>
+              <li><span class="fpd-row is-off"><span class="fpd-this">Use Recipes</span><span class="fpd-badge">Already a Vault</span><span class="fpd-count">86 notes</span></span></li>
+            </ul>
+            <div class="fpd-new is-off">No new folder here: this folder belongs to the Vault <b>Kitchen</b>.</div>
+          </div>
         </div>
       </div>
 
@@ -3586,12 +3621,14 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <p class="blurb"><b>Two quiet text links sit under the list</b>, underlined in <span class="key">--ink-soft</span>: <i>My folder isn&rsquo;t here</i> opens a <a href="#settings">.settings-notice</a> explaining that Hatchdoor only sees the folders shared with it at install, with Help&rsquo;s <span class="key">.help-link</span> and &ldquo;Or ask your agent to add it.&rdquo; <i>Type a path instead</i> swaps the picker for the original Folder path row, which has <i>Pick from the list instead</i> under it. <b>When the mount holds no notes</b>, a dashed <span class="key">--rule-strong</span> panel titled &ldquo;No notes found yet&rdquo; in the display face sits above the list, with the same Help link and agent line and a <i>Look again</i> button; the list stays pickable so an empty Vault can still be started. When the mount does not exist the panel stands alone. A failed listing shows <span class="key">.settings-notice-err</span> with <i>Try again</i>.</p>
 
+      <p class="blurb"><b>The box ends in a &ldquo;New folder&rdquo; strip</b> (#494), on a <span class="key">--rule</span> divider under the list, so it stays put while the list scrolls. Closed, it is one <span class="key">--hot</span> text button, <i>+ New folder</i>, underlined on hover. Open, it stacks a label naming the folder it will be made in, a full-width <a href="#settings">.settings-input</a>, and Settings&rsquo; own two buttons: <span class="key">.settings-btn-hot</span> <i>Create folder</i>, off until a name is typed and reading <i>Creating&hellip;</i> while it works, and <span class="key">.settings-btn</span> <i>Cancel</i>. Enter in the field creates the folder and never submits the form around the picker. A refusal sits under the buttons in <span class="key">--err-fg</span> and clears on the next keystroke; when the folder itself is the problem (read-only, gone) it ends with Help&rsquo;s <span class="key">.help-link</span>. The new folder joins the list in order, takes the selection treatment and takes focus. <b>Inside a Vault</b> the strip is one muted line naming the Vault instead, with no control. The strip is absent when the mount does not exist.</p>
+
       <p class="blurb"><b>Help opens beside the dialog, not over it.</b> The picker&rsquo;s Help link is the first inside a Settings dialog, so the shared shell follows the What&rsquo;s new rules from <a href="#whats-new">§35</a>: while Help is open the backdrop gives up Help&rsquo;s width (<span class="key">.settings-modal-back.is-beside-help</span>, <span class="key">right: min(32rem, 40vw)</span> and <span class="key">z-index: 45</span>, under <span class="key">.help-panel</span>&rsquo;s 50), Escape closes Help before the dialog, and Tab is no longer held inside. Below 920px Help is full screen and covers the dialog until closed.</p>
 
       <div class="tag-row">
         <span class="key">features/settings/FolderPicker.tsx</span><span class="key">features/settings/settings.css</span>
         <span class="key">.folder-picker-field</span><span class="key">.folder-picker</span><span class="key">.folder-picker-box</span><span class="key">.folder-picker-crumbs</span><span class="key">.folder-picker-crumb</span><span class="key">.folder-picker-crumb-step</span><span class="key">.folder-picker-sep</span><span class="key">.folder-picker-list</span><span class="key">.folder-picker-item</span><span class="key">.folder-picker-row</span><span class="key">.folder-picker-row-this</span><span class="key">.folder-picker-name</span>
-        <span class="key">.folder-picker-badge</span><span class="key">.folder-picker-count</span><span class="key">.folder-picker-open</span><span class="key">.folder-picker-row-note</span><span class="key">.folder-picker-picked</span><span class="key">.folder-picker-status</span><span class="key">.folder-picker-more</span><span class="key">.folder-picker-note</span><span class="key">.folder-picker-empty</span><span class="key">.settings-modal-back.is-beside-help</span>
+        <span class="key">.folder-picker-badge</span><span class="key">.folder-picker-count</span><span class="key">.folder-picker-open</span><span class="key">.folder-picker-row-note</span><span class="key">.folder-picker-picked</span><span class="key">.folder-picker-status</span><span class="key">.folder-picker-more</span><span class="key">.folder-picker-note</span><span class="key">.folder-picker-empty</span><span class="key">.folder-picker-new</span><span class="key">.folder-picker-new-open</span><span class="key">.folder-picker-new-label</span><span class="key">.folder-picker-new-actions</span><span class="key">.folder-picker-new-error</span><span class="key">.folder-picker-new-off</span><span class="key">.settings-modal-back.is-beside-help</span>
       </div>
     </section>
 

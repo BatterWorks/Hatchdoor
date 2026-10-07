@@ -903,7 +903,9 @@ Frontend, cache, and search adapters remain separately owned later packets.
 
 The folder listing consumes `load`, `vault_path` and
 `ensure_outside_instance_state` to flag registered Vaults and skip folders
-that hold instance state.
+that hold instance state. Its `create_folder` (#494) consumes the same three
+to refuse a new folder at or inside a registered Vault's root or over
+instance state; the registry itself is unchanged.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
 `src/app_state.rs` construct and retain it; `/data/state` deployment
@@ -1261,7 +1263,7 @@ it needs no Vault, index or model, so it answers during model setup.
 ### Folder listing
 
 **Kind:** product capability/adapter (the first filesystem read outside any
-Vault).
+Vault, and since #494 the one write outside a Vault and instance state).
 
 **Owned paths:** `src/folder_listing.rs`.
 
@@ -1278,7 +1280,18 @@ missing root is an empty listing with `root_found: false`, not an error.
 so a picker joins it with a folder's `path` to get the path a Vault is created
 from (#430). See ADR-41.
 
-**Consumers:** `src/handlers/folders.rs` (`GET /api/v1/folders`), and through
+`create_folder(root, parent, name, registry)` (#494, ADR-44) makes one new,
+empty folder called `name` in the folder at `parent` and returns it as the
+`FolderEntry` the listing would show (zero notes, no Vault, no subfolders); or
+a `FolderCreateError` (`InvalidName`, `NameTaken`, `MountNotFound`,
+`ParentNotFound`, `OutsideRoot`, `InsideVault`, `NotWritable`,
+`VaultsUnknown`) with a stable
+`code` and a plain `message` that carries no OS error text. It shares the
+listing's root resolution, relative-path parsing, symlink-free walk and
+hidden-name rule (`resolve_root`, `parse_relative`, `shown_folder`,
+`is_hidden`), so a parent is exactly a folder the listing can show.
+
+**Consumers:** `src/handlers/folders.rs` (`GET` and `POST /api/v1/folders`), and through
 it Settings' `FolderPicker.tsx` in Add a Vault (#430), which the first-run
 checklist (#419) reuses.
 
@@ -1286,13 +1299,19 @@ checklist (#419) reuses.
 `vault_path` and crate-private `ensure_outside_instance_state`.
 
 **Coordination paths:** `src/lib.rs`, `src/app_state.rs`
-(`vault_mount_root`), `src/server.rs` (the route, its web-token gate and demo
-refusal, and the field from `AppConfig::vault_source`),
+(`vault_mount_root`), `src/server.rs` (the route with both methods, its
+web-token gate and demo refusal, and the field from `AppConfig::vault_source`),
 `src/handlers/mod.rs`, `src/vault_registry.rs` (the widened check).
 
-**Invariants:** read-only: it opens no file and writes nothing; it resolves the
-configured root once and follows no symlink below it, so it never leaves the
-root and cannot loop; a requested path that is absolute or contains `..` is
+**Invariants:** the listing is read-only: it opens no file and writes nothing.
+`create_folder` is the only write here and makes exactly one directory per
+call, never a chain, and nothing inside it; never outside the mount; never
+when the new folder would sit at or inside a registered Vault's root, a Vault
+whose folder is missing included, and never while the registry cannot be
+read (`VaultsUnknown`); never over an existing name; it deletes and
+renames nothing (ADR-44). Both resolve the
+configured root once and follow no symlink below it, so neither leaves the
+root and the listing cannot loop; a requested path that is absolute or contains `..` is
 refused; hidden folders, folders that would overlap instance state, and
 non-UTF-8 names (counted) are left out; responses carry folder names and
 counts only, never file names or content; it is not exposed over MCP; the
@@ -2964,7 +2983,14 @@ routes sit outside the bearer and web-token guards, which they leave unchanged.
 `folders.rs` serves `GET /api/v1/folders?path=` over the folder listing on the
 blocking pool, behind the web token when one is configured and refused with
 `403 demo_read_only` in demo mode; its refusals are `400 folder_outside_root`,
-`404 folder_not_found` and `422 folder_unreadable` (ADR-41).
+`404 folder_not_found` and `422 folder_unreadable` (ADR-41). The same route
+takes `POST` (#494, ADR-44) with `{parent, name}`, unknown fields refused, and
+answers `201` with the new `FolderEntry`; its refusals are `400
+folder_name_invalid`, `400 folder_outside_root`, `404 folder_mount_not_found`,
+`404 folder_parent_not_found`, `409 folder_name_taken`, `409
+folder_inside_vault`, `422 folder_not_writable` and `503
+folder_vaults_unknown`, under the same web-token
+gate and demo refusal.
 `whats_new.rs` serves `GET /api/v1/whats-new` (ADR-42) behind the web token
 when one is configured and refused with `403 demo_read_only` in demo mode,
 because it names the running version (ADR-38 decision 6). It answers
@@ -4329,7 +4355,8 @@ model choice), `features/settings/SettingsPage.tsx` (each section head, and the
 MCP writes row or its "Managed outside this page" entry) and
 `features/settings/VaultSettingsIndex.tsx` (a Vault's condition line, its Git
 console, and the index's recovery blocks), and
-`features/settings/FolderPicker.tsx` (`folderOutsideMount`, #430), each
+`features/settings/FolderPicker.tsx` (`folderOutsideMount`, #430, and
+`newFolderRefused`, #494), each
 passing a `CONTEXTUAL_HELP` entry and nothing else.
 
 **Invariants:** Help never fetches or shows Vault content and calls no
@@ -5200,6 +5227,17 @@ First-run checklist's step 1 is its other consumer (#419), with
 the same path draft, and the create request is the same `POST /api/v1/vaults`.
 Its "My folder isn't here" and empty-mount Help links read
 `CONTEXTUAL_HELP.folderOutsideMount`.
+The picker's box ends in "New folder" (#494, ADR-44): a name prompt that calls
+`vaultCreation.ts`'s `createFolder` (`POST /api/v1/folders`) for the folder on
+screen, adds the answer to the list in the listing's order, focuses it and
+reports it through `onPick` like any picked folder, so both consumers get it
+with no change of their own and the Vault creation request is untouched. It
+is replaced by a line naming the Vault when the folder on screen is a
+registered Vault or below one, which the picker knows from the `vault` fields
+of the listings it walked through; the server refuses that case regardless.
+Its buttons are `type="button"` and Enter in the name is caught, because the
+picker renders inside the Add a Vault form. A refusal about the folder rather
+than the name links to `CONTEXTUAL_HELP.newFolderRefused`.
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than

@@ -31,16 +31,17 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::GitConfig;
 use crate::handlers::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
-    disable_vault_handler, disconnect_vault_handler, docs_router, download_transfer_handler,
-    edit_vault_handler, enable_vault_handler, generate_mcp_token_handler, get_settings_handler,
-    health_handler, list_folders_handler, list_vaults_handler, patch_settings_handler,
-    publish_recovery_branch_handler, refresh_vault_handler, retry_vault_handler,
-    reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler, spa_not_found_handler,
-    sync_vault_handler, upload_transfer_handler, vault_collection_events_handler,
-    vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,
-    vault_scope_stats_handler, vault_scope_tree_handler, vault_scoped_archive_note_handler,
-    vault_scoped_asset_handler, vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, create_folder_handler, create_vault_handler,
+    demo_read_only_response, disable_vault_handler, disconnect_vault_handler, docs_router,
+    download_transfer_handler, edit_vault_handler, enable_vault_handler,
+    generate_mcp_token_handler, get_settings_handler, health_handler, list_folders_handler,
+    list_vaults_handler, patch_settings_handler, publish_recovery_branch_handler,
+    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
+    spa_index_handler, spa_not_found_handler, sync_vault_handler, upload_transfer_handler,
+    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
+    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
+    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
     vault_scoped_note_saved_queries_handler, vault_scoped_rename_note_handler,
@@ -567,11 +568,15 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )
         .layer(Extension(mcp_transport.limiter()));
 
-    // ADR-41: the folders under the Vault mount, for the folder picker. An
-    // operator surface, so demo mode refuses it with `demo_read_only` before
-    // the token check could answer, and otherwise it sits behind the web
-    // token like the rest of the API.
-    let folders = Router::new().route("/api/v1/folders", get(list_folders_handler));
+    // ADR-41: the folders under the Vault mount, for the folder picker, and
+    // ADR-44: the one new, empty folder a person may make there. An operator
+    // surface, so demo mode refuses both with `demo_read_only` before the
+    // token check could answer, and otherwise they sit behind the web token
+    // like the rest of the API.
+    let folders = Router::new().route(
+        "/api/v1/folders",
+        get(list_folders_handler).post(create_folder_handler),
+    );
     let folders = match web_bearer_token.clone() {
         _ if state.demo_mode => folders.layer(demo_guard.clone()),
         Some(token) => folders.layer(axum::middleware::from_fn_with_state(
@@ -9709,6 +9714,150 @@ mod tests {
                 assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
                 assert_eq!(json_body(response).await["code"], "demo_read_only");
             }
+        }
+    }
+
+    fn create_folder_request(body: serde_json::Value, token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/folders")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(body.to_string())).expect("request")
+    }
+
+    #[tokio::test]
+    async fn folders_creates_one_folder_behind_the_web_token() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let mount = tmp.path().join("mount");
+        std::fs::create_dir_all(mount.join("Notes")).expect("mkdir");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, mount.join("Link")).expect("symlink");
+        let body = serde_json::json!({"parent": "Notes", "name": "Journal"});
+
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(create_folder_request(body.clone(), token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+        assert!(!mount.join("Notes/Journal").exists());
+
+        let response = app
+            .clone()
+            .oneshot(create_folder_request(body.clone(), Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({
+                "name": "Journal",
+                "path": "Notes/Journal",
+                "markdown": {"count": 0, "at_least": false},
+                "vault": null,
+                "has_subfolders": false,
+            })
+        );
+        assert!(mount.join("Notes/Journal").is_dir());
+        assert_eq!(
+            std::fs::read_dir(mount.join("Notes/Journal"))
+                .expect("read")
+                .count(),
+            0
+        );
+
+        // The parent defaults to the mount itself.
+        let top = app
+            .clone()
+            .oneshot(create_folder_request(
+                serde_json::json!({"name": "Top"}),
+                Some("web-secret"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(top.status(), StatusCode::CREATED);
+        assert_eq!(json_body(top).await["path"], "Top");
+
+        for (body, status, code) in [
+            (body, StatusCode::CONFLICT, "folder_name_taken"),
+            (
+                serde_json::json!({"parent": "", "name": "a/b"}),
+                StatusCode::BAD_REQUEST,
+                "folder_name_invalid",
+            ),
+            (
+                serde_json::json!({"parent": "..", "name": "Out"}),
+                StatusCode::BAD_REQUEST,
+                "folder_outside_root",
+            ),
+            (
+                serde_json::json!({"parent": "Missing", "name": "New"}),
+                StatusCode::NOT_FOUND,
+                "folder_parent_not_found",
+            ),
+            (
+                serde_json::json!({"parent": "Link", "name": "New"}),
+                StatusCode::NOT_FOUND,
+                "folder_parent_not_found",
+            ),
+            (
+                serde_json::json!({"name": "New", "recursive": true}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request_body",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(create_folder_request(body.clone(), Some("web-secret")))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status, "{body}");
+            assert_eq!(json_body(response).await["code"], code, "{body}");
+        }
+        assert!(!tmp.path().join("Out").exists());
+        assert!(!outside.join("New").exists());
+    }
+
+    #[tokio::test]
+    async fn folders_creation_answers_a_missing_mount_without_making_it() {
+        let (app, tmp, _state) = app_for_tests_with_state();
+        let response = app
+            .oneshot(create_folder_request(
+                serde_json::json!({"name": "New"}),
+                None,
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(response).await["code"], "folder_mount_not_found");
+        assert!(!tmp.path().join("mount").exists());
+    }
+
+    #[tokio::test]
+    async fn folders_creation_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            std::fs::create_dir_all(tmp.path().join("mount")).expect("mkdir");
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(create_folder_request(
+                        serde_json::json!({"name": "New"}),
+                        token,
+                    ))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+            assert!(!tmp.path().join("mount/New").exists());
         }
     }
 

@@ -60,6 +60,10 @@ The way Hatchdoor obtains a vault's local Markdown directory: a local directory,
 an existing Git checkout, or a managed Git checkout cloned from a remote.
 _Avoid_: Remote vault, Git repository as vault
 
+**Vault mount**:
+The one folder on the server under which Hatchdoor looks for folders to turn into vaults, set by the operator when Hatchdoor is installed. The folder picker lists what is under it and can make a new, empty folder there; Hatchdoor shows and creates nothing outside it. A vault added by typing its path, or cloned by Hatchdoor from a Git remote, may live elsewhere. The mount may itself be one vault, or a parent folder holding several.
+_Avoid_: Vault root (that is one vault's own top folder), data folder, notes folder
+
 **Degraded vault**:
 A usable local vault with an impaired supporting capability, such as Git
 synchronization or indexing. The impairment is reported explicitly without
