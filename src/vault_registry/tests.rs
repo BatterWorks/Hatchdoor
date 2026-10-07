@@ -187,6 +187,21 @@ fn overlap_refusal_on_add(store: &VaultRegistryStore, revision: u64, path: PathB
     error.to_string()
 }
 
+fn assert_each_relation_names_field_notes(same: &str, nested: &str, containing: &str) {
+    assert!(
+        same.contains("is already the Vault \"Field Notes\""),
+        "{same}"
+    );
+    assert!(
+        nested.contains("is inside the Vault \"Field Notes\""),
+        "{nested}"
+    );
+    assert!(
+        containing.contains("contains the Vault \"Field Notes\""),
+        "{containing}"
+    );
+}
+
 #[test]
 fn an_add_refused_for_overlap_names_the_vault_and_how_the_folders_relate() {
     let directory = tempdir().expect("temporary directory");
@@ -203,18 +218,7 @@ fn an_add_refused_for_overlap_names_the_vault_and_how_the_folders_relate() {
     let nested = overlap_refusal_on_add(&store, 1, inside);
     let containing = overlap_refusal_on_add(&store, 1, root);
 
-    assert!(
-        same.contains("is already the Vault \"Field Notes\""),
-        "{same}"
-    );
-    assert!(
-        nested.contains("is inside the Vault \"Field Notes\""),
-        "{nested}"
-    );
-    assert!(
-        containing.contains("contains the Vault \"Field Notes\""),
-        "{containing}"
-    );
+    assert_each_relation_names_field_notes(&same, &nested, &containing);
     // Another Vault's folder is the operator's own input, but the message
     // reaches every caller of the refusal, so it carries the name alone.
     for message in [&same, &nested, &containing] {
@@ -263,18 +267,7 @@ fn an_edit_refused_for_overlap_names_the_vault_and_how_the_folders_relate() {
     let nested = refusal(inside);
     let containing = refusal(root);
 
-    assert!(
-        same.contains("is already the Vault \"Field Notes\""),
-        "{same}"
-    );
-    assert!(
-        nested.contains("is inside the Vault \"Field Notes\""),
-        "{nested}"
-    );
-    assert!(
-        containing.contains("contains the Vault \"Field Notes\""),
-        "{containing}"
-    );
+    assert_each_relation_names_field_notes(&same, &nested, &containing);
     // The Vault being edited never collides with its own folder.
     for message in [&same, &nested, &containing] {
         assert!(!message.contains("Moving"), "{message}");
@@ -293,12 +286,29 @@ fn an_overlap_refusal_marks_a_disabled_vault_as_disabled() {
         .add(0, local_definition("Paused", parent, false))
         .expect("add disabled Vault");
 
-    let message = overlap_refusal_on_add(&store, 1, nested);
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).expect("create the moving Vault's folder");
 
-    assert!(
-        message.contains("is inside the disabled Vault \"Paused\""),
-        "{message}"
-    );
+    let on_add = overlap_refusal_on_add(&store, 1, nested.clone());
+    let committed = store
+        .add(1, local_definition("Moving", elsewhere, false))
+        .expect("add the Vault that will move");
+    let moving_id = committed
+        .definitions()
+        .find(|definition| definition.name() == "Moving")
+        .expect("moving Vault")
+        .vault_id();
+    let on_edit = store
+        .edit(2, moving_id, local_edit("Moving", nested, true))
+        .expect_err("nested path accepted")
+        .to_string();
+
+    for message in [on_add, on_edit] {
+        assert!(
+            message.contains("is inside the disabled Vault \"Paused\""),
+            "{message}"
+        );
+    }
 }
 
 #[test]

@@ -841,16 +841,7 @@ impl VaultRegistryStore {
             .filter_map(|(other_id, record)| {
                 let other_path =
                     canonical_or_normalized(&self.source_vault_path(*other_id, &record.source));
-                let relation = if vault_path == other_path {
-                    VaultPathRelation::Same
-                } else if vault_path.starts_with(&other_path) {
-                    VaultPathRelation::Inside
-                } else if other_path.starts_with(vault_path) {
-                    VaultPathRelation::Contains
-                } else {
-                    return None;
-                };
-                Some((record, relation))
+                path_relation(vault_path, &other_path).map(|relation| (record, relation))
             })
             .collect::<Vec<_>>();
         colliding.sort_by_key(|(record, _)| (vault_name_key(&record.name), record.name.clone()));
@@ -1809,8 +1800,21 @@ fn invalid_source(message: &str) -> VaultRegistryError {
     VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(message.to_string()))
 }
 
+/// How `path` relates to `other`, or `None` when neither holds the other.
+fn path_relation(path: &Path, other: &Path) -> Option<VaultPathRelation> {
+    if path == other {
+        Some(VaultPathRelation::Same)
+    } else if path.starts_with(other) {
+        Some(VaultPathRelation::Inside)
+    } else if other.starts_with(path) {
+        Some(VaultPathRelation::Contains)
+    } else {
+        None
+    }
+}
+
 fn paths_overlap(first: &Path, second: &Path) -> bool {
-    first.starts_with(second) || second.starts_with(first)
+    path_relation(first, second).is_some()
 }
 
 fn validate_stored_names(vaults: &BTreeMap<VaultId, VaultRecord>) -> Result<(), &'static str> {

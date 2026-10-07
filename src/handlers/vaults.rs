@@ -536,9 +536,9 @@ mod tests {
             .expect("create the Vault");
     }
 
-    /// #495 changed the overlap refusal's words and nothing else: the code,
-    /// the `409` and the `retryable` flag are what a client branches on, and
-    /// the message names the colliding Vault without giving away its folder.
+    /// The code, the `409` and the `retryable` flag are what a client
+    /// branches on; the message names the colliding Vault without giving
+    /// away its folder (#495).
     #[tokio::test]
     async fn an_overlapping_folder_is_refused_with_409_and_names_the_vault() {
         let (state, _worker, directory) = test_state();
