@@ -5511,6 +5511,10 @@ packet scope:
   documentation.
 - `eval/**`: evaluation inputs and results coordinated with offline tooling.
 - `scripts/**`: repository validation and maintenance tooling.
+  `scripts/dev-browser-token.py`, started by `just dev-browser-token`, hands
+  the dev web token to a test browser; it reads the same
+  `HATCHDOOR_WEB_BEARER_TOKEN` the backend does and the `localStorage` key
+  `TOKEN_KEY` in `frontend/src/api/api.ts`.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.
@@ -5521,9 +5525,11 @@ wants a new dependency.
 just check
 ```
 
-It runs formatting, clippy for the default and the all-features build, the
-backend tests with `--features eval`, and the frontend format, lint, typecheck,
-test and build steps. `CONTRIBUTING.md` lists the exact commands. Run
+It runs the repository's own script checks (this map's structural coverage,
+the docs-freshness table, and the tests under `scripts/`), formatting, clippy
+for the default and the all-features build, the backend tests with
+`--features eval`, and the frontend format, lint, typecheck, test and build
+steps. `CONTRIBUTING.md` lists the exact commands. Run
 `npm ci` in `frontend/` first on a fresh checkout.
 
 `just check-full` adds the backend tests in the default configuration and with
