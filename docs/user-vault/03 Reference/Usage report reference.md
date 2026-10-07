@@ -23,7 +23,7 @@ The report is a fixed list. Every value is a word from a short list, a yes or no
 | `id` | A random ID | The install ID, described under [[#The install ID]]. It lets two reports from the same install be counted as one install. |
 | `schema` | `1` | Which version of this field list the report follows. |
 | `version` | Such as `2.8.0` | The Hatchdoor release the install runs. |
-| `channel` | `stable`, `dev` | Whether it is a release or a development build. The exact build is not sent. |
+| `channel` | `stable`, `dev` | Whether it is a published release or a development build. A copy you built from source yourself is `dev`. The exact build is not sent. |
 | `os` | Such as `linux` | The operating system Hatchdoor itself runs on. Inside Docker that is Linux, whatever the computer runs. |
 | `arch` | Such as `x86_64`, `aarch64` | The processor type. |
 | `image` | `docker`, `podman`, `source` | Which published image the install runs, or `source` for anything else. |

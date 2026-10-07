@@ -295,7 +295,7 @@ Exactly one directory is made and nothing is written into it. The parent is reac
 }
 ```
 
-- `version` is the running version as the binary reports it. A development build adds ` (dev <commit>)`.
+- `version` is the running version as the binary reports it. A development build that was built with its commit adds ` (dev <commit>)`; a release never does.
 - `previous_version` is the version this instance ran before the current one, or `null` when it has run no other. An install that was already set up before it started keeping this record counts as coming from `2.7.0`, unless it runs 2.7.0 itself.
 - `fresh_install` is `true` when the instance was first started with no Vault list and no stored settings and still runs the version it started on. It turns `false` at its first upgrade.
 - `releases` lists the releases after `previous_version` up to the running version, newest first. It is empty on a fresh install that has not been upgraded yet. Each highlight's `text` is Markdown. `action_needed` lines come first, and `link`, when present, names the manual page (`read_docs` and `/docs/<page>.md` take the same name) and heading that explain it.
