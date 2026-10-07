@@ -14,7 +14,7 @@ Read by Compose on the host, not by the Hatchdoor binary — these decide what g
 | --- | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | `/data/vault` | Markdown notes and attachments |
 | `HOST_CACHE_PATH` | `./data/cache` | `/data/cache` | SQLite search cache and `settings.json` |
-| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), which Hatchdoor version ran before this one and which agent last connected (`instance.json`) |
+| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), which Hatchdoor version ran before this one, which agent last connected and, with the usage report on, its install ID (`instance.json`) |
 | `HOST_MODELS_PATH` | `./models` | `/models` | Downloaded embedding model and the Gemma-terms acceptance record |
 
 See [[Understand where your data lives]] for what to back up.
@@ -75,6 +75,12 @@ Above these settings, **Agent access (MCP)** names the last agent that used a to
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
 | `HATCHDOOR_UPDATE_CHECK_ENABLED` | `false` | instant | Shown in Settings as **Tell me about new releases**. On, Hatchdoor sends one `GET` a day to `https://api.github.com/repos/BatterWorks/Hatchdoor/releases/latest` with the user-agent `Hatchdoor` and no version, so GitHub sees the server's IP address and nothing else about the instance. A newer release shows a banner with links to its release notes and to [[How to upgrade Hatchdoor]]. A failed request is logged and tried again the next day. Turning it on checks within a minute; turning it off stops the check at once, both without a restart. Never runs in demo mode. Hatchdoor never upgrades itself. |
+
+**Usage report**
+
+| Key | Default | Class | Purpose |
+| --- | --- | --- | --- |
+| `HATCHDOOR_USAGE_REPORT_ENABLED` | `false` | instant | Shown in Settings as **Send a usage report**. This is telemetry. On, Hatchdoor makes a random install ID and sends one small report a day to `https://telemetry-hatchdoor.battercloud.cc`, saying what the install runs on and which parts of Hatchdoor it uses, and nothing about your notes. Settings shows the exact report, on or off. Turning it off deletes the install ID and everything kept for the report; turning it on again makes a new ID. Both take effect without a restart. Never active in demo mode. [[Usage report reference]] lists every field. |
 
 **Legacy — single-Vault keys**
 

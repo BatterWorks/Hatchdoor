@@ -69,6 +69,10 @@ pub struct AppState {
     /// The last MCP client that called a tool, and when (#426). Written by the
     /// MCP adapter, read by the settings response.
     pub agent_connections: Arc<crate::instance_state::AgentConnectionLog>,
+    /// The one owner of the usage report's install ID and activity record
+    /// (ADR-45). Brought in line with the setting at startup and after every
+    /// settings save; fed by the MCP adapter and the web-activity middleware.
+    pub usage_report: Arc<crate::usage_report::UsageReport>,
     /// Fired once when the process starts shutting down. The HTTP server
     /// stops accepting on it, and every response that would otherwise stay
     /// open forever ends on it (#353).

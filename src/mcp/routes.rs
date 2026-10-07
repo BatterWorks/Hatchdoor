@@ -365,6 +365,7 @@ mod tests {
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
             agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         }
     }
@@ -1206,6 +1207,65 @@ mod tests {
         let recorded = state.agent_connections.latest().expect("call recorded");
         assert_eq!(recorded.name, "Codex", "the display title wins over the id");
         assert!(recorded.connected_at.ends_with('Z'));
+    }
+
+    /// #477: the usage report keeps the agent family the client's own name
+    /// maps onto, not its display title, and never the name itself.
+    #[tokio::test]
+    async fn a_tool_call_records_the_agent_family_for_the_usage_report() {
+        let (mut state, tmp) = test_state();
+        let store = crate::instance_state::InstanceStateStore::new(
+            tmp.path().join("usage-report/instance.json"),
+        );
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "true".to_string(),
+            )])
+            .expect("turn the usage report on");
+        state.usage_report = std::sync::Arc::new(crate::usage_report::UsageReport::new(
+            store.clone(),
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        let mut meta = modern_meta("2026-07-28", true);
+        meta["io.modelcontextprotocol/clientInfo"] =
+            json!({"name": "codex-mcp-client", "title": "Cursor Lookalike", "version": "1"});
+        let raw = modern_post(
+            transport(&state),
+            "tools/call",
+            Some("list_vaults"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"_meta": meta, "name":"list_vaults", "arguments":{}}
+            }),
+        )
+        .await;
+        assert_eq!(response_message(raw).await["result"]["isError"], false);
+
+        let mut section = None;
+        for _ in 0..200 {
+            section = store
+                .section::<serde_json::Value>("usage_report")
+                .filter(|section| section.get("mcp_seen").is_some());
+            if section.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let section = section.expect("the call was recorded");
+        let families: Vec<&String> = section["agents_seen"]
+            .as_object()
+            .expect("agent families")
+            .keys()
+            .collect();
+        assert_eq!(families, ["codex"]);
+        let stored = section.to_string();
+        assert!(!stored.contains("codex-mcp-client"), "{stored}");
+        assert!(!stored.contains("Lookalike"), "{stored}");
     }
 
     /// #426: a legacy client names itself once, in `initialize`; the later

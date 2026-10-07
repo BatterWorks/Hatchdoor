@@ -21,6 +21,7 @@ pub mod server;
 pub mod startup;
 pub mod transfer_link;
 pub mod update_check;
+pub mod usage_report;
 pub mod vault;
 pub mod vault_error;
 pub mod vault_executor;

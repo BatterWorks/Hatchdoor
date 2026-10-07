@@ -65,8 +65,17 @@ impl HatchdoorMcpHandler {
     /// save that fails is logged by the log itself, never returned to the
     /// caller.
     fn record_agent_connection(&self, context: &RequestContext<RoleServer>) {
-        let name = context
-            .client_info()
+        let client = context.client_info();
+        let now = std::time::SystemTime::now();
+        // The usage report (ADR-45) reads the name the client sends, not its
+        // display title, and keeps only the agent family it maps onto.
+        let usage_report = &self.state.usage_report;
+        let client_name = client.as_ref().map_or("", |client| client.name.as_str());
+        if usage_report.observe_mcp_call(client_name, now) {
+            let usage_report = Arc::clone(usage_report);
+            tokio::task::spawn_blocking(move || usage_report.save());
+        }
+        let name = client
             .map(|client| {
                 client
                     .title
@@ -75,7 +84,7 @@ impl HatchdoorMcpHandler {
             })
             .unwrap_or_default();
         let log = &self.state.agent_connections;
-        if log.observe(&name, std::time::SystemTime::now()) {
+        if log.observe(&name, now) {
             let log = Arc::clone(log);
             tokio::task::spawn_blocking(move || log.save());
         }

@@ -20,6 +20,21 @@ pub fn version_string() -> String {
     }
 }
 
+/// How this build was packaged, for the usage report (ADR-45): `docker` or
+/// `podman` when the image build passed that word as the `HATCHDOOR_IMAGE`
+/// build argument, and `source` for every other build.
+pub fn build_image() -> &'static str {
+    image_word(option_env!("HATCHDOOR_IMAGE"))
+}
+
+fn image_word(build_argument: Option<&str>) -> &'static str {
+    match build_argument.map(str::trim) {
+        Some("docker") => "docker",
+        Some("podman") => "podman",
+        _ => "source",
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LegacyVaultEnvironmentKeyKind {
     DeploymentPath,
@@ -230,6 +245,18 @@ fn capped_log_filter(filter: EnvFilter) -> EnvFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_reports_docker_or_podman_only_when_told_and_source_otherwise() {
+        assert_eq!(image_word(Some("docker")), "docker");
+        assert_eq!(image_word(Some(" podman ")), "podman");
+        assert_eq!(image_word(Some("")), "source");
+        assert_eq!(
+            image_word(Some("my-own-registry.example/hatchdoor")),
+            "source"
+        );
+        assert_eq!(image_word(None), "source");
+    }
 
     #[test]
     fn message_logging_stays_at_info_even_under_a_trace_filter() {

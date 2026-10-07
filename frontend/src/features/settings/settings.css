@@ -831,6 +831,38 @@
   font-size: 0.7rem;
 }
 
+/* The usage report as text (#477): the note code block's inverted surface,
+   so it reads as something sent rather than something to edit. */
+.settings-report {
+  margin-top: 1.6rem;
+}
+
+.settings-report-id {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.84rem;
+  margin: 0 0 0.9rem;
+}
+
+.settings-report-id code {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.settings-report-body {
+  margin: 0;
+  overflow-x: auto;
+  padding: var(--space-3);
+  background: var(--code-surface);
+  color: var(--code-ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 /* ── the confirmation modal ─────────────────────────────────────────────── */
 
 .settings-modal-back {

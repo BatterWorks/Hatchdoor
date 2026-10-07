@@ -107,6 +107,11 @@ export const CONTEXTUAL_HELP = {
     heading: "hear-about-new-releases",
     topic: "Hearing about new releases",
   },
+  /** Settings' Usage report section (#477). */
+  usageReport: {
+    page: "reference/usage-report-reference",
+    topic: "What the usage report sends",
+  },
   /** A Vault's own Settings page while nothing is wrong. */
   vaultSettings: { page: MULTIPLE_VAULTS, topic: "Managing your Vaults" },
   /** Vault conditions. */

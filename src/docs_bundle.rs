@@ -139,6 +139,10 @@ const PAGES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "03 Reference/Usage report reference.md",
+        include_str!("../docs/user-vault/03 Reference/Usage report reference.md"),
+    ),
+    (
         "04 Concepts/How indexing and search work.md",
         include_str!("../docs/user-vault/04 Concepts/How indexing and search work.md"),
     ),

@@ -38,6 +38,16 @@ type Setting = {
   kind: SettingKind;
 };
 
+/** The opt-in usage report, from the settings response (ADR-45). `report` is
+ * the exact report the next send would carry, already indented by the server
+ * so the page shows it as text and never rebuilds it. `install_id` is `null`
+ * while the report is off. */
+type UsageReportStatus = {
+  enabled: boolean;
+  install_id: string | null;
+  report: string;
+};
+
 type Consequence = "reindex";
 type Confirmation = {
   consequence: Consequence;
@@ -92,6 +102,14 @@ const SECTIONS = [
     title: "Updates",
     blurb: "Whether Hatchdoor tells you when a newer version is out.",
     manual: CONTEXTUAL_HELP.upgrade,
+  },
+  {
+    id: "usage",
+    number: "05",
+    title: "Usage report",
+    blurb:
+      "Whether this server tells Hatchdoor's maintainer how it is set up. This is telemetry, and it is off unless you turn it on.",
+    manual: CONTEXTUAL_HELP.usageReport,
   },
 ] as const;
 
@@ -183,6 +201,11 @@ const COPY: Record<
     label: "Tell me about new releases",
     help: "Once a day, Hatchdoor sends one request to GitHub's public list of Hatchdoor releases, carrying this server's IP address and the user-agent Hatchdoor, nothing else.",
     manual: CONTEXTUAL_HELP.updateCheck,
+  },
+  HATCHDOOR_USAGE_REPORT_ENABLED: {
+    section: "usage",
+    label: "Send a usage report",
+    help: "Once a day, Hatchdoor sends the report shown below to telemetry-hatchdoor.battercloud.cc, which Hatchdoor's maintainer runs, to decide which platforms to test and which parts of Hatchdoor people rely on.",
   },
   HATCHDOOR_GIT_SYNC_ENABLED: {
     section: "notes",
@@ -300,6 +323,9 @@ export function SettingsPage({
   }, []);
   const [settings, setSettings] = useState<Setting[]>([]);
   const [lastAgent, setLastAgent] = useState<LastAgentConnection | null>(null);
+  const [usageReport, setUsageReport] = useState<UsageReportStatus | null>(
+    null,
+  );
   const [active, setActive] = useState<SectionId>("notes");
   const [showDrafts, setShowDrafts] = useState(false);
   const [heldDrafts, setHeldDrafts] = useState<HeldDraft[]>(() =>
@@ -335,9 +361,11 @@ export function SettingsPage({
     const payload = (await response.json()) as {
       settings: Setting[];
       last_agent?: LastAgentConnection | null;
+      usage_report?: UsageReportStatus;
     };
     setSettings(payload.settings);
     setLastAgent(payload.last_agent ?? null);
+    setUsageReport(payload.usage_report ?? null);
     setDrafts({});
     setErrors({});
     setRevealed({});
@@ -425,6 +453,7 @@ export function SettingsPage({
       const payload = (await response.json()) as {
         settings?: Setting[];
         last_agent?: LastAgentConnection | null;
+        usage_report?: UsageReportStatus;
         error?: string;
         fields?: { key: string | null; message: string }[];
         confirmation_required?: Consequence;
@@ -466,6 +495,7 @@ export function SettingsPage({
       const sentKeys = new Set(Object.keys(updates));
       setSettings(payload.settings ?? settings);
       if (payload.last_agent !== undefined) setLastAgent(payload.last_agent);
+      if (payload.usage_report) setUsageReport(payload.usage_report);
       setDrafts((old) => withoutKeys(old, sentKeys));
       setRevealed((old) => withoutKeys(old, sentKeys));
       setReplacing((old) => withoutKeys(old, sentKeys));
@@ -937,6 +967,27 @@ export function SettingsPage({
                     </p>
                   ),
                 )}
+              </div>
+            ) : null}
+
+            {/* The server builds this text with the code that builds the real
+              report, so it is shown as it arrives and never reformatted. */}
+            {active === "usage" && usageReport ? (
+              <div className="settings-report" data-testid="usage-report">
+                {usageReport.install_id ? (
+                  <p className="settings-report-id">
+                    <span>Install ID</span>
+                    <code>{usageReport.install_id}</code>
+                  </p>
+                ) : null}
+                <p className="settings-plaque-head">
+                  {usageReport.enabled && usageReport.install_id
+                    ? "The next report"
+                    : "The report this server would send"}
+                </p>
+                <pre className="settings-report-body" tabIndex={0}>
+                  {usageReport.report}
+                </pre>
               </div>
             ) : null}
           </div>

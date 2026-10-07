@@ -94,6 +94,7 @@ The demo's fourth Vault, [Team Docs](https://hatchdoor.battercloud.cc/v/ec49f950
 - [[Supported Markdown reference]]
 - [[Markdown feature showcase]]
 - [[Settings and environment variables reference]]
+- [[Usage report reference]]
 - [[The LLM wiki pattern (external reference)]]
 - [[The PARA method (external reference)]]
 - [[The Second Brain method (external reference)]]

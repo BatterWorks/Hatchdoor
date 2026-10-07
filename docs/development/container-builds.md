@@ -43,6 +43,7 @@ runtime image never depends on a mounted cache at runtime.
 | `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` | `16` | Preserve Cargo's normal non-incremental release value when opting into incrementality. |
 | `CARGO_CACHE_NAMESPACE` | `hatchdoor` | Isolate persistent caches on a shared builder. |
 | `GIT_SHA` | Empty | The commit the image was built from. Compiled into the binary as build provenance and written to the `org.opencontainers.image.revision` label. |
+| `HATCHDOOR_IMAGE` | Empty | How the image was built, `docker` or `podman`. Compiled into the binary, and reported as `image` by the opt-in usage report. Any other value, or none, reports `source`. |
 | `VERSION` | Empty | The release version, such as `2.8.0`, written to the `org.opencontainers.image.version` label. It does not change the version the binary reports, which comes from `Cargo.toml`. |
 
 ## Image labels
