@@ -1048,6 +1048,24 @@ mod tests {
             .to_string();
         assert_eq!(report(&on)["payload"]["id"], id.as_str());
         assert_eq!(
+            on["usage_report"]["last_sent_at"],
+            serde_json::Value::Null,
+            "on, and nothing sent yet"
+        );
+        // The job's send, with the request itself replaced (#478).
+        let mut reporter =
+            crate::usage_report::Reporter::new(state.clone(), Arc::new(|_request| Ok(())));
+        let sent_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        assert!(reporter.tick(sent_at).await);
+        let sent = body(
+            get_settings_handler(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(sent["usage_report"]["last_sent_at"], "2027-01-15T08:00:00Z");
+        assert_eq!(
             state.usage_report.install_id().as_deref(),
             Some(id.as_str())
         );
@@ -1060,6 +1078,10 @@ mod tests {
         assert_eq!(
             report(&off_again)["payload"]["id"],
             crate::usage_report::INSTALL_ID_PLACEHOLDER
+        );
+        assert_eq!(
+            off_again["usage_report"]["last_sent_at"],
+            serde_json::Value::Null
         );
         let state_file = std::fs::read_to_string(directory.path().join("state/instance.json"))
             .unwrap_or_default();

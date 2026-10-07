@@ -14,7 +14,7 @@ Read by Compose on the host, not by the Hatchdoor binary — these decide what g
 | --- | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | `/data/vault` | Markdown notes and attachments |
 | `HOST_CACHE_PATH` | `./data/cache` | `/data/cache` | SQLite search cache and `settings.json` |
-| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), which Hatchdoor version ran before this one, which agent last connected and, with the usage report on, its install ID (`instance.json`) |
+| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), which Hatchdoor version ran before this one, which agent last connected and, with the usage report on, its install ID and when the last report was sent (`instance.json`) |
 | `HOST_MODELS_PATH` | `./models` | `/models` | Downloaded embedding model and the Gemma-terms acceptance record |
 
 See [[Understand where your data lives]] for what to back up.

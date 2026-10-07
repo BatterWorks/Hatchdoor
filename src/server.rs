@@ -1419,6 +1419,13 @@ pub async fn run_server() {
             state.shutdown.clone(),
         )
     });
+    // ADR-45: the opt-in daily usage report. Like the update check, the task
+    // reads the setting on every tick and a demo instance never starts it.
+    let usage_report_task = crate::usage_report::spawn(
+        crate::usage_report::Reporter::new(state.clone(), crate::usage_report::collector()),
+        config.demo_mode,
+        state.shutdown.clone(),
+    );
     // Lets a Vault whose commit failed resume committing on its own once its
     // cooldown elapses, instead of waiting for the operator's next save.
     let commit_cooldown_tick_task = crate::git::spawn_commit_cooldown_tick(
@@ -1472,6 +1479,9 @@ pub async fn run_server() {
     commit_cooldown_tick_task.abort();
     startup_settle_task.abort();
     if let Some(task) = update_check_task {
+        task.abort();
+    }
+    if let Some(task) = usage_report_task {
         task.abort();
     }
     if let Some(task) = watcher_index_task {

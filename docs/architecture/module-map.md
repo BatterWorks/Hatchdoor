@@ -1220,8 +1220,8 @@ router tests, followed by the full backend checks.
 
 ### Usage report
 
-**Status:** Added by #477 (ADR-45). It builds and shows the report; nothing
-sends it yet (#478).
+**Status:** Added by #477 (ADR-45), which builds and shows the report. #478
+added the background job that sends it.
 
 **Kind:** infrastructure/background capability.
 
@@ -1232,27 +1232,43 @@ off by default), `INSTALL_ID_PLACEHOLDER`, `UsageReport` (`new`, `reconcile`,
 `install_id`, `observe_mcp_call`, `observe_web_request`, `save`, and an inert
 `Default`), `Build` (`current`), `current_report`, `UsageReportBody`, `status`
 and the wire type `UsageReportStatus` (`enabled`, `install_id`, `report`, the
-report as indented JSON text). The report body is schema 1 of ADR-45:
+report as indented JSON text, and `last_sent_at`, the RFC 3339 time the
+collector last accepted a report from this install ID, while the report is
+on). The sending job (#478): `REPORT_INTERVAL` (24 hours), `RETRY_INTERVAL`
+(one hour), `TICK_INTERVAL` (one minute), `ReportRequest` (`url`,
+`user_agent`, `body`), `SendReport` (the seam that keeps tests off the
+network), `collector` (the real request), `Reporter` (`new`, `tick`),
+`UsageReport::last_sent_at` and `spawn`, which takes the demo-mode flag and
+starts nothing when it is set. The outbound request is one `POST` of the
+report as JSON to `https://telemetry-hatchdoor.battercloud.cc/v1/report` with
+the user-agent `Hatchdoor`; a redirect is not followed and nothing in the
+answer is used beyond success or failure. The report body is schema 1 of ADR-45:
 `{"type":"event","payload":{"website","hostname":"hatchdoor","url":"/report","name":"report","id","data"}}`,
 where `data` holds `schema`, `version`, `channel`, `os`, `arch`, `image`,
 `search_model`, `vaults`, `notes`, `git_sync`, `mcp_enabled`, `mcp_writes`,
 `mcp_active_7d`, `web_active_7d` and one `agent_*` yes or no per agent family,
 and nothing else. The `usage_report` section of `state/instance.json`:
 `install_id`, and the UTC day of the last MCP tool call (`mcp_seen`), the last
-web request (`web_seen`) and each agent family last seen (`agents_seen`). The
+web request (`web_seen`) and each agent family last seen (`agents_seen`), plus
+`last_sent`, the RFC 3339 time of the last report the collector accepted. The
 agent families are a closed list matched on the name a client sends as
 `clientInfo.name`; a new family, like a new field, is a new schema.
 
 **Consumers:** runtime composition builds the one `UsageReport` from a clone
 of the shared instance state store, reconciles it at startup, holds it in
 `AppState::usage_report` and feeds it web activity through
-`record_web_activity`; `src/handlers/settings.rs` reconciles it after every
+`record_web_activity`, and starts `spawn` with a `Reporter` on `collector`
+beside the update check, aborting the task at shutdown;
+`src/handlers/settings.rs` reconciles it after every
 save and serves `status` as the settings response's `usage_report`;
 `src/mcp/adapter.rs` feeds it each tool call's client name; the frontend
-Settings page shows the report text and the install ID.
+Settings page shows the report text, the install ID and the time of the last
+report.
 
 **Consumed dependencies:** Live configuration foundation (the setting, read
-on every reconcile), Instance state (`InstanceStateStore`, `base_version`),
+on every reconcile and every tick), `ureq` as already compiled in (ADR-39),
+the collector endpoint (the maintainer's infrastructure, set up outside this
+repository), Instance state (`InstanceStateStore`, `base_version`),
 `config::{version_string, build_image}`, the Vault collection registry (which
 Vaults are enabled and their Git mode), the cache's
 `SqliteCache::snapshot_note_count` (one row count per enabled Vault, never
@@ -1265,12 +1281,24 @@ ID.
 `src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument),
 `.env.example`, the frontend Settings page and its `settings.css`,
 `frontend/src/features/help/contextualLinks.ts`,
-`docs/design/design-system.html` (the report block), `src/docs_bundle.rs` and
+`docs/design/design-system.html` (the report block and its last-report
+row), `src/docs_bundle.rs` and
 `docs/user-vault/03 Reference/Usage report reference.md` (the page the field
 test reads), and `scripts/check-docs-freshness.mjs` (the `usage-report`
 surface).
 
-**Invariants:** no outbound request; while the setting is off nothing is
+**Invariants:** no outbound request while the setting is off or in demo
+mode, none is started after the setting goes off, and none goes to any
+address but the declared one:
+no setting, variable or flag changes it; at most one successful report in 24
+hours per install ID, across restarts, and never more than one attempt a
+minute, even when the state file cannot be written (the minute and the
+retry's hour are each held a second short, `TIMER_SLACK`, so a tick the timer
+woke a moment early is not skipped); a failed send is tried
+again an hour later, logged at debug, and nothing is queued; nothing is sent
+with an ID that could not be saved; the body sent is the report Settings
+shows; the user-agent carries no version; no test reaches the network; while
+the setting is off nothing is
 written to the section, no ID exists, and the hooks keep nothing; turning the
 setting off clears the whole section and turning it on again makes a new ID;
 an ID that could not be saved is never shown or used, and a section that could
@@ -3094,7 +3122,7 @@ full refreshed document, plus the read-only `last_agent` (#426) and
 `update_check` (#425, `update_check::status` read from the instance state file
 beside the registry) fields, and the read-only `usage_report` (#477,
 `usage_report::status`: whether the report is on, the install ID while it is,
-and the exact report as text). A save reconciles `AppState::usage_report`
+the exact report as text, and since #478 the time of the last report sent). A save reconciles `AppState::usage_report`
 before it answers, so the response to the save that turns the report on
 already carries the new install ID. MCP enablement and its bearer token validate together
 against one prospective snapshot, so an invalid combination saves nothing and
@@ -5085,8 +5113,9 @@ from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and
 revisioned pause/rebuild/disconnect controls through the existing Vault API.
 Its Usage report section (#477) shows the `usage_report` field of the settings
-response: the switch, the report text exactly as the server sent it, and the
-install ID while the report is on.
+response: the switch, the report text exactly as the server sent it, and,
+while the report is on, the install ID and when the last report was sent
+(#478).
 
 A git-backed Vault's own page (issue #149, resolving #121) carries one
 segmented Git-behaviour control offering the four behaviours legal on a

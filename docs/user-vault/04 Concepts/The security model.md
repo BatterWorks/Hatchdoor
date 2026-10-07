@@ -101,6 +101,8 @@ With **Tell me about new releases** on, Hatchdoor sends one request a day to Git
 
 The usage report is telemetry, and it is off unless you turn it on. With **Send a usage report** on, Hatchdoor sends one small report a day to `https://telemetry-hatchdoor.battercloud.cc`, a collector run by Hatchdoor's maintainer. The report says what the install runs on and which parts of Hatchdoor it uses, as fixed words, yes or no answers and ranges, with a random install ID. It carries nothing about your notes, your Vaults' names, your machine or any token. [[Usage report reference]] lists every field, and Settings shows the exact report before you decide.
 
+The first request goes within a minute of turning the report on. After that Hatchdoor makes at most one successful request in any 24 hours, and tries again an hour after one that failed. Each is a single `POST` that carries your IP address, the user-agent `Hatchdoor` and the report, and Hatchdoor uses nothing from the answer beyond whether the report got through. While the report is off, and in a public demo, no request is made at all.
+
 ## Demo mode's narrower rule
 
 A public, read-only demo (`HATCHDOOR_DEMO_MODE=true`) doesn't just relax these rules; it restructures them, and the result isn't uniform across surfaces:
