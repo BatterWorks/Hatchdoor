@@ -13,6 +13,10 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
+use tower_http::classify::{
+    ClassifiedResponse, ClassifyResponse, MakeClassifier, NeverClassifyEos,
+    ServerErrorsFailureClass,
+};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{error, info, warn};
@@ -598,7 +602,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
 
     Router::new()
         .route("/health", get(health_handler))
-        .route("/ready", get(readiness_handler))
+        .route(READINESS_PATH, get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
         .merge(docs)
         .merge(model_setup)
@@ -634,7 +638,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         // bare 404.
         .fallback_service(ServeDir::new("frontend/dist").fallback(get(spa_not_found_handler)))
         .layer(
-            TraceLayer::new_for_http()
+            TraceLayer::new(MakeFailureClassifier)
                 // Custom span so the URI logged never contains the raw web token
                 // that `<img>`/download URLs may carry as ?access_token=..., nor
                 // a transfer link's ?signature=...
@@ -649,6 +653,56 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
         .with_state(state)
+}
+
+const READINESS_PATH: &str = "/ready";
+
+/// Which responses the trace layer logs as failed, at `ERROR`: every 5xx
+/// except the readiness probe's `503`. An installing agent polls `/ready`
+/// until it answers `200`, so that answer is expected during startup (#472).
+#[derive(Clone, Copy)]
+struct MakeFailureClassifier;
+
+impl MakeClassifier for MakeFailureClassifier {
+    type Classifier = FailureClassifier;
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn make_classifier<B>(&self, request: &axum::http::Request<B>) -> Self::Classifier {
+        FailureClassifier {
+            readiness_probe: request.uri().path() == READINESS_PATH,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FailureClassifier {
+    readiness_probe: bool,
+}
+
+impl ClassifyResponse for FailureClassifier {
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn classify_response<B>(
+        self,
+        response: &axum::http::Response<B>,
+    ) -> ClassifiedResponse<Self::FailureClass, Self::ClassifyEos> {
+        let status = response.status();
+        let expected = self.readiness_probe && status == StatusCode::SERVICE_UNAVAILABLE;
+        if status.is_server_error() && !expected {
+            ClassifiedResponse::Ready(Err(ServerErrorsFailureClass::StatusCode(status)))
+        } else {
+            ClassifiedResponse::Ready(Ok(()))
+        }
+    }
+
+    fn classify_error<E>(self, error: &E) -> Self::FailureClass
+    where
+        E: std::fmt::Display + 'static,
+    {
+        ServerErrorsFailureClass::Error(error.to_string())
+    }
 }
 
 /// The request URI as the trace span records it: the path, and the query with
@@ -4781,6 +4835,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ready_probe_answered_not_ready_logs_no_error_or_warning() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state.startup.set_scanning();
+        let app = build_router(state, None);
+        let logs = CapturedLogs::default();
+        let response = {
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch());
+            app.oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"not ready");
+        let lines = logs.lines();
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("ERROR") || line.contains("WARN")),
+            "{lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_probe_exemption_leaves_other_server_errors_logged_as_errors() {
+        // The same status the readiness probe answers with, from a route that
+        // is not the probe: a Vault whose directory has gone missing.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("materializing");
+        let vault_id = create_vault_with_files(&app, "Materializing", &vault_root, &[], 0).await;
+        std::fs::remove_dir_all(&vault_root).expect("remove vault directory");
+        let logs = CapturedLogs::default();
+        let response = {
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch());
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/assets/diagram.png"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let lines = logs.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("ERROR") && line.contains("503")),
+            "{lines:?}"
+        );
     }
 
     async fn ready_status(state: &AppState) -> StatusCode {
