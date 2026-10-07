@@ -201,7 +201,9 @@ that production inventory are still checked for stale paths and duplicates.
   from it. The instance is ready when the search model is set up, the Vault
   registry loaded normally, and every active Vault's first index has settled;
   no active Vault at all satisfies the last condition, and a registry awaiting
-  operator recovery never does (#453). `report_indexing_progress` is how an Index turn reports progress,
+  operator recovery never does (#453). The request trace layer in `server.rs`
+  does not log a `503` from `/ready` as a failed response, since a poller
+  expects it; every other 5xx is still logged at `ERROR` (#472). `report_indexing_progress` is how an Index turn reports progress,
   and it never moves a tracker that has already settled `Ready`: a routine
   reindex is one Vault's upkeep, reported on that Vault, not an instance
   readiness change (#326). Each report names its Vault and carries every
