@@ -79,3 +79,19 @@ COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 EXPOSE 42824
 USER nonroot:nonroot
 ENTRYPOINT ["/app/hatchdoor"]
+
+# Last, so a new commit or version rewrites only metadata and no layer above.
+# description, licenses and source repeat Cargo.toml, and
+# scripts/dockerfile-labels.test.mjs fails when they drift. The MCP registry
+# reads the server name to prove who owns the image.
+ARG VERSION=""
+ARG GIT_SHA=""
+LABEL org.opencontainers.image.title="Hatchdoor" \
+      org.opencontainers.image.description="Self-hosted Obsidian-style Markdown vault browser with optional web and MCP write access" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/BatterWorks/Hatchdoor" \
+      org.opencontainers.image.url="https://github.com/BatterWorks/Hatchdoor" \
+      org.opencontainers.image.documentation="https://docs-hatchdoor.battercloud.cc" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      io.modelcontextprotocol.server.name="io.github.BatterWorks/hatchdoor"
