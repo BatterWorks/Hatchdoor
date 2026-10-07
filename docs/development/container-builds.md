@@ -15,7 +15,7 @@ docker build -t hatchdoor:local .
 permission-sensitive tests. It runs the default-feature suite, just like the
 same Cargo command outside Docker; feature-gated model/evaluation tests are not
 implicitly enabled. Production builds do not depend on this target. Callers
-that require tests before publication must run it first and propagate failure. `verification` derives from `chef` rather than from the dependency stage, so its
+that require tests before publication must run it first and propagate failure. The suite needs two things beyond the Rust sources: the `git` program, which `chef` installs, and `frontend/vite.config.ts`, which the stage copies so the SPA test can compare the backend reserved prefixes with the service-worker denylist. A new test that reads another file outside `src/` and `docs/user-vault` needs its own `COPY` here. `verification` derives from `chef` rather than from the dependency stage, so its
 first run on a builder compiles the test profile from scratch even when a release
 build is already cached. That is the expected cost of a separate profile, not a
 regression.

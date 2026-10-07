@@ -2,7 +2,7 @@
 
 FROM docker.io/library/rust:1.97-slim AS chef
 WORKDIR /app
-RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ perl make && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git pkg-config libssl-dev g++ perl make && rm -rf /var/lib/apt/lists/*
 # Permission-sensitive tests must run without root; all Cargo stages share this user.
 RUN useradd --uid 1000 --create-home builder \
     && chown builder:builder /app /usr/local/cargo /usr/local/cargo/bin
@@ -50,6 +50,8 @@ FROM chef AS verification
 COPY --chown=builder:builder Cargo.toml Cargo.lock ./
 COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/user-vault ./docs/user-vault
+# The SPA regression test compares reserved routes with the real worker denylist.
+COPY --chown=builder:builder frontend/vite.config.ts ./frontend/vite.config.ts
 ARG GIT_SHA=""
 RUN --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-git-${TARGETPLATFORM},target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
