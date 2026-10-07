@@ -122,3 +122,11 @@ _Avoid_: Computed content, rendered note
 **Transfer link**:
 A short-lived address, handed to an agent by an authenticated call, that lets whoever holds it download one attachment or upload one file to one named location, without the agent's own token. It is narrower than the token that produced it: one file, one direction, a few minutes.
 _Avoid_: Presigned URL, signed URL, download URL (when meant as the credentialed link)
+
+**Usage report**:
+The small report an instance sends once a day, only when its operator has turned it on, saying what the install runs on and which parts of Hatchdoor it uses. It is telemetry and is called that. Every value is a fixed word, a yes or no, or a range, and none describes a note.
+_Avoid_: Analytics, statistics, phone-home, diagnostics
+
+**Install ID**:
+The random identifier a usage report carries so that reports from one instance count as one install. It exists only while the usage report is on, is derived from nothing on the machine, and is replaced by a new one each time the report is turned off and on again. Distinct from a Vault ID, which never leaves the instance.
+_Avoid_: Instance ID, device ID, user ID

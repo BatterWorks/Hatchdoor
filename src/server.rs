@@ -257,11 +257,16 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // token/origin, binds its live snapshot, and reapplies the method-aware
     // limit before collecting a request.
     let mcp_body_limit = McpConfig::maximum_request_body_limit();
+    // ADR-45: added to each group below before its web-token layer, so the
+    // token check runs first.
+    let web_activity =
+        axum::middleware::from_fn_with_state(state.usage_report.clone(), record_web_activity);
 
     let model_setup = Router::new()
         .route("/api/model/accept-gemma", post(accept_gemma_handler))
         .route("/api/model/decline-gemma", post(decline_gemma_handler))
-        .route("/api/model/retry", post(retry_model_setup_handler));
+        .route("/api/model/retry", post(retry_model_setup_handler))
+        .layer(web_activity.clone());
     let model_setup = match web_bearer_token.clone() {
         Some(token) => model_setup.layer(axum::middleware::from_fn_with_state(
             WebToken(token),
@@ -296,7 +301,8 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/settings/mcp-token/reveal",
                 post(reveal_mcp_token_handler),
             )
-            .layer(Extension(web_bearer_token.clone()));
+            .layer(Extension(web_bearer_token.clone()))
+            .layer(web_activity.clone());
         match web_bearer_token.clone() {
             Some(token) => settings.layer(axum::middleware::from_fn_with_state(
                 WebToken(token),
@@ -470,7 +476,8 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/search",
                 get(vault_scope_search_handler),
-            );
+            )
+            .layer(web_activity.clone());
         // #109: demo mode publishes every enabled Vault's reads
         // unauthenticated even when this instance also has
         // `HATCHDOOR_WEB_BEARER_TOKEN` configured. Gating the whole group
@@ -573,10 +580,12 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // surface, so demo mode refuses both with `demo_read_only` before the
     // token check could answer, and otherwise they sit behind the web token
     // like the rest of the API.
-    let folders = Router::new().route(
-        "/api/v1/folders",
-        get(list_folders_handler).post(create_folder_handler),
-    );
+    let folders = Router::new()
+        .route(
+            "/api/v1/folders",
+            get(list_folders_handler).post(create_folder_handler),
+        )
+        .layer(web_activity.clone());
     let folders = match web_bearer_token.clone() {
         _ if state.demo_mode => folders.layer(demo_guard.clone()),
         Some(token) => folders.layer(axum::middleware::from_fn_with_state(
@@ -590,7 +599,9 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // version. The answer names the running version, so it sits behind the
     // web token, and demo mode refuses it like the folder listing (ADR-38
     // decision 6).
-    let whats_new = Router::new().route("/api/v1/whats-new", get(whats_new_handler));
+    let whats_new = Router::new()
+        .route("/api/v1/whats-new", get(whats_new_handler))
+        .layer(web_activity);
     let whats_new = match web_bearer_token.clone() {
         _ if state.demo_mode => whats_new.layer(demo_guard.clone()),
         Some(token) => whats_new.layer(axum::middleware::from_fn_with_state(
@@ -1048,6 +1059,22 @@ async fn reject_demo_mutation(
     next.run(request).await
 }
 
+/// ADR-45: note that a web request arrived, for the usage report's
+/// `web_active_7d`. Layered inside the web-token check of each route group
+/// that check protects, so it sees a request only once it has been let in,
+/// and sees it just the same on an install with no token. It keeps the day
+/// and nothing about the request, and does nothing while the report is off.
+async fn record_web_activity(
+    State(usage_report): State<Arc<crate::usage_report::UsageReport>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if usage_report.observe_web_request(std::time::SystemTime::now()) {
+        tokio::task::spawn_blocking(move || usage_report.save());
+    }
+    next.run(request).await
+}
+
 /// An install counts as existing when a Vault registry or stored settings are
 /// already on disk; with neither, this is a fresh install. Read before startup
 /// can write a registry (ADR-40 decision 6).
@@ -1183,6 +1210,15 @@ pub async fn run_server() {
     let agent_connections = Arc::new(crate::instance_state::AgentConnectionLog::load(
         instance_state.clone(),
     ));
+    // ADR-45: the usage report's install ID exists only while its setting is
+    // on. The setting can change through the environment at a restart, so
+    // the section is brought in line here as well as after a settings save.
+    let usage_report = Arc::new(crate::usage_report::UsageReport::new(
+        instance_state.clone(),
+        runtime_config.clone(),
+        config.demo_mode,
+    ));
+    usage_report.reconcile();
     let environment_keys = std::env::vars()
         .filter(|(_, value)| !value.trim().is_empty())
         .map(|(key, _)| key)
@@ -1299,6 +1335,7 @@ pub async fn run_server() {
         },
         instance_versions,
         agent_connections,
+        usage_report,
         shutdown: Default::default(),
     };
 
@@ -2199,6 +2236,7 @@ mod tests {
             vault_mount_root: tmp.path().join("mount"),
             instance_versions: Default::default(),
             agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -2285,6 +2323,7 @@ mod tests {
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
             agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -9981,5 +10020,111 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A state whose usage report is on and kept in `tmp`, plus the store
+    /// its record is written to.
+    fn state_with_the_usage_report_on(
+        mut state: AppState,
+        tmp: &TempDir,
+    ) -> (AppState, crate::instance_state::InstanceStateStore) {
+        let store =
+            crate::instance_state::InstanceStateStore::new(tmp.path().join("state/instance.json"));
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "true".to_string(),
+            )])
+            .expect("turn the usage report on");
+        state.usage_report = Arc::new(crate::usage_report::UsageReport::new(
+            store.clone(),
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        (state, store)
+    }
+
+    /// The day the usage report last saw a web request, once the save the
+    /// middleware started has landed.
+    async fn recorded_web_day(store: &crate::instance_state::InstanceStateStore) -> Option<String> {
+        for _ in 0..200 {
+            let section = store.section::<serde_json::Value>("usage_report");
+            if let Some(day) = section
+                .as_ref()
+                .and_then(|section| section["web_seen"].as_str())
+            {
+                return Some(day.to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn a_web_request_let_in_by_the_token_counts_as_web_activity() {
+        let (_app, tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let (state, store) = state_with_the_usage_report_on(state, &tmp);
+        let app = build_router(state, Some(Arc::from("web-secret")));
+
+        // Neither a public route nor a refused request is web activity.
+        let health = Request::builder().uri("/health").body(Body::empty());
+        app.clone()
+            .oneshot(health.expect("request"))
+            .await
+            .expect("response");
+        let refused = app
+            .clone()
+            .oneshot(whats_new_request(Some("wrong")))
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let section = store.section::<serde_json::Value>("usage_report");
+        assert_eq!(
+            section.expect("the install ID")["web_seen"],
+            serde_json::Value::Null
+        );
+
+        let response = app
+            .oneshot(whats_new_request(Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let recorded = recorded_web_day(&store)
+            .await
+            .expect("web activity recorded");
+        // The request and this line can fall either side of midnight UTC.
+        assert!(recorded <= today && recorded.len() == 10, "{recorded}");
+    }
+
+    #[tokio::test]
+    async fn a_web_request_counts_as_web_activity_on_an_install_with_no_token() {
+        let (_app, tmp, state) = app_for_tests_with_state();
+        let (state, store) = state_with_the_usage_report_on(state, &tmp);
+
+        let response = build_router(state, None)
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(recorded_web_day(&store).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_web_request_is_not_recorded_while_the_usage_report_is_off() {
+        let (app, tmp, _state) = app_for_tests_with_state();
+
+        let response = app
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!tmp.path().join("state/instance.json").exists());
     }
 }

@@ -1100,6 +1100,7 @@ pub(crate) mod test_support {
             vault_mount_root: Default::default(),
             instance_versions: Default::default(),
             agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
         (state, worker, directory)

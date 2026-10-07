@@ -113,7 +113,15 @@ that production inventory are still checked for stale paths and duplicates.
   `vault_migration::prepare_registry`, with whether the install existed read
   before that step can write a registry, so a refused start records nothing,
   and `agent_connections`, the last MCP client log loaded from the same store, written by `mcp/adapter.rs` and read
-  by `handlers/settings.rs`), or process lifecycle (`shutdown`).
+  by `handlers/settings.rs`), the usage report (`usage_report`, the one owner
+  of that section of the same store, which `run_server` reconciles with the
+  setting once at startup, ADR-45), or process lifecycle (`shutdown`).
+- `record_web_activity` (ADR-45) is the one middleware that tells the usage
+  report a web request arrived. `build_router` layers it inside the web-token
+  check of the five route groups that check alone protects (model setup,
+  settings, `vaults_v1`, folders, What's new), so it runs only for a request
+  that was let in and runs the same on an install with no token. The asset
+  and attachment routes are left out because the MCP token opens them too.
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -1000,7 +1008,8 @@ connection added by #426.
 `section`, `write_section`), `VersionRecord` (`current`, `previous`,
 `fresh_install`, `after_start`, and a `Default` of the running version with no
 history), `base_version`, which reads `2.8.0 (dev abc123)` as `2.8.0`,
-`AgentConnection` (`name`, `connected_at` in RFC 3339 UTC),
+`InstanceStateStore::remove_section`, which drops one section and writes
+nothing when it is not there (#477), `AgentConnection` (`name`, `connected_at` in RFC 3339 UTC),
 and `AgentConnectionLog` (`load`, `latest`, `observe`, `save`, and a
 `Default` that keeps the record in memory only). The versioned `state/instance.json` format: a
 `schema_version` beside named sections, each a JSON value owned by one
@@ -1208,6 +1217,75 @@ mode is on, which the redeeming adapter re-reads per request.
 
 **Validation:** `cargo test transfer_link`, `cargo test transfer` in the server
 router tests, followed by the full backend checks.
+
+### Usage report
+
+**Status:** Added by #477 (ADR-45). It builds and shows the report; nothing
+sends it yet (#478).
+
+**Kind:** infrastructure/background capability.
+
+**Owned paths:** `src/usage_report.rs`.
+
+**Public contract:** `USAGE_REPORT_SETTING` (`HATCHDOOR_USAGE_REPORT_ENABLED`,
+off by default), `INSTALL_ID_PLACEHOLDER`, `UsageReport` (`new`, `reconcile`,
+`install_id`, `observe_mcp_call`, `observe_web_request`, `save`, and an inert
+`Default`), `Build` (`current`), `current_report`, `UsageReportBody`, `status`
+and the wire type `UsageReportStatus` (`enabled`, `install_id`, `report`, the
+report as indented JSON text). The report body is schema 1 of ADR-45:
+`{"type":"event","payload":{"website","hostname":"hatchdoor","url":"/report","name":"report","id","data"}}`,
+where `data` holds `schema`, `version`, `channel`, `os`, `arch`, `image`,
+`search_model`, `vaults`, `notes`, `git_sync`, `mcp_enabled`, `mcp_writes`,
+`mcp_active_7d`, `web_active_7d` and one `agent_*` yes or no per agent family,
+and nothing else. The `usage_report` section of `state/instance.json`:
+`install_id`, and the UTC day of the last MCP tool call (`mcp_seen`), the last
+web request (`web_seen`) and each agent family last seen (`agents_seen`). The
+agent families are a closed list matched on the name a client sends as
+`clientInfo.name`; a new family, like a new field, is a new schema.
+
+**Consumers:** runtime composition builds the one `UsageReport` from a clone
+of the shared instance state store, reconciles it at startup, holds it in
+`AppState::usage_report` and feeds it web activity through
+`record_web_activity`; `src/handlers/settings.rs` reconciles it after every
+save and serves `status` as the settings response's `usage_report`;
+`src/mcp/adapter.rs` feeds it each tool call's client name; the frontend
+Settings page shows the report text and the install ID.
+
+**Consumed dependencies:** Live configuration foundation (the setting, read
+on every reconcile), Instance state (`InstanceStateStore`, `base_version`),
+`config::{version_string, build_image}`, the Vault collection registry (which
+Vaults are enabled and their Git mode), the cache's
+`SqliteCache::snapshot_note_count` (one row count per enabled Vault, never
+its notes), model setup (the chosen model), and `getrandom` for the install
+ID.
+
+**Coordination paths:** `src/lib.rs`, `src/app_state.rs`, `src/server.rs`,
+`src/runtime_config.rs` (the setting's default), `src/instance_state.rs`
+(`remove_section`), `src/handlers/settings.rs`, `src/mcp/adapter.rs`,
+`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument),
+`.env.example`, the frontend Settings page and its `settings.css`,
+`frontend/src/features/help/contextualLinks.ts`,
+`docs/design/design-system.html` (the report block), `src/docs_bundle.rs` and
+`docs/user-vault/03 Reference/Usage report reference.md` (the page the field
+test reads), and `scripts/check-docs-freshness.mjs` (the `usage-report`
+surface).
+
+**Invariants:** no outbound request; while the setting is off nothing is
+written to the section, no ID exists, and the hooks keep nothing; turning the
+setting off clears the whole section and turning it on again makes a new ID;
+an ID that could not be saved is never shown or used, and a section that could
+not be cleared is not read back by the process that failed to clear it; a demo instance keeps nothing, even with
+the variable set; every value in the report is a fixed word, a yes or no, or a
+bucket; the raw client name is never stored or reported; each fact is written
+at most once a day; the report is never offered over MCP, and the settings
+response that carries it is not served in demo mode. The manual page's field
+table and the report's fields are the same set
+(`the_manual_page_documents_exactly_the_fields_the_report_carries`).
+
+**Validation:** `cargo test usage_report`, `cargo test handlers::settings`,
+`cargo test instance_state`, `cargo test mcp`,
+`node scripts/check-docs-freshness.mjs --validate-table`, followed by the full
+backend checks.
 
 ### Bundled manual
 
@@ -3014,7 +3092,11 @@ the same shape at release time. `PAGE` (`whats-new`, re-exported as
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
 full refreshed document, plus the read-only `last_agent` (#426) and
 `update_check` (#425, `update_check::status` read from the instance state file
-beside the registry) fields. MCP enablement and its bearer token validate together
+beside the registry) fields, and the read-only `usage_report` (#477,
+`usage_report::status`: whether the report is on, the install ID while it is,
+and the exact report as text). A save reconciles `AppState::usage_report`
+before it answers, so the response to the save that turns the report on
+already carries the new install ID. MCP enablement and its bearer token validate together
 against one prospective snapshot, so an invalid combination saves nothing and
 reports field errors. Its candidate-token and capability-safe secret-reveal
 endpoints are `no-store`; the ordinary settings document never exposes secret
@@ -3546,7 +3628,8 @@ limits, the live configuration snapshot bound at each request, the Bundled
 manual (`docs_bundle::{pages, home, page, search}`) for the two docs tools,
 Instance state's `AgentConnectionLog` (`AppState.agent_connections`), fed the
 client's name from rmcp's `RequestContext::client_info()` on every
-`tools/call` (#426). No HTTP
+`tools/call` (#426), and the Usage report's `UsageReport`
+(`AppState.usage_report`), fed the same call's `clientInfo.name` (#477). No HTTP
 adapter is consumed: since #188 no file under `src/mcp/` imports
 `crate::handlers`, and ADR-19's MCP-to-handler proxying debt is retired.
 
@@ -5001,6 +5084,9 @@ directly. The Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and
 revisioned pause/rebuild/disconnect controls through the existing Vault API.
+Its Usage report section (#477) shows the `usage_report` field of the settings
+response: the switch, the report text exactly as the server sent it, and the
+install ID while the report is on.
 
 A git-backed Vault's own page (issue #149, resolving #121) carries one
 segmented Git-behaviour control offering the four behaviours legal on a

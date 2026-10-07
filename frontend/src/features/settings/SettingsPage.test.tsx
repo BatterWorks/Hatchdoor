@@ -111,6 +111,14 @@ const settings = [
     kind: "switch",
   },
   {
+    key: "HATCHDOOR_USAGE_REPORT_ENABLED",
+    value: "false",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
     key: "HATCHDOOR_GIT_AUTHOR_NAME",
     value: "Server author",
     source: "default",
@@ -170,6 +178,20 @@ function vault(name: string, enabled = true) {
   };
 }
 
+const INSTALL_ID = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8";
+
+/** The report as the server sends it: already indented text. */
+function usageReport(enabled: boolean) {
+  const id = enabled
+    ? INSTALL_ID
+    : "(created when the usage report is turned on)";
+  return {
+    enabled,
+    install_id: enabled ? INSTALL_ID : null,
+    report: `{\n  "type": "event",\n  "payload": {\n    "id": "${id}",\n    "data": {\n      "schema": 1\n    }\n  }\n}`,
+  };
+}
+
 function mockPage(
   vaults = [vault("Field notes")],
   onPatch?: (updates: Record<string, string>) => void,
@@ -186,10 +208,17 @@ function mockPage(
         settings: settings.map((item) =>
           item.key in updates ? { ...item, value: updates[item.key] } : item,
         ),
+        usage_report: usageReport(
+          updates.HATCHDOOR_USAGE_REPORT_ENABLED === "true",
+        ),
       });
     }
     if (url === "/api/settings")
-      return json({ settings, last_agent: lastAgent });
+      return json({
+        settings,
+        last_agent: lastAgent,
+        usage_report: usageReport(false),
+      });
     if (url === "/api/v1/vaults")
       return json({
         registry_revision: 3,
@@ -310,8 +339,8 @@ describe("SettingsPage", () => {
     expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
       "author@example.test",
     );
-    // The footer counts the rows the page renders: all twelve, none hidden.
-    expect(screen.getByText(/12 editable here, 0 set in/)).toBeVisible();
+    // The footer counts the rows the page renders: all thirteen, none hidden.
+    expect(screen.getByText(/13 editable here, 0 set in/)).toBeVisible();
   });
 
   it("offers the public address under Agent access", async () => {
@@ -506,6 +535,7 @@ describe("How does this work? links (#423)", () => {
     [/Agent access/, CONTEXTUAL_HELP.agentSettings],
     [/Uploads/, CONTEXTUAL_HELP.uploadSettings],
     [/Updates/, CONTEXTUAL_HELP.upgrade],
+    [/Usage report/, CONTEXTUAL_HELP.usageReport],
   ] as const)("links the %s section to its page", async (name, target) => {
     const { container } = await openSection(name);
     clickLinkIn(container.querySelector(".settings-sec-head"), target);
@@ -577,6 +607,49 @@ describe("How does this work? links (#423)", () => {
       CONTEXTUAL_HELP.updateCheck.page,
       CONTEXTUAL_HELP.updateCheck.heading,
     );
+  });
+
+  it("offers the usage report off, saying what is sent and showing the exact report (#477)", async () => {
+    await openSection(/Usage report/);
+    const row = screen
+      .getByText("Send a usage report")
+      .closest(".settings-row");
+    expect(row).toHaveTextContent(
+      "Once a day, Hatchdoor sends the report shown below to telemetry-hatchdoor.battercloud.cc, which Hatchdoor's maintainer runs, to decide which platforms to test and which parts of Hatchdoor people rely on.",
+    );
+    expect(
+      within(row as HTMLElement).getByRole("button", {
+        name: "Send a usage report",
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+
+    const report = screen.getByTestId("usage-report");
+    expect(report).toHaveTextContent("The report this server would send");
+    expect(report.querySelector("pre")?.textContent).toBe(
+      usageReport(false).report,
+    );
+    expect(report).not.toHaveTextContent("Install ID");
+  });
+
+  it("shows the install ID and the report it goes with once the usage report is on (#477)", async () => {
+    await openSection(/Usage report/);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send a usage report" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save usage report" }));
+
+    const report = await screen.findByText("The next report");
+    const block = report.closest("[data-testid='usage-report']") as HTMLElement;
+    expect(block.querySelector("pre")?.textContent).toBe(
+      usageReport(true).report,
+    );
+    expect(within(block).getByText("Install ID")).toBeInTheDocument();
+    expect(within(block).getAllByText(INSTALL_ID).length).toBeGreaterThan(0);
+  });
+
+  it("shows the usage report only in its own section", async () => {
+    await openSection(/Updates/);
+    expect(screen.queryByTestId("usage-report")).not.toBeInTheDocument();
   });
 
   it("names each help link in a section after what it explains (#460)", async () => {

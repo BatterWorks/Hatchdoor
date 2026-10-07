@@ -347,6 +347,28 @@ impl InstanceStateStore {
         self.persist(&stored)
     }
 
+    /// Drop the section stored under `name`, keeping every other section.
+    /// Writes nothing when there is no such section, and refuses when the
+    /// file belongs to a newer Hatchdoor.
+    pub fn remove_section(&self, name: &str) -> Result<(), String> {
+        let _write = self.lock_writes();
+        let mut stored = match self.load() {
+            LoadedState::Usable(stored) => stored,
+            LoadedState::FutureSchema(found) => {
+                return Err(format!(
+                    "Instance state '{}' uses newer schema {found}, but this Hatchdoor \
+                     supports schema {INSTANCE_STATE_SCHEMA_VERSION}; leaving it untouched",
+                    self.path.display()
+                ));
+            }
+            LoadedState::Unusable => return Ok(()),
+        };
+        if stored.sections.remove(name).is_none() {
+            return Ok(());
+        }
+        self.persist(&stored)
+    }
+
     /// Held across a whole read-modify-write. A panic while holding it cannot
     /// leave the file half-written (see [`Self::persist`]), so a poisoned lock
     /// is still safe to take.
@@ -715,5 +737,30 @@ mod tests {
                 .and_then(|record| record.previous),
             Some("2.8.0".into())
         );
+    }
+
+    #[test]
+    fn a_removed_section_is_gone_and_the_others_stay() {
+        let directory = tempdir().expect("temporary state directory");
+        let store = store_in(directory.path());
+        store.record_start("2.8.0", false);
+        store
+            .write_section("feature", &serde_json::json!({ "kept": false }))
+            .expect("write section");
+
+        store.remove_section("feature").expect("remove section");
+
+        assert_eq!(store.section::<serde_json::Value>("feature"), None);
+        assert!(store.section::<VersionRecord>(VERSIONS_SECTION).is_some());
+    }
+
+    #[test]
+    fn removing_a_section_that_is_not_there_writes_nothing() {
+        let directory = tempdir().expect("temporary state directory");
+        let store = store_in(directory.path());
+
+        store.remove_section("feature").expect("nothing to remove");
+
+        assert!(!store.path().exists());
     }
 }

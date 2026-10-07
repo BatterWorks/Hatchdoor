@@ -97,6 +97,10 @@ The manual is open too. Every instance serves this manual as plain Markdown at `
 
 With **Tell me about new releases** on, Hatchdoor sends one request a day to GitHub's public Hatchdoor release list, carrying your IP address and the user-agent `Hatchdoor`, nothing else; it is off by default (see [[How to upgrade Hatchdoor#Hear about new releases]]).
 
+## The usage report
+
+The usage report is telemetry, and it is off unless you turn it on. With **Send a usage report** on, Hatchdoor sends one small report a day to `https://telemetry-hatchdoor.battercloud.cc`, a collector run by Hatchdoor's maintainer. The report says what the install runs on and which parts of Hatchdoor it uses, as fixed words, yes or no answers and ranges, with a random install ID. It carries nothing about your notes, your Vaults' names, your machine or any token. [[Usage report reference]] lists every field, and Settings shows the exact report before you decide.
+
 ## Demo mode's narrower rule
 
 A public, read-only demo (`HATCHDOOR_DEMO_MODE=true`) doesn't just relax these rules; it restructures them, and the result isn't uniform across surfaces:

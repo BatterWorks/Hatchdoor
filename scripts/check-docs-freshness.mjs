@@ -228,6 +228,18 @@ const SURFACES = [
     notes: [`${REFERENCE}/MCP tools reference.md`],
   },
   {
+    id: "usage-report",
+    label: "The opt-in usage report (telemetry)",
+    // ADR-45: the manual page lists every field the report carries, so a
+    // change to the report is a change to what operators were told.
+    paths: ["src/usage_report.rs"],
+    notes: [
+      `${REFERENCE}/Usage report reference.md`,
+      `${REFERENCE}/Settings and environment variables reference.md`,
+      `${CONCEPTS}/The security model.md`,
+    ],
+  },
+  {
     id: "deployment",
     label: "Deployment and packaging",
     paths: ["Dockerfile", "docker-compose.yml", ".env.example"],

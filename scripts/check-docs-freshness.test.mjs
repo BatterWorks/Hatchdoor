@@ -35,6 +35,9 @@ const FIXTURE_NOTES = [
   "docs/user-vault/02 Guides/How to manage multiple Vaults.md",
   "docs/user-vault/01 Get started/Connect your first Vault.md",
   "docs/user-vault/04 Concepts/Vault lifecycle states.md",
+  "docs/user-vault/03 Reference/Usage report reference.md",
+  "docs/user-vault/03 Reference/Settings and environment variables reference.md",
+  "docs/user-vault/04 Concepts/The security model.md",
 ];
 
 function run(root, args = []) {
@@ -455,6 +458,17 @@ test("a bundled manual change names the MCP tools reference", async () => {
   const result = run(root);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /MCP tools reference\.md/);
+});
+
+test("a usage report change names its reference page", async () => {
+  const root = await fixture();
+  await write(root, "src/usage_report.rs", "// a new report field\n");
+  await commit(root, "usage report");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Usage report reference\.md/);
+  assert.match(result.stderr, /The security model\.md/);
 });
 
 // The manual ships inside the binary (ADR-38), so editing a page changes
