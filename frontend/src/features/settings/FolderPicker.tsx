@@ -8,6 +8,7 @@ import type {
   FolderNoteCount,
   FolderVaultRef,
 } from "../../types";
+import type { CreateFolderRefusal } from "./vaultCreation";
 import {
   createFolder,
   fetchFolderListing,
@@ -38,12 +39,22 @@ function mountIsEmpty(listing: FolderListing): boolean {
  * on screen belongs to one. */
 type VaultsSeen = Record<string, FolderVaultRef>;
 
-function vaultsIn(listing: FolderListing): VaultsSeen {
-  const seen: VaultsSeen = {};
-  if (listing.vault) seen[listing.path] = listing.vault;
+/** `seen` brought up to date by one listing: what it says about its own
+ * folder and each folder in it replaces what was known, so a Vault
+ * disconnected since stops counting. */
+function withListing(seen: VaultsSeen, listing: FolderListing): VaultsSeen {
+  const prefix = listing.path ? `${listing.path}/` : "";
+  const next: VaultsSeen = {};
+  for (const [path, vault] of Object.entries(seen)) {
+    const listed =
+      path === listing.path ||
+      (path.startsWith(prefix) && !path.slice(prefix.length).includes("/"));
+    if (!listed) next[path] = vault;
+  }
+  if (listing.vault) next[listing.path] = listing.vault;
   for (const folder of listing.folders)
-    if (folder.vault) seen[folder.path] = folder.vault;
-  return seen;
+    if (folder.vault) next[folder.path] = folder.vault;
+  return next;
 }
 
 /** The Vault the folder at `path` is, or sits inside. */
@@ -86,17 +97,12 @@ function NewFolder({
   onCreate,
 }: {
   parentName: string;
-  onCreate: (
-    name: string,
-  ) => Promise<{ ok: true } | { ok: false; code?: string; message: string }>;
+  onCreate: (name: string) => Promise<{ ok: true } | CreateFolderRefusal>;
 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<{
-    code?: string;
-    message: string;
-  } | null>(null);
+  const [failure, setFailure] = useState<CreateFolderRefusal | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const restoreFocus = useRef(false);
   const errorId = useId();
@@ -299,7 +305,7 @@ export function FolderPicker({
     if (result.ok) {
       setFailure(null);
       setListing(result.listing);
-      setVaultsSeen((seen) => ({ ...seen, ...vaultsIn(result.listing) }));
+      setVaultsSeen((seen) => withListing(seen, result.listing));
     } else {
       setFailure(result.message);
     }

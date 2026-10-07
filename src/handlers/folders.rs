@@ -44,7 +44,7 @@ pub async fn list_folders_handler(
     match listing {
         Ok(Ok(listing)) => Json(listing).into_response(),
         Ok(Err(error)) => VaultApiError::new(error.code(), error.message(), None, false)
-            .respond(error_status(error)),
+            .respond(listing_error_status(error)),
         Err(error) => internal_error_response(format!("folder listing task failed: {error}"), None),
     }
 }
@@ -92,10 +92,11 @@ fn create_error_status(error: FolderCreateError) -> StatusCode {
         }
         FolderCreateError::NameTaken | FolderCreateError::InsideVault => StatusCode::CONFLICT,
         FolderCreateError::NotWritable => StatusCode::UNPROCESSABLE_ENTITY,
+        FolderCreateError::VaultsUnknown => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
-fn error_status(error: FolderListingError) -> StatusCode {
+fn listing_error_status(error: FolderListingError) -> StatusCode {
     match error {
         FolderListingError::OutsideRoot => StatusCode::BAD_REQUEST,
         FolderListingError::NotFound => StatusCode::NOT_FOUND,
@@ -118,6 +119,7 @@ mod tests {
             (NameTaken, 409, "folder_name_taken"),
             (InsideVault, 409, "folder_inside_vault"),
             (NotWritable, 422, "folder_not_writable"),
+            (VaultsUnknown, 503, "folder_vaults_unknown"),
         ];
         for (error, status, code) in cases {
             assert_eq!(create_error_status(error).as_u16(), status);
@@ -133,7 +135,7 @@ mod tests {
             (FolderListingError::Unreadable, 422, "folder_unreadable"),
         ];
         for (error, status, code) in cases {
-            assert_eq!(error_status(error).as_u16(), status);
+            assert_eq!(listing_error_status(error).as_u16(), status);
             assert_eq!(error.code(), code);
         }
     }

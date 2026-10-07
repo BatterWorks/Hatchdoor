@@ -124,9 +124,12 @@ export async function fetchFolderListing(
   return { ok: true, listing: typed as FolderListing };
 }
 
+/** A folder Hatchdoor refused to make: the server's stable `code` and its
+ * plain message. */
+export type CreateFolderRefusal = { ok: false; code?: string; message: string };
+
 export type CreateFolderResult =
-  | { ok: true; folder: FolderListingEntry }
-  | { ok: false; code?: string; message: string };
+  { ok: true; folder: FolderListingEntry } | CreateFolderRefusal;
 
 /** `POST /api/v1/folders` (#494, ADR-44): make one new, empty folder called
  * `name` in the folder at `parent`, `""` for the mount itself. */

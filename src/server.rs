@@ -9733,6 +9733,9 @@ mod tests {
         let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
         let mount = tmp.path().join("mount");
         std::fs::create_dir_all(mount.join("Notes")).expect("mkdir");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, mount.join("Link")).expect("symlink");
         let body = serde_json::json!({"parent": "Notes", "name": "Journal"});
 
         for token in [None, Some("wrong")] {
@@ -9799,6 +9802,11 @@ mod tests {
                 "folder_parent_not_found",
             ),
             (
+                serde_json::json!({"parent": "Link", "name": "New"}),
+                StatusCode::NOT_FOUND,
+                "folder_parent_not_found",
+            ),
+            (
                 serde_json::json!({"name": "New", "recursive": true}),
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_request_body",
@@ -9813,6 +9821,7 @@ mod tests {
             assert_eq!(json_body(response).await["code"], code, "{body}");
         }
         assert!(!tmp.path().join("Out").exists());
+        assert!(!outside.join("New").exists());
     }
 
     #[tokio::test]

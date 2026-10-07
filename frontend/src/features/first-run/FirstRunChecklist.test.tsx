@@ -180,6 +180,64 @@ describe("FirstRunChecklist", () => {
     });
   });
 
+  it("adds a folder just made in the picker as a Vault, named after it (#494)", async () => {
+    serve({
+      "GET /api/settings": settings(),
+      "GET /api/v1/folders": {
+        root: "/data/vault",
+        root_found: true,
+        path: "",
+        markdown: { count: 0, at_least: false },
+        vault: null,
+        folders: [],
+        skipped_invalid_names: 0,
+      },
+      "POST /api/v1/folders": (body: unknown) => ({
+        name: (body as { name: string }).name,
+        path: (body as { name: string }).name,
+        markdown: { count: 0, at_least: false },
+        vault: null,
+        has_subfolders: false,
+      }),
+      "GET /api/v1/vaults": {
+        registry_revision: 7,
+        collection_revision: 0,
+        vaults: [],
+      },
+      "POST /api/v1/vaults": (body: unknown) => ({
+        vault: { ...healthyVault("Journal"), ...(body as object) },
+      }),
+    });
+    const props = renderChecklist();
+
+    fireEvent.click(screen.getByRole("button", { name: "Pick a folder" }));
+    fireEvent.click(await screen.findByRole("button", { name: /New folder/ }));
+    const name = screen.getByLabelText(/Name of the new folder/);
+    fireEvent.change(name, { target: { value: "Journal" } });
+    fireEvent.keyDown(name, { key: "Enter" });
+
+    expect(
+      await screen.findByRole("button", { name: /^Journal/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue(
+      "Journal",
+    );
+    expect(
+      calls.filter((call) => call.method === "POST").map((call) => call.path),
+    ).toEqual(["/api/v1/folders"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add these notes" }));
+    await waitFor(() => expect(props.onVaultCreated).toHaveBeenCalled());
+    const create = calls.find(
+      (call) => call.method === "POST" && call.path === "/api/v1/vaults",
+    );
+    expect(create?.body).toEqual({
+      expected_registry_revision: 7,
+      name: "Journal",
+      source: { type: "local", path: "/data/vault/Journal" },
+    });
+  });
+
   it("ticks adding notes once a Vault exists", () => {
     serve({ "GET /api/settings": settings() });
     renderChecklist([healthyVault("Recipes")]);

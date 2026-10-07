@@ -150,6 +150,9 @@ pub enum FolderCreateError {
     InsideVault,
     /// Hatchdoor may not write to the parent folder.
     NotWritable,
+    /// The Vault registry cannot be read, so nothing says which folders
+    /// belong to a Vault. Refusing is the safe answer.
+    VaultsUnknown,
 }
 
 impl FolderCreateError {
@@ -162,13 +165,14 @@ impl FolderCreateError {
             Self::OutsideRoot => "folder_outside_root",
             Self::InsideVault => "folder_inside_vault",
             Self::NotWritable => "folder_not_writable",
+            Self::VaultsUnknown => "folder_vaults_unknown",
         }
     }
 
     pub fn message(self) -> &'static str {
         match self {
             Self::InvalidName => {
-                "A folder name cannot be empty, start with a dot or a space, end with a space, or contain a slash."
+                "That name cannot be used. A folder name cannot be empty, start with a dot or a space, end with a space, or contain a slash, and it cannot be a folder Hatchdoor keeps its own data in."
             }
             Self::NameTaken => "A folder with this name already exists.",
             Self::MountNotFound => {
@@ -179,10 +183,13 @@ impl FolderCreateError {
             }
             Self::OutsideRoot => FolderListingError::OutsideRoot.message(),
             Self::InsideVault => {
-                "This folder belongs to a Vault. A new folder can only be made outside a Vault."
+                "This place belongs to a Vault. A new folder can only be made outside every Vault."
             }
             Self::NotWritable => {
                 "Hatchdoor could not make a folder here. The folder is read-only, or Hatchdoor is not allowed to write to it."
+            }
+            Self::VaultsUnknown => {
+                "Hatchdoor cannot read its list of Vaults right now, so it cannot tell whether this folder belongs to one. Nothing was made."
             }
         }
     }
@@ -221,10 +228,10 @@ pub fn create_folder(
     }
 
     let target = parent.join(name);
-    if vault_roots(registry)
-        .iter()
-        .any(|vault| target.starts_with(vault))
-    {
+    let Some(vaults) = vault_roots(registry) else {
+        return Err(FolderCreateError::VaultsUnknown);
+    };
+    if vaults.iter().any(|vault| target.starts_with(vault)) {
         return Err(FolderCreateError::InsideVault);
     }
     // A name the listing would hide as instance state is as unusable as a
@@ -495,15 +502,16 @@ fn registered_vaults(registry: &VaultRegistryStore) -> Vec<(PathBuf, RegisteredV
         .collect()
 }
 
-/// Every registered Vault's root as [`create_folder`] must respect it. Unlike
+/// Every registered Vault's root as [`create_folder`] must respect it, or
+/// `None` when the registry cannot say (unreadable, or in recovery). Unlike
 /// [`registered_vaults`] this keeps a Vault whose folder is missing, resolved
 /// through its parent, so a new folder cannot land where that Vault expects
 /// its notes.
-fn vault_roots(registry: &VaultRegistryStore) -> Vec<PathBuf> {
+fn vault_roots(registry: &VaultRegistryStore) -> Option<Vec<PathBuf>> {
     let Ok(VaultRegistryState::Ready(snapshot)) = registry.load() else {
-        return Vec::new();
+        return None;
     };
-    snapshot
+    let roots = snapshot
         .definitions()
         .map(|definition| {
             let path = registry.vault_path(&definition);
@@ -514,7 +522,8 @@ fn vault_roots(registry: &VaultRegistryStore) -> Vec<PathBuf> {
                 }
             })
         })
-        .collect()
+        .collect();
+    Some(roots)
 }
 
 fn vault_at(vaults: &[(PathBuf, RegisteredVault)], path: &Path) -> Option<RegisteredVault> {
@@ -911,7 +920,7 @@ mod tests {
 
     /// Every path under the fixture's temporary directory, so a test can show
     /// a refusal changed nothing anywhere, inside the mount or beside it.
-    fn everything(fixture: &Fixture) -> Vec<PathBuf> {
+    fn every_path(fixture: &Fixture) -> Vec<PathBuf> {
         let mut found = Vec::new();
         let mut pending = vec![fixture._dir.path().to_path_buf()];
         while let Some(directory) = pending.pop() {
@@ -931,7 +940,7 @@ mod tests {
     fn creates_one_empty_folder_at_the_mount_and_inside_a_subfolder() {
         let fixture = fixture();
         write(&fixture.root.join("Work/a.md"));
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
 
         let top = create(&fixture, "", "Journal").unwrap();
 
@@ -954,7 +963,7 @@ mod tests {
         expected.push(fixture.root.join("Journal"));
         expected.push(fixture.root.join("Work/Projects"));
         expected.sort();
-        assert_eq!(everything(&fixture), expected);
+        assert_eq!(every_path(&fixture), expected);
         // The listing shows what was made, as it was answered.
         let listing = list(&fixture, "").unwrap();
         assert_eq!(listing.folders[0], top);
@@ -975,7 +984,7 @@ mod tests {
     fn names_that_are_not_one_plain_segment_are_refused() {
         let fixture = fixture();
         fs::create_dir(fixture.root.join("Work")).unwrap();
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
         let long = "x".repeat(MAX_NAME_BYTES + 1);
         for name in [
             "",
@@ -1003,7 +1012,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(everything(&fixture), before);
+        assert_eq!(every_path(&fixture), before);
     }
 
     #[test]
@@ -1027,7 +1036,7 @@ mod tests {
         write(&fixture.root.join("Work/a.md"));
         fs::write(fixture.root.join("file"), "x").unwrap();
         std::os::unix::fs::symlink(fixture.root.join("Work"), fixture.root.join("Alias")).unwrap();
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
 
         for name in ["Work", "file", "Alias"] {
             assert_eq!(
@@ -1036,7 +1045,7 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(everything(&fixture), before);
+        assert_eq!(every_path(&fixture), before);
     }
 
     #[test]
@@ -1044,7 +1053,7 @@ mod tests {
         let fixture = fixture();
         write(&fixture.root.join("note.md"));
         fs::create_dir_all(fixture.root.join(".git/objects")).unwrap();
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
 
         for parent in [
             "Missing",
@@ -1059,14 +1068,14 @@ mod tests {
                 "{parent}"
             );
         }
-        assert_eq!(everything(&fixture), before);
+        assert_eq!(every_path(&fixture), before);
     }
 
     #[test]
     fn a_parent_that_leaves_the_mount_is_refused() {
         let fixture = fixture();
         fs::create_dir(fixture.root.join("Work")).unwrap();
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
 
         for parent in [
             "..",
@@ -1083,7 +1092,7 @@ mod tests {
                 "{parent}"
             );
         }
-        assert_eq!(everything(&fixture), before);
+        assert_eq!(every_path(&fixture), before);
     }
 
     #[test]
@@ -1095,7 +1104,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, fixture.root.join("Escape")).unwrap();
         std::os::unix::fs::symlink(fixture.root.join("Real"), fixture.root.join("Alias")).unwrap();
         std::os::unix::fs::symlink(&outside, fixture.root.join("Real/out")).unwrap();
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
 
         for parent in ["Escape", "Alias", "Alias/Sub", "Real/out"] {
             assert_eq!(
@@ -1104,7 +1113,7 @@ mod tests {
                 "{parent}"
             );
         }
-        assert_eq!(everything(&fixture), before);
+        assert_eq!(every_path(&fixture), before);
     }
 
     #[test]
@@ -1125,7 +1134,7 @@ mod tests {
         write(&fixture.root.join("Work/Projects/a.md"));
         fs::create_dir(fixture.root.join("Personal")).unwrap();
         register(&fixture, "Work", fixture.root.join("Work"));
-        let before = everything(&fixture);
+        let before = every_path(&fixture);
 
         for parent in ["Work", "Work/Projects"] {
             assert_eq!(
@@ -1134,7 +1143,7 @@ mod tests {
                 "{parent}"
             );
         }
-        assert_eq!(everything(&fixture), before);
+        assert_eq!(every_path(&fixture), before);
         // Beside the Vault, and in a folder that only holds Vaults, is fine.
         assert!(create(&fixture, "", "Another").is_ok());
         assert!(create(&fixture, "Personal", "New").is_ok());
@@ -1167,6 +1176,25 @@ mod tests {
             Err(FolderCreateError::InsideVault)
         );
         assert!(!fixture.root.join("Gone").exists());
+    }
+
+    #[test]
+    fn nothing_is_made_while_the_registry_cannot_name_the_vaults() {
+        let fixture = fixture();
+        fs::create_dir(fixture.root.join("Work")).unwrap();
+        register(&fixture, "Work", fixture.root.join("Work"));
+        // A registry that no longer parses is in recovery and lists nothing.
+        fs::write(fixture._dir.path().join("state/vaults.json"), "{ not json").unwrap();
+        let before = every_path(&fixture);
+
+        for parent in ["", "Work"] {
+            assert_eq!(
+                create(&fixture, parent, "New"),
+                Err(FolderCreateError::VaultsUnknown),
+                "{parent:?}"
+            );
+        }
+        assert_eq!(every_path(&fixture), before);
     }
 
     #[test]
@@ -1220,6 +1248,7 @@ mod tests {
             (FolderCreateError::OutsideRoot, "folder_outside_root"),
             (FolderCreateError::InsideVault, "folder_inside_vault"),
             (FolderCreateError::NotWritable, "folder_not_writable"),
+            (FolderCreateError::VaultsUnknown, "folder_vaults_unknown"),
         ];
         for (error, code) in codes {
             assert_eq!(error.code(), code);

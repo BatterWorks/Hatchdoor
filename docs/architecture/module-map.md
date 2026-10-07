@@ -1284,7 +1284,8 @@ from (#430). See ADR-41.
 empty folder called `name` in the folder at `parent` and returns it as the
 `FolderEntry` the listing would show (zero notes, no Vault, no subfolders); or
 a `FolderCreateError` (`InvalidName`, `NameTaken`, `MountNotFound`,
-`ParentNotFound`, `OutsideRoot`, `InsideVault`, `NotWritable`) with a stable
+`ParentNotFound`, `OutsideRoot`, `InsideVault`, `NotWritable`,
+`VaultsUnknown`) with a stable
 `code` and a plain `message` that carries no OS error text. It shares the
 listing's root resolution, relative-path parsing, symlink-free walk and
 hidden-name rule (`resolve_root`, `parse_relative`, `shown_folder`,
@@ -1306,7 +1307,8 @@ web-token gate and demo refusal, and the field from `AppConfig::vault_source`),
 `create_folder` is the only write here and makes exactly one directory per
 call, never a chain, and nothing inside it; never outside the mount; never
 when the new folder would sit at or inside a registered Vault's root, a Vault
-whose folder is missing included; never over an existing name; it deletes and
+whose folder is missing included, and never while the registry cannot be
+read (`VaultsUnknown`); never over an existing name; it deletes and
 renames nothing (ADR-44). Both resolve the
 configured root once and follow no symlink below it, so neither leaves the
 root and the listing cannot loop; a requested path that is absolute or contains `..` is
@@ -2986,7 +2988,8 @@ takes `POST` (#494, ADR-44) with `{parent, name}`, unknown fields refused, and
 answers `201` with the new `FolderEntry`; its refusals are `400
 folder_name_invalid`, `400 folder_outside_root`, `404 folder_mount_not_found`,
 `404 folder_parent_not_found`, `409 folder_name_taken`, `409
-folder_inside_vault` and `422 folder_not_writable`, under the same web-token
+folder_inside_vault`, `422 folder_not_writable` and `503
+folder_vaults_unknown`, under the same web-token
 gate and demo refusal.
 `whats_new.rs` serves `GET /api/v1/whats-new` (ADR-42) behind the web token
 when one is configured and refused with `403 demo_read_only` in demo mode,

@@ -444,6 +444,38 @@ describe("FolderPicker new folder (#494)", () => {
     ).toBeInTheDocument();
   });
 
+  it("is offered again once a listing no longer names the Vault", async () => {
+    const kitchen = { vault_id: "v-1", name: "Kitchen" };
+    const inside = listing("Recipes", [folder("Baking", 40, {}, "Recipes")]);
+    serve({
+      "": listing("", [
+        folder("Recipes", 86, { vault: kitchen, has_subfolders: true }),
+      ]),
+      Recipes: { ...inside, vault: kitchen },
+    });
+    render(<FolderPicker value="" onPick={() => {}} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open Recipes" }),
+    );
+    await screen.findByRole("button", { name: /^Baking/ });
+    expect(screen.queryByRole("button", { name: /New folder/ })).toBeNull();
+
+    // The Vault is disconnected elsewhere; the next listings say so.
+    serve({
+      "": listing("", [folder("Recipes", 86, { has_subfolders: true })]),
+      Recipes: inside,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "vault" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open Recipes" }),
+    );
+    await screen.findByRole("button", { name: /^Baking/ });
+    expect(
+      screen.getByRole("button", { name: /New folder/ }),
+    ).toBeInTheDocument();
+  });
+
   it("is not offered anywhere when the mount itself is a Vault", async () => {
     serve({
       "": listing("", [folder("Sub", 2, { has_subfolders: true })], {

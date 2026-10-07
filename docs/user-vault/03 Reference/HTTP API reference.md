@@ -262,6 +262,7 @@ Exactly one directory is made and nothing is written into it. The parent is reac
 | `409` | `folder_inside_vault` | `parent` is a registered Vault or sits inside one, or the new folder would be a registered Vault's own missing folder. |
 | `422` | `folder_not_writable` | Hatchdoor could not write to `parent`: it is read-only, or the process lacks permission. |
 | `422` | `invalid_request_body` | The body is not the JSON object above. |
+| `503` | `folder_vaults_unknown` | Hatchdoor cannot read its Vault registry, so it cannot tell whether `parent` belongs to a Vault. Nothing is made. |
 
 ## What's new
 
