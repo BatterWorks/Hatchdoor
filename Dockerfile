@@ -81,7 +81,7 @@ USER nonroot:nonroot
 ENTRYPOINT ["/app/hatchdoor"]
 
 # Last, so a new commit or version rewrites only metadata and no layer above.
-# title, description, licenses and source repeat Cargo.toml, and
+# description, licenses and source repeat Cargo.toml, and
 # scripts/dockerfile-labels.test.mjs fails when they drift. The MCP registry
 # reads the server name to prove who owns the image.
 ARG VERSION=""

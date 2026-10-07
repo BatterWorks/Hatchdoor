@@ -20,13 +20,17 @@ async function read(file) {
 function runtimeStage(dockerfile) {
   const stages = dockerfile.split(/^FROM /m);
   const runtime = stages.at(-1);
-  assert.match(runtime, /^\S+ AS runtime$/m, "the last stage is `runtime`");
+  assert.match(runtime, /^\S+ AS runtime\n/, "the last stage is `runtime`");
   return runtime;
 }
 
+// Every key and value of the stage's one LABEL instruction, which runs over
+// continuation lines to the first line that does not end in a backslash.
 function labels(stage) {
+  const instructions = [...stage.matchAll(/^LABEL ((?:.*\\\n)*.*)$/gm)];
+  assert.equal(instructions.length, 1, "one LABEL instruction");
   return Object.fromEntries(
-    [...stage.matchAll(/^(?:LABEL)?\s+([a-z.]+)="([^"]*)"/gm)].map(
+    [...instructions[0][1].matchAll(/(\S+?)="([^"]*)"/g)].map(
       ([, key, value]) => [key, value],
     ),
   );
@@ -40,10 +44,10 @@ function cargoField(cargo, field) {
 
 test("the runtime image carries the labels that link it to the project", async () => {
   const cargo = await read("Cargo.toml");
-  const found = labels(runtimeStage(await read("Dockerfile")));
+  const imageLabels = labels(runtimeStage(await read("Dockerfile")));
   const repository = cargoField(cargo, "repository");
 
-  assert.deepEqual(found, {
+  assert.deepEqual(imageLabels, {
     "org.opencontainers.image.title": "Hatchdoor",
     "org.opencontainers.image.description": cargoField(cargo, "description"),
     "org.opencontainers.image.licenses": cargoField(cargo, "license"),

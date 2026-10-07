@@ -5340,6 +5340,7 @@ packet scope:
   killed by Docker's default 10 s grace (#322); raise it if those bounds grow.
   Validate cold/warm verification,
   source/dependency invalidation, and the final image's platform/healthcheck.
+  After changing a label, run `node --test scripts/dockerfile-labels.test.mjs`.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: Rust build and dependency
   coordination.
 - `frontend/package.json`, lockfile, TypeScript/Vite/ESLint configuration:

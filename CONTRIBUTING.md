@@ -180,6 +180,12 @@ When changing the checker itself, run its isolated regression tests:
 node --test scripts/check-module-map.test.mjs
 ```
 
+When changing the image labels in the `Dockerfile`, or the `description`, `license` or `repository` field in `Cargo.toml` that they repeat, run:
+
+```bash
+node --test scripts/dockerfile-labels.test.mjs
+```
+
 ## Architecture decisions
 
 Before a structural change, read [`docs/adr/`](docs/adr/README.md). Those records

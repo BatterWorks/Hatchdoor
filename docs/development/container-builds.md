@@ -56,7 +56,7 @@ docker build --build-arg VERSION=2.8.0 --build-arg GIT_SHA="$(git rev-parse HEAD
 docker inspect hatchdoor:local --format '{{json .Config.Labels}}'
 ```
 
-`title`, `description`, `licenses` and `source` repeat `Cargo.toml`. `node --test scripts/dockerfile-labels.test.mjs` fails when they drift.
+`description`, `licenses` and `source` repeat `Cargo.toml`. Nothing runs the comparison for you, so after changing a label or one of those `Cargo.toml` fields, run `node --test scripts/dockerfile-labels.test.mjs`.
 
 ### Resource-limited builders
 
