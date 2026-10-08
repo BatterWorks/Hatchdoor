@@ -188,7 +188,7 @@ Available whenever MCP is enabled, independent of write mode.
 
 | Tool | Required parameters | Purpose |
 | --- | --- | --- |
-| `search_notes` | `scope`, `query` | Search one Vault or all enabled Vaults. Optional: `mode` (`semantic` default or `keyword`), `limit` (1–50, default 10), `per_note_cap` (1–10, default 2), `layers` (array of layer names to include). Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query that is a single `#tag` (letters, digits, `-`, `_` and `/` after the `#`) runs as a tag match whatever `mode` was requested: every hit scores 1 and the response reports `"mode": "tag"`. Every other query reports the mode it asked for. `tag` is never accepted as a requested mode. |
+| `search_notes` | `scope`, `query` | Search one Vault or all enabled Vaults. Optional: `mode` (`semantic` default or `keyword`), `limit` (1–50, default 10), `per_note_cap` (1–10, default 2), `layers` (array of layer names to include), `detail` (`compact` default or `full`). Hits are compact by default: each carries `vault_id`, `note_slug`, `note_title`, `note_path`, `heading_path`, `score`, `layer` and a `snippet`, which is enough to pick a note and read it with `get_note`. See [Compact and full search hits](#compact-and-full-search-hits). Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query that is a single `#tag` (letters, digits, `-`, `_` and `/` after the `#`) runs as a tag match whatever `mode` was requested: every hit scores 1 and the response reports `"mode": "tag"`. Every other query reports the mode it asked for. `tag` is never accepted as a requested mode. |
 | `get_note` | `vault_id`, `slug` | Read one exact note's authoritative Markdown. Also lists the note's saved queries under `saved_queries`, by name, without evaluating them. |
 | `get_note_links` | `vault_id`, `slug` | Outgoing links and backlinks for one exact note, wikilinks and Markdown links to `.md` files alike. |
 | `resolve_wikilink` | `vault_id`, `target` | Resolve a wikilink target within one Vault. |
@@ -211,6 +211,23 @@ Collection-scoped results (`search_notes`, `get_tree`, `get_stats`, `get_graph`,
 `get_tree` with nothing but `scope` returns the whole Vault, which on a few hundred notes is large enough to overflow a client's per-result budget. Three optional arguments narrow it. `include_notes: false` is the cheap one to open with: it returns every folder at every level with its note count and no notes at all, so a several-hundred-note Vault's shape costs on the order of a kilobyte instead of seventy. `folder` returns one subtree — `"40-reference/Parenting"`, matched case-insensitively, surrounding slashes ignored. `max_depth` stops the descent: the starting folder is depth 0, a folder at the limit is listed with its count but not opened, and one that had something inside it is marked `truncated` so it cannot be mistaken for an empty leaf. Every folder reports `note_count`, the notes held directly inside it, not counting its subfolders; a subtree total is the sum of those. A `folder` naming something the Vault does not have answers the structured error `folder_not_found` rather than an empty tree, so a typo never reads as an empty folder. With `scope: "all"` that refusal is per-Vault: the Vaults that do have the folder still answer, each Vault that does not appears in `participants` carrying `folder_not_found`, and the result is marked `partial`. Only when no Vault has it does the whole call refuse, and that refusal names no Vault, because none of them is more at fault than the others; the per-Vault refusals stay on `participants`, where each one does name its own Vault.
 
 Notes inside a tree carry `title` and `slug` but no `vault_id`: the tree they sit in already names its Vault, once. Flat results that mix Vaults in a single list — `search_notes`, `recently_modified`, `query_notes`, `find_text` — still qualify every hit.
+
+### Compact and full search hits
+
+`search_notes` returns small hits unless you ask for more, because most searches only locate a note that `get_note` then reads. Before 2.8.0 every hit carried the whole matched chunk, and a search near the defaults cost 20 to 50 KB.
+
+A compact hit, the default, has eight fields: `vault_id`, `note_slug`, `note_title`, `note_path`, `heading_path`, `score`, `layer` and `snippet`. It has no `content`, `outbound_links`, `metadata` or `chunk_id`.
+
+The `snippet` is at most 200 characters copied from the matched chunk, and its length cannot be changed:
+
+- In keyword mode it is centred on the first query word the chunk contains.
+- In semantic mode, and for a `#tag` query, it is the start of the chunk.
+- `…` marks each side where text was left out. A chunk of 200 characters or fewer comes back whole, with no `…`.
+- A cut falls between words. Text with no spaces near the cut, such as Chinese or Japanese or a very long URL, is cut between characters instead, never inside one.
+
+Pass `detail: "full"` to get the earlier shape: every hit carries the whole chunk in `content`, the note's `outbound_links`, its `metadata` (tags and aliases) and the `chunk_id`, and no `snippet`. Any other `detail` value is refused as invalid input.
+
+Both shapes return the same hits, with the same scores, in the same order. `detail` changes only what each hit carries. A `search_notes` item inside `batch` follows the same default.
 
 ### Selecting notes by tag, path or property
 

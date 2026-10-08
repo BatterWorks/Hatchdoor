@@ -47,6 +47,8 @@ Use `resolve_wikilink` when the user names a note as an Obsidian wikilink target
 
 Use `get_note` only after search or wikilink resolution has found the note you need.
 
+A search hit is small on purpose. It names the note and carries a `snippet` of at most 200 characters, so you can raise `limit` up to 50 without filling your context. Pick the note from its title, path, heading and snippet, then read it with `get_note`. Pass `detail: "full"` only when you need the whole matched chunk, the note's outbound links or its tags on every hit, and keep `limit` low when you do.
+
 Use `get_tree` only when folder structure or broad navigation is the task.
 
 When you need to know how Hatchdoor itself works, `read_docs` and `search_docs` read this manual. See [[MCP tools reference#Hatchdoor's manual]].
