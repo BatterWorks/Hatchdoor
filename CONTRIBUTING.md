@@ -193,6 +193,12 @@ When changing the image labels in the `Dockerfile`, or the `description`, `licen
 node --test scripts/dockerfile-labels.test.mjs
 ```
 
+When changing the Docker Hub overview or short description under `docs/maintenance/docker-hub/`, run:
+
+```bash
+node --test scripts/docker-hub-overview.test.mjs
+```
+
 ## Review standards
 
 [`CODING_STANDARDS.md`](CODING_STANDARDS.md) holds the rules a reviewer applies to a finished diff: the judgement calls no check can make. Anything a machine can enforce belongs in `just check` instead.

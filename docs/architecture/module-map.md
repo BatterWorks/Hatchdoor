@@ -5542,6 +5542,13 @@ packet scope:
   Validate cold/warm verification,
   source/dependency invalidation, and the final image's platform/healthcheck.
   After changing a label, run `node --test scripts/dockerfile-labels.test.mjs`.
+  The image's Docker Hub page is published from
+  `docs/maintenance/docker-hub/overview.md` and `short-description.txt` by
+  the release hook's `images` step (#486, ADR-36 decision 7); this repository
+  makes no Docker Hub call. The overview's quick start repeats the Docker
+  Compose install guide, so the docs-freshness table names the overview when
+  `Dockerfile`, `docker-compose.yml`, `.env.example` or that guide changes.
+  After editing the overview or the short description, run `node --test scripts/docker-hub-overview.test.mjs`.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: Rust build and dependency
   coordination.
 - `frontend/package.json`, lockfile, TypeScript/Vite/ESLint configuration:

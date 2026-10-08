@@ -182,6 +182,9 @@ The build machines, the internal registry and the servers that run releases are 
 - Pass every build `--build-arg HATCHDOOR_IMAGE=docker` for the Docker build and `--build-arg HATCHDOOR_IMAGE=podman` for the Podman build. The opt-in usage report sends it as `image`; without it a published image reports `source`.
 - Copy them to Docker Hub from the fixed version tags, never from a moving tag such as `latest`.
 - Skip a tag that already points at the image it would push, and refuse if a different image already sits under the version. A published version is never overwritten.
+- Publish the Docker Hub page of `battermanz/hatchdoor` once the tags above are in place: `docs/maintenance/docker-hub/overview.md` as the overview and the one line of `docs/maintenance/docker-hub/short-description.txt`, without its final newline, as the short description. Read both from the tagged commit, not from a working tree that may have moved on. Docker Hub accepts at most 25,000 bytes of overview and 100 characters of short description, and `scripts/docker-hub-overview.test.mjs` holds the files to that. Publishing the same text again changes nothing, so the duty is safe to repeat. A failure here fails `images` like any other: the release stays a draft and the next run tries again.
+
+The Docker Hub page changes only at a release, and only when one of those two files did. `release-publish` never talks to Docker Hub itself. Edit the files like any other documentation: `just docs-freshness` names the overview when the Compose file, the example environment file, the Dockerfile or the Docker Compose install guide changes.
 
 `deploy` must:
 

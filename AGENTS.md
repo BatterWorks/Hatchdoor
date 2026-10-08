@@ -158,7 +158,9 @@ just docs-freshness
 ```
 
 It names the user-facing surfaces the branch changed and the `docs/user-vault`
-notes that document them, then exits non-zero. That exit is the trigger, not a
+notes that document them, plus the Docker Hub overview
+(`docs/maintenance/docker-hub/overview.md`) when the install steps changed,
+then exits non-zero. That exit is the trigger, not a
 failure to work around: the script cannot judge whether a note still reads
 true, so it hands you the reading list instead.
 
