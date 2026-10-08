@@ -76,8 +76,8 @@
 [#477]: https://github.com/BatterWorks/Hatchdoor/issues/477
 [#478]: https://github.com/BatterWorks/Hatchdoor/issues/478
 [#479]: https://github.com/BatterWorks/Hatchdoor/issues/479
-[#482]: https://github.com/BatterWorks/Hatchdoor/issues/482
 [#480]: https://github.com/BatterWorks/Hatchdoor/issues/480
+[#482]: https://github.com/BatterWorks/Hatchdoor/issues/482
 [#485]: https://github.com/BatterWorks/Hatchdoor/issues/485
 [#491]: https://github.com/BatterWorks/Hatchdoor/issues/491
 [#494]: https://github.com/BatterWorks/Hatchdoor/issues/494
