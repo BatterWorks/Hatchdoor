@@ -1746,7 +1746,7 @@ the full backend checks.
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/text_match.rs`.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, `AssetSurface`,
 `NoteDownload` (#342), explicit `VaultScope`,
@@ -1756,7 +1756,7 @@ projections, plus `VaultReadCore::saved_queries` and its wire types
 (`SavedQueriesResponse`, `SavedQueryResult`, `SavedQueryOutcome`,
 `SavedQueryTable`, `SavedQueryColumn`, `SavedQueryRow`, `SavedQueryTruncation`,
 `SavedQueryTruncationReason`), and `VaultReadCore::saved_query` with its
-wire types (`SavedQueryEvaluation`, `SavedQueryRows`). `VaultQualifiedNote`
+wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46). `VaultQualifiedNote`
 carries `saved_queries: Vec<SavedQuerySummary>` (#277). `BrowseSurface` names which layer surface a caller may read.
 `Everything` is the established behavior and stays the default: a layer demotes
 a Note from the default *search* surface only, and an operator still reaches it
@@ -1981,7 +1981,7 @@ the shared cache's published Vault snapshot seam, existing Vault note/link
 types, and Runtime Search's two tag primitives (`normalize_tag_path`,
 `tag_matches`) for a query's tag condition. That last one is a dependency on
 the shared search *vocabulary*, not on retrieval: nothing here calls
-`VaultSearchCore`. `statistics_detail` also reads a Git-backed Vault's
+`VaultSearchCore`. `find_text` reads each Note's file from the Vault's directory and takes the frontmatter block's extent from `cache::parse::frontmatter_span`. `statistics_detail` also reads a Git-backed Vault's
 `git::NoteHistory` through its control block to date notes (#300).
 
 **Consumers:** `handlers/vault_content.rs` (exact note/link/resolve reads,
@@ -3468,6 +3468,7 @@ history. It is rejected inside
 `is_collection_management_tool`: that exemption keeps discovery and Vault
 control reachable while model setup is pending, and an Index turn cannot run
 without a configured search model. Catalogue grows 39 → 40, purely additive.
+`find_text` (#500, ADR-46) is a text match: `VaultReadCore::find_text` takes a `VaultScope` and a `TextMatchRequest` and returns every Note containing one literal string inside the shared envelope as `TextMatchResponse` (`TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet` with its `TextMatchPlace`, `TextMatchUnread` with its `TextMatchUnreadReason`). `src/vault_read/text_match.rs` holds the matching. It is the one collection read that opens files: the Notes walked are the published snapshot's rows after `BrowseSurface::restrict`, and each is read from `<vault directory>/<relative_path>.md` at call time, so the answer is never older than disk while the Note list can be, which the envelope's `stale` participant reports. A Vault whose directory is unreachable is an `unavailable` participant through `try_collection`, never an empty answer. The string is compared lowercased character by character unless `case_sensitive`, and always NFC-composed, in the body, the frontmatter block (`cache::parse::frontmatter_span`'s block with its delimiters) and the Vault-relative path with `.md`. The request's `layers` are selector tokens and an empty list means every layer, which is this operation's default and deliberately not `LayerSelection::default()`; named tokens go through `BrowseSurface::layer_selection`, so a restricted surface clamps them, and a name no readable participant declares is `invalid_layer_selection` by the same rule `search::vault_scoped` applies (restated here rather than shared, since Runtime Search is a consumed dependency). `path_prefix` reuses `query::CompiledCondition::folder`. Notes are ordered by path, Vault, then slug; `limit` clamps to 1..=500 (default 50) and snippets to 0..=3; `total_notes` and `total_occurrences` are counted before the limit. A file is read only when its resolved path is the one the index named, so no symbolic link added since is followed; an occurrence belongs to the place it starts in; a file that is not UTF-8 is matched lossily, and a Note whose file cannot be read is listed in `unread` (at most 50, `total_unread` counts all). An empty string, an over-long one or an empty `path_prefix` is the `invalid_text_match` refusal, compiled before any Vault is resolved. No HTTP route calls it.
 #242 adds `rename_tag`, the sixteenth write tool: a mapping onto the mutation
 core's `rename_tag`, dispatched under the Vault's mutation lock like every
 other write tool, answering a plan or an applied rename in `RenameTagResult`.
@@ -3528,7 +3529,7 @@ refuses them as items. `read_docs` answers `ReadDocsResult` (the Home page plus
 every page's name and title with no argument, one page otherwise) and refuses a
 name that matches no page with the structured `docs_page_not_found` error;
 `search_docs` answers `SearchDocsResult`. Both instruction variants name them.
-Catalogue grows to 48, purely additive. #423 adds `docs` to a standalone tool
+Catalogue grows to 48, purely additive. #500 adds `find_text`, the sixteenth read tool and a `READ_OPS` entry (so `batch` may carry it): a mapping onto `VaultReadCore::find_text` answering `FindTextResult`, the shared projection envelope around `TextMatchResponse`, with a hand-written input schema (`find_text_tool_schema`). Every default and bound is the core's. `search_notes`' description gains one sentence sending exact-string questions to it, and nothing else about `search_notes` changes. Catalogue grows to 49, purely additive. #423 adds `docs` to a standalone tool
 call's structured error when its `code` is one the manual explains
 (`docs_pointers.rs` holds that code-to-page table): `{page, heading}`, where
 `page` is a name `read_docs` accepts. `handle_tools_call` adds it to the

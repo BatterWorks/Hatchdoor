@@ -30,8 +30,8 @@ use crate::vault_management::{
     VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
 };
 use crate::vault_read::{
-    NoteQueryResponse, SavedQueryEvaluation, VaultGraph, VaultQualifiedLinks, VaultReadProjection,
-    VaultRecentNote, VaultResolveResponse, VaultStatistics, VaultTree,
+    NoteQueryResponse, SavedQueryEvaluation, TextMatchResponse, VaultGraph, VaultQualifiedLinks,
+    VaultReadProjection, VaultRecentNote, VaultResolveResponse, VaultStatistics, VaultTree,
 };
 
 // ---------------------------------------------------------------------------
@@ -59,6 +59,7 @@ pub struct StampedStatsResult {
 pub type GetGraphResult = VaultReadProjection<Vec<VaultGraph>>;
 pub type RecentlyModifiedResult = VaultReadProjection<Vec<VaultRecentNote>>;
 pub type QueryNotesResult = VaultReadProjection<NoteQueryResponse>;
+pub type FindTextResult = VaultReadProjection<TextMatchResponse>;
 pub type EvaluateSavedQueryResult = VaultReadProjection<SavedQueryEvaluation>;
 pub type CreateVaultResult = VaultMutationResponse;
 pub type EditVaultResult = VaultMutationResponse;
@@ -455,6 +456,7 @@ output_schemas! {
     "get_graph" => GetGraphResult,
     "recently_modified" => RecentlyModifiedResult,
     "query_notes" => QueryNotesResult,
+    "find_text" => FindTextResult,
     "evaluate_saved_query" => EvaluateSavedQueryResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
@@ -543,12 +545,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 48,
-            "3 setup + 15 read + 2 manual + 1 batch + 9 management + 18 write tools"
+            total, 49,
+            "3 setup + 16 read + 2 manual + 1 batch + 9 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 48, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 49, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
