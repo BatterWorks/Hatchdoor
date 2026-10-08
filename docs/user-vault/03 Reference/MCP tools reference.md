@@ -190,6 +190,8 @@ Available whenever MCP is enabled, independent of write mode.
 | --- | --- | --- |
 | `search_notes` | `scope`, `query` | Search one Vault or all enabled Vaults. Optional: `mode` (`semantic` default or `keyword`), `limit` (1–50, default 10), `per_note_cap` (1–10, default 2), `layers` (array of layer names to include), `detail` (`compact` default or `full`). Hits are compact by default: each carries `vault_id`, `note_slug`, `note_title`, `note_path`, `heading_path`, `score`, `layer` and a `snippet`, which is enough to pick a note and read it with `get_note`. See [Compact and full search hits](#compact-and-full-search-hits). Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query that is a single `#tag` (letters, digits, `-`, `_` and `/` after the `#`) runs as a tag match whatever `mode` was requested: every hit scores 1 and the response reports `"mode": "tag"`. Every other query reports the mode it asked for. `tag` is never accepted as a requested mode. |
 | `get_note` | `vault_id`, `slug` | Read one exact note's authoritative Markdown. Also lists the note's saved queries under `saved_queries`, by name, without evaluating them. |
+| `get_note_outline` | `vault_id`, `slug` | List one exact note's headings with the size of each section, plus the note's `content_hash` and its sizes, without any note text. See [[#Reading part of a long note]]. |
+| `get_note_section` | `vault_id`, `slug`, `headings` | Read whole sections of one exact note, picked by heading text or heading path. `headings` is a list of 1 to 10 strings. See [[#Reading part of a long note]]. |
 | `get_note_links` | `vault_id`, `slug` | Outgoing links and backlinks for one exact note, wikilinks and Markdown links to `.md` files alike. |
 | `resolve_wikilink` | `vault_id`, `target` | Resolve a wikilink target within one Vault. |
 | `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. Optional: `folder` (a Vault-relative folder to return as the root), `max_depth` (how far below it to descend, minimum 1), `include_notes` (default `true`). |
@@ -281,6 +283,39 @@ A note whose file could not be read is listed under `unread`, with `reason` `mis
 
 Reading every file is slower than an index lookup. On a large Vault, narrow with `path_prefix` when you can.
 
+### Reading part of a long note
+
+`get_note` returns the whole file. For a long rules note or runbook where you want two sections, that is most of the cost for none of the benefit. `get_note_outline` and `get_note_section` read part of a note instead.
+
+A **section** is a heading line and everything under it, up to the next heading of the same or a higher level. Its subsections are inside it. This is the same span `replace_section` replaces, so what you read is what a write to that heading would overwrite. A `#` line inside a fenced code block is not a heading.
+
+A **heading path** is the headings above a heading and its own text, joined with ` > `, such as `Rules > Filing > Inbox`. A `search_notes` hit carries one as `heading_path`, built from the first three heading levels.
+
+`get_note_outline` returns no note text. It returns:
+
+- `vault_id`, `slug`, `relative_path` and `content_hash`, the same hash `get_note` reports.
+- `size_bytes`, the size of the whole file.
+- `frontmatter_bytes`, the size of the frontmatter block with its `---` lines, or `0`.
+- `opening_text_bytes`, the size of the text between the frontmatter and the first heading.
+- `headings`, in document order. Each has `text` (the heading without its `#` characters), `level` (1 to 6), `heading_path` and `size_bytes`, the size of its section.
+
+A note with no headings returns an empty `headings` list, not an error. The frontmatter, the opening text and the sections of the headings that sit under no other heading add up to `size_bytes`.
+
+`get_note_section` takes `headings`, a list of 1 to 10 strings, and reads the note once. Each string is a heading's exact text or a heading path. If exactly one heading has that text, it is selected. Otherwise the string is read as a heading path and must match exactly one. Matching is exact, case included, with only the spaces around your string ignored. Write the text without `#` characters: `Filing`, not `## Filing`.
+
+The reply carries the note's `content_hash` and `sections`, one entry per string in the order you asked:
+
+- A found entry has `requested` (your string), the `heading_path` it resolved to, `level`, and the text under `section`, byte for byte as the file holds it.
+- An entry that selected nothing has `requested` and `error`, with `code` `heading_not_found` or `heading_ambiguous`. An ambiguous one lists every matching heading path under `matches`, so you know what to send next. Two headings with the same full path cannot be told apart by any request; read the enclosing section, or the whole note, for those.
+
+One bad heading never fails the call: the other entries still come back. Only a malformed list does. An empty list, an empty string or more than 10 strings is refused with the structured error `invalid_heading_selection`. A note that does not exist is `note_not_found`, as with `get_note`.
+
+The frontmatter and the opening text are not sections and cannot be requested. Use `get_frontmatter` for the properties, or `get_note` for everything.
+
+The text comes back in a field named `section`, never `content`. It is part of a note. Do not pass it to `update_note`, which replaces the whole note. To change a section, pass the reply's `content_hash` to `replace_section` or `edit_note`. `replace_section` names its heading with the `#` characters, which the outline's `level` gives you: a level 2 heading with the text `Filing` is `## Filing`.
+
+Both tools read the note's file when the call runs, as `get_note` does.
+
 ### Reading a note's saved queries
 
 A note can hold saved queries, fenced `base` blocks that describe which notes to list (see [[Supported Markdown reference]]). The note page draws each one as a table. An agent gets the same rows as data in two steps.
@@ -318,7 +353,7 @@ A saved query is never picked by its position in the note. Moving blocks around 
 
 ## Write content tools
 
-Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id` in addition to the parameters listed. Every mutating tool that targets an existing note also requires `expected_content_hash` — the hash most recently read from `get_note`, or from `get_frontmatter` when the body is not needed — for optimistic concurrency: a stale hash means someone else changed the note since you read it, and the write is rejected rather than silently overwriting.
+Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id` in addition to the parameters listed. Every mutating tool that targets an existing note also requires `expected_content_hash`, the hash most recently read from `get_note`, or from `get_frontmatter`, `get_note_outline` or `get_note_section` when the whole body is not needed. This is optimistic concurrency: a stale hash means someone else changed the note since you read it, and the write is rejected rather than silently overwriting.
 
 One limit on that promise is worth knowing. Hatchdoor normally commits a save by swapping the new copy of the note with the old one in a single step, which is what makes a change landing mid-save detectable. Filesystems that cannot do that swap, ZFS before 2.2 and anything mounted through FUSE, get a save that checks the note and then replaces it as two steps, and a change landing between those two is overwritten rather than reported. A stale hash is still refused either way, and Hatchdoor's own writes are serialised whatever the filesystem. This is not visible over MCP: `list_vaults` capabilities do not carry it, and the answer lives on the HTTP route `GET /api/v1/vaults/{vault_id}/write-capabilities` and in one line per Vault in the server log.
 

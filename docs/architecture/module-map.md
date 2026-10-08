@@ -1496,6 +1496,7 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/links.rs`
 - `src/vault/markdown_links.rs`
 - `src/vault/paths.rs`
+- `src/vault/sections.rs`
 - `src/vault/types.rs`
 - `src/vault/tests.rs`
 
@@ -1527,6 +1528,7 @@ process-wide memo keeps each note's counts until its size or modification
 time changes, so a listing re-reads only changed notes. The scanner records
 inline images as `MarkdownLink::Image` for that count only, and no rewriter
 touches them.
+`sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every ATX heading outside a fenced code block (one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text as the chunker does. The scan moved here unchanged from `write/notes.rs`, where it was private to `replace_section`, so the write layer and the read core's outline and section reads cannot disagree about a span. `scan_from` starts at a byte offset for a caller that knows where the frontmatter block ends; the write layer still scans the whole file, as it always has.
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
 currently supplies content hashing to the index and, since #248, the shared
@@ -1551,6 +1553,7 @@ watching, and application startup.
   resolution. `src/vault/paths.rs` is the single home for that split, shared
   with the write layer's rewriters, and no escape reaches
   `normalize_link_target`, which would read it as a path separator (#252).
+- A Section's span has one implementation, `NoteSections::span`. Neither `replace_section` nor a section read computes it another way (#502).
 - A note link is a wikilink or a Markdown link whose destination, once any
   `#anchor` is removed, ends `.md` (ADR-28), and both feed the same outgoing
   and backlink records. A Markdown target resolves by path from the linking
@@ -1607,6 +1610,7 @@ note back, plus `search::tag_matches` for what a tag and its namespace match. It
 also consumes the vault read model's wikilink body splits
 (`split_wikilink_note_body`, `split_wikilink_asset_body`), so a rewriter and
 the link graph can never disagree about where a target ends (#252).
+`replace_section` takes its headings and its span from the read model's `NoteSections` (#502); which heading the caller means, and the two refusals for a heading that is missing or not unique, stay in `write/notes.rs`.
 
 **Consumers:** the Vault-qualified mutation core (`src/vault_mutation.rs`),
 which since #186 is the sole caller of every write primitive. The one
@@ -1746,7 +1750,7 @@ the full backend checks.
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/text_match.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/sections.rs`, `src/vault_read/text_match.rs`.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, `AssetSurface`,
 `NoteDownload` (#342), explicit `VaultScope`,
@@ -1756,7 +1760,7 @@ projections, plus `VaultReadCore::saved_queries` and its wire types
 (`SavedQueriesResponse`, `SavedQueryResult`, `SavedQueryOutcome`,
 `SavedQueryTable`, `SavedQueryColumn`, `SavedQueryRow`, `SavedQueryTruncation`,
 `SavedQueryTruncationReason`), and `VaultReadCore::saved_query` with its
-wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46). `VaultQualifiedNote`
+wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46), and `VaultReadCore::note_outline` and `note_sections` with their wire types (`NoteOutline`, `OutlineHeading`, `NoteSectionsResponse`, `NoteSectionEntry`, `NoteSection`, `NoteSectionMiss`, `NoteSectionError`, `NoteSectionErrorCode`; #502). `VaultQualifiedNote`
 carries `saved_queries: Vec<SavedQuerySummary>` (#277). `BrowseSurface` names which layer surface a caller may read.
 `Everything` is the established behavior and stays the default: a layer demotes
 a Note from the default *search* surface only, and an operator still reaches it
@@ -1918,6 +1922,7 @@ frontmatter read has already loaded. It is therefore identical to the hash
 `exact_note` reports for that Note at that instant and costs no extra
 filesystem read, and it is not optional: the hash covers the whole file, so a
 Note with no frontmatter block still has one to report.
+`note_outline` and `note_sections` (#502) are the partial reads of one Note, in `src/vault_read/sections.rs`. Both are exact reads like `exact_note_frontmatter`: the catalog walk, the browse surface (`Ok(None)` for a Note this surface withholds), one read of the Note's file through the shared private `visible_note_file`, and the canonical `content_hash` of the whole file. Neither is wrapped in `VaultReadProjection`. The outline reports the file's size, the frontmatter block's size (delimiter lines included, from `text_match::body_start`, now `pub(super)`), the size of the text before the first heading, and every body heading with its text, level, heading path and Section size; the frontmatter size, the opening text and the Sections of the headings under no other heading sum to the file's size. `note_sections` takes 1 to `MAX_SECTION_HEADINGS` (10, public so the MCP schema can state it) strings and answers one `NoteSectionEntry` per string, in order: a string that is the text of exactly one heading selects it, and otherwise it is compared with each heading's path and must equal exactly one. Requests are trimmed and otherwise matched exactly. A miss is data in its own entry (`heading_not_found`, or `heading_ambiguous` with the matching paths), so the other entries still answer; only a malformed list refuses the call, as `invalid_heading_selection`, before any Vault is resolved. The Section text travels in a field named `section`, never `content`, so a partial read cannot be mistaken for the whole Note an `update_note` replaces. Headings and spans come from the read model's `NoteSections`, scanned from the end of the frontmatter block, so a `# comment` in the YAML is not a heading here. That is the one place a section read and `replace_section` differ: the write scans the whole file, as it did before #502, so it still counts such a line when it checks that a heading is unique, and a code-fence marker line inside the frontmatter opens a fence for the write alone. For any heading both see with the same headings after it, the span is the same bytes. A heading path matches a search hit's `heading_path` for clean headings; the chunker (consumed, not editable here) also reads a `#tag` line as a level 1 heading, which no Section rule does, so a hit below such a line carries a path that `note_sections` reports as `heading_not_found`. An ambiguous request lists every heading it matched by text or by path.
 `vault_capabilities` reports one Vault's own mutation/sync posture under the
 same gate, for an adapter describing a Vault rather than reading it.
 `contained_asset` is the single home for the contained-resource policy both
@@ -1981,7 +1986,7 @@ the shared cache's published Vault snapshot seam, existing Vault note/link
 types, and Runtime Search's two tag primitives (`normalize_tag_path`,
 `tag_matches`) for a query's tag condition. That last one is a dependency on
 the shared search *vocabulary*, not on retrieval: nothing here calls
-`VaultSearchCore`. `find_text` reads each Note's file from the Vault's directory and takes the frontmatter block's extent from `cache::parse::frontmatter_span`. `statistics_detail` also reads a Git-backed Vault's
+`VaultSearchCore`. `find_text` reads each Note's file from the Vault's directory and takes the frontmatter block's extent from `cache::parse::frontmatter_span`. The outline and section reads take that same extent, and their headings and spans from the Vault read model's `NoteSections` (#502). `statistics_detail` also reads a Git-backed Vault's
 `git::NoteHistory` through its control block to date notes (#300).
 
 **Consumers:** `handlers/vault_content.rs` (exact note/link/resolve reads,
@@ -3538,7 +3543,7 @@ call's structured error when its `code` is one the manual explains
 `page` is a name `read_docs` accepts. `handle_tools_call` adds it to the
 finished result, so `batch` item errors, `VaultOperationError` and HTTP bodies
 never carry it, and errors for other codes, the writes-off `-32602` refusal and
-the plain-text setup refusals are unchanged. Additive.
+the plain-text setup refusals are unchanged. Additive. #502 adds `get_note_outline` and `get_note_section`, the seventeenth and eighteenth read tools and both `READ_OPS` entries (so `batch` may carry them): mappings onto `VaultReadCore::note_outline` and `note_sections`, answering `GetNoteOutlineResult` (`NoteOutline`) and `GetNoteSectionResult` (`NoteSectionsResponse`) with hand-written input schemas. They refuse a malformed `vault_id` and a missing Note exactly as `get_note` does, and every limit and matching rule is the core's: the adapter does not check `headings`, and its schema takes `maxItems` from the core's `MAX_SECTION_HEADINGS`. `get_note`'s description gains one sentence pointing to them, and its reply does not change. Catalogue grows to 51, purely additive.
 
 **Kind:** adapter/security surface.
 

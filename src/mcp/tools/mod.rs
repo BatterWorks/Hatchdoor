@@ -224,6 +224,8 @@ fn select_model_tool(
 pub(super) const READ_OPS: &[&str] = &[
     "search_notes",
     "get_note",
+    "get_note_outline",
+    "get_note_section",
     "get_note_links",
     "resolve_wikilink",
     "get_tree",
@@ -251,6 +253,8 @@ pub(super) async fn dispatch_read_tool(
     match op {
         "search_notes" => read::search_notes_tool(state, arguments).await,
         "get_note" => read::get_note_tool(state, arguments).await,
+        "get_note_outline" => read::get_note_outline_tool(state, arguments).await,
+        "get_note_section" => read::get_note_section_tool(state, arguments).await,
         "get_note_links" => read::get_note_links_tool(state, arguments).await,
         "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
         "get_tree" => read::get_tree_tool(state, arguments).await,

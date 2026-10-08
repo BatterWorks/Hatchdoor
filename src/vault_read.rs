@@ -21,6 +21,7 @@ use crate::vault_runtime::{IndexedAssets, VaultCapabilities, VaultCollectionRunt
 mod assets;
 mod query;
 mod saved_query;
+mod sections;
 mod text_match;
 
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, encode_relative_path};
@@ -30,6 +31,10 @@ pub use saved_query::{
     SavedQueryIgnored, SavedQueryMarkerProblem, SavedQueryOutcome, SavedQueryRefusal,
     SavedQueryResult, SavedQueryRow, SavedQueryRows, SavedQuerySummary, SavedQueryTable,
     SavedQueryTruncation, SavedQueryTruncationReason,
+};
+pub use sections::{
+    MAX_SECTION_HEADINGS, NoteOutline, NoteSection, NoteSectionEntry, NoteSectionError,
+    NoteSectionErrorCode, NoteSectionMiss, NoteSectionsResponse, OutlineHeading,
 };
 pub use text_match::{
     TextMatchNote, TextMatchPlace, TextMatchPlaces, TextMatchRequest, TextMatchResponse,
@@ -200,6 +205,9 @@ impl VaultReadError {
             // A text match (ADR-46), reported by MCP's `find_text`; no HTTP
             // route runs one, so the HTTP adapter gives it no status yet.
             | "invalid_text_match"
+            // A section read (#502), reported by MCP's `get_note_section`;
+            // no HTTP route runs one either.
+            | "invalid_heading_selection"
             // `note_attachments` reads the Note through the write module's
             // attachment lister, whose only failure on a read is I/O.
             | "write_failed" => self.code.as_str(),
@@ -1346,18 +1354,9 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultNoteFrontmatter>, VaultReadError> {
-        let index = self.catalog(vault_id)?;
-        let Some(entry) = self.visible_entry(&index, slug) else {
+        let Some((entry, content)) = self.visible_note_file(vault_id, slug)? else {
             return Ok(None);
         };
-        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
-            unavailable(
-                vault_id,
-                "note_unreadable",
-                format!("failed to read note '{}': {error}", entry.relative_path),
-                false,
-            )
-        })?;
         let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
         let metadata = crate::cache::parse::parse_frontmatter_metadata(&content)
             .map_err(|message| unavailable(vault_id, "invalid_frontmatter", message, false))?;
@@ -1372,6 +1371,62 @@ impl<'a> VaultReadCore<'a> {
             has_frontmatter,
             metadata,
         }))
+    }
+
+    /// One Note's outline (#502): its hash, its sizes and its headings, with
+    /// no body text. `Ok(None)` is a Note this caller may not see. A Note
+    /// with no headings answers with an empty list.
+    pub fn note_outline(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<NoteOutline>, VaultReadError> {
+        Ok(self
+            .visible_note_file(vault_id, slug)?
+            .map(|(entry, content)| sections::note_outline(vault_id, &entry, &content)))
+    }
+
+    /// Whole sections of one Note, picked by heading text or heading path
+    /// (#502), from one read of its file. Each string that selects no single
+    /// heading gets an error in its own entry and the rest still answer; only
+    /// a malformed `headings` list refuses the call, before any Vault is
+    /// resolved. `Ok(None)` is a Note this caller may not see.
+    pub fn note_sections(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+        headings: &[String],
+    ) -> Result<Option<NoteSectionsResponse>, VaultReadError> {
+        sections::validate_headings(headings).map_err(|message| VaultReadError {
+            code: "invalid_heading_selection".to_string(),
+            message,
+            vault_id: None,
+            retryable: false,
+        })?;
+        Ok(self
+            .visible_note_file(vault_id, slug)?
+            .map(|(entry, content)| sections::note_sections(vault_id, &entry, &content, headings)))
+    }
+
+    /// The Note `slug` names on this surface and its file's text, read now.
+    fn visible_note_file(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<(crate::vault::NoteEntry, String)>, VaultReadError> {
+        let index = self.catalog(vault_id)?;
+        let Some(entry) = self.visible_entry(&index, slug) else {
+            return Ok(None);
+        };
+        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
+            unavailable(
+                vault_id,
+                "note_unreadable",
+                format!("failed to read note '{}': {error}", entry.relative_path),
+                false,
+            )
+        })?;
+        Ok(Some((entry, content)))
     }
 
     /// The existing attachments one Note references, on this core's browse
@@ -5375,5 +5430,144 @@ mod tests {
                 .expect("read")
                 .is_none()
         );
+    }
+    #[test]
+    fn the_outline_and_a_section_read_report_the_hash_an_exact_read_does() {
+        let content = "---\ntitle: Home\n---\nintro\n# A\na\n## B\nb\n";
+        let workspace = workspace(&[("Notes", &[("Home.md", content)])]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let note = reads.exact_note(vault_id, "home").unwrap().unwrap();
+        let outline = reads.note_outline(vault_id, "home").unwrap().unwrap();
+        let sections = reads
+            .note_sections(vault_id, "home", &["B".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(outline.content_hash, note.note.content_hash);
+        assert_eq!(sections.content_hash, note.note.content_hash);
+        assert_eq!(outline.vault_id, vault_id);
+        assert_eq!(sections.slug, "home");
+        assert_eq!(outline.size_bytes, content.len());
+
+        // Both read the file as it is now, not as it was indexed.
+        std::fs::write(workspace.vault_paths[0].join("Home.md"), "# A\nnew\n").unwrap();
+        let after = reads.note_outline(vault_id, "home").unwrap().unwrap();
+        assert_eq!(after.size_bytes, "# A\nnew\n".len());
+        assert_eq!(
+            after.content_hash,
+            crate::cache::parse::content_hash("# A\nnew\n")
+        );
+    }
+
+    #[test]
+    fn an_outline_or_section_read_of_a_missing_or_withheld_note_is_none() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Home.md", "# A\n"),
+                ("sources/.hatchdoor-layer", "sources"),
+                ("sources/Clip.md", "# A\n"),
+            ],
+        )]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let headings = ["A".to_string()];
+        assert!(reads.note_outline(vault_id, "ghost").unwrap().is_none());
+        assert!(
+            reads
+                .note_sections(vault_id, "ghost", &headings)
+                .unwrap()
+                .is_none()
+        );
+        let clip = VaultIndex::build(&workspace.vault_paths[0])
+            .unwrap()
+            .ordered_entries()
+            .into_iter()
+            .find(|note| note.relative_path == "sources/Clip")
+            .expect("the demoted note")
+            .slug;
+        assert!(reads.note_outline(vault_id, &clip).unwrap().is_some());
+
+        // #109: a demo is told a demoted Note is absent.
+        let demo = VaultReadCore::new(&workspace.cache, &workspace.vaults)
+            .on_surface(BrowseSurface::DefaultOnly);
+        assert!(demo.note_outline(vault_id, &clip).unwrap().is_none());
+        assert!(
+            demo.note_sections(vault_id, &clip, &headings)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_malformed_heading_list_is_refused_before_the_note_is_looked_up() {
+        let workspace = workspace(&[("Notes", &[("Home.md", "# A\n")])]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        for headings in [Vec::new(), vec![String::new()], vec!["A".to_string(); 11]] {
+            // Refused for a Note that does not exist too: the list is checked
+            // first.
+            for slug in ["home", "ghost"] {
+                let error = reads
+                    .note_sections(vault_id, slug, &headings)
+                    .expect_err("malformed list");
+                assert_eq!(error.public_code(), "invalid_heading_selection");
+                assert!(!error.retryable);
+            }
+        }
+    }
+
+    #[test]
+    fn a_section_read_is_the_span_replace_section_overwrites() {
+        let content = "---\nk: v\n---\nintro\n# A\na\n## B\nb\n```\n# fenced\n```\n### C\nc\n## D\r\nd\r\n# E\ne";
+        let workspace = workspace(&[("Notes", &[("Home.md", content)])]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let path = workspace.vault_paths[0].join("Home.md");
+        let outline = reads.note_outline(vault_id, "home").unwrap().unwrap();
+        assert_eq!(outline.headings.len(), 5);
+
+        for heading in &outline.headings {
+            std::fs::write(&path, content).unwrap();
+            let read = reads
+                .note_sections(
+                    vault_id,
+                    "home",
+                    std::slice::from_ref(&heading.heading_path),
+                )
+                .unwrap()
+                .unwrap();
+            let super::NoteSectionEntry::Found(section) = &read.sections[0] else {
+                panic!("no section for {}", heading.heading_path);
+            };
+            let entry = VaultIndex::build(&workspace.vault_paths[0])
+                .unwrap()
+                .find_by_slug("home")
+                .cloned()
+                .unwrap();
+            // Replacing a section with nothing removes exactly the bytes
+            // `replace_section` takes the section to be.
+            crate::vault::replace_section(
+                &entry,
+                &format!("{} {}", "#".repeat(heading.level.into()), heading.text),
+                crate::vault::SectionMode::Replace,
+                "",
+                &read.content_hash,
+            )
+            .expect("replace");
+            let remaining = std::fs::read_to_string(&path).unwrap();
+            let start = content.find(section.section.as_str()).unwrap();
+            assert_eq!(
+                remaining,
+                format!(
+                    "{}{}",
+                    &content[..start],
+                    &content[start + section.section.len()..]
+                ),
+                "{}",
+                heading.heading_path
+            );
+        }
     }
 }

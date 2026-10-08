@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cache::parse::{content_hash, parse_fence_marker};
+use crate::cache::parse::content_hash;
 use crate::vault::paths::{slugify, strip_md_extension};
+use crate::vault::sections::NoteSections;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::asset_move_plan;
@@ -592,52 +593,19 @@ fn read_note(entry: &NoteEntry) -> Result<String, WriteError> {
     })
 }
 
-/// All ATX headings in `content` that are not inside a fenced code block, as
-/// `(byte offset of the heading line, heading level, trimmed heading line)`.
-fn scan_headings(content: &str) -> Vec<(usize, usize, &str)> {
-    let mut headings = Vec::new();
-    let mut fenced_marker: Option<(u8, usize)> = None;
-    let mut offset = 0usize;
-    for line in content.split_inclusive('\n') {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        let trimmed = body.trim_start();
-        if let Some((marker, min_len)) = fenced_marker {
-            if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
-                && close_marker == marker
-                && close_len >= min_len
-            {
-                fenced_marker = None;
-            }
-        } else if let Some(marker) = parse_fence_marker(trimmed) {
-            fenced_marker = Some(marker);
-        } else {
-            let level = trimmed.chars().take_while(|ch| *ch == '#').count();
-            if (1..=6).contains(&level)
-                && trimmed[level..]
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_whitespace)
-            {
-                headings.push((offset, level, trimmed.trim_end()));
-            }
-        }
-        offset += line.len();
-    }
-    headings
-}
-
-/// Byte range `[start, end)` covering the requested section: the heading line
-/// through the body that precedes the next same-or-higher heading (or EOF).
+/// Byte range `[start, end)` covering the requested section, by the shared
+/// section rule (`vault::sections`) the read core's section reads use too.
 fn section_span(
     content: &str,
     requested: &str,
     relative_path: &str,
 ) -> Result<(usize, usize), WriteError> {
-    let headings = scan_headings(content);
-    let matched: Vec<usize> = headings
+    let sections = NoteSections::scan(content);
+    let matched: Vec<usize> = sections
+        .headings()
         .iter()
         .enumerate()
-        .filter(|(_, (_, _, text))| *text == requested)
+        .filter(|(_, heading)| heading.line == requested)
         .map(|(idx, _)| idx)
         .collect();
     match matched.as_slice() {
@@ -645,13 +613,8 @@ fn section_span(
             "heading '{requested}' not found in note '{relative_path}'"
         ))),
         [idx] => {
-            let (start, level, _) = headings[*idx];
-            let end = headings[idx + 1..]
-                .iter()
-                .find(|(_, candidate_level, _)| *candidate_level <= level)
-                .map(|(offset, _, _)| *offset)
-                .unwrap_or(content.len());
-            Ok((start, end))
+            let span = sections.span(*idx);
+            Ok((span.start, span.end))
         }
         more => Err(WriteError::Conflict(format!(
             "heading '{requested}' is not unique in note '{relative_path}' ({} matches)",

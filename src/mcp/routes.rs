@@ -945,6 +945,8 @@ mod tests {
                 "list_vaults",
                 "search_notes",
                 "get_note",
+                "get_note_outline",
+                "get_note_section",
                 "get_note_links",
                 "resolve_wikilink",
                 "get_tree",
@@ -3052,6 +3054,279 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Outline and section reads (#502)
+    // ---------------------------------------------------------------------------
+
+    const SECTIONED_NOTE: &str = "---\ntags: [rules]\n---\nOpening.\n# Filing\nWhere notes go.\n## Notes\nFiling notes.\n# Tags\n## Notes\nTag notes.\n```\n# fenced\n```\n";
+
+    fn sectioned_state() -> (AppState, TempDir) {
+        let (state, tmp) = test_state();
+        std::fs::write(
+            registered_vault_path(&state).join("Rules.md"),
+            SECTIONED_NOTE,
+        )
+        .expect("write rules");
+        (state, tmp)
+    }
+
+    #[tokio::test]
+    async fn get_note_outline_lists_headings_and_sizes_without_any_text() {
+        let (state, _tmp) = sectioned_state();
+        let note = call_tool(&state, "get_note", json!({"slug": "rules"})).await;
+        let note = &note["result"]["structuredContent"];
+        let body = call_tool(&state, "get_note_outline", json!({"slug": "rules"})).await;
+        let outline = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        assert_eq!(outline["vault_id"], note["vault_id"]);
+        assert_eq!(outline["slug"], "rules");
+        assert_eq!(outline["relative_path"], "Rules");
+        assert_eq!(outline["content_hash"], note["note"]["content_hash"]);
+        assert_eq!(outline["size_bytes"], SECTIONED_NOTE.len());
+        assert_eq!(
+            outline["frontmatter_bytes"],
+            "---\ntags: [rules]\n---\n".len()
+        );
+        assert_eq!(outline["opening_text_bytes"], "Opening.\n".len());
+        let filing_notes = "## Notes\nFiling notes.\n";
+        let filing = format!("# Filing\nWhere notes go.\n{filing_notes}");
+        let tag_notes = "## Notes\nTag notes.\n```\n# fenced\n```\n";
+        let tags = format!("# Tags\n{tag_notes}");
+        assert_eq!(
+            outline["headings"],
+            json!([
+                {"text": "Filing", "level": 1, "heading_path": "Filing", "size_bytes": filing.len()},
+                {"text": "Notes", "level": 2, "heading_path": "Filing > Notes", "size_bytes": filing_notes.len()},
+                {"text": "Tags", "level": 1, "heading_path": "Tags", "size_bytes": tags.len()},
+                {"text": "Notes", "level": 2, "heading_path": "Tags > Notes", "size_bytes": tag_notes.len()},
+            ])
+        );
+        let text = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        assert!(!text.contains("Where notes go"), "{text}");
+
+        // A note with no headings is an empty outline, not an error.
+        std::fs::write(
+            registered_vault_path(&state).join("Flat.md"),
+            "just prose\n",
+        )
+        .expect("write flat");
+        let flat = call_tool(&state, "get_note_outline", json!({"slug": "flat"})).await;
+        let flat = &flat["result"]["structuredContent"];
+        assert_eq!(flat["headings"], json!([]));
+        assert_eq!(flat["size_bytes"], 11);
+        assert_eq!(flat["opening_text_bytes"], 11);
+        assert_eq!(flat["frontmatter_bytes"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_note_section_returns_each_requested_section_or_its_own_error_in_order() {
+        let (state, _tmp) = sectioned_state();
+        let note = call_tool(&state, "get_note", json!({"slug": "rules"})).await;
+        let body = call_tool(
+            &state,
+            "get_note_section",
+            json!({"slug": "rules", "headings": ["Tags > Notes", "Missing", "Notes", "Filing"]}),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let reply = &body["result"]["structuredContent"];
+        assert_eq!(
+            reply["content_hash"],
+            note["result"]["structuredContent"]["note"]["content_hash"]
+        );
+        assert_eq!(reply["slug"], "rules");
+        assert_eq!(
+            reply["sections"],
+            json!([
+                {
+                    "requested": "Tags > Notes",
+                    "heading_path": "Tags > Notes",
+                    "level": 2,
+                    "section": "## Notes\nTag notes.\n```\n# fenced\n```\n",
+                },
+                {
+                    "requested": "Missing",
+                    "error": {
+                        "code": "heading_not_found",
+                        "message": "No heading has the text or the heading path 'Missing'. Give a heading's text without its '#' characters, or its heading path.",
+                        "matches": [],
+                    },
+                },
+                {
+                    "requested": "Notes",
+                    "error": {
+                        "code": "heading_ambiguous",
+                        "message": "'Notes' matches 2 headings. Ask for one by its heading path.",
+                        "matches": ["Filing > Notes", "Tags > Notes"],
+                    },
+                },
+                {
+                    "requested": "Filing",
+                    "heading_path": "Filing",
+                    "level": 1,
+                    "section": "# Filing\nWhere notes go.\n## Notes\nFiling notes.\n",
+                },
+            ])
+        );
+        // Nothing in the reply is named `content`, the field a whole note
+        // travels in.
+        assert!(!reply.to_string().contains("\"content\""), "{reply:#}");
+    }
+
+    #[tokio::test]
+    async fn get_note_section_refuses_a_malformed_request_and_a_missing_note() {
+        let (state, _tmp) = sectioned_state();
+        for headings in [
+            json!([]),
+            json!([""]),
+            json!(["Filing", "  "]),
+            json!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]),
+        ] {
+            let body = call_tool(
+                &state,
+                "get_note_section",
+                json!({"slug": "rules", "headings": headings}),
+            )
+            .await;
+            assert_eq!(body["result"]["isError"], true, "{body:#}");
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], "invalid_heading_selection",
+                "{body:#}"
+            );
+        }
+        // Ten is allowed.
+        let ten = call_tool(
+            &state,
+            "get_note_section",
+            json!({"slug": "rules", "headings": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]}),
+        )
+        .await;
+        assert_eq!(ten["result"]["isError"], false, "{ten:#}");
+
+        // A missing note fails the way get_note does.
+        let missing_note = call_tool(&state, "get_note", json!({"slug": "ghost"})).await;
+        for (name, arguments) in [
+            ("get_note_outline", json!({"slug": "ghost"})),
+            (
+                "get_note_section",
+                json!({"slug": "ghost", "headings": ["Filing"]}),
+            ),
+        ] {
+            let body = call_tool(&state, name, arguments).await;
+            assert_eq!(
+                body["result"]["structuredContent"], missing_note["result"]["structuredContent"],
+                "{name}: {body:#}"
+            );
+        }
+
+        // Arguments the tools do not take are protocol errors.
+        for (name, arguments) in [
+            (
+                "get_note_outline",
+                json!({"slug": "rules", "outline": true}),
+            ),
+            ("get_note_section", json!({"slug": "rules"})),
+            (
+                "get_note_section",
+                json!({"slug": "rules", "headings": "Filing"}),
+            ),
+        ] {
+            let body = call_tool(&state, name, arguments).await;
+            assert_eq!(body["error"]["code"], -32602, "{name}: {body:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_carries_the_outline_and_section_reads() {
+        let (state, _tmp) = sectioned_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "get_note_outline", "arguments": {"vault_id": vault_id, "slug": "rules"}},
+                {"op": "get_note_section", "arguments": {"vault_id": vault_id, "slug": "rules", "headings": ["Tags"]}},
+                {"op": "get_note_section", "arguments": {"vault_id": vault_id, "slug": "rules", "headings": []}},
+            ]}),
+        )
+        .await;
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], true, "{body:#}");
+        assert_eq!(items[0]["result"]["headings"][2]["heading_path"], "Tags");
+        assert_eq!(items[1]["ok"], true, "{body:#}");
+        assert_eq!(
+            items[1]["result"]["sections"][0]["section"]
+                .as_str()
+                .map(str::len),
+            items[0]["result"]["headings"][2]["size_bytes"]
+                .as_u64()
+                .map(|size| size as usize)
+        );
+        assert_eq!(items[2]["ok"], false, "{body:#}");
+        assert_eq!(items[2]["error"]["code"], "invalid_heading_selection");
+    }
+
+    #[tokio::test]
+    async fn a_section_hash_is_accepted_by_replace_section_for_the_same_heading() {
+        let (state, _tmp) = write_state();
+        let path = registered_vault_path(&state).join("Rules.md");
+        std::fs::write(&path, SECTIONED_NOTE).expect("write rules");
+        let read = call_tool(
+            &state,
+            "get_note_section",
+            json!({"slug": "rules", "headings": ["Filing > Notes"]}),
+        )
+        .await;
+        let reply = &read["result"]["structuredContent"];
+        let section = reply["sections"][0]["section"].as_str().expect("section");
+        let written = call_tool(
+            &state,
+            "replace_section",
+            json!({
+                "slug": "rules",
+                "heading": "## Notes",
+                "mode": "replace",
+                "content": "## Notes\nRewritten.\n",
+                "expected_content_hash": reply["content_hash"],
+            }),
+        )
+        .await;
+        // `## Notes` is two headings, so the write refuses. The hash was
+        // accepted to get that far, and nothing changed.
+        assert_eq!(written["result"]["isError"], true, "{written:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SECTIONED_NOTE);
+
+        let written = call_tool(
+            &state,
+            "replace_section",
+            json!({
+                "slug": "rules",
+                "heading": "# Filing",
+                "mode": "replace",
+                "content": "",
+                "expected_content_hash": reply["content_hash"],
+            }),
+        )
+        .await;
+        assert_eq!(written["result"]["isError"], false, "{written:#}");
+        assert!(SECTIONED_NOTE.contains(section));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            SECTIONED_NOTE.replace("# Filing\nWhere notes go.\n## Notes\nFiling notes.\n", "")
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // Text match (#500, ADR-46)
     // ---------------------------------------------------------------------------
 
@@ -3521,6 +3796,14 @@ mod tests {
                 "resolve_wikilink",
                 json!({"vault_id": "not-a-uuid", "target": "Home"}),
             ),
+            (
+                "get_note_outline",
+                json!({"vault_id": "not-a-uuid", "slug": "home"}),
+            ),
+            (
+                "get_note_section",
+                json!({"vault_id": "not-a-uuid", "slug": "home", "headings": ["Home"]}),
+            ),
         ] {
             let body = call_tool_unscoped(&state, name, arguments).await;
             assert_eq!(body["result"]["isError"], true, "{name}: {body:#}");
@@ -3949,11 +4232,19 @@ mod tests {
                 .map(str::to_string)
         };
 
-        // An ordinary instance still reads all three.
+        // An ordinary instance still reads all of them.
         for (name, arguments) in [
             (
                 "get_frontmatter",
                 json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_note_outline",
+                json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_note_section",
+                json!({"vault_id": vault_id, "slug": "clip", "headings": ["Clip"]}),
             ),
             (
                 "list_note_attachments",
@@ -3993,6 +4284,23 @@ mod tests {
             .as_deref(),
             Some("note_not_found")
         );
+
+        for (name, arguments) in [
+            (
+                "get_note_outline",
+                json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_note_section",
+                json!({"vault_id": vault_id, "slug": "clip", "headings": ["Clip"]}),
+            ),
+        ] {
+            assert_eq!(
+                tool(demo.clone(), name, arguments).await.as_deref(),
+                Some("note_not_found"),
+                "{name} withholds a demoted Note"
+            );
+        }
 
         // And the demoted asset is refused with the same code the HTTP asset
         // route reports for the same path on the same instance.
