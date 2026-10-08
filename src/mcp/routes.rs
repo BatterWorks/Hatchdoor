@@ -1194,11 +1194,13 @@ mod tests {
 
         let first = initialize_result(&state).await;
         assert!(carries_the_notice(&first));
+        let instructions = first["instructions"].as_str().unwrap();
         assert!(
-            first["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("Start with list_vaults"),
+            instructions.starts_with(crate::mcp::config::USAGE_REPORT_NOTICE),
+            "a client that cuts long instructions short keeps their start (#480)"
+        );
+        assert!(
+            instructions.contains("Start with list_vaults"),
             "the sentence is added to the instructions, not put in their place"
         );
         assert!(!carries_the_notice(&initialize_result(&state).await));
