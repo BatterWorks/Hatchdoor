@@ -245,7 +245,8 @@ export type Note = {
   content: string;
   content_hash: string;
   layer: string | null;
-  metadata?: NoteMetadata;
+  /** `null` when the note's frontmatter does not parse (#521). */
+  metadata?: NoteMetadata | null;
 };
 
 export type NoteMetadata = {

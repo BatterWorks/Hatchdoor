@@ -4333,6 +4333,77 @@ mod tests {
         assert!(missing.is_none());
     }
 
+    #[test]
+    fn an_exact_note_read_carries_the_frontmatter_the_frontmatter_read_reports() {
+        let broken = "---\ntags: [unclosed\n---\n# Broken\n";
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Tagged.md",
+                    "---\ntags: [Project/Active, status/on-track]\naliases: [Base]\ndue: 2026-09-01\n---\n# Tagged\n\n#inline",
+                ),
+                ("Plain.md", "# Plain"),
+                ("Broken.md", broken),
+                ("Scalar.md", "---\njust a string\n---\n# Scalar"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        let metadata = |slug: &str| {
+            reads
+                .exact_note(first, slug)
+                .expect("note read")
+                .expect("note")
+                .note
+                .metadata
+        };
+
+        let tagged = metadata("tagged").expect("frontmatter that parses");
+        assert_eq!(tagged.tags, ["project/active", "status/on-track"]);
+        assert_eq!(tagged.aliases, ["Base"]);
+        assert_eq!(tagged.properties, serde_json::json!({"due": "2026-09-01"}));
+        let frontmatter = reads
+            .exact_note_frontmatter(first, "tagged")
+            .expect("frontmatter read")
+            .expect("tagged")
+            .metadata;
+        assert_eq!(tagged.tags, frontmatter.tags);
+        assert_eq!(tagged.aliases, frontmatter.aliases);
+        assert_eq!(
+            tagged.properties,
+            serde_json::Value::Object(frontmatter.properties)
+        );
+
+        let plain = metadata("plain").expect("no frontmatter is not a parse failure");
+        assert!(plain.tags.is_empty());
+        assert!(plain.aliases.is_empty());
+        assert_eq!(plain.properties, serde_json::json!({}));
+
+        // Bad frontmatter never fails the read: reading the note is how an
+        // agent repairs it. `None` says "could not parse", not "no tags".
+        let note = reads
+            .exact_note(first, "broken")
+            .expect("note read")
+            .expect("broken")
+            .note;
+        assert_eq!(note.metadata, None);
+        assert_eq!(note.content, broken);
+        assert_eq!(note.content_hash, crate::cache::parse::content_hash(broken));
+        assert_eq!(
+            metadata("scalar"),
+            None,
+            "frontmatter that is not a mapping"
+        );
+        assert_eq!(
+            reads
+                .exact_note_frontmatter(first, "broken")
+                .expect_err("the frontmatter read still refuses")
+                .code,
+            "invalid_frontmatter"
+        );
+    }
+
     /// Reading one Note must not read every other one (#361). The counter is
     /// on the full build itself, so a read that went back to scanning the
     /// Vault's content fails here however it got there.
