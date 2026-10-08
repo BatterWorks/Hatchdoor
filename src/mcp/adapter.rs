@@ -75,8 +75,7 @@ impl HatchdoorMcpHandler {
         // characters of a server's instructions, and at the end the sentence
         // arrived cut in half (#480).
         if due && let Some(instructions) = info.instructions.as_mut() {
-            instructions.insert(0, ' ');
-            instructions.insert_str(0, USAGE_REPORT_NOTICE);
+            *instructions = format!("{USAGE_REPORT_NOTICE} {instructions}");
         }
         (info, due)
     }

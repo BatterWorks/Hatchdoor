@@ -1181,11 +1181,18 @@ mod tests {
         initialize(&transport(state)).await.1
     }
 
+    /// Whether the instructions carry the sentence. When they do it must
+    /// open them: a client that cuts long instructions short keeps their
+    /// start (#480).
     fn carries_the_notice(result: &Value) -> bool {
-        result["instructions"]
-            .as_str()
-            .expect("instructions")
-            .contains(crate::mcp::config::USAGE_REPORT_NOTICE)
+        let notice = crate::mcp::config::USAGE_REPORT_NOTICE;
+        let instructions = result["instructions"].as_str().expect("instructions");
+        let carried = instructions.contains(notice);
+        assert!(
+            !carried || instructions.starts_with(notice),
+            "the sentence comes first"
+        );
+        carried
     }
 
     #[tokio::test]
@@ -1194,13 +1201,11 @@ mod tests {
 
         let first = initialize_result(&state).await;
         assert!(carries_the_notice(&first));
-        let instructions = first["instructions"].as_str().unwrap();
         assert!(
-            instructions.starts_with(crate::mcp::config::USAGE_REPORT_NOTICE),
-            "a client that cuts long instructions short keeps their start (#480)"
-        );
-        assert!(
-            instructions.contains("Start with list_vaults"),
+            first["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Start with list_vaults"),
             "the sentence is added to the instructions, not put in their place"
         );
         assert!(!carries_the_notice(&initialize_result(&state).await));

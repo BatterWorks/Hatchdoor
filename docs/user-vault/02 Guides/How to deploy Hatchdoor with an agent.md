@@ -332,7 +332,7 @@ claude mcp add --transport http --scope user hatchdoor "$HD/mcp" \
 
 [[Connect your agent#Configure your MCP client]] lists the configuration for Codex, OpenClaw and Hermes. Where it uses an environment variable, put the token straight into the configuration file instead. If your client can read its token only from an environment variable, follow [[#A client that reads its token only from an environment variable]] below instead of the rest of this step.
 
-Then prove it works. If your client loads new servers straight away, call the tools from it. Otherwise call them over HTTP, as below. Put your own client in `clientInfo`. `name` is the name your client itself sends when it connects, such as `claude-code` for Claude Code or `codex-mcp-client` for Codex: Hatchdoor tells agents apart by it. `title` is what Settings shows as the connected agent.
+Then prove it works. If your client loads new servers straight away, call the tools from it. Otherwise call them over HTTP, as below. Put your own client in `clientInfo`. `name` is the name your client itself sends when it connects: `claude-code` for Claude Code, `codex-mcp-client` for Codex, `cursor-vscode` for Cursor, `openclaw` for OpenClaw, `hermes` for Hermes. Hatchdoor tells agents apart by it, so if you are none of these and do not know yours, use your product's name in lower case. `title` is what Settings shows as the connected agent.
 
 ```bash
 SID=$(curl -s -D - -o /dev/null "$HD/mcp" \
