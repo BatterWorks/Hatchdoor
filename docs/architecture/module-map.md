@@ -3093,6 +3093,7 @@ vault_runtime`.
 - `src/handlers/docs.rs`
 - `src/handlers/downloads.rs`
 - `src/handlers/folders.rs`
+- `src/handlers/link_preview.rs`
 - `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
 - `src/handlers/transfer.rs`
@@ -3373,13 +3374,24 @@ unbounded transfer buffers; an over-limit asset or export receives the shared
 `VaultApiError` shape and `413 Payload Too Large`.
 
 `spa.rs` serves the built app: `spa_index_handler` answers the app's own routes
-with `200`, and `spa_not_found_handler` is the static directory's fallback
+with `200`, `spa_note_handler` answers the note address
+`/v/{vault_id}/n/{slug}`, and `spa_not_found_handler` is the static directory's fallback
 (#302), so an address no route or built file matches still loads the app with a
 `404` status and the app renders its not-found state. Paths under
 `SPA_RESERVED_PREFIXES` (`/api/`, `/vault-assets/`, `/docs/`, `/llms.txt`, and
 anything starting `/health`) keep a bare `404`. That list mirrors the service
 worker's `navigateFallbackDenylist` in `frontend/vite.config.ts`, and a test in
-`spa.rs` fails if the two drift. `docs.rs` (#422, ADR-38) exports
+`spa.rs` fails if the two drift. Outside demo mode all three return the built
+`index.html` byte for byte. In demo mode they write a link preview (#512,
+ADR-47) in place of its `<title>`: `link_preview.rs` builds the tags, the
+general wording, and a note's description (its `description` property, else its
+opening prose reduced to plain text, cut to 200 characters), and escapes every
+value. Only `spa_note_handler` reads a note, through
+`VaultReadCore::{exact_note, exact_note_frontmatter}` on the demo browse
+surface, so any note that read refuses previews as the general wording.
+`og:url` and `og:image` are built on `HATCHDOOR_PUBLIC_URL` alone and are left
+out when it is empty; no request header is read. The picture is
+`frontend/public/link-preview.png`. `docs.rs` (#422, ADR-38) exports
 `docs_router`, the public manual routes `GET /docs/<page>.md`,
 `/docs/index.md`, `/docs/deploy.md` (the agent deploy page), `/docs/search?q=`
 (JSON `results` of `name`, `title`, `excerpt`; `q` cut to 200 characters) and
@@ -3393,7 +3405,9 @@ index, search and its links' destinations for anyone else and out of
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth (`docs.rs` uses
 `auth::request_is_authorized` to tell whether a caller holds the web token),
-the Bundled manual (`docs.rs` only), and — for `vaults.rs`
+the Bundled manual (`docs.rs` only), `chunk::normalize::strip_frontmatter`
+(`link_preview.rs` only), `mcp::config::parse_public_url` (`settings.rs` and
+`spa.rs`), and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,
 `VaultCollectionRuntime::{snapshot, reconcile_and_reconstruct,
 subscribe_revisions}`, `VaultWorkCoordinator`, and
@@ -3419,7 +3433,11 @@ and whichever domain a handler adapts.
 filesystem directly (ADR-03). Static and vault asset behavior must retain auth
 and path containment. `docs.rs` reads the Bundled manual and nothing else: no
 Vault, registry, settings or token value reaches its responses
-(`public_manual_routes_answer_without_a_token_and_reveal_nothing_of_the_instance`). `vaults.rs` never returns HTTPS credentials, only
+(`public_manual_routes_answer_without_a_token_and_reveal_nothing_of_the_instance`). `spa.rs` returns the built page unchanged outside demo mode
+(`outside_demo_mode_the_page_is_the_built_file_byte_for_byte`), and in demo
+mode names nothing the unauthenticated note read refuses
+(`demo_preview_names_nothing_the_demo_read_refuses`), builds no address from a
+request header, and writes no value into the page unescaped (ADR-47). `vaults.rs` never returns HTTPS credentials, only
 `credential_configured` (ADR-01/registry invariant); disconnect deletes no
 files, checkouts, Git history, or credentials outside the registry record.
 
@@ -5562,7 +5580,12 @@ packet scope:
   coordination.
 - `frontend/package.json`, lockfile, TypeScript/Vite/ESLint configuration:
   frontend build and dependency coordination.
-- `assets/**`: project branding and screenshots.
+- `assets/**`: project branding and screenshots. `assets/link-preview/link-preview.html`
+  is the source of the link preview picture (ADR-47): it draws the mark and
+  wordmark with the tokens in `frontend/src/styles/base.css`, and its header
+  holds the command that exports `frontend/public/link-preview.png`, which
+  must stay 1200 by 630 and under 300 KB. The service worker leaves that file
+  out of its precache (`globIgnores` in `frontend/vite.config.ts`).
 - `docs/**`: user, contributor, architecture, research, and roadmap
   documentation.
 - `eval/**`: evaluation inputs and results coordinated with offline tooling.

@@ -66,6 +66,22 @@ A page marked `private: true` in its frontmatter answers `/docs/<page>.md` only 
 
 Paths under `/api/`, `/vault-assets/` and `/docs/`, `/llms.txt`, and any path starting `/health`, never get the app. An unknown one there is a plain `404`, so a script calling a mistyped API path gets an error, not a page of HTML.
 
+The page is sent before any token is checked. Outside demo mode it is the same file for every address, so it names no note and no Vault.
+
+### Link previews in demo mode
+
+In demo mode (`HATCHDOOR_DEMO_MODE=true`) the page carries a link preview, the title, description and picture a chat app or search engine shows for a shared address. The tags are written into the page's `<head>` when it is sent; the status code does not change.
+
+| Address | `<title>` | `og:title` | Description | `og:type` |
+| --- | --- | --- | --- | --- |
+| `/v/{vault_id}/n/{slug}`, when the demo serves that note | `<note title> · Hatchdoor` | The note title | The note's `description` property when it is a non-empty string, otherwise its first paragraph of prose as plain text. At most 200 characters, cut on a word with `…`. A note with neither gets the general description | `article` |
+| `/`, `/graph`, `/stats`, `/settings` | `Hatchdoor`, `Graph · Hatchdoor`, `Stats · Hatchdoor`, `Settings · Hatchdoor` | `Hatchdoor` | `Self-host your Obsidian vaults: a web UI for you, MCP for your AI agents. No Obsidian, no plugins required.` | `website` |
+| Any other address the app answers, and a note address the demo does not serve | `Hatchdoor` | `Hatchdoor` | The same general description | `website` |
+
+Every response carries `<title>`, `<meta name="description">`, `og:title`, `og:description`, `og:type`, `og:site_name` (`Hatchdoor`) and `twitter:card`. When **Public address** (`HATCHDOOR_PUBLIC_URL`) is set it also carries `og:url` (the public address plus the path asked for), `og:image` (the public address plus `/link-preview.png`, one fixed 1200 by 630 picture), `og:image:width`, `og:image:height` and `og:image:alt`, and `twitter:card` is `summary_large_image`. With no public address those are left out and `twitter:card` is `summary`. Hatchdoor never builds an address from the `Host` header or a forwarded header here.
+
+A note address previews the note only when the unauthenticated read of that note would succeed. A missing note, an unknown or disabled Vault, or a note on a demoted layer gets the general wording, so a preview tells a fetcher nothing the demo's API would not. Every value is HTML-escaped. `/link-preview.png` is served without a token on every instance.
+
 ## Model setup
 
 First-run embedding model selection. Not present in demo mode.

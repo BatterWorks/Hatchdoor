@@ -127,7 +127,9 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff2}"],
         // PDF.js is loaded only for an embedded PDF. Keeping its renderer and
         // worker out of the install-time precache preserves that lazy boundary.
-        globIgnores: ["**/pdf-*.js", "**/pdf.worker*.mjs"],
+        // The link preview picture is fetched by chat apps, never by the app
+        // itself, so no visitor's browser should download it at install.
+        globIgnores: ["**/pdf-*.js", "**/pdf.worker*.mjs", "link-preview.png"],
         // The same boundary for everything else those two imports pull in,
         // above all Mermaid's diagram tree (see `trackLazyChunks`).
         manifestTransforms: [
