@@ -23,6 +23,15 @@ If your `compose.yaml` names a fixed version, such as `battermanz/hatchdoor:2.7.
 
 Want to go back? Put the previous version in the `image:` line and run the same two commands. Your notes are plain Markdown files, so no version can lock you out of them.
 
+## Coming from 2.4.x or earlier
+
+Hatchdoor 2.8.0 and later upgrade directly only from 2.5.0 or later. An install still on 2.4.x or earlier takes two steps:
+
+1. Set the `image:` line to `battermanz/hatchdoor:2.7.0` (`podman-2.7.0` on Podman), run the two commands above and open Hatchdoor once. That release moves your single Vault into the Vault list.
+2. Set the `image:` line back to `latest`, or to the version you want, and run the two commands again.
+
+If you skip the first step, an install that used Git sync refuses to start and changes nothing; [[How to troubleshoot common problems#Hatchdoor won't start]] shows the log line. An install that never used Git sync opens with no Vaults instead. Its notes are untouched, and you add their folder as a Vault yourself, as in [[Connect your first Vault]]. The [legacy single-Vault upgrade guide](https://github.com/BatterWorks/Hatchdoor/blob/main/docs/migrations/legacy-single-vault.md) in the repository has the details.
+
 ## What you see after an upgrade
 
 The first time you open Hatchdoor in a browser after an upgrade, a **What's new** window lists what changed in every release since the version you had, with anything that needs action pinned at the top. Click **Got it** and it stays away in that browser until the next upgrade. A fresh install never shows it.

@@ -4,25 +4,25 @@ tags: [type/explanation, topic/vault-organization, topic/agent-workflow]
 
 # Why keep a second brain
 
-The pitch for a [[The Second Brain method (external reference)|second brain]], an outside place you trust with the things worth keeping, doesn't depend on Hatchdoor at all. Plain Markdown files in any folder already satisfy it: durable, portable, readable without special software. What changes with Hatchdoor is who's allowed to act on that store.
+A [[The Second Brain method (external reference)|second brain]] is a place outside your head that you trust with what is worth keeping. The case for one does not depend on Hatchdoor. Plain Markdown files in any folder already do the job: they last, they move with you, and any program can read them. Hatchdoor changes who can act on those files.
 
 ## A second brain built for one reader
 
-Most note-taking advice, including Forte's CODE method and Luhmann's slip-box, assumes a single author who is also the only future reader: you capture something, and later *you* organize, distill, and use it. The system's whole design optimizes for that one relationship: a person writing to their future self.
+Most note-taking advice, including Forte's CODE method and Luhmann's slip-box, assumes one author who is also the only future reader. You capture something, and later you organize it, distill it and use it. The whole system is built around a person writing to their future self.
 
 ## What changes when an agent can read and write it too
 
-An agent connected over MCP (see [[Connect your agent]]) is a second party with the same read/write access to the Vault a human has, gated by the same guarded tools described in [[MCP tools reference]]. That changes what the mechanical steps of keeping a second brain cost:
+An agent connected over MCP (see [[Connect your agent]]) is a second party. It reads and writes the Vault as you do, through the checked tools in [[MCP tools reference]]. That makes the routine steps of keeping a second brain cheaper:
 
-- **Capture** stays mostly human. An agent doesn't decide what's worth keeping on your behalf, but it can take a source you hand it and file it as a note without you doing the typing.
-- **Organize and Distill** get cheaper. Rewriting a rough note into something concise, merging two notes on the same topic, or filling in cross-links between related pages are exactly the kind of mechanical, well-specified edits an agent can carry out, and does, in the [[How to run an LLM wiki in Hatchdoor|LLM-wiki workflow]], as an ongoing habit rather than a one-off cleanup.
-- **Express** can start from what the Vault already contains. An agent asked for a summary or a report searches the Vault first, the same way it's expected to in [[Search and change notes with your agent]], rather than reconstructing an answer from nothing.
+- **Capture** stays mostly yours. An agent does not decide what is worth keeping, but it can take a source you hand it and file it as a note, so you do not have to type it.
+- **Organize and Distill** get cheaper. An agent can rewrite a rough note into a short one, merge two notes on the same topic, and add links between related pages. In the [[How to run an LLM wiki in Hatchdoor|LLM wiki workflow]] it does this every time new material arrives, so the cleanup never piles up.
+- **Express** can start from what the Vault already holds. An agent asked for a summary or a report searches the Vault first, as [[Search and change notes with your agent]] expects, and does not answer from nothing.
 
-None of this requires trusting the agent unsupervised. Every write is checked against the note's current version before it is saved, every note stays plain Markdown you can read without Hatchdoor at all, and [[Browse and review through the Web UI|reviewing what changed]] is a normal part of the workflow, not an afterthought.
+You do not have to leave the agent unsupervised for any of this. Hatchdoor checks every write against the note's current version before saving it. Every note stays plain Markdown that you can read without Hatchdoor. And [[Browse and review through the Web UI|reviewing what changed]] is part of the routine.
 
 ## Why this doesn't require a specific layout
 
-Nothing above depends on organizing the Vault one particular way. [[The PARA method (external reference)|PARA]], [[The Zettelkasten method (external reference)|Zettelkasten]], and [[The LLM wiki pattern (external reference)|the LLM-wiki pattern]] all describe a different answer to "how should notes be filed and linked". An agent uses the same guarded tools regardless of which one a Vault follows, or none at all. Pick a layout because it fits how you think, not because Hatchdoor asks for it.
+None of this depends on how you organize the Vault. [[The PARA method (external reference)|PARA]], [[The Zettelkasten method (external reference)|Zettelkasten]] and [[The LLM wiki pattern (external reference)|the LLM wiki pattern]] each answer the question of how to file and link notes in a different way. An agent uses the same tools whichever one a Vault follows, or with none of them. Pick the layout that fits how you think.
 
 ---
 

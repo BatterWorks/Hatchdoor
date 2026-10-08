@@ -35,6 +35,13 @@ When something is not working, [[How to troubleshoot common problems]] lists the
 
 To see what changed in a release, read [[What's new]].
 
+## Hatchdoor on the web
+
+- The [public demo](https://hatchdoor.battercloud.cc) is a live, read-only Hatchdoor with four example Vaults.
+- [This manual online](https://docs-hatchdoor.battercloud.cc) is the manual for the latest release, to read or share without an install. Help in your own Hatchdoor always shows the manual for the version you run.
+- The [source code on GitHub](https://github.com/BatterWorks/Hatchdoor) comes with the [release notes](https://github.com/BatterWorks/Hatchdoor/releases) and the [issue tracker](https://github.com/BatterWorks/Hatchdoor/issues), where bug reports and requests go. Hatchdoor is free and open source under the AGPL-3.0 licence.
+- The [Docker image](https://hub.docker.com/r/battermanz/hatchdoor) is on Docker Hub.
+
 ## Words used in this manual
 
 - A **Vault** is one folder of Markdown notes that Hatchdoor knows about. You can have several.

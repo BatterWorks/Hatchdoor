@@ -4,7 +4,7 @@ tags: [type/reference, topic/http-api]
 
 # HTTP API reference
 
-Every HTTP endpoint Hatchdoor exposes, grouped by area. This is a dictionary, not a walkthrough — see [[How to deploy Hatchdoor with an agent]] or [[Install Hatchdoor with Docker Compose]] for task-oriented setup steps.
+Every HTTP endpoint Hatchdoor exposes, grouped by area. For setup steps, see [[How to deploy Hatchdoor with an agent]] or [[Install Hatchdoor with Docker Compose]].
 
 All request and response bodies are JSON unless noted. Errors from the `/api/v1/vaults/...` group share one shape:
 
@@ -20,18 +20,18 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | --- | --- |
 | `/health`, `/ready`, `/api/startup-status` | None, always |
 | `/docs/*`, `/llms.txt` | None, always, demo mode included. A private manual page needs the web token (if configured) |
-| `/api/model/*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
-| `/api/settings*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
-| `/mcp` | Its own MCP bearer token — see [[Connect your agent]] |
+| `/api/model/*` | Web bearer token (if configured). **Absent (`404`) in demo mode** |
+| `/api/settings*` | Web bearer token (if configured). **Absent (`404`) in demo mode** |
+| `/mcp` | Its own MCP bearer token, see [[Connect your agent]] |
 | `/api/v1/vaults/...` reads (`GET`) | Web bearer token if configured, **unauthenticated in demo mode** |
-| `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
+| `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode**. The route exists there, so the answer is never `404` |
 | `/api/v1/vaults/{vault_id}/attachments` (upload) | Web bearer token **or** a live MCP bearer token; same demo-mode refusal as other writes |
 | `/api/v1/folders` (`GET` and `POST`) | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
 | `/api/v1/whats-new` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
-| `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled — see [[#Transfer links]] |
+| `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled, see [[#Transfer links]] |
 
 > [!warning]
-> Demo mode treats settings and model setup as operator-only surfaces that don't exist (`404`), but treats every Vault-scoped route as present — reads are public, writes/control answer `403 demo_read_only`. Don't infer "not implemented" from a `404` on a `/api/v1/vaults/...` path; check the method and current mode first.
+> In demo mode the settings and model setup routes do not exist (`404`), and every Vault-scoped route does: reads are public, and writes and Vault control answer `403 demo_read_only`. A `404` on a `/api/v1/vaults/...` path does not mean the route is missing. Check the method and the mode first.
 
 The web bearer token is sent as `Authorization: Bearer <token>`, or as an `access_token` query parameter.
 
@@ -39,7 +39,7 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health` | Liveness probe; also used by the container's own `--healthcheck`. Returns `200 ok` plaintext. |
+| GET | `/health` | Liveness probe, also used by the container's own `--healthcheck`. Returns `200 ok` as plain text. |
 | GET | `/ready` | `200 ready` once the search model is set up and every active Vault's first index has settled, else `503 not ready`. A Vault that failed to index, or has no folder, counts as settled: its problem shows on that Vault (`GET /api/v1/vaults`), not here. An instance with no active Vaults is ready as soon as the model is set up. The exception is a Vault list that needs recovery (see [[Vault lifecycle states#Registry recovery]]): it stays `503` until the file is fixed. Once `200`, it stays `200` through later reindexing. |
 | GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). While first-run indexing runs, `percent` and `eta_seconds` cover every active Vault, including ones still waiting their turn, and `percent` never goes down; the `notes_*`, `chunks_*` and `tokens_*` counters describe only the Vault indexing right now. `Cache-Control: no-store`. |
 
@@ -102,7 +102,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | PATCH | `/api/settings` | Update one or more settings. Body: `{"updates": {"KEY": "value", ...}, "confirm": ["reindex", ...]}`. |
 | POST | `/api/settings/web-token/reveal` | Returns the current web bearer token, `{"value": "..."}`. `404` if none is set. |
 | POST | `/api/settings/mcp-token/generate` | Returns a freshly generated candidate token, `{"value": "..."}`. Not saved or made live by this call alone. |
-| POST | `/api/settings/mcp-token/reveal` | Returns the live MCP bearer token — only if it equals the caller's own web token (seeing it grants no new access). `404` otherwise. |
+| POST | `/api/settings/mcp-token/reveal` | Returns the live MCP bearer token, but only when it equals the caller's own web token, so seeing it grants no new access. `404` otherwise. |
 
 **`PATCH /api/settings` consequences.** A save that would reindex returns `409` with the machine-readable consequence `reindex` instead of applying. Resend the same request with that value added to `confirm` to proceed. `reindex` is the only consequence: the instance-wide `git_init` and `git_downgrade` consequences were retired along with the routes that reported on them, and per-Vault Git changes carry their own consequences on `/api/v1/vaults/{vault_id}`.
 
@@ -121,6 +121,8 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_PUBLIC_URL` | instant | text |
 | `HATCHDOOR_MAX_ATTACHMENT_BYTES` | instant | number |
 | `HATCHDOOR_MCP_MAX_BASE64_BYTES` | instant | number |
+| `HATCHDOOR_UPDATE_CHECK_ENABLED` | instant | switch |
+| `HATCHDOOR_USAGE_REPORT_ENABLED` | instant | switch |
 | `HATCHDOOR_GIT_SYNC_ENABLED` | instant | mode |
 | `HATCHDOOR_GIT_HTTPS_USERNAME` | instant | text |
 | `HATCHDOOR_GIT_HTTPS_TOKEN` | instant | secret |
@@ -130,7 +132,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_GIT_BRANCH` | instant | text |
 
 > [!note]
-> The six `HATCHDOOR_GIT_*`/`HATCHDOOR_EXCLUDE` keys and `HATCHDOOR_ARCHIVE_PREFIX` are legacy: they configured a single-Vault deployment before the Vault registry existed, and releases 2.5.0 to 2.7.x imported them once. This version no longer imports them. For a Vault created directly in the registry (via `POST /api/v1/vaults` or `create_vault`), the equivalent per-Vault fields — `source` (branch/mode/poll interval), `https_credentials`, `commit_identity`, `archive_folder`, `exclude_patterns` — are the only place that setting lives; nothing here overrides them.
+> The `HATCHDOOR_GIT_*` keys and `HATCHDOOR_EXCLUDE` are legacy: they configured a single-Vault deployment before the Vault registry existed, and releases 2.5.0 to 2.7.x imported them once. This version no longer imports them. Two of them still do something: `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` sign the commits of a Vault that has no `commit_identity` of its own. `HATCHDOOR_ARCHIVE_PREFIX` is not legacy: it is the archive folder of every Vault that sets no `archive_folder`. For every other legacy key, the Vault's own fields are the only place the setting lives, and nothing here overrides them: `source` (branch, mode, poll interval), `https_credentials` and `exclude_patterns`.
 
 ## MCP transport
 
@@ -141,14 +143,14 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 
 ## Vault collection management
 
-`/api/v1/vaults` and Vault-control routes. Every mutation here uses optimistic concurrency: read `registry_revision` from `GET /api/v1/vaults` first, and pass it back as `expected_registry_revision` — a stale value is rejected rather than silently overwriting a concurrent change.
+`/api/v1/vaults` and Vault-control routes. Every mutation here uses optimistic concurrency: read `registry_revision` from `GET /api/v1/vaults` first, and pass it back as `expected_registry_revision`. A stale value is rejected, so one change never overwrites another.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/v1/vaults` | List every Vault definition plus `registry_revision`/`collection_revision`. In demo mode, only enabled Vaults, each `source` is omitted (never exposes host paths or remote URLs to a public visitor), and the `capabilities` block is rewritten for a visitor (see below). |
 | POST | `/api/v1/vaults` | Create a Vault. Body: `CreateVaultRequest` (below). `201` with the new definition. |
 | GET | `/api/v1/vaults/events` | Server-Sent Events stream of collection-revision changes (`vault-collection-revision` events carrying `collection_revision`, affected `vault_ids`, and a change `category`). Carries no Note content. |
-| PATCH | `/api/v1/vaults/{vault_id}` | Replace a Vault's definition wholesale (not a partial patch — resend every field you want to keep). Body: `EditVaultRequest`. |
+| PATCH | `/api/v1/vaults/{vault_id}` | Replace a Vault's whole definition. Resend every field you want to keep. Body: `EditVaultRequest`. |
 | DELETE | `/api/v1/vaults/{vault_id}` | Disconnect a Vault from the registry. Deletes no files, checkout, Git history, or credentials outside the registry record itself. |
 | POST | `/api/v1/vaults/{vault_id}/enable` | Enable a disabled Vault. Query: `expected_registry_revision`. |
 | POST | `/api/v1/vaults/{vault_id}/disable` | Disable a Vault. Same query param. |
@@ -174,13 +176,13 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 
 `source` is one of three shapes (`type` discriminates):
 
-- **`local`** — `{ "type": "local", "path": "<absolute container path>" }`. Hatchdoor never runs Git for it.
-- **`existing_git`** — `{ "type": "existing_git", "repository_path": "...", "repository_url": "...|null", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "local_history"|"pull_only"|"two_way", "poll_interval_secs": 86400 }`. A Git working copy that already exists on disk; Hatchdoor uses it in place and never clones it. `repository_url` is required for `pull_only`/`two_way`, may be null only for `local_history`.
-- **`managed_git`** — `{ "type": "managed_git", "repository_url": "...", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "pull_only"|"two_way", "poll_interval_secs": 900 }`. Hatchdoor clones and owns the checkout; no `local_history` mode (there is always a remote to track). `poll_interval_secs` minimum 60, default 86400. There is no maximum, but the scheduler treats anything beyond ten years as ten years, so a very large value is stored as sent and read back unchanged while still producing a `next_attempt_at` you can read.
+- **`local`**: `{ "type": "local", "path": "<absolute container path>" }`. Hatchdoor never runs Git for it.
+- **`existing_git`**: `{ "type": "existing_git", "repository_path": "...", "repository_url": "...|null", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "local_history"|"pull_only"|"two_way", "poll_interval_secs": 86400 }`. A Git working copy that already exists on disk; Hatchdoor uses it in place and never clones it. `repository_url` is required for `pull_only`/`two_way`, may be null only for `local_history`.
+- **`managed_git`**: `{ "type": "managed_git", "repository_url": "...", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "pull_only"|"two_way", "poll_interval_secs": 900 }`. Hatchdoor clones and owns the checkout; no `local_history` mode (there is always a remote to track). `poll_interval_secs` minimum 60, default 86400. There is no maximum, but the scheduler treats anything beyond ten years as ten years, so a very large value is stored as sent and read back unchanged while still producing a `next_attempt_at` you can read.
 
-**Git schedule fields on a listed Vault.** Alongside the status fields, a Vault whose source has a remote to poll (`managed_git`, or `existing_git` in `pull_only`/`two_way`) carries two optional RFC 3339 UTC timestamps: `last_checked_at`, when its last completed Git turn finished, and `next_attempt_at`, when the next scheduled one is due. Both are absent for a source with no remote and in demo mode. They are the supported way to tell a Vault that checked and found nothing from one that has stopped checking — a fetch that brings nothing new leaves no trace in the repository itself.
+**Git schedule fields on a listed Vault.** Alongside the status fields, a Vault whose source has a remote to poll (`managed_git`, or `existing_git` in `pull_only`/`two_way`) carries two optional RFC 3339 UTC timestamps: `last_checked_at`, when its last completed Git turn finished, and `next_attempt_at`, when the next scheduled one is due. Both are absent for a source with no remote and in demo mode. They are the supported way to tell a Vault that checked and found nothing from one that has stopped checking, because a fetch that brings nothing new leaves no trace in the repository.
 
-`last_checked_at` reports the last check whether it succeeded or failed, so read it together with `git` and `git_error` rather than as a successful sync: a Vault that cannot authenticate still reports the time it last tried. It is absent until the first check completes, and it survives a restart. `next_attempt_at` is present for every Vault with a remote — one that has never checked is due immediately, not unscheduled — and reflects the live countdown, so it also accounts for a manual sync, a retry backoff, or an edit to the Vault's `poll_interval_secs`. Shortening the interval moves `next_attempt_at` back to one new interval after `last_checked_at`, which may be immediately; lengthening it leaves the pending attempt where it is. A Vault mid-backoff after a failed check keeps the backoff's own timing, so its `next_attempt_at` does not move until a check succeeds.
+`last_checked_at` reports the last check whether it succeeded or failed, so read it together with `git` and `git_error` rather than as a successful sync: a Vault that cannot authenticate still reports the time it last tried. It is absent until the first check completes, and it survives a restart. `next_attempt_at` is present for every Vault with a remote, and a Vault that has never checked is due at once. It follows the live countdown, so it also accounts for a manual sync, a retry backoff, or an edit to the Vault's `poll_interval_secs`. Shortening the interval moves `next_attempt_at` back to one new interval after `last_checked_at`, which may be immediately; lengthening it leaves the pending attempt where it is. A Vault mid-backoff after a failed check keeps the backoff's own timing, so its `next_attempt_at` does not move until a check succeeds.
 
 **The `index_turn` field on a listed Vault.** Where the Vault's indexing stands in the instance-wide queue: `running` while its Index turn runs, `waiting` while it is queued behind another Vault's or paused part-way to let one through, and absent when nothing is queued for it. Vaults index one at a time, and a turn that has embedded for about five minutes pauses if another Vault is waiting ([[How indexing and search work#Vaults take turns indexing]]). It is independent of `search`, which keeps saying what the Vault can answer while it waits or runs, and it is present in demo mode too. A Vault that was already searchable reads `search: "stale"` with `capabilities.search: true` for the whole reindex. `search: "indexing"` means a Vault with nothing to search yet.
 
@@ -192,9 +194,9 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 
 In demo mode the block answers the visitor's question instead. `mutate`, `pull`, `push`, `retry`, `commit`, `sync` and `publish_recovery` are always `false`, because every route behind them refuses with `403 demo_read_only`. `browse` and `search` keep their derived values, since those reads do work on a demo, so a Vault that is unavailable still reports both as `false`. `local_content` is unchanged and still describes the directory: a demo Vault on a writable directory reports `read_write` next to `mutate: false`, the same pairing a pull-only Git Vault has on any instance.
 
-`https_credentials`, `archive_folder`, and `commit_identity` are all optional; omitted, the server-wide defaults apply (`HATCHDOOR_GIT_HTTPS_*`, `HATCHDOOR_ARCHIVE_PREFIX`, `HATCHDOOR_GIT_AUTHOR_*`). Embedded credentials in `repository_url` are rejected — supply them via `https_credentials` instead.
+`https_credentials`, `archive_folder`, and `commit_identity` are all optional; omitted, the server-wide defaults apply (`HATCHDOOR_GIT_HTTPS_*`, `HATCHDOOR_ARCHIVE_PREFIX`, `HATCHDOOR_GIT_AUTHOR_*`). Credentials embedded in `repository_url` are rejected. Send them in `https_credentials`.
 
-`EditVaultRequest` is the same shape, plus `vault_id` in the path and `confirm_identity_change: bool`. It replaces the definition wholesale: `name` and `source` are required on every edit, and omitting `exclude_patterns`, `archive_folder`, or `commit_identity` clears the stored value rather than preserving it. The one exception is `https_credentials`, which takes an explicit `{"action": "keep"}` / `{"action": "remove"}` / `{"action": "replace", "username": "...", "token": "..."}` so a secret never has to be resent just to survive an edit.
+`EditVaultRequest` is the same shape, plus `vault_id` in the path and `confirm_identity_change: bool`. It replaces the whole definition: `name` and `source` are required on every edit, and omitting `exclude_patterns`, `archive_folder`, or `commit_identity` clears the stored value rather than preserving it. The one exception is `https_credentials`, which takes an explicit `{"action": "keep"}` / `{"action": "remove"}` / `{"action": "replace", "username": "...", "token": "..."}` so an edit never has to resend a secret to keep it.
 
 ## Folders under the Vault mount
 
@@ -318,7 +320,7 @@ Exactly one directory is made and nothing is written into it. The parent is reac
 
 Hatchdoor keeps the version record in `instance.json`, beside the Vault list in its state folder. It updates the record once at startup, and only when the version changes. Deleting the file makes the next start count as an upgrade from `2.7.0` when a Vault list or settings exist, and as a fresh install otherwise.
 
-## Vault-scoped content — one Vault
+## Vault-scoped content: one Vault
 
 Every route below is a read and stays reachable unauthenticated in demo mode (subject to the collection-wide token gate above). Exact reads always inspect the Vault's live Markdown directory, never the disposable cache, so indexing lag never applies to them.
 
@@ -331,24 +333,24 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 | GET | `/api/v1/vaults/{vault_id}/resolve?target=...` | Resolve one wikilink target to a slug. `{"vault_id": "...", "slug": "...|null"}`. |
 | POST | `/api/v1/vaults/{vault_id}/resolve-batch` | Resolve many targets at once. Body: `{"targets": [...], "asset_targets": [...], "note_link_targets": [...], "note_path": "...|null"}` (the three lists capped at 200 combined). `targets` are wikilink targets, resolved by title. `note_link_targets` are Markdown note-link destinations as written, such as `../20-projects/Beacon%20Launch.md`, resolved by path and answered in `note_link_results`, shaped like `results`. `note_path` anchors asset and Markdown note-link resolution to that note's folder. |
 | GET | `/api/v1/vaults/{vault_id}/assets/{*path}` | Serve one contained asset or attachment file, with extension allowlisting and traversal containment. |
-| GET | `/api/v1/vaults/{vault_id}/write-capabilities` | `{"vault_id", "enabled", "atomic_compare_and_swap", "warnings": [...]}` — whether the Web UI's write controls should be shown, and why not if disabled (unwritable path, non-mutable source, or missing web auth on a mutable one). `atomic_compare_and_swap` is `true` when this Vault's filesystem can commit a save as one atomic swap, `false` when saves work through the weaker check-then-rename path, and `null` when the filesystem could not be asked. It answers for the filesystem, not for whether the Vault is writable, so a read-only Vault is never `false` on that account. When it is `false` and `enabled` is `true`, `warnings` gains one sentence saying a change made in another editor mid-save is overwritten rather than refused. |
-| GET | `/api/v1/vaults/{vault_id}/stats/detail` | Rich exact statistics for this one Vault (richer than the collection projection below), including layer diagnostics. `activity_by_month` is six calendar months, oldest first, each with a `created_count` of the notes whose created date falls in it: a `created` property, else the commit that first added the note in a Git-backed Vault, else the file's modification time. `created_date_status` is `complete`, `estimated` (some Git dates were unavailable) or `reading` (history is still being read; ask again shortly). |
+| GET | `/api/v1/vaults/{vault_id}/write-capabilities` | `{"vault_id", "enabled", "atomic_compare_and_swap", "warnings": [...]}`: whether the Web UI's write controls should be shown, and why not if disabled (unwritable path, non-mutable source, or missing web auth on a mutable one). `atomic_compare_and_swap` is `true` when this Vault's filesystem can commit a save as one atomic swap, `false` when saves work through the weaker check-then-rename path, and `null` when the filesystem could not be asked. It answers for the filesystem, not for whether the Vault is writable, so a read-only Vault is never `false` on that account. When it is `false` and `enabled` is `true`, `warnings` gains one sentence saying a change made in another editor mid-save is overwritten rather than refused. |
+| GET | `/api/v1/vaults/{vault_id}/stats/detail` | Detailed, exact statistics for this one Vault, more than the collection statistics below carry, including layer diagnostics. `activity_by_month` is six calendar months, oldest first, each with a `created_count` of the notes whose created date falls in it: a `created` property, else the commit that first added the note in a Git-backed Vault, else the file's modification time. `created_date_status` is `complete`, `estimated` (some Git dates were unavailable) or `reading` (history is still being read; ask again shortly). |
 
-## Vault-scoped content — one-or-all
+## Vault-scoped content: one-or-all
 
 `{scope}` is either one canonical Vault ID or the literal `all`. Also reads, also demo-safe.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/vaults/{scope}/tree` | Folder/note tree, grouped per Vault. Always the whole tree — `get_tree`'s `folder`, `max_depth` and `include_notes` narrowing is on the MCP surface only. Each folder carries `note_count`, the notes held directly inside it; the notes themselves carry `title` and `slug` but no `vault_id`, because the tree around them already names its Vault. |
-| GET | `/api/v1/vaults/{scope}/recent?limit=` | Recently modified notes, flattened across Vaults. `limit` clamped 1–25, default 5. |
-| GET | `/api/v1/vaults/{scope}/stats` | Lean per-Vault statistics projection (for the exact/rich version, see `stats/detail` above). |
+| GET | `/api/v1/vaults/{scope}/tree` | Folder/note tree, grouped per Vault. Always the whole tree. Only the MCP tool `get_tree` can narrow it with `folder`, `max_depth` and `include_notes`. Each folder carries `note_count`, the notes held directly inside it; the notes themselves carry `title` and `slug` but no `vault_id`, because the tree around them already names its Vault. |
+| GET | `/api/v1/vaults/{scope}/recent?limit=` | Recently modified notes, flattened across Vaults. `limit` is clamped to 1 to 25, default 5. |
+| GET | `/api/v1/vaults/{scope}/stats` | Short statistics for each Vault. For the detailed, exact version see `stats/detail` above. |
 | GET | `/api/v1/vaults/{scope}/graph` | Note-link graph, grouped per Vault; edges never cross a Vault boundary. |
-| GET | `/api/v1/vaults/{scope}/search?q=&mode=&limit=&per_note_cap=&layers=` | One global ranking flattened across every usable participant. `mode` is `semantic` (default) or `keyword`. `limit` clamped 1–50 (default 10), `per_note_cap` clamped 1–10 (default 2). `layers` is a comma-separated list of layer names, or `all`/`default`; a demo instance always sees the default surface regardless of this parameter. Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query that is a single `#tag` (letters, digits, `-`, `_` and `/` after the `#`) runs as a tag match whatever `mode` was requested: every hit scores 1 and the response reports `"mode": "tag"`. Every other query reports the mode it asked for. `tag` is never accepted as a requested mode. |
+| GET | `/api/v1/vaults/{scope}/search?q=&mode=&limit=&per_note_cap=&layers=` | One global ranking flattened across every usable participant. `mode` is `semantic` (default) or `keyword`. `limit` is clamped to 1 to 50 (default 10) and `per_note_cap` to 1 to 10 (default 2). `layers` is a comma-separated list of layer names, or `all`/`default`; a demo instance always sees the default surface regardless of this parameter. Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query that is a single `#tag` (letters, digits, `-`, `_` and `/` after the `#`) runs as a tag match whatever `mode` was requested: every hit scores 1 and the response reports `"mode": "tag"`. Every other query reports the mode it asked for. `tag` is never accepted as a requested mode. |
 
 ## Vault-scoped mutations
 
-Content-changing routes. Web bearer token (if configured); refused with `403 demo_read_only` in demo mode rather than a bare `401`. Every mutation except create takes `expected_content_hash`, read from a prior `GET .../notes/{slug}` — a stale hash is rejected rather than overwriting a concurrent edit.
+Content-changing routes. Web bearer token (if configured); refused with `403 demo_read_only` in demo mode rather than a bare `401`. Every mutation except create takes `expected_content_hash`, read from a prior `GET .../notes/{slug}`. A stale hash is rejected, so a save never overwrites an edit made in between.
 
 That rejection is unconditional. What depends on the filesystem is the narrower race: on a Vault reporting `atomic_compare_and_swap: false`, a change landing between the hash check and the replacement is overwritten instead of reported, because the save is two steps there rather than one. Read `GET .../write-capabilities` to know which kind of Vault you are writing to.
 
@@ -361,7 +363,7 @@ That rejection is unconditional. What depends on the filesystem is the narrower 
 | PATCH | `/api/v1/vaults/{vault_id}/notes/{slug}/move-rename` | `{"target_relative_path", "expected_content_hash"}` | Move and rename in one step. |
 | PATCH | `/api/v1/vaults/{vault_id}/notes/{slug}/archive` | `{"expected_content_hash"}` | Move a note under the Vault's archive folder. |
 | DELETE | `/api/v1/vaults/{vault_id}/notes/{slug}` | `{"expected_content_hash"}` | Delete a note. |
-| POST | `/api/v1/vaults/{vault_id}/attachments` | `multipart/form-data`: `target_relative_path`, `file` | Import an attachment file. Accepts the web token **or** a live MCP bearer token, unlike other mutations — an MCP agent can use it directly without provisioning a separate web token. |
+| POST | `/api/v1/vaults/{vault_id}/attachments` | `multipart/form-data`: `target_relative_path`, `file` | Import an attachment file. Accepts the web token **or** a live MCP bearer token, unlike other mutations, so an MCP agent can use it without being given a web token. |
 
 All of the above (except attachment upload) return `VaultWriteOutcomeResponse`: `{"vault_id", "ok", "slug", "relative_path", "content_hash", "quality_warnings": [...], "rewritten_notes", "moved_assets", "trashed_path", "layer"}`. `rewritten_notes` counts other notes whose links, wikilinks or Markdown note links, were rewritten to follow a rename, move or delete; `quality_warnings` flags things like a missing heading, not hard failures. Attachment upload returns `VaultAttachmentOutcomeResponse`: `{"vault_id", "ok", "attachment", "rewritten_notes", "trashed_path", "cleanup_warning"}`. A rename, move, archive or delete that would have to rewrite a link in a note that is not valid UTF-8 text answers `409` with the code `link_rewrite_unsupported`, writes nothing, and names every such note in its `message`.
 
@@ -371,7 +373,7 @@ Transfer links are minted over MCP, never by these routes: `get_attachment` retu
 
 | Method | Path | Body | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/v1/vaults/{vault_id}/transfers/{*path}` | — | Download the attachment a download link names. Answers like the asset route, held to `HATCHDOOR_MCP_MAX_BASE64_BYTES` and the MCP rate quota (`429` with `Retry-After`). Usable any number of times until it expires. |
+| GET | `/api/v1/vaults/{vault_id}/transfers/{*path}` | none | Download the attachment a download link names. Answers like the asset route, held to `HATCHDOOR_MCP_MAX_BASE64_BYTES` and the MCP rate quota (`429` with `Retry-After`). Usable any number of times until it expires. |
 | POST | `/api/v1/vaults/{vault_id}/transfers/{*path}` | `multipart/form-data`: `file`, and optionally `target_relative_path`, which must match the link | Upload one file to the path an upload link names, under `HATCHDOOR_MAX_ATTACHMENT_BYTES`. Returns `VaultAttachmentOutcomeResponse`, or `VaultWriteOutcomeResponse` when the path ends in `.md` and the file becomes a note. Usable once. |
 
 Refusals are `403` with a stable `code`: `transfer_link_invalid` (any other path, Vault, or target; a tampered link; a link from before a restart or an MCP password change), `transfer_link_expired` (five minutes after minting), `transfer_link_spent` (an upload link's second use), `mcp_disabled` (MCP is off), and `mcp_write_disabled` (an upload while MCP writes are off). An upload whose target appeared after the link was minted, when replacing was not allowed, is `409 write_conflict`, and so is a note upload whose note no longer has the hash the link was minted with. A note upload that is not UTF-8 or contains a NUL byte is `400 invalid_write_input`.
