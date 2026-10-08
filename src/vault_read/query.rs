@@ -33,7 +33,7 @@ const MAX_QUERY_TERMS: usize = 50;
 
 /// The longest `path_prefix` a condition may carry, matching the retired
 /// tool's bound and comfortably past any real Vault path.
-const MAX_PATH_PREFIX_BYTES: usize = 4_096;
+pub(super) const MAX_PATH_PREFIX_BYTES: usize = 4_096;
 
 /// The default and bounds a query's `limit` is held to. Applied by
 /// [`CompiledQuery::compile`] rather than by each adapter, so a caller cannot

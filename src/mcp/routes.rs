@@ -684,6 +684,7 @@ mod tests {
                 | "get_graph"
                 | "recently_modified"
                 | "query_notes"
+                | "find_text"
         ) {
             arguments["scope"] = json!(vault_id);
         } else if !matches!(
@@ -954,6 +955,7 @@ mod tests {
                 "get_attachment",
                 "get_attachment_import_config",
                 "query_notes",
+                "find_text",
                 "evaluate_saved_query",
                 "recently_modified",
                 "read_docs",
@@ -3050,6 +3052,102 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Text match (#500, ADR-46)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn find_text_counts_a_literal_string_across_every_layer_inside_the_envelope() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(&state, "find_text", json!({"text": "Melatonin"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert!(content.get("scope").is_some(), "{body:#}");
+        assert!(content["participants"].is_array());
+        let data = &content["data"];
+        assert_eq!(data["total_notes"], 2, "{body:#}");
+        assert_eq!(data["total_occurrences"], 2);
+        assert_eq!(data["truncated"], false);
+        assert_eq!(data["total_unread"], 0);
+        let notes = data["notes"].as_array().expect("notes array");
+        // A demoted Note is found with no layers argument, and says so.
+        assert_eq!(notes[0]["relative_path"], "sources/Clip");
+        assert_eq!(notes[0]["layer"], "sources");
+        assert_eq!(notes[1]["relative_path"], "wiki/Page");
+        assert_eq!(notes[1]["layer"], Value::Null);
+        assert_eq!(notes[1]["occurrences"], 1);
+        assert_eq!(
+            notes[1]["snippets"],
+            json!([{"place": "body", "line": 5, "text": "melatonin body"}])
+        );
+        assert!(notes[0].get("score").is_none());
+
+        // The strict flag, the layer selector and the snippet count all reach
+        // the core.
+        let strict = call_tool(
+            &state,
+            "find_text",
+            json!({"text": "Melatonin", "case_sensitive": true}),
+        )
+        .await;
+        assert_eq!(
+            strict["result"]["structuredContent"]["data"]["total_notes"],
+            0
+        );
+        let narrowed = call_tool(
+            &state,
+            "find_text",
+            json!({"text": "melatonin", "layers": ["sources"], "snippets_per_note": 0, "limit": 1}),
+        )
+        .await;
+        let data = &narrowed["result"]["structuredContent"]["data"];
+        assert_eq!(data["total_notes"], 1, "{narrowed:#}");
+        assert_eq!(data["notes"][0]["relative_path"], "sources/Clip");
+        assert_eq!(data["notes"][0]["snippets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_text_refuses_what_it_cannot_answer_as_a_structured_error() {
+        let (state, _tmp) = layered_test_state();
+        for (arguments, code) in [
+            (json!({"text": ""}), "invalid_text_match"),
+            (
+                json!({"text": "melatonin", "layers": ["ghost"]}),
+                "invalid_layer_selection",
+            ),
+        ] {
+            let body = call_tool(&state, "find_text", arguments).await;
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], code,
+                "{body:#}"
+            );
+        }
+        // An argument the tool does not take is a protocol error, as on every
+        // other tool.
+        let body = call_tool(&state, "find_text", json!({"text": "x", "regex": true})).await;
+        assert_eq!(body["error"]["code"], -32602, "{body:#}");
+    }
+
+    #[tokio::test]
+    async fn batch_carries_find_text() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "find_text", "arguments": {"scope": "all", "text": "melatonin clipping"}},
+                {"op": "find_text", "arguments": {"scope": "all", "text": ""}},
+            ]}),
+        )
+        .await;
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], true, "{body:#}");
+        assert_eq!(items[0]["result"]["data"]["total_notes"], 1);
+        assert_eq!(items[1]["ok"], false, "{body:#}");
+        assert_eq!(items[1]["error"]["code"], "invalid_text_match");
+    }
+
+    // ---------------------------------------------------------------------------
     // Saved queries reach an agent as data (#277)
     // ---------------------------------------------------------------------------
 
@@ -3464,6 +3562,10 @@ mod tests {
             (
                 "query_notes",
                 json!({"scope": "not-a-scope", "conditions": [{"type": "tag", "tag": "topic"}]}),
+            ),
+            (
+                "find_text",
+                json!({"scope": "not-a-scope", "text": "needle"}),
             ),
         ] {
             let body = call_tool_unscoped(&state, name, arguments).await;

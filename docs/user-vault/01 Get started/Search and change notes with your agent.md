@@ -36,6 +36,7 @@ You don't need to know the tool names; the agent picks them. This table is for c
 | --- | --- |
 | Find a note | `list_vaults` → `search_notes` |
 | Find every note with a tag, in a folder, or with a property | `list_vaults` → `query_notes` |
+| Find every note that contains an exact string | `list_vaults` → `find_text` |
 | Inspect it | `get_note` |
 | Get the rows a note's saved query lists | `get_note` to see its `saved_queries`, then `evaluate_saved_query` with the name |
 | Add one item under a heading | `edit_note` or `replace_section`, with the returned content hash |

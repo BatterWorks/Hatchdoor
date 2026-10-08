@@ -28,9 +28,9 @@ use crate::vault_management::{
 };
 use crate::vault_read::{
     AssetPathError, AssetReadError, NoteQuery, NoteQueryCondition, OffloadedReadError,
-    ResolvedAsset, TreeScope, VaultReadError, VaultReads, VaultResolveResponse, VaultScope,
-    clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap, clamp_tree_max_depth,
-    note_not_found,
+    ResolvedAsset, TextMatchRequest, TreeScope, VaultReadError, VaultReads, VaultResolveResponse,
+    VaultScope, clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap,
+    clamp_tree_max_depth, note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -137,6 +137,25 @@ struct QueryArgs {
     properties: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// `find_text`'s arguments. Only `scope` and `text` are required; the rest
+/// narrow the sweep or shape the answer, and the core owns every default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindTextArgs {
+    scope: String,
+    text: String,
+    #[serde(default)]
+    case_sensitive: bool,
+    #[serde(default)]
+    layers: Vec<String>,
+    #[serde(default)]
+    path_prefix: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    snippets_per_note: Option<usize>,
 }
 
 /// `get_tree`'s arguments. The three narrowing ones are optional and default to
@@ -468,6 +487,33 @@ pub(super) async fn query_notes_tool(
         .await
     {
         Ok(projection) => Ok(tool_result::<results::QueryNotesResult>(&projection)),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn find_text_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: FindTextArgs = parse("find_text", arguments)?;
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    let request = TextMatchRequest {
+        text: args.text,
+        case_sensitive: args.case_sensitive,
+        layers: args.layers,
+        path_prefix: args.path_prefix,
+        // Clamped by the core, like the snippet count.
+        limit: args.limit,
+        snippets_per_note: args.snippets_per_note,
+    };
+    match VaultReads::new(&state)
+        .read(move |core| core.find_text(scope, &request))
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::FindTextResult>(&projection)),
         Err(error) => read_failure(error),
     }
 }
@@ -1189,7 +1235,7 @@ fn exclude_patterns_schema() -> Value {
 pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
         json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants. index_turn is running while a Vault indexes and waiting while its indexing is queued behind another Vault's or paused to let one through; search says what the Vault answers meanwhile.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified. Results are ranked and may include notes that do not contain the query's words, so to learn which notes contain exactly a given string, or how many times, use find_text."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
@@ -1207,6 +1253,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an absolute HTTP download_url built on the server's configured public address if one is set, else on the address the client reached this MCP endpoint on, as reported by a reverse proxy's Forwarded or X-Forwarded-Proto/X-Forwarded-Host headers; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
+        find_text_tool_schema(),
         evaluate_saved_query_tool_schema(),
         json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"read_docs", "description":"Read Hatchdoor's own manual, the one bundled with this running version. With no page, returns the Home page plus the name and title of every page; with a page name, returns that page as Markdown, its links to other pages pointing at page names you can pass back here. Takes no Vault and works during model setup. A name that matches no page is the structured docs_page_not_found error.", "inputSchema":{"type":"object","properties":{"page":{"type":"string","minLength":1,"description":"A page name from the index or a link, such as guides/how-to-set-up-a-git-backed-vault. Omit it for the index."}},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
@@ -1306,6 +1353,32 @@ fn evaluate_saved_query_tool_schema() -> Value {
             "additionalProperties": false
         },
         "annotations": read_only_tool_annotations(),
+    })
+}
+
+/// `find_text` (ADR-46). The description has to keep an agent from reaching
+/// for `search_notes` when the question is exact, and has to say the two
+/// things that differ from its neighbours: it reads every layer, and it reads
+/// the files rather than the index.
+fn find_text_tool_schema() -> Value {
+    json!({
+        "name": "find_text",
+        "description": collection_description("Find every Note in one Vault, or all enabled Vaults, that contains one literal string, with how many times each contains it. Use it for exact questions: does anything still say the old name, did a bulk edit land everywhere, which notes cite this path or ID. Nothing is ranked and there is no score: a Note either contains the string or it does not, and Notes come back ordered by path. Every character means itself, so there are no wildcards or patterns, and one call takes one string. The string is looked for in three places, and each occurrence is counted under its place: the body, the frontmatter block (aliases, tags and properties as written), and the Vault-relative file path. Case is ignored unless case_sensitive is true. Accents always count, so resume does not match résumé. total_notes and total_occurrences are true for the whole scope even when limit cut the list, and truncated says when it did; there is no paging, so narrow with path_prefix or raise limit. Unlike search_notes this covers every layer unless layers narrows it, and each Note reports its layer. Each Note's text is read from its Markdown file when the call runs, so an edit is matched at once, with no wait for indexing. Only the list of Notes comes from the index, so a Note created in the last few seconds can be absent; its Vault usually reports stale meanwhile. Occurrences are counted without overlap. A Note whose file could not be read is listed in unread and was not checked, so check total_unread is 0 before treating an empty result as proof."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": scope_schema(),
+                "text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "The literal string to find. Punctuation, brackets and spaces are matched as written. An empty string is refused with the structured invalid_text_match error."},
+                "case_sensitive": {"type": "boolean", "default": false, "description": "true matches case exactly. The composed and decomposed Unicode forms of an accented letter are equal either way."},
+                "layers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Omit to cover every layer. Otherwise only the named layers, with default naming the default surface. A name no Vault in scope declares is the structured invalid_layer_selection error, as in search_notes."},
+                "path_prefix": {"type": "string", "minLength": 1, "description": "Only Notes at or under this Vault-relative folder, such as 40-reference/Parenting. Matched case-insensitively and by whole path segment, so notes never selects notes-archive."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum Notes to return. The totals count every match regardless."},
+                "snippets_per_note": {"type": "integer", "minimum": 0, "maximum": 3, "default": 3, "description": "Matched lines shown per Note, one per line, each cut to about 200 characters with its place and line number. 0 returns counts only."}
+            },
+            "required": ["scope", "text"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
     })
 }
 
@@ -1557,6 +1630,7 @@ mod tests {
             checked,
             [
                 "evaluate_saved_query",
+                "find_text",
                 "get_graph",
                 "get_stats",
                 "get_tree",

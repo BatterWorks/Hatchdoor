@@ -27,9 +27,11 @@ Use `search_notes` for most questions.
 
 Use `query_notes` when a note's tags, folder or properties decide the answer on their own: every note carrying a tag, everything under a folder, notes whose frontmatter property has a given value or has passed a date. It selects rather than ranks, so it never comes back empty for want of a good enough match, and it uses no embeddings, so it answers in full on a Vault that is still indexing. `search_notes` is for what a note says; `query_notes` is for what a note is. Neither takes the other's arguments.
 
+Use `find_text` when the question is exact: whether anything still says an old name, whether a bulk edit landed everywhere, which notes cite a path or an ID. It returns every note that contains one literal string, with a true count, in every layer. A ranked search cannot answer these, because its hits may not contain the string at all.
+
 Use semantic search, the default, when the user describes an idea, topic, project or relationship in natural language. Phrase the query as a sentence that explains what you are trying to find.
 
-Use keyword search when exact matching matters:
+Use keyword search to find the notes most relevant to an exact term:
 
 - filenames
 - paths
@@ -56,6 +58,8 @@ When you need to know how Hatchdoor itself works, `read_docs` and `search_docs` 
 An entry reading `stale` is the case you can do something about: that Vault's snapshot is known to be behind its Markdown. Call `refresh_vault` with its `vault_id` to ask for the index turn that republishes it, then read again. Like every Vault-management tool, `refresh_vault` needs write mode; on a read-only connection, wait a few seconds and read again, since the turn is usually already queued.
 
 `refresh_vault` returns as soon as the turn is admitted, `queued`, or `coalesced` when a turn for that Vault is already pending. It does not wait for the turn to finish. The answer confirms the request landed, not that the index is rebuilt, so check the freshness fields of a second read. It is not `sync_vault`: it contacts no Git remote and works on any enabled Vault, including a plain local one. A read that looks stale is never a reason to fall back to editing files directly.
+
+`find_text` is the exception among these reads. It takes only its list of notes from the snapshot and reads each note's text from the file, so it sees an edit straight away. Use it to check that a change landed.
 
 ## Editing workflow
 
