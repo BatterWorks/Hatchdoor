@@ -1367,7 +1367,12 @@ note slug rule when the link names a heading. `search` is case-insensitive word
 matching with a trailing plural `s` folded and common words such as `how` and
 `the` dropped from the query. Pages rank by how many query words their title
 holds, then their headings outside code, then how often the words appear
-anywhere, code included; a query that matches nothing returns nothing.
+anywhere, code included; a query that matches nothing returns nothing. Ahead
+of that order, a query word with punctuation between its letters or digits
+(`find_text`, `docker-compose.yml`) is looked for exactly as typed, ignoring
+case, in each page's title and Markdown, code included: pages holding more such
+words rank first, and their excerpt is the first line outside code that shows
+one, or the first code line when only code does (#522).
 
 **Consumers:** the MCP `read_docs` and `search_docs` tools
 (`src/mcp/tools/read.rs`), the public manual routes in

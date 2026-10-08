@@ -220,7 +220,31 @@ pub struct Manual {
     /// Home first, then every other page in path order.
     pages: Vec<ManualPage>,
     words: Vec<PageWords>,
+    texts: Vec<PageText>,
     targets: LinkTargets,
+}
+
+/// One page's title and Markdown, lowercased, for finding a query word
+/// exactly as typed.
+struct PageText {
+    all: String,
+    /// The same with links to private pages reduced to their text, when
+    /// that differs, so a public search cannot match a private page's name.
+    public: Option<String>,
+}
+
+impl PageText {
+    fn lowercased(title: &str, markdown: &str) -> String {
+        format!("{title}\n{markdown}").to_lowercase()
+    }
+
+    fn holds(&self, word: &str, include_private: bool) -> bool {
+        let text = match &self.public {
+            Some(public) if !include_private => public,
+            _ => &self.all,
+        };
+        text.contains(word)
+    }
 }
 
 /// The words of one page, normalized for matching.
@@ -316,11 +340,25 @@ impl Manual {
                 body,
             });
         }
-        Self {
+        let mut manual = Self {
             pages,
             words,
+            texts: Vec::new(),
             targets,
-        }
+        };
+        manual.texts = manual
+            .pages
+            .iter()
+            .map(|page| {
+                let public = manual.public_markdown(page);
+                PageText {
+                    all: PageText::lowercased(&page.title, &page.markdown),
+                    public: (public != page.markdown)
+                        .then(|| PageText::lowercased(&page.title, &public)),
+                }
+            })
+            .collect();
+        manual
     }
 
     /// Every page, Home first.
@@ -347,40 +385,62 @@ impl Manual {
     /// The best [`SEARCH_RESULTS`] pages for `query`. Unless
     /// `include_private`, private pages are left out, and so are links to
     /// them in the excerpts. A page matches when any query word
-    /// appears in it; see [`Relevance`] for the order. A query that matches
-    /// nothing returns nothing.
+    /// appears in it. Pages holding more of the query's punctuated words
+    /// (see [`punctuated_words`]) exactly as typed come first, and their
+    /// excerpt shows one; then [`Relevance`] decides the order. A query
+    /// that matches nothing returns nothing.
     pub fn search(&self, query: &str, include_private: bool) -> Vec<ManualSearchHit<'_>> {
         let terms = query_terms(query);
         if terms.is_empty() {
             return Vec::new();
         }
-        let mut ranked: Vec<(Relevance, usize)> = self
+        let exact = punctuated_words(query);
+        let held_by = |index: usize| {
+            exact
+                .iter()
+                .filter(move |word| self.texts[index].holds(word, include_private))
+        };
+        let mut ranked: Vec<(usize, Relevance, usize)> = self
             .words
             .iter()
             .enumerate()
             .filter(|(index, _)| include_private || !self.pages[*index].private)
-            .map(|(index, words)| (words.relevance(&terms), index))
-            .filter(|(relevance, _)| *relevance != Relevance::default())
+            .map(|(index, words)| (held_by(index).count(), words.relevance(&terms), index))
+            .filter(|(exact, relevance, _)| *exact > 0 || *relevance != Relevance::default())
             .collect();
-        // Most relevant first; equals keep the manual's own order.
-        ranked.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        // Most exact words first, then most relevant; equals keep the
+        // manual's own order.
+        ranked.sort_by(|left, right| {
+            (right.0, &right.1)
+                .cmp(&(left.0, &left.1))
+                .then(left.2.cmp(&right.2))
+        });
         ranked
             .into_iter()
             .take(SEARCH_RESULTS)
-            .map(|(_, index)| {
+            .map(|(_, _, index)| {
                 let page = &self.pages[index];
-                let excerpt = if include_private {
-                    excerpt(&page.markdown, &terms)
+                let held: Vec<&str> = held_by(index).map(String::as_str).collect();
+                let public;
+                let markdown = if include_private {
+                    &page.markdown
                 } else {
-                    // A link to a private page must not name it.
-                    let markdown = self.markdown_linking(page, |target, anchor| {
-                        (!target.private).then(|| page_address(&target.name, anchor))
-                    });
-                    excerpt(&markdown, &terms)
+                    public = self.public_markdown(page);
+                    &public
                 };
+                let excerpt =
+                    exact_excerpt(markdown, &held).unwrap_or_else(|| excerpt(markdown, &terms));
                 ManualSearchHit { page, excerpt }
             })
             .collect()
+    }
+
+    /// `page`'s Markdown as the public addresses may show it: a link to a
+    /// private page must not name it.
+    fn public_markdown(&self, page: &ManualPage) -> String {
+        self.markdown_linking(page, |target, anchor| {
+            (!target.private).then(|| page_address(&target.name, anchor))
+        })
     }
 
     /// `page`'s Markdown with each wikilink pointing where `link` says.
@@ -497,6 +557,27 @@ fn query_terms(query: &str) -> Vec<String> {
     }
 }
 
+/// The query's punctuated words, lowercased: runs of non-whitespace with
+/// the punctuation at both ends ignored, where something that is neither a
+/// letter nor a digit sits between two letters or digits, as in
+/// `find_text`, `HATCHDOOR_PUBLIC_URL` or `docker-compose.yml`. Splitting
+/// such a word into its parts loses what was asked for, so a page that
+/// holds it whole ranks first.
+fn punctuated_words(query: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for raw in query.split_whitespace() {
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if word.chars().all(char::is_alphanumeric) {
+            continue;
+        }
+        let word = word.to_lowercase();
+        if !found.contains(&word) {
+            found.push(word);
+        }
+    }
+    found
+}
+
 /// The first prose line of `markdown` that carries a query word, then the
 /// first such heading, cut to [`EXCERPT_CHARS`] around the match. A page
 /// that matched only in code or on its title gets its first line of prose.
@@ -527,6 +608,38 @@ fn excerpt(markdown: &str, terms: &[String]) -> String {
         (None, Some(line)) => clip(line, 0),
         (None, None) => String::new(),
     }
+}
+
+/// The line to show for a page that holds some of the query's punctuated
+/// words (`held`, lowercased): the first line outside code that carries
+/// one, else the first code line that does, cut to [`EXCERPT_CHARS`]
+/// around it. This is the one case where an excerpt comes from a code
+/// block. `None` when no line carries one, as when only the title does.
+fn exact_excerpt(markdown: &str, held: &[&str]) -> Option<String> {
+    let mut first_code: Option<String> = None;
+    for (line, in_code) in fenced_lines(markdown) {
+        if in_code && first_code.is_some() {
+            continue;
+        }
+        let trimmed = line.trim();
+        let Some(at) = held.iter().find_map(|word| find_lowercased(trimmed, word)) else {
+            continue;
+        };
+        if !in_code {
+            return Some(clip(trimmed, at));
+        }
+        first_code = Some(clip(trimmed, at));
+    }
+    first_code
+}
+
+/// The byte offset in `line` where `word`, already lowercased, starts,
+/// ignoring the line's case.
+fn find_lowercased(line: &str, word: &str) -> Option<usize> {
+    line.char_indices().map(|(at, _)| at).find(|at| {
+        let mut rest = line[*at..].chars().flat_map(char::to_lowercase);
+        word.chars().all(|c| rest.next() == Some(c))
+    })
 }
 
 /// The byte offset of the first word in `line` that matches a term.
@@ -1069,6 +1182,160 @@ mod tests {
         assert_eq!(
             excerpt(markdown, &query_terms("port")),
             "Set the port here."
+        );
+    }
+
+    /// A manual where `find_text` is whole on three pages, one of them
+    /// private and one holding it only in code, and in parts on the rest.
+    fn punctuated_manual() -> Manual {
+        Manual::from_sources(&[
+            (
+                "Home.md",
+                "# Home\n\nFind any text in your notes.\n\nFind text again, find text.\n",
+            ),
+            (
+                "Code only.md",
+                "# Code only\n\nRun the command below.\n\n```sh\ncurl -d '{\"name\":\"find_text\"}' /mcp\n```\n",
+            ),
+            (
+                "Links.md",
+                "# Links\n\nSee [[Secret notes]] for more on find text.\n\nSet two_way as [[Secret notes]] says.\n",
+            ),
+            (
+                "Secret notes.md",
+                "---\nprivate: true\n---\n\n# Secret notes\n\nfind_text and two-way live here.\n",
+            ),
+            (
+                "Tools.md",
+                "# Tools\n\nEvery tool, one per row.\n\n| `Find_Text` | exact search |\n",
+            ),
+        ])
+    }
+
+    fn names<'a>(hits: &'a [ManualSearchHit<'_>]) -> Vec<&'a str> {
+        hits.iter().map(|hit| hit.page.name.as_str()).collect()
+    }
+
+    #[test]
+    fn pages_holding_a_punctuated_word_whole_come_first_and_show_it() {
+        let manual = punctuated_manual();
+        let hits = manual.search("find_text", true);
+        assert_eq!(
+            names(&hits),
+            ["code-only", "secret-notes", "tools", "home", "links"]
+        );
+        assert_eq!(hits[0].excerpt, "curl -d '{\"name\":\"find_text\"}' /mcp");
+        assert_eq!(hits[1].excerpt, "find_text and two-way live here.");
+        assert_eq!(hits[2].excerpt, "| `Find_Text` | exact search |");
+    }
+
+    #[test]
+    fn a_punctuated_word_ignores_case_and_punctuation_at_its_ends() {
+        let manual = punctuated_manual();
+        let plain = manual.search("find_text", true);
+        let dressed = manual.search("`FIND_TEXT`?", true);
+        assert_eq!(names(&plain), names(&dressed));
+        assert_eq!(dressed[0].excerpt, plain[0].excerpt);
+    }
+
+    #[test]
+    fn a_whole_punctuated_word_outranks_a_plain_word_in_a_title() {
+        let manual = punctuated_manual();
+        let hits = manual.search("home find_text", true);
+        assert_eq!(
+            names(&hits),
+            ["code-only", "secret-notes", "tools", "home", "links"]
+        );
+        // More punctuated words held whole rank higher still.
+        let hits = manual.search("find_text two-way", true);
+        assert_eq!(hits[0].page.name, "secret-notes");
+    }
+
+    #[test]
+    fn a_query_without_a_punctuated_word_ranks_and_excerpts_as_before() {
+        let manual = punctuated_manual();
+        let hits = manual.search("find text", true);
+        assert_eq!(
+            names(&hits),
+            ["home", "code-only", "links", "secret-notes", "tools"]
+        );
+        assert_eq!(hits[0].excerpt, "Find any text in your notes.");
+        assert_eq!(
+            hits[1].excerpt, "Run the command below.",
+            "no excerpt comes from code without a punctuated word"
+        );
+    }
+
+    #[test]
+    fn a_public_search_for_a_punctuated_word_leaves_private_pages_out() {
+        let manual = punctuated_manual();
+        assert_eq!(
+            names(&manual.search("find_text", false)),
+            ["code-only", "tools", "home", "links"]
+        );
+        // The link to the private page is all that holds its name.
+        let signed_in = manual.search("secret-notes", true);
+        assert_eq!(signed_in[0].page.name, "links");
+        assert!(signed_in[0].excerpt.contains("(secret-notes)"));
+        let public = manual.search("secret-notes", false);
+        assert_eq!(public[0].page.name, "links");
+        assert_eq!(public[0].excerpt, "See Secret notes for more on find text.");
+        // A line shown for its punctuated word loses the link all the same.
+        assert_eq!(
+            manual.search("two_way", false)[0].excerpt,
+            "Set two_way as Secret notes says."
+        );
+    }
+
+    #[test]
+    fn the_manual_finds_its_own_identifiers() {
+        for (query, expected) in [
+            (
+                "find_text",
+                &[
+                    "reference/mcp-tools-reference",
+                    "guides/how-to-work-in-a-vault-as-an-agent",
+                ][..],
+            ),
+            (
+                "HATCHDOOR_PUBLIC_URL",
+                &["reference/settings-and-environment-variables-reference"][..],
+            ),
+            (
+                "docs_page_not_found",
+                &["reference/mcp-tools-reference"][..],
+            ),
+        ] {
+            let needle = query.to_lowercase();
+            let hits = search(query);
+            let whole: Vec<bool> = hits
+                .iter()
+                .map(|hit| hit.page.markdown.to_lowercase().contains(&needle))
+                .collect();
+            assert!(
+                whole.is_sorted_by(|left, right| left >= right),
+                "{query}: a page without it outranks a page with it"
+            );
+            for (hit, whole) in hits.iter().zip(&whole) {
+                assert!(
+                    !whole || hit.excerpt.to_lowercase().contains(&needle),
+                    "{query}: {} shows {:?}",
+                    hit.page.name,
+                    hit.excerpt
+                );
+            }
+            for name in expected {
+                let at = hits.iter().position(|hit| hit.page.name == *name);
+                assert!(
+                    at.is_some_and(|at| whole[at]),
+                    "{query}: {name} is missing from {:?}",
+                    names(&hits)
+                );
+            }
+        }
+        assert_eq!(
+            search("docs_page_not_found")[0].page.name,
+            "reference/mcp-tools-reference"
         );
     }
 
