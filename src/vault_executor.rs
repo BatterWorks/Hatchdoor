@@ -728,9 +728,6 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
     // it, never from this flag.
     let published_stale = Arc::new(AtomicBool::new(false));
     let requeue_on = slicing.as_ref().map(|slicing| slicing.work.clone());
-    control_block
-        .set_search_status(VaultSearchStatus::Indexing, None)
-        .map_err(vault_index_error)?;
     let (result, stale_mark_required) = {
         let _refresh = control_block
             .acquire_refresh()
@@ -743,6 +740,14 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                 "failed to mark the retained Vault snapshot stale for an active rebuild"
             );
         }
+        // Published after the stale mark, so the status never leaves `Ready`
+        // while the snapshot still reads fresh (#483). A mark that failed is
+        // logged above and leaves that pair standing until publication.
+        let opening_status = opening_search_status(&cache, vault_id);
+        control_block
+            .set_search_status(opening_status, None)
+            .map_err(vault_index_error)?;
+        let rebuilds_searchable = opening_status == VaultSearchStatus::Stale;
         let indexing_control = control_block.clone();
         let indexing_cache = cache.clone();
         let publication_stale = published_stale.clone();
@@ -783,6 +788,15 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                     "could not publish the structure-only Vault snapshot; browsing waits for the full index"
                 ),
             }
+            // The structure pass is where a changed search model wipes the
+            // cache. If the generation this turn opened on is gone and
+            // nothing replaced it, stop reporting it searchable.
+            if rebuilds_searchable
+                && opening_search_status(&indexing_cache, vault_id) != VaultSearchStatus::Stale
+                && indexing_control.snapshot().search == VaultSearchStatus::Stale
+            {
+                let _ = indexing_control.set_search_status(VaultSearchStatus::Indexing, None);
+            }
             let publication_control = indexing_control.clone();
             indexing_cache
                 .replace_vault_snapshot_with_embed_layers_and_progress(
@@ -797,6 +811,16 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                             let (mutated, guard) = publication_control
                                 .blocking_retake_mutation_for_index(read_phase_generation);
                             publication_stale.store(mutated, Ordering::Release);
+                            // A rebuild reports `Ready` ahead of the row that
+                            // makes it true, under the guard that row is
+                            // published under, so no reader finds a fresh
+                            // snapshot on a Vault still reporting `Stale`
+                            // (#483). A first build waits for its vectors: it
+                            // has no search capability to keep until then.
+                            if rebuilds_searchable && !mutated {
+                                let _ = publication_control
+                                    .set_search_status(VaultSearchStatus::Ready, None);
+                            }
                             let freshness = if mutated {
                                 // A write landed while this turn was
                                 // embedding, so what is about to be published
@@ -904,6 +928,21 @@ fn retained_search_status(cache: &SqliteCache, vault_id: VaultId) -> VaultSearch
         }
         Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
         Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
+    }
+}
+
+/// The search status an Index turn publishes as it starts. A Vault that
+/// already answers search keeps answering from its retained generation for
+/// the whole rebuild, so it reports `Stale` and keeps the search capability
+/// (ADR-35 decision 2, #483). `Indexing` is for a Vault with nothing
+/// searchable yet, a vectorless generation included.
+fn opening_search_status(cache: &SqliteCache, vault_id: VaultId) -> VaultSearchStatus {
+    match retained_search_status(cache, vault_id) {
+        VaultSearchStatus::Stale => VaultSearchStatus::Stale,
+        VaultSearchStatus::Browsable
+        | VaultSearchStatus::Unavailable
+        | VaultSearchStatus::Indexing
+        | VaultSearchStatus::Ready => VaultSearchStatus::Indexing,
     }
 }
 

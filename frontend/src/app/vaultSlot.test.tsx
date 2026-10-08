@@ -165,6 +165,29 @@ describe("deriveVaultSlot", () => {
     ).toEqual({ kind: "indexing" });
   });
 
+  it("keeps the count while a searchable Vault's own reindex runs (#483)", () => {
+    const reindexing = healthyVault("Alpha", {
+      search: "stale",
+      index_turn: "running",
+    });
+    expect(deriveVaultSlot(reindexing, 40)).toEqual({
+      kind: "count",
+      count: 40,
+    });
+    expect(
+      deriveVaultAggregate([reindexing], { [reindexing.vault_id]: 40 }),
+    ).toEqual({
+      kind: "count",
+      count: 1,
+    });
+  });
+
+  it("keeps the stale condition for a failed build while its retry runs", () => {
+    expect(
+      deriveVaultSlot({ ...staleVault("Alpha"), index_turn: "running" }, 40),
+    ).toMatchObject({ kind: "condition", word: "stale" });
+  });
+
   it("shows stale in warn tier when indexing has failed", () => {
     const result = deriveVaultSlot(staleVault("Alpha"), 40);
     expect(result).toMatchObject({
