@@ -29,19 +29,19 @@ Two Vaults cannot share notes, so a folder that is already a Vault, sits inside 
 Open the Vault from the list in Settings and use **Pause Vault** or **Resume Vault** on its page. Pausing:
 
 - Removes the Vault from the sidebar, search and the graph straight away.
-- Leaves every file, the search index and any Git history exactly as they were. Nothing is deleted or rebuilt.
+- Leaves every file, the search index and any Git history as they were. Nothing is deleted or rebuilt.
 - Stops all changes to that Vault, from agents too, until you resume it.
 
 Pausing asks for no confirmation, because one click undoes it.
 
 ## Disconnect a Vault
 
-**Disconnect Vault**, on the same page, makes Hatchdoor forget the Vault. It removes the Vault from Hatchdoor's list, including where it lives and how it is set up, and leaves the Vault's own files, folder and Git history on disk exactly where they were.
+**Disconnect Vault**, on the same page, makes Hatchdoor forget the Vault. It removes the Vault from Hatchdoor's list, including where it lives and how it is set up, and leaves the Vault's own files, folder and Git history on disk where they were.
 
 > [!warning]
-> Disconnecting forgets the Vault; it does not delete any notes. To reconnect, use **Add a Vault** again and pick the same folder or repository. Hatchdoor treats it as a new Vault, so its own settings (ignored files, archive folder, commit identity) need entering again.
+> Disconnecting forgets the Vault and deletes no notes. To reconnect, use **Add a Vault** again and pick the same folder or repository. Hatchdoor treats it as a new Vault, so its own settings (ignored files, archive folder, commit identity) need entering again.
 
-Hatchdoor has no undo for disconnecting. That is why the button is red and the warning sits above it, so you read what happens before you click, not after.
+Hatchdoor has no undo for disconnecting. That is why the button is red and the warning sits above it, where you read it before you click.
 
 ## Ask an agent to do it
 
@@ -56,7 +56,7 @@ An agent manages Vaults with MCP tools, and needs **Let assistants change notes*
 Creating a Vault works the same way, with `create_vault`. [[How to deploy Hatchdoor with an agent]] shows an agent setting up Hatchdoor and its first Vault from scratch.
 
 > [!tip]
-> `list_vaults` always works, with or without write access, so an agent can look at every Vault, its status and what it allows before deciding anything needs to change. Only `create_vault`, `edit_vault`, `enable_vault`, `disable_vault` and `disconnect_vault` need write access.
+> `list_vaults` always works, with or without write access, so an agent can look at every Vault, its status and what it allows before deciding anything needs to change. Every tool that changes a Vault or asks it to do something needs write access: `create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `refresh_vault` and `publish_recovery_branch`.
 
 ---
 

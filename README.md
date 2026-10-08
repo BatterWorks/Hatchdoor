@@ -76,7 +76,7 @@ under close human review, with tests and a documented safety model.
 - A web UI for browsing folders and Markdown notes.
 - Native multi-vault: one instance serves several vaults, each with its own
   source, git sync, and agent scope.
-- Clean note URLs at `/n/:slug`.
+- Clean note URLs at `/v/<vault-id>/n/<slug>`.
 - Obsidian-style wikilinks for `[[Note]]`, `[[Folder/Note]]`, and
   `[[Note|Alias]]`, and Markdown links to `.md` files, both kept up to date
   through renames and moves. New links follow each vault's own link style.
@@ -93,6 +93,14 @@ under close human review, with tests and a documented safety model.
   notes with the same safety as the UI, rename or delete a tag across a whole
   vault in one checked operation, and move attachments of any size through
   short-lived download and upload links.
+- Agent reads sized for a context window: compact search hits, an outline of a
+  long note and just the sections asked for, and an exact-string search that
+  counts every occurrence.
+- A setup checklist on a fresh install that goes from an empty instance to an
+  agent searching your notes, with a folder picker in place of container paths.
+- The manual built into the app: Help beside whatever you are doing, the same
+  pages for agents through `read_docs` and `search_docs`, and as plain Markdown
+  at `/docs/` on every instance.
 - Optional automatic git commits and pushes for Hatchdoor writes, with sync
   conflicts resolved on your Git host through a recovery branch.
 - PWA assets and service worker caching for common read paths.
@@ -266,18 +274,23 @@ browser prompt.
 
 Hatchdoor images include no model weights. On first launch, before it
 downloads anything, Hatchdoor asks you to pick one: **Gemma** (multilingual,
-the default, requires accepting its terms) or **Nomic Embed Text v1.5**
+recommended, requires accepting its terms) or **Nomic Embed Text v1.5**
 (English-only, no terms to accept). Either way the model and its acceptance
 receipt stay in `HOST_MODELS_PATH` and persist across restarts; Hatchdoor
 never sends vault content anywhere. Vault features stay unavailable until
 setup finishes.
+
+A fresh install has no Vaults. Once the model is ready it opens on the **Set up
+Hatchdoor** checklist: add your notes folder as a Vault, connect your agent, and
+try a search. The **?** button in the top bar opens Help, the manual for the
+version you are running.
 
 ### 5. Container Image And Paths
 
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.7.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.8.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -466,9 +479,9 @@ Set `HATCHDOOR_WEB_BEARER_TOKEN`, bind to `127.0.0.1`, or enable
 `HATCHDOOR_DEMO_MODE=true` for a read-only public demo. This is intentional: a
 non-loopback bind can expose your vault to the network.
 
-### The app opens on an empty Vault
+### The app opens with no Vaults, or your notes folder is not in the list
 
-If you expected an existing vault, the container almost always mounted an empty directory. Check that `HOST_VAULT_PATH` in `.env` is not a typo and that no stale Docker volume shadows the mount.
+A fresh install has no Vaults until you add one: choose **Add your notes** on the setup checklist, or **Settings** → **Add a Vault**. If the folder list is empty or your folder is missing from it, the container almost always mounted an empty directory. Check that `HOST_VAULT_PATH` in `.env` is not a typo and that no stale Docker volume shadows the mount.
 
 For write permission issues, MCP `401`/`403`, git sync problems, and more, see
 [How to troubleshoot common
@@ -515,7 +528,13 @@ npm run build
 
 - [User documentation](https://docs-hatchdoor.battercloud.cc): setup, configuration,
   and day-to-day usage guides for running Hatchdoor, hosted in a Hatchdoor
-  vault itself.
+  vault itself. Its source is [`docs/user-vault`](docs/user-vault), and every
+  install carries the same pages for its own version, in Help and at `/docs/`.
+- [Live demo](https://hatchdoor.battercloud.cc): a public, read-only instance
+  with four example vaults.
+- [Changelog](CHANGELOG.md) and
+  [releases](https://github.com/BatterWorks/Hatchdoor/releases): what changed in
+  each version.
 - [Documentation index](docs/README.md): architecture, collaboration, roadmap,
   research, maintenance, and historical records.
 - [Product roadmap](docs/roadmap/product-roadmap.md): draft overall product direction

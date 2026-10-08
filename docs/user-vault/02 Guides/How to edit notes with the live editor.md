@@ -4,23 +4,23 @@ tags: [type/how-to, topic/web-ui]
 
 # How to edit notes with the live editor
 
-On a writable Vault, the note you're reading *is* the note you edit. There's no separate edit mode to switch into. Click any paragraph, heading, list item, table row, or callout line and it turns into an editable field in place; everything else on the page stays exactly as rendered. This page covers how that works day to day. For the underlying Markdown syntax itself, see [[Supported Markdown reference]]; for browsing and search, see [[Browse and review through the Web UI]].
+On a Vault Hatchdoor can write to, you edit a note on the page where you read it. There is no edit mode to switch into. Click any paragraph, heading, list item, table row or callout line and it becomes an editable field in place, while the rest of the page stays as rendered. This page covers how that works. For the Markdown syntax, see [[Supported Markdown reference]]. For browsing and search, see [[Browse and review through the Web UI]].
 
 ## Entering a block
 
 - **Mouse:** click the block. The caret lands roughly where you clicked.
-- **Keyboard:** `Tab` to the block, then `Enter`. Every editable block is reachable this way, not just by mouse.
-- **Touch:** double-tap the line. A single tap keeps its normal job (following a link, toggling a checkbox, expanding a callout), so a stray tap while scrolling never opens an editor by accident. The first time you visit a writable Vault on a touch device, a dismissible banner reminds you: *"Double-tap a line to edit it."* It only shows once.
+- **Keyboard:** `Tab` to the block, then `Enter`. The keyboard reaches every editable block.
+- **Touch:** double-tap the line. A single tap keeps its normal job of following a link, ticking a checkbox or expanding a callout, so a stray tap while scrolling never opens an editor. The first time you open a writable Vault on a touch device, a banner you can dismiss says "Double-tap a line to edit it." It shows once.
 
-Links, task-list checkboxes, and callout summary lines never open for editing on click or tap; they do what they already do (navigate, toggle, expand/collapse).
+Links, task-list checkboxes and callout summary lines never open for editing on a click or tap. A link still navigates, a checkbox still toggles, and a callout still expands or collapses.
 
 ## Editable units
 
-Each click targets one **block**, not the whole note: one paragraph, one heading, one list item, one table row, one callout line, or one fenced code block. Markdown syntax you don't normally see (`## `, `- `, `> `, the code fence) appears only inside the block you're actively editing, and disappears again once you move on. The rest of the note keeps rendering normally while you edit one piece of it.
+Each click opens one **block**: one paragraph, one heading, one list item, one table row, one callout line, or one fenced code block. The Markdown syntax you do not normally see, such as `## `, `- `, `> ` and the code fence, appears only inside the block you are editing and disappears when you move on. The rest of the note stays rendered.
 
 A saved query is one block as well. Its table is drawn from a fenced `base` block, and clicking the table opens that block's definition for editing. A column heading and a row's link are the exceptions: a heading sorts the table and a link opens its note. Once the edit saves, the table is worked out again from the new definition. Source mode's preview shows the definition rather than a table, because it previews text that isn't saved yet and only the saved note is evaluated.
 
-Note properties (the frontmatter block: tags, status, and so on) are also editable inline, right above the note body.
+You can also edit a note's properties, the frontmatter block with its tags, status and so on, in place above the note body.
 
 ## Moving and splitting as you type
 
@@ -28,54 +28,54 @@ Note properties (the frontmatter block: tags, status, and so on) are also editab
 | --- | --- |
 | `Enter` at the end of a paragraph or heading | Starts a new block below and moves you into it |
 | `Enter` inside a list item | Starts the next list item, keeping the same marker and indent (and an unchecked box, if it was a task) |
-| `Enter` inside a fenced code block | Inserts a literal newline, same as any text editor |
+| `Enter` inside a fenced code block | Inserts a new line, as in any text editor |
 | `Shift+Enter` | A hard line break within the current block |
 | `Backspace` at the very start of a block | Merges it into the block above, caret at the join |
 | `Tab` / `Shift+Tab` in a list item | Indent / outdent |
 | `↑` / `↓` at the top/bottom line of a block | Moves to the previous/next block, keeping your column |
 | `Escape` | Commits your edit and returns to the rendered view, with focus back on that block |
 
-These are disabled inside table rows. Restructuring a table (adding rows or columns) needs Source mode, below.
+These keys do nothing inside table rows. To add rows or columns to a table, use Source mode, below.
 
 ## Saving
 
-There's no Save button. Edits save automatically: when you commit a block (by clicking elsewhere, pressing `Escape`, or moving to another block) and again after about two seconds of typing without a pause. A badge above the note tells you where things stand:
+There is no Save button. An edit saves when you leave the block, by clicking elsewhere, pressing `Escape` or moving to another block, and also after about two seconds without typing. A badge above the note shows the state:
 
-- **Saving…**: a write is in flight.
+- **Saving…**: a save is under way.
 - **Saved HH:MM**: everything up to that point is on disk.
-- **Not saving**: autosave has stopped; see below.
+- **Not saving**: saving has stopped. See below.
 
 ## If the page goes away mid-edit
 
-Your browser keeps a local copy of what you are typing, and Hatchdoor writes that copy out for certain whenever the tab is closed or hidden. A crash, a reload, a closed tab, or Hatchdoor updating itself in the background cannot take the last few seconds of typing with it, including text sitting inside a block you have open.
+Your browser keeps a local copy of what you are typing, and Hatchdoor writes that copy out whenever the tab is closed or hidden. A crash, a reload, a closed tab, or Hatchdoor updating itself in the background cannot take the last few seconds of typing with it, including text sitting inside a block you have open.
 
 Reopen the note and the unsaved text is back, above a notice saying so, and the interrupted save finishes on its own. If the note changed on disk while you were away, the text is held rather than written over the newer version: the notice sends you to **Edit** instead, where you can compare the two.
 
-If your browser will not store that local copy at all (private browsing, a full disk, site data blocked), a notice says so, because then saving really is the only thing keeping your edit.
+If your browser cannot store that local copy, in private browsing, with a full disk or with site data blocked, a notice says so, because the save is then the only thing keeping your edit.
 
 Hatchdoor also waits before updating itself. A new version installs in the background and normally takes effect on a reload; while you have an unsaved edit or an open block, that reload is held back until the edit is saved or you leave the note.
 
 ## When editing stops or isn't available
 
-- **"Edits aren't saving. This note changed somewhere else."**: someone or something else (an agent, Obsidian, a git sync) wrote to this note while you were editing. Your local changes are kept; click **Review** to compare your draft against the version on disk and choose which to keep.
-- **"Edits aren't saving"** with nothing else to go on, or a save that fails repeatedly for no visible reason: this is a problem on the server rather than in your browser, and the server log records every failed save with its cause. See [[How to troubleshoot common problems]].
+- **"Edits aren't saving. This note changed somewhere else."**: an agent, Obsidian or a Git sync wrote to this note while you were editing. Your changes are kept. Click **Review** to compare your draft with the version on disk and choose which to keep.
+- **"Edits aren't saving"** with no reason given, or a save that keeps failing: the problem is on the server and not in your browser, and the server log records every failed save with its cause. See [[How to troubleshoot common problems]].
 - **"Edits aren't saving. Hatchdoor could not reach the vault."**: a connectivity problem. It retries once the connection is back.
 - **"This note changed on disk while your edit was waiting to save."**: the note moved somewhere else while your edit was stuck (a save the server refused, a connection that is down). Nothing of yours is written over: open **Edit** to put the two versions side by side and decide.
 - **"This note is part of a sync conflict with the Vault's remote."**: the Vault's last sync stopped because this note changed both here and on the remote. You can still edit it, but an edit made before the conflict is resolved may cause the same conflict again. [[How to troubleshoot common problems#Resolving a sync conflict]] explains how to resolve it from the Vault's settings.
 - **`conflict` or `sync stopped` next to the Vault in the sidebar** does not stop your edits. Notes keep saving to disk; only the Vault's Git commit and sync wait until the problem is dealt with from the Vault's settings. See [[How to troubleshoot common problems#Git sync is failing]].
-- **"This note's source and rendered lines don't line up, so inline editing is off here."**: a rare safety guard that disables inline editing for that specific note rather than risk misplacing an edit. Use **Edit** to open Source mode instead.
-- If the Vault is read-only, or you're on a demo deployment, no block is clickable at all; the note behaves as a plain reader.
+- **"This note's source and rendered lines don't line up, so inline editing is off here."**: Hatchdoor could not match that note's rendered lines to its Markdown, so it turns block editing off for the note to avoid putting an edit in the wrong place. This is rare. Use **Edit** to open Source mode.
+- If the Vault is read-only, or you are on a public demo, no block opens and you can only read the note.
 
 > [!note]
-> The detection behind the first and third messages above depends on the filesystem holding the Vault. Hatchdoor normally saves a note by swapping the new copy with the old one in a single step, which is how it notices that something else got there first. Where the filesystem cannot do that swap, ZFS before 2.2 and anything mounted through FUSE, a save checks the note and then replaces it as two steps, and a change that lands in between is overwritten rather than caught. Your own edit is never lost either way, and Hatchdoor tells you when a Vault is in that state: the banner above the note says so, and the server log names the Vault once at startup. [[Install Hatchdoor with Docker Compose]] explains which filesystems are affected.
+> The detection behind the two messages above that say the note changed, somewhere else or on disk, depends on the filesystem holding the Vault. Hatchdoor normally saves a note by swapping the new copy with the old one in a single step, which is how it notices that something else got there first. Some filesystems cannot do that swap: ZFS before 2.2, anything mounted through FUSE, and a Windows folder used through Docker Desktop. There a save checks the note and then replaces it as two steps, and a change that lands in between is overwritten rather than caught. Your own edit is never lost either way, and Hatchdoor tells you when a Vault is in that state: the banner above the note says so, and the server log names the Vault once at startup. [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains which filesystems are affected.
 
 ## Source mode
 
-The **Edit** button next to the note title opens the full-note Markdown editor with an explicit Save button. Use it for anything block editing can't do: restructuring a table, editing display math or raw HTML, and resolving a conflict flagged by the **Review** button above. It's always there as a fallback. Nothing you can do in Source mode is off-limits; it's just not block-by-block.
+The **Edit** button next to the note title opens the whole note in a Markdown editor with a Save button. Use it for what block editing cannot do: changing a table's rows or columns, editing display math or raw HTML, and resolving a conflict the **Review** button reports. It is always available, and it can change anything in the note.
 
 ### Linking to another note
 
-In Source mode, type `[[` and keep typing part of a note's title to get a list of matching notes. Pick one with the arrow keys and Enter, or click it, and Hatchdoor replaces what you typed with a link in the Vault's link style:
+In Source mode, type `[[` and keep typing part of a note's title to get a list of matching notes. Pick one with the arrow keys and `Enter`, or click it, and Hatchdoor replaces what you typed with a link in the Vault's link style:
 
 - In a wikilink Vault, `[[Note Title]]`.
 - In a Markdown-link Vault, `[Note Title](path/to/Note%20Title.md)`, with the path written in the Vault's path form. Only notes in the same Vault are offered, because a link never reaches into another Vault.

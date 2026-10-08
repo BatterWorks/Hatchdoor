@@ -78,7 +78,7 @@ Prefer:
 - `edit_note` for exact string replacements.
 - `replace_section` for one heading's section.
 - `append_to_note` for adding a short new section or log entry.
-- `update_note` only when replacing the whole note is genuinely clearer.
+- `update_note` only when replacing the whole note is clearer.
 
 ## Creating notes
 

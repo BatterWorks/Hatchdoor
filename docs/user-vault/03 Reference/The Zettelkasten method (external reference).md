@@ -4,41 +4,41 @@ tags: [type/reference, topic/vault-organization]
 
 # The Zettelkasten method (external reference)
 
-Zettelkasten ("slip-box") is Niklas Luhmann's note-taking method, popularized for a modern audience by Sönke Ahrens. This page is a dictionary of the method itself, for anyone deciding how to lay out a new Vault, with links to the primary sources.
+Zettelkasten ("slip-box") is Niklas Luhmann's note-taking method, which Sönke Ahrens brought to today's readers. This page describes the method for anyone deciding how to lay out a new Vault, and links to the primary sources.
 
 ## Primary sources
 
 | Source | Link |
 | --- | --- |
-| *How to Take Smart Notes* (book) — Sönke Ahrens | [takesmartnotes.com](https://takesmartnotes.com/) |
-| Niklas Luhmann's Zettelkasten (digitized archive) — Bielefeld University | [niklas-luhmann-archiv.de](https://niklas-luhmann-archiv.de/) |
-| "Zettelkasten Method" overview — zettelkasten.de | [zettelkasten.de/introduction](https://zettelkasten.de/introduction/) |
+| *How to Take Smart Notes* (book), by Sönke Ahrens | [takesmartnotes.com](https://takesmartnotes.com/) |
+| Niklas Luhmann's Zettelkasten (digitized archive), Bielefeld University | [niklas-luhmann-archiv.de](https://niklas-luhmann-archiv.de/) |
+| "Zettelkasten Method" overview, zettelkasten.de | [zettelkasten.de/introduction](https://zettelkasten.de/introduction/) |
 
 ## The core idea
 
-Luhmann kept roughly 90,000 index cards over his career, cross-referenced by hand, and credited the slip-box itself — not just his own thinking — with the volume of work he produced. The method treats writing notes as thinking, not transcription: a note is only useful once it's rewritten in your own words, atomic, and linked to what it relates to. The slip-box's value compounds because notes accumulate connections over time, not because it stores more.
+Luhmann kept roughly 90,000 index cards over his career and cross-referenced them by hand. He credited the slip-box, along with his own thinking, for the volume of work he produced. The method treats writing a note as thinking. A note becomes useful once you have rewritten it in your own words, cut it down to one idea and linked it to what it relates to. A slip-box gains value as its notes gain connections, and a bigger pile of unlinked notes adds little.
 
 ## Three kinds of notes
 
-Ahrens distinguishes notes by role, not by where they're filed:
+Ahrens sorts notes by what they are for, wherever they are filed:
 
 | Kind | Role |
 | --- | --- |
-| **Fleeting notes** | A quick capture of a thought as it occurs — disposable, meant to be processed within a day or two, not kept long-term. |
-| **Literature notes** | What a source actually said, in your own words, tied to the source it came from. |
-| **Permanent notes** | One idea, fully written out, in a form that makes sense without its original context — this is what actually goes into the slip-box and gets linked. |
+| **Fleeting notes** | A quick capture of a thought as it occurs. You process it within a day or two and then throw it away. |
+| **Literature notes** | What a source said, in your own words, tied to the source it came from. |
+| **Permanent notes** | One idea, written out in full, in a form that makes sense without its original context. These are the notes that go into the slip-box and get linked. |
 
 ## What makes a note "atomic"
 
-A permanent note holds exactly one idea, written so it stands on its own months or years later without needing the surrounding material that produced it. This is the property that makes dense linking possible: a note that bundles several ideas can only be linked as a whole, while an atomic note can be linked precisely, from every other note that actually relates to that one idea.
+A permanent note holds one idea, written so it stands on its own months or years later, without the material that produced it. That is what makes dense linking possible. A note that bundles several ideas can only be linked as a whole. An atomic note can be linked from every other note that relates to its one idea.
 
 ## Links over hierarchy
 
-Luhmann's slip-box had almost no folder structure — cards were filed near a related card and connected by explicit reference numbers, so a note's context came from its links, not its location. This is the method's sharpest contrast with [[The PARA method (external reference)|PARA]]: PARA sorts by where a note belongs (which folder, based on actionability); Zettelkasten deliberately avoids that question and lets structure emerge from links accumulated over time.
+Luhmann's slip-box had almost no folder structure. He filed a card near a related card and connected cards by reference numbers, so a note's context came from its links and never from its location. Here the method differs most from [[The PARA method (external reference)|PARA]]. PARA asks which folder a note belongs in, based on how actionable it is. Zettelkasten skips that question and lets structure grow out of the links.
 
 ## How this shows up in a Hatchdoor Vault
 
-A Vault's `[[wikilinks]]` are the direct mechanical equivalent of Luhmann's card references — see [[Supported Markdown reference]] for the link syntax and [[How indexing and search work]] for how they're indexed and surfaced as backlinks. A note's slug plays the role Luhmann's ID numbers played: a stable handle other notes can point at regardless of where the file lives or gets moved. Nothing about the method requires folders at all, so a Zettelkasten-style Vault can be as flat as a single directory of permanent notes — though nothing stops combining it with [[The PARA method (external reference)|PARA]] folders or [[The layer system|layers]] for fleeting and literature notes, keeping only permanent notes on the default surface.
+A Vault's `[[wikilinks]]` do the job of Luhmann's card references. [[Supported Markdown reference]] has the link syntax, and [[How indexing and search work]] explains how links are indexed and shown as backlinks. A note's slug does the job of Luhmann's ID numbers: other notes can point at it wherever the file lives or moves to. The method needs no folders, so a Zettelkasten Vault can be one flat directory of permanent notes. You can also combine it with [[The PARA method (external reference)|PARA]] folders, or put fleeting and literature notes on [[The layer system|layers]] and keep only permanent notes on the default surface.
 
 ---
 
