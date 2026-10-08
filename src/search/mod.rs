@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 
 use serde::{Deserialize, Serialize};
 
+pub mod compact;
 pub mod layer_selection;
 pub mod vault_scoped;
 

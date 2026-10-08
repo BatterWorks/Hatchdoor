@@ -20,6 +20,7 @@ use std::str::FromStr;
 
 use crate::app_state::AppState;
 use crate::mcp::results;
+use crate::search::compact::CompactSearchResponse;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::vault::allowed_attachment_extensions;
 use crate::vault_error::VaultOperationError;
@@ -28,9 +29,9 @@ use crate::vault_management::{
 };
 use crate::vault_read::{
     AssetPathError, AssetReadError, NoteQuery, NoteQueryCondition, OffloadedReadError,
-    ResolvedAsset, TextMatchRequest, TreeScope, VaultReadError, VaultReads, VaultResolveResponse,
-    VaultScope, clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap,
-    clamp_tree_max_depth, note_not_found,
+    ResolvedAsset, TextMatchRequest, TreeScope, VaultReadError, VaultReadProjection, VaultReads,
+    VaultResolveResponse, VaultScope, clamp_recent_limit, clamp_search_limit,
+    clamp_search_per_note_cap, clamp_tree_max_depth, note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -116,6 +117,20 @@ struct SearchArgs {
     per_note_cap: Option<usize>,
     #[serde(default)]
     layers: Vec<String>,
+    #[serde(default)]
+    detail: SearchDetail,
+}
+
+/// How much of each hit `search_notes` returns (#501). Compact is the
+/// default because most searches only locate a note that `get_note` then
+/// reads; the HTTP search route has no such argument and always answers in
+/// full.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SearchDetail {
+    #[default]
+    Compact,
+    Full,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +268,8 @@ pub(super) async fn search_notes_tool(
             .then(|| args.layers.join(","))
             .as_deref(),
     );
+    let detail = args.detail;
+    let query = args.query.clone();
     let request = VaultSearchRequest {
         scope,
         query: args.query,
@@ -273,7 +290,23 @@ pub(super) async fn search_notes_tool(
     })
     .await;
     match result {
-        Ok(Ok(projection)) => Ok(tool_result::<results::SearchNotesResult>(&projection)),
+        Ok(Ok(projection)) => {
+            let data = match detail {
+                SearchDetail::Compact => results::SearchNotesData::Compact(
+                    CompactSearchResponse::from_full(projection.data, &query),
+                ),
+                SearchDetail::Full => results::SearchNotesData::Full(projection.data),
+            };
+            Ok(tool_result::<results::SearchNotesResult>(
+                &VaultReadProjection {
+                    scope: projection.scope,
+                    collection_revision: projection.collection_revision,
+                    partial: projection.partial,
+                    participants: projection.participants,
+                    data,
+                },
+            ))
+        }
         Ok(Err(error)) => Ok(structured_error(error.into_operation_error())),
         Err(join_error) => Err(JsonRpcFailure::internal(format!(
             "background task panicked: {join_error}"
@@ -1235,7 +1268,7 @@ fn exclude_patterns_schema() -> Value {
 pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
         json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants. index_turn is running while a Vault indexes and waiting while its indexing is queued behind another Vault's or paused to let one through; search says what the Vault answers meanwhile.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified. Results are ranked and may include notes that do not contain the query's words, so to learn which notes contain exactly a given string, or how many times, use find_text."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified. Hits are compact by default: each names its note and carries a snippet of at most 200 characters, centred on the first matched word in keyword mode and otherwise the start of the matched chunk. get_note returns the content. Pass detail: \"full\" to get the whole matched chunk, the note's outbound links, its tags and aliases and the chunk_id on every hit instead of the snippet. Results are ranked and may include notes that do not contain the query's words, so to learn which notes contain exactly a given string, or how many times, use find_text."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]},"detail":{"type":"string","enum":["compact","full"],"default":"compact","description":"compact returns a snippet per hit; full returns the matched chunk, outbound links and metadata."}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),

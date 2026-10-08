@@ -24,6 +24,7 @@ use schemars::{JsonSchema, Schema};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::search::compact::CompactSearchResponse;
 use crate::search::vault_scoped::VaultSearchResponse;
 use crate::vault::AttachmentInfo;
 use crate::vault_management::{
@@ -39,7 +40,19 @@ use crate::vault_read::{
 // ---------------------------------------------------------------------------
 
 pub type ListVaultsResult = VaultDiscoveryResponse;
-pub type SearchNotesResult = VaultReadProjection<VaultSearchResponse>;
+pub type SearchNotesResult = VaultReadProjection<SearchNotesData>;
+
+/// `search_notes` answers in one of two shapes, chosen by its `detail`
+/// argument (#501). Untagged, so the full shape stays byte for byte what the
+/// shared search core serializes and the advertised schema lists both.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SearchNotesData {
+    /// `detail: "compact"`, the default: each hit carries a `snippet`.
+    Compact(CompactSearchResponse),
+    /// `detail: "full"`: each hit carries its chunk, links and metadata.
+    Full(VaultSearchResponse),
+}
 
 pub type GetNoteResult = crate::vault_read::VaultQualifiedNote;
 pub type GetNoteLinksResult = VaultQualifiedLinks;

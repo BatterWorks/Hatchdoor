@@ -4839,18 +4839,311 @@ mod tests {
         assert_eq!(bad_mode["error"]["code"], -32602);
     }
 
-    #[tokio::test]
-    async fn search_notes_returns_compact_results() {
-        let (state, _tmp) = test_state();
-        let body = call_tool(&state, "search_notes", json!({"query":"Home", "limit": 5})).await;
-        let results = body["result"]["structuredContent"]["data"]["results"]
-            .as_array()
-            .expect("results array");
-        assert!(results.iter().any(|r| r["note_slug"] == "home"));
-        let first = &results[0];
-        for key in ["vault_id", "note_slug", "chunk_id", "content", "score"] {
-            assert!(first.get(key).is_some(), "{key} present");
+    /// A Vault for the hit-shape tests (#501): one note whose only `needle`
+    /// sits far into a long chunk, fifty-five notes of full-size chunks that
+    /// all say `filler`, and one tagged note.
+    fn search_shape_state() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        std::fs::write(
+            vault_root.join("Long.md"),
+            format!(
+                "# Long\n\n[[Tagged]]\n\n{} needle {}",
+                vec!["alpha"; 150].join(" "),
+                vec!["omega"; 150].join(" ")
+            ),
+        )
+        .expect("write long");
+        for index in 0..55 {
+            std::fs::write(
+                vault_root.join(format!("Bulk {index:02}.md")),
+                format!("# Bulk {index:02}\n\n{}", vec!["filler"; 450].join(" ")),
+            )
+            .expect("write bulk");
         }
+        std::fs::write(
+            vault_root.join("Tagged.md"),
+            "---\ntags: [topic/sub]\naliases: [Labelled]\n---\n# Tagged\nneedle body",
+        )
+        .expect("write tagged");
+        let mut state = base_state(&tmp);
+        state.runtime_config = mcp_runtime_config(false);
+        (scoped_test_state(state, vault_root), tmp)
+    }
+
+    fn search_hits(body: &Value) -> &Vec<Value> {
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        body["result"]["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("results array")
+    }
+
+    fn field_names(hit: &Value) -> Vec<&str> {
+        let mut names = hit
+            .as_object()
+            .expect("a hit object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+
+    const COMPACT_HIT_FIELDS: [&str; 8] = [
+        "heading_path",
+        "layer",
+        "note_path",
+        "note_slug",
+        "note_title",
+        "score",
+        "snippet",
+        "vault_id",
+    ];
+
+    const FULL_HIT_FIELDS: [&str; 11] = [
+        "chunk_id",
+        "content",
+        "heading_path",
+        "layer",
+        "metadata",
+        "note_path",
+        "note_slug",
+        "note_title",
+        "outbound_links",
+        "score",
+        "vault_id",
+    ];
+
+    /// The three ways a search runs, as `(query, mode)`.
+    const SEARCH_SHAPE_CASES: [(&str, &str); 3] = [
+        ("needle", "semantic"),
+        ("needle", "keyword"),
+        ("#topic", "semantic"),
+    ];
+
+    #[tokio::test]
+    async fn search_notes_hits_are_compact_unless_full_detail_is_asked_for() {
+        let (state, _tmp) = search_shape_state();
+        for (query, mode) in SEARCH_SHAPE_CASES {
+            let arguments = json!({"query": query, "mode": mode});
+            let omitted = call_tool(&state, "search_notes", arguments.clone()).await;
+            let mut with_detail = arguments.clone();
+            with_detail["detail"] = json!("compact");
+            let compact = call_tool(&state, "search_notes", with_detail.clone()).await;
+            assert_eq!(
+                omitted["result"]["structuredContent"], compact["result"]["structuredContent"],
+                "{query} {mode}: compact is the default"
+            );
+            with_detail["detail"] = json!("full");
+            let full = call_tool(&state, "search_notes", with_detail).await;
+
+            let (compact, full) = (search_hits(&compact), search_hits(&full));
+            assert!(!compact.is_empty(), "{query} {mode} finds something");
+            assert_eq!(compact.len(), full.len(), "{query} {mode}");
+            for (compact, full) in compact.iter().zip(full) {
+                assert_eq!(field_names(compact), COMPACT_HIT_FIELDS, "{query} {mode}");
+                assert_eq!(field_names(full), FULL_HIT_FIELDS, "{query} {mode}");
+                // Same hits, same scores, same order.
+                for shared in [
+                    "vault_id",
+                    "note_slug",
+                    "note_title",
+                    "note_path",
+                    "heading_path",
+                    "score",
+                    "layer",
+                ] {
+                    assert_eq!(compact[shared], full[shared], "{query} {mode} {shared}");
+                }
+            }
+        }
+    }
+
+    /// `detail: "full"` is the reply the shared search core serializes to,
+    /// which is what this tool returned before it had a compact shape.
+    #[tokio::test]
+    async fn search_notes_full_detail_is_the_search_core_reply_unchanged() {
+        use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
+
+        let (state, _tmp) = search_shape_state();
+        for (query, mode) in SEARCH_SHAPE_CASES {
+            let body = call_tool(
+                &state,
+                "search_notes",
+                json!({"query": query, "mode": mode, "detail": "full"}),
+            )
+            .await;
+            let core = VaultSearchCore::new(
+                &state.startup_sqlite,
+                &state.vaults,
+                state.embedder.as_ref(),
+            )
+            .search(VaultSearchRequest {
+                scope: crate::vault_read::VaultScope::One(vault_id_of(&state)),
+                query: query.to_owned(),
+                mode: serde_json::from_value(json!(mode)).expect("mode"),
+                limit: 10,
+                per_note_cap: 2,
+                layers: crate::search::LayerSelection::default(),
+            })
+            .expect("core search");
+            // Compared as the bytes sent: a score read back from JSON text
+            // can differ from the original in its last digit.
+            let expected = serde_json::to_string(&serde_json::to_value(&core).expect("serializes"))
+                .expect("text");
+            assert_eq!(body["result"]["content"][0]["text"], expected, "{query}");
+            assert_eq!(
+                body["result"]["structuredContent"],
+                serde_json::from_str::<Value>(&expected).expect("parses"),
+                "{query}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_notes_keyword_snippet_shows_a_match_deep_in_a_long_chunk() {
+        let (state, _tmp) = search_shape_state();
+        let body = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "needle", "mode": "keyword"}),
+        )
+        .await;
+        let long = search_hits(&body)
+            .iter()
+            .find(|hit| hit["note_slug"] == "long")
+            .expect("the long note matches");
+        let snippet = long["snippet"].as_str().expect("snippet");
+        assert!(snippet.contains(" needle "), "{snippet}");
+        assert!(
+            snippet.starts_with('…') && snippet.ends_with('…'),
+            "{snippet}"
+        );
+        assert!(snippet.chars().count() <= 200, "{snippet}");
+    }
+
+    #[tokio::test]
+    async fn search_notes_semantic_and_tag_snippets_start_the_chunk() {
+        let (state, _tmp) = search_shape_state();
+        let compact = call_tool(&state, "search_notes", json!({"query": "needle"})).await;
+        let full = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "needle", "detail": "full"}),
+        )
+        .await;
+        for (compact, full) in search_hits(&compact).iter().zip(search_hits(&full)) {
+            let snippet = compact["snippet"].as_str().expect("snippet");
+            let shown = snippet
+                .strip_suffix('…')
+                .expect("a long chunk is cut short");
+            let content = full["content"].as_str().expect("content");
+            assert!(content.starts_with(shown), "{snippet}");
+            assert!(snippet.chars().count() <= 200, "{snippet}");
+        }
+
+        let tagged = call_tool(&state, "search_notes", json!({"query": "#topic"})).await;
+        assert_eq!(tagged["result"]["structuredContent"]["data"]["mode"], "tag");
+        assert_eq!(search_hits(&tagged)[0]["snippet"], "Matched tag: #topic");
+    }
+
+    /// The reason the compact shape exists: the largest search an agent can
+    /// ask for fits in one result.
+    #[tokio::test]
+    async fn search_notes_at_the_limit_ceiling_fits_in_thirty_kilobytes() {
+        let (state, _tmp) = search_shape_state();
+        let arguments =
+            json!({"query": "filler", "mode": "keyword", "limit": 50, "per_note_cap": 1});
+        let body = call_tool(&state, "search_notes", arguments.clone()).await;
+        assert_eq!(search_hits(&body).len(), 50);
+        let compact = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .len();
+        assert!(compact < 30_000, "compact reply is {compact} bytes");
+
+        // The control: the same call in full is far past that.
+        let mut full = arguments;
+        full["detail"] = json!("full");
+        let body = call_tool(&state, "search_notes", full).await;
+        let full = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .len();
+        assert!(full > 100_000, "full reply is {full} bytes");
+    }
+
+    #[tokio::test]
+    async fn search_notes_refuses_an_unknown_detail() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "Home", "detail": "tiny"}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn search_notes_output_schema_validates_both_hit_shapes() {
+        let (state, _tmp) = search_shape_state();
+        let tools = tools_list_result(&state).await;
+        let tool = tool_named(&tools, "search_notes");
+        let validator = jsonschema::validator_for(&tool["outputSchema"]).expect("valid schema");
+        for detail in ["compact", "full"] {
+            let body = call_tool(
+                &state,
+                "search_notes",
+                json!({"query": "needle", "mode": "keyword", "detail": detail}),
+            )
+            .await;
+            assert!(!search_hits(&body).is_empty());
+            let reply = &body["result"]["structuredContent"];
+            assert!(validator.is_valid(reply), "{detail}: {reply:#}");
+        }
+        // The schema names the fields of each shape rather than accepting
+        // anything: a hit with neither a snippet nor content is refused.
+        let mut neither = call_tool(&state, "search_notes", json!({"query": "needle"})).await
+            ["result"]["structuredContent"]
+            .clone();
+        neither["data"]["results"][0]
+            .as_object_mut()
+            .expect("hit")
+            .remove("snippet");
+        assert!(!validator.is_valid(&neither));
+
+        let input = &tool["inputSchema"]["properties"]["detail"];
+        assert_eq!(input["enum"], json!(["compact", "full"]));
+        assert_eq!(input["default"], "compact");
+        let description = tool["description"].as_str().expect("description");
+        for said in ["compact", "get_note", "detail: \"full\""] {
+            assert!(description.contains(said), "description says {said}");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_notes_inside_batch_is_compact_by_default() {
+        let (state, _tmp) = search_shape_state();
+        let vault_id = vault_id_of(&state).to_string();
+        let search = |detail: Option<&str>| {
+            let mut arguments = json!({"scope": vault_id, "query": "needle", "mode": "keyword"});
+            if let Some(detail) = detail {
+                arguments["detail"] = json!(detail);
+            }
+            json!({"op": "search_notes", "arguments": arguments})
+        };
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [search(None), search(Some("full"))]}),
+        )
+        .await;
+        let items = &body["result"]["structuredContent"]["items"];
+        let hit = |item: usize| &items[item]["result"]["data"]["results"][0];
+        assert_eq!(field_names(hit(0)), COMPACT_HIT_FIELDS);
+        assert_eq!(field_names(hit(1)), FULL_HIT_FIELDS);
     }
 
     /// `tag` is a mode a search response reports, never one a caller can ask

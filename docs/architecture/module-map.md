@@ -2468,6 +2468,7 @@ commands when retrieval behavior may change.
 **Owned paths:**
 
 - `src/search/mod.rs`
+- `src/search/compact.rs`
 - `src/search/layer_selection.rs`
 - `src/search/vault_scoped.rs`
 
@@ -2487,13 +2488,14 @@ shared-core contract is `VaultSearchCore`, `VaultSearchRequest`,
 core without owning any HTTP, MCP, or frontend adapter. `VaultSearchCore` is
 the only search entry point: the scope-less single-Vault `run`, its retrieve
 and assemble helpers, and its request/result/response types are retired.
+`compact.rs` (#501) adds `CompactSearchResponse` and `CompactSearchResult`, the locating-sized projection of a finished response: the identifying fields, `score`, `layer` and a `snippet` of at most 200 characters in place of `content`, `outbound_links`, `metadata` and `chunk_id`. `CompactSearchResponse::from_full(response, query)` builds it after the core has ranked and capped, so it is not on the retrieval path and cannot change which hits come back, their scores or their order. `VaultSearchRequest` carries no detail level: the core always answers in full and the caller chooses whether to project.
 
 **Consumed dependencies:** `SqliteCache`, its published Vault snapshot/cache
 query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
-scope/envelope, and vault metadata/types.
+scope/envelope, vault metadata/types, and `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet).
 
 **Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
-`VaultSearchCore::search`), MCP search tools, offline evaluation runners,
+`VaultSearchCore::search`, full hits only), MCP search tools (which also consume `compact::CompactSearchResponse`), offline evaluation runners,
 `vault_read/query.rs` and the Vault-wide tag rename in `vault/write/tags.rs`
 (`tag_matches` only; neither reaches the retrieval path),
 and future Vault-scoped MCP adapters.
@@ -2544,6 +2546,7 @@ and future Vault-scoped MCP adapters.
   costs an embedding on a query whose Vaults turn out not to participate, and
   reports an unhealthy embedder ahead of a bad layer name or an unavailable
   single Vault, both of which need the pinned generation to detect.
+- A compact snippet is a verbatim slice of the chunk. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes); in a semantic or tag response, or when no word is found, it is the start of the chunk. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
 - A structure-only frontend Search pilot must not modify these paths.
 
 **Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
@@ -3529,7 +3532,7 @@ refuses them as items. `read_docs` answers `ReadDocsResult` (the Home page plus
 every page's name and title with no argument, one page otherwise) and refuses a
 name that matches no page with the structured `docs_page_not_found` error;
 `search_docs` answers `SearchDocsResult`. Both instruction variants name them.
-Catalogue grows to 48, purely additive. #500 adds `find_text`, the sixteenth read tool and a `READ_OPS` entry (so `batch` may carry it): a mapping onto `VaultReadCore::find_text` answering `FindTextResult`, the shared projection envelope around `TextMatchResponse`, with a hand-written input schema (`find_text_tool_schema`). Every default and bound is the core's. `search_notes`' description gains one sentence sending exact-string questions to it, and nothing else about `search_notes` changes. Catalogue grows to 49, purely additive. #423 adds `docs` to a standalone tool
+Catalogue grows to 48, purely additive. #500 adds `find_text`, the sixteenth read tool and a `READ_OPS` entry (so `batch` may carry it): a mapping onto `VaultReadCore::find_text` answering `FindTextResult`, the shared projection envelope around `TextMatchResponse`, with a hand-written input schema (`find_text_tool_schema`). Every default and bound is the core's. `search_notes`' description gains one sentence sending exact-string questions to it, and nothing else about `search_notes` changes. Catalogue grows to 49, purely additive. #501 gives `search_notes` a `detail` argument (`compact`, the default, or `full`; anything else is the usual invalid-params refusal) and changes its default reply: `SearchNotesResult` is now the projection envelope around `results::SearchNotesData`, an untagged choice between Runtime Search's `CompactSearchResponse` and the unchanged `VaultSearchResponse`, so the advertised `outputSchema` lists both hit shapes and `detail: "full"` serializes byte for byte what the tool returned before. The adapter only chooses the shape; the snippet is Runtime Search's. `batch` reaches the same function, so it follows the same default. This is a behaviour change to a published tool, not an addition: a caller reading `content`, `outbound_links`, `metadata` or `chunk_id` from a hit must pass `detail: "full"`. #423 adds `docs` to a standalone tool
 call's structured error when its `code` is one the manual explains
 (`docs_pointers.rs` holds that code-to-page table): `{page, heading}`, where
 `page` is a name `read_docs` accepts. `handle_tools_call` adds it to the
