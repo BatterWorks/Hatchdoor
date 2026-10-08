@@ -1221,7 +1221,8 @@ router tests, followed by the full backend checks.
 ### Usage report
 
 **Status:** Added by #477 (ADR-45), which builds and shows the report. #478
-added the background job that sends it.
+added the background job that sends it. #479 added the one-time sentence to
+agents and the mark that it was spent.
 
 **Kind:** infrastructure/background capability.
 
@@ -1229,8 +1230,8 @@ added the background job that sends it.
 
 **Public contract:** `USAGE_REPORT_SETTING` (`HATCHDOOR_USAGE_REPORT_ENABLED`,
 off by default), `INSTALL_ID_PLACEHOLDER`, `UsageReport` (`new`, `reconcile`,
-`install_id`, `observe_mcp_call`, `observe_web_request`, `save`, and an inert
-`Default`), `Build` (`current`), `current_report`, `UsageReportBody`, `status`
+`install_id`, `observe_mcp_call`, `observe_web_request`, `save`,
+`take_notice`, and an inert `Default`), `Build` (`current`), `current_report`, `UsageReportBody`, `status`
 and the wire type `UsageReportStatus` (`enabled`, `install_id`, `report`, the
 report as indented JSON text, and `last_sent_at`, the RFC 3339 time the
 collector last accepted a report from this install ID, while the report is
@@ -1253,6 +1254,10 @@ web request (`web_seen`) and each agent family last seen (`agents_seen`), plus
 `last_sent`, the RFC 3339 time of the last report the collector accepted. The
 agent families are a closed list matched on the name a client sends as
 `clientInfo.name`; a new family, like a new field, is a new schema.
+`take_notice(&VersionRecord)` (#479) says whether an opening MCP handshake
+carries the one-time sentence about the report, and marks it delivered either
+way in a section of its own, `usage_report_notice` (`{"delivered": true}`),
+which the report's switch-off never clears.
 
 **Consumers:** runtime composition builds the one `UsageReport` from a clone
 of the shared instance state store, reconciles it at startup, holds it in
@@ -1261,14 +1266,17 @@ of the shared instance state store, reconciles it at startup, holds it in
 beside the update check, aborting the task at shutdown;
 `src/handlers/settings.rs` reconciles it after every
 save and serves `status` as the settings response's `usage_report`;
-`src/mcp/adapter.rs` feeds it each tool call's client name; the frontend
+`src/mcp/adapter.rs` feeds it each tool call's client name and asks
+`take_notice` at each `initialize` and `server/discover`; the frontend
 Settings page shows the report text, the install ID and the time of the last
 report.
 
 **Consumed dependencies:** Live configuration foundation (the setting, read
 on every reconcile and every tick), `ureq` as already compiled in (ADR-39),
 the collector endpoint (the maintainer's infrastructure, set up outside this
-repository), Instance state (`InstanceStateStore`, `base_version`),
+repository), Instance state (`InstanceStateStore`, `base_version`, and
+`VersionRecord`, whose `fresh_install` tells `take_notice` an upgraded install
+from a fresh one),
 `config::{version_string, build_channel, build_image}` (a build is a release,
 and its channel `stable`, only when the `VERSION` build argument names the
 crate's own version, #504), the Vault collection registry (which
@@ -1310,7 +1318,10 @@ not be cleared is not read back by the process that failed to clear it; a demo i
 the variable set; every value in the report is a fixed word, a yes or no, or a
 bucket; the raw client name is never stored or reported; each fact is written
 at most once a day; the report is never offered over MCP, and the settings
-response that carries it is not served in demo mode. The manual page's field
+response that carries it is not served in demo mode; `take_notice` is true
+at most once per install, only when the version record's `fresh_install` is
+`None` and the setting is off and not pinned, never in demo mode, and at most
+once per run even when the mark cannot be written. The manual page's field
 table and the report's fields are the same set
 (`the_manual_page_documents_exactly_the_fields_the_report_carries`).
 
@@ -3567,7 +3578,13 @@ the structured `attachment_too_large_for_base64` tool error. Every tool response
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
 43-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
-while the adapter logs diagnostics. `McpConfig`, server instructions, tool
+while the adapter logs diagnostics. On an install that existed before 2.8.0,
+one opening handshake, `initialize` or `server/discover`, appends
+`USAGE_REPORT_NOTICE` (`config.rs`) to its instructions (#479, ADR-45): the
+two handlers ask the Usage report module's `take_notice`, never `get_info`,
+and a `discover` answer that carries the sentence has `ttlMs` 0 so no client
+replays it. No tool reads or changes the usage report setting
+(`no_tool_reads_or_changes_the_usage_report_setting`). `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
 with its authorization/body-limit middleware) remain the boundary's public
 surface; `adapter.rs` implements rmcp's `ServerHandler` seam over the
@@ -3661,7 +3678,9 @@ manual (`docs_bundle::{pages, home, page, search}`) for the two docs tools,
 Instance state's `AgentConnectionLog` (`AppState.agent_connections`), fed the
 client's name from rmcp's `RequestContext::client_info()` on every
 `tools/call` (#426), and the Usage report's `UsageReport`
-(`AppState.usage_report`), fed the same call's `clientInfo.name` (#477). No HTTP
+(`AppState.usage_report`), fed the same call's `clientInfo.name` (#477) and
+asked `take_notice` with Instance state's `VersionRecord`
+(`AppState.instance_versions`) at each opening handshake (#479). No HTTP
 adapter is consumed: since #188 no file under `src/mcp/` imports
 `crate::handlers`, and ADR-19's MCP-to-handler proxying debt is retired.
 
@@ -4633,7 +4652,10 @@ the component and is shown once, inside a ready-made config for Claude Code,
 Codex, OpenClaw, Hermes or a generic client, addressed at
 `HATCHDOOR_PUBLIC_URL` or the page's own origin plus `/mcp`. "Make a new
 password" replaces it the same way. An optional row toggles
-`HATCHDOOR_UPDATE_CHECK_ENABLED`, off by default. Storage failures never throw:
+`HATCHDOOR_UPDATE_CHECK_ENABLED`, off by default, and a second one below it
+toggles `HATCHDOOR_USAGE_REPORT_ENABLED` (#479, ADR-45), also off by default;
+each saves its own key alone, and a key the configuration file holds shows as
+locked. Storage failures never throw:
 a dismissal then holds for the visit only.
 
 **Consumed dependencies:** `api/api.ts`'s `apiFetch`, the settings HTTP
@@ -4655,7 +4677,9 @@ something, and passes `onOpenSetupChecklist` to `HelpProvider`), `App.css`,
 and the Help reader's `HelpProvider.tsx`/`HelpPanel.tsx` (the entry).
 
 **Invariants:** never shown in demo mode and never shown on its own to an
-upgraded install; the one-click connect never turns MCP writes on; the
+upgraded install; the one-click connect never turns MCP writes on; the usage
+report switch is never on by default and never follows the update-check
+switch; the
 password is never stored in the browser; a storage failure never breaks the
 app.
 

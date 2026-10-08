@@ -1127,6 +1127,227 @@ mod tests {
         assert!(message.get("error").is_none());
     }
 
+    // ---------------------------------------------------------------------------
+    // The one-time usage report sentence (#479)
+    // ---------------------------------------------------------------------------
+
+    /// `test_state` with a real usage report handle over a state file in
+    /// `tmp`. The default version record is an install that existed before
+    /// 2.8.0. Building it again over the same `tmp` is a restart.
+    fn with_usage_report(mut state: AppState, tmp: &TempDir) -> AppState {
+        let store =
+            crate::instance_state::InstanceStateStore::new(tmp.path().join("state/instance.json"));
+        state.usage_report = Arc::new(crate::usage_report::UsageReport::new(
+            store,
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        state
+    }
+
+    fn upgraded_state() -> (AppState, TempDir) {
+        let (state, tmp) = test_state();
+        (with_usage_report(state, &tmp), tmp)
+    }
+
+    fn set_usage_report(state: &AppState, enabled: bool) {
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                enabled.to_string(),
+            )])
+            .expect("save the setting");
+        state.usage_report.reconcile();
+    }
+
+    async fn discover_result(state: &AppState) -> Value {
+        let raw = modern_post(
+            transport(state),
+            "server/discover",
+            Some("server/discover"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":1,"method":"server/discover",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            }),
+        )
+        .await;
+        response_message(raw).await["result"].clone()
+    }
+
+    async fn initialize_result(state: &AppState) -> Value {
+        initialize(&transport(state)).await.1
+    }
+
+    fn carries_the_notice(result: &Value) -> bool {
+        result["instructions"]
+            .as_str()
+            .expect("instructions")
+            .contains(crate::mcp::config::USAGE_REPORT_NOTICE)
+    }
+
+    #[tokio::test]
+    async fn an_upgraded_install_tells_one_initialize_about_the_usage_report() {
+        let (state, tmp) = upgraded_state();
+
+        let first = initialize_result(&state).await;
+        assert!(carries_the_notice(&first));
+        assert!(
+            first["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Start with list_vaults"),
+            "the sentence is added to the instructions, not put in their place"
+        );
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        assert!(!carries_the_notice(&discover_result(&state).await));
+
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&initialize_result(&restarted).await));
+        assert!(!carries_the_notice(&discover_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn an_upgraded_install_tells_one_discover_and_that_answer_is_not_cached() {
+        let (state, tmp) = upgraded_state();
+
+        let first = discover_result(&state).await;
+        assert!(carries_the_notice(&first));
+        assert_eq!(
+            first["ttlMs"], 0,
+            "a cached answer would carry the sentence to a second session"
+        );
+
+        let second = discover_result(&state).await;
+        assert!(!carries_the_notice(&second));
+        assert_eq!(second["ttlMs"], 300_000);
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&discover_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn the_setup_instructions_carry_the_usage_report_sentence_too() {
+        let (state, _tmp) = upgraded_state();
+        state.startup.set_terms_required();
+
+        let result = initialize_result(&state).await;
+        assert!(carries_the_notice(&result));
+        assert!(
+            result["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("accept_gemma_terms")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_install_never_tells_an_agent_about_the_usage_report() {
+        let (mut state, _tmp) = upgraded_state();
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.8.0".into(),
+            previous: None,
+            fresh_install: Some("2.8.0".into()),
+        });
+
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        assert!(!carries_the_notice(&discover_result(&state).await));
+        assert_eq!(discover_result(&state).await["ttlMs"], 300_000);
+    }
+
+    #[tokio::test]
+    async fn an_install_with_the_report_already_on_is_never_told() {
+        let (state, tmp) = upgraded_state();
+        set_usage_report(&state, true);
+
+        assert!(!carries_the_notice(&discover_result(&state).await));
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+
+        // The handshake marked it delivered, so switching the report off
+        // later does not bring the sentence back, in this run or the next.
+        set_usage_report(&state, false);
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&discover_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn an_install_with_the_setting_pinned_off_is_never_told() {
+        let (mut state, tmp) = test_state();
+        let pinned = crate::runtime_config::RuntimeConfig::load(
+            tmp.path().join("settings.json"),
+            crate::runtime_config::Environment::from_values([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "false".to_string(),
+            )]),
+            crate::runtime_config::live_settings_defaults(),
+        )
+        .expect("load settings");
+        pinned
+            .save(
+                ["HATCHDOOR_MCP_ENABLED", "HATCHDOOR_MCP_BEARER_TOKEN"].map(|key| {
+                    let value = state.runtime_snapshot().required(key).unwrap().to_string();
+                    (key.to_string(), value)
+                }),
+            )
+            .expect("configure MCP");
+        state.runtime_config = pinned;
+        let state = with_usage_report(state, &tmp);
+
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        assert!(!carries_the_notice(&discover_result(&state).await));
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&initialize_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn a_handshake_without_the_token_does_not_spend_the_sentence() {
+        let (state, _tmp) = upgraded_state();
+
+        let refused = send(
+            transport(&state),
+            "POST",
+            vec![
+                ("accept", "application/json, text/event-stream".into()),
+                ("content-type", "application/json".into()),
+            ],
+            Some(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                               "clientInfo": {"name":"no-token","version":"1"}}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+        assert!(carries_the_notice(&initialize_result(&state).await));
+    }
+
+    #[tokio::test]
+    async fn no_tool_reads_or_changes_the_usage_report_setting() {
+        let (state, _tmp) = write_state();
+        let body = tools_list_result(&state).await;
+        let tools = body["result"]["tools"].as_array().expect("tools array");
+        assert!(!tools.is_empty());
+
+        for tool in tools {
+            let text = tool.to_string().to_lowercase();
+            for word in ["usage_report", "usage report", "telemetry"] {
+                assert!(
+                    !text.contains(word),
+                    "tool {} mentions {word}",
+                    tool["name"]
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn modern_tools_list_is_stateless_and_carries_cache_metadata() {
         let (state, _tmp) = test_state();

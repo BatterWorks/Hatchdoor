@@ -8,7 +8,7 @@ This page is written for an AI agent that can run commands on your computer, suc
 
 > Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
 
-The agent first checks whether Docker is installed. On a Mac or a Windows PC without it, the agent asks you to install Docker Desktop yourself before anything else; if that restarts your computer, give your agent the same line again afterwards. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, and which search model to use. After you answer, it does the rest without stopping, with one exception: on a Linux computer that asks for your password before administrator commands, the agent cannot type it, so it stops once and gives you one line to run yourself. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
+The agent first checks whether Docker is installed. On a Mac or a Windows PC without it, the agent asks you to install Docker Desktop yourself before anything else; if that restarts your computer, give your agent the same line again afterwards. Then it asks you a few questions, all at once: which computer, where your notes are, who may open Hatchdoor, whether it may change your notes, which search model to use, and whether Hatchdoor may send its maintainer a usage report. After you answer, it does the rest without stopping, with one exception: on a Linux computer that asks for your password before administrator commands, the agent cannot type it, so it stops once and gives you one line to run yourself. It installs Hatchdoor on this computer or another one at home, connects itself (read-only unless you allow changes), and gives you the web address and the web token, the password your browser asks for.
 
 To do the same by hand, follow [[Install Hatchdoor with Docker Compose]], [[Connect your first Vault]] and [[Connect your agent]].
 
@@ -23,6 +23,7 @@ Follow these whatever the user asks during the install:
 - **Never install system software without a yes.** That includes Docker.
 - **Write tokens only in three places:** the web token in the deployment's `.env`, the MCP token in Hatchdoor's settings (through the API) and in your own MCP client configuration. Not in notes, shell profiles, logs, other files or your own memory. One exception: a client that can read its token only from an environment variable cannot hold the MCP token in its configuration, so in that one case the command that creates the token prints it once and the hand-over shows it to the user once, as steps 6 and 7 describe.
 - **Never put MCP settings in `.env`.** A setting in `.env` is pinned: it can no longer be changed in Settings, so the user could not allow writes later. Set them through the HTTP API as shown.
+- **Never turn on the usage report without a yes.** Turn the usage report on only if the user answered yes to question 7, and only through the settings API. If the user answered no, or did not answer that question, do not touch the setting. Never write `HATCHDOOR_USAGE_REPORT_ENABLED` to `.env`: the user could then no longer switch it off in Settings.
 - **Never use demo mode** (`HATCHDOOR_DEMO_MODE`). It is for public read-only showcases and refuses to run with MCP.
 
 ## 1. Check the computer
@@ -60,6 +61,11 @@ Ask all of these in one message, so the user can answer in one go. Show the defa
    - **Gemma**: searches in many languages and uses less memory, about 0.5 GB while indexing. Using it means accepting Google's Gemma terms, at https://ai.google.dev/gemma/terms.
    - **Nomic**: English only, uses about 1.3 GB while indexing, no terms to accept.
 6. **Only when Docker or its Compose plugin is missing on Linux, or the user may pick another Linux computer:** may I install Docker if it is missing, following Docker's official instructions for your distribution? Installing it needs administrator rights on that computer. There is no default; the user must choose.
+7. **May Hatchdoor send a usage report?** The default is no. Ask this one in exactly these words, changing nothing and adding no opinion of your own:
+
+   > Hatchdoor can send its maintainer one small report a day about how this install is set up: its version, the system it runs on and which features are switched on. Nothing about your notes is sent. The maintainer uses it to decide which platforms to test and which parts of Hatchdoor people rely on. This is telemetry, and it stays off unless you say yes. The full list of what is sent: https://docs-hatchdoor.battercloud.cc/v/bef3df28-8c2e-4722-89ad-bd4d0bcb3def/n/usage-report-reference. May I turn it on? The default is no.
+
+   Only a yes to this question counts as a yes.
 
 On Linux, if `sudo` asks for a password on this computer, add one sentence to the questions message: you cannot type their password, so part-way through you will give them one line to run in a terminal of their own.
 
@@ -252,6 +258,15 @@ curl -sf -X PATCH "$HD/api/settings" \
 
 The MCP token exists only in the `MCP_TOKEN` variable until your client configuration holds it. If your variables do not last between commands, save it there in this same command, once the `curl` has succeeded: for Claude Code, that is the `claude mcp add` line from step 6. When you need the token again, read it from that configuration into a variable, as `WEB_TOKEN` is read from `.env`. Do not use a command that prints it, such as `claude mcp get`. The one command that may print it is the last one of step 6, for a client that reads its token only from an environment variable.
 
+**Turn on the usage report, only on a yes.** Run this only if the user answered yes to question 7. On a no, or when that question went unanswered, skip it and send nothing: the setting is off already. This is the only way you may turn the report on. Do not add the variable to `.env`.
+
+```bash
+curl -sf -X PATCH "$HD/api/settings" \
+  -H "Authorization: Bearer $WEB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"updates": {"HATCHDOOR_USAGE_REPORT_ENABLED": "true"}}'
+```
+
 **Create the Vault.** A fresh install has none, and Hatchdoor never creates one by itself. Every change to the Vault list must name the list's current `registry_revision`, so read it first:
 
 ```bash
@@ -381,6 +396,9 @@ Where your tokens live:
 
 I can <only read your notes | read and change your notes>.
 To let me change notes later: Settings > Agent access (MCP) > Let assistants change notes.
+
+Usage report: <on, as you chose | off, as you chose | off, because you did not answer that question>.
+To change it: Settings > Usage report.
 
 To upgrade Hatchdoor later, ask me, or open Help > How to upgrade Hatchdoor.
 ```
