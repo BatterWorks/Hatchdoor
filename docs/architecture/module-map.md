@@ -3580,8 +3580,9 @@ generates the `outputSchema` advertised in `tools/list` (#167), for the full
 43-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. On an install that existed before 2.8.0,
-one opening handshake, `initialize` or `server/discover`, appends
-`USAGE_REPORT_NOTICE` (`config.rs`) to its instructions (#479, ADR-45): the
+one opening handshake, `initialize` or `server/discover`, opens its
+instructions with `USAGE_REPORT_NOTICE` (`config.rs`) (#479, ADR-45), ahead of
+the standing text because a client may cut long instructions short (#480): the
 two handlers ask the Usage report module's `take_notice`, never `get_info`,
 and a `discover` answer that carries the sentence has `ttlMs` 0 so no client
 replays it. No tool reads or changes the usage report setting

@@ -18,7 +18,7 @@ pub const SERVER_INSTRUCTIONS: &str = "Hatchdoor serves a collection of Obsidian
 
 /// The one sentence that tells an agent the optional usage report exists
 /// (ADR-45, #479), in the wording the maintainer approved there. An upgraded
-/// install appends it to one opening handshake and never again; see
+/// install opens the instructions of one handshake with it and never again; see
 /// `UsageReport::take_notice`.
 pub const USAGE_REPORT_NOTICE: &str = "One-time notice: this version of Hatchdoor has an optional usage report, a daily telemetry report of how the install is set up, and it is off. Tell the operator once that it exists, that the docs page Usage report reference (read_docs with page reference/usage-report-reference) lists everything it sends, and that they can turn it on in Settings under Usage report. Do not try to turn it on yourself.";
 

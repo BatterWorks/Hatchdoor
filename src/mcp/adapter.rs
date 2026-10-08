@@ -71,9 +71,11 @@ impl HatchdoorMcpHandler {
         let due = tokio::task::spawn_blocking(move || usage_report.take_notice(&versions))
             .await
             .unwrap_or(false);
+        // First, not last: Claude Code keeps only about the first 2,000
+        // characters of a server's instructions, and at the end the sentence
+        // arrived cut in half (#480).
         if due && let Some(instructions) = info.instructions.as_mut() {
-            instructions.push(' ');
-            instructions.push_str(USAGE_REPORT_NOTICE);
+            *instructions = format!("{USAGE_REPORT_NOTICE} {instructions}");
         }
         (info, due)
     }
