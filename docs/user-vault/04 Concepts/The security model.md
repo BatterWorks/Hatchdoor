@@ -110,6 +110,9 @@ A public, read-only demo (`HATCHDOOR_DEMO_MODE=true`) doesn't just relax these r
 - Settings and model setup stop existing entirely: `404`, not a refusal.
 - Vault reads become public and unauthenticated, by design. That's the point of a demo.
 - Vault writes and Vault control still exist as routes, but answer `403 demo_read_only` rather than performing the action.
+- The page the browser loads carries a link preview, so a demo link shared in a chat app shows a title, a short description and a picture. A note's link previews that note's title and opening words, and only for a note the demo already serves to anyone: a missing note, a disabled Vault or a note on a demoted layer previews as Hatchdoor itself. The picture and the page's own address appear only when **Public address** (`HATCHDOOR_PUBLIC_URL`) is set, because Hatchdoor never builds them from the `Host` or forwarded headers a request carries.
+
+Outside demo mode none of this applies. The page is sent before any token is checked, so it stays the same file for every address and names no note.
 
 Demo mode and MCP are mutually exclusive at startup: Hatchdoor refuses to run with both `HATCHDOOR_DEMO_MODE=true` and `HATCHDOOR_MCP_ENABLED=true` set together. A demo has no operator to hold an MCP token in the first place, so the two postures don't compose.
 

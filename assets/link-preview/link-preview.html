@@ -1,0 +1,84 @@
+<!doctype html>
+<!--
+  Source of the link preview picture (ADR-47), frontend/public/link-preview.png.
+
+  It draws the mark and the wordmark with the app's own tokens and typefaces,
+  so a token change shows up here on the next export. Everything sits inside
+  the middle 630 by 630 square, which is what a chat app keeps when it crops
+  the picture to a small thumbnail. Export with a Chrome-family browser from
+  the repository root:
+
+    google-chrome --headless=new --hide-scrollbars --force-device-scale-factor=1 \
+      --window-size=1200,630 --screenshot=frontend/public/link-preview.png \
+      "file://$PWD/assets/link-preview/link-preview.html"
+
+  The result must stay 1200 by 630 and under 300 KB.
+-->
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hatchdoor link preview</title>
+    <link rel="stylesheet" href="../../frontend/src/assets/fonts/fonts.css" />
+    <link rel="stylesheet" href="../../frontend/src/styles/base.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+      }
+      body {
+        background: var(--bg);
+        display: flex;
+        justify-content: center;
+      }
+      .square {
+        box-sizing: border-box;
+        width: 630px;
+        height: 630px;
+        background: var(--paper);
+        border-left: 1px solid var(--rule-strong);
+        border-right: 1px solid var(--rule-strong);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 44px;
+      }
+      .mark {
+        width: 300px;
+        height: 300px;
+      }
+      .mark .bracket {
+        fill: var(--ink);
+      }
+      .mark .accent {
+        fill: var(--hot);
+      }
+      .word {
+        font-family: var(--font-display);
+        font-weight: 800;
+        font-stretch: 78%;
+        font-size: 92px;
+        letter-spacing: 0.04em;
+        line-height: 1;
+        color: var(--ink);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="square">
+      <svg class="mark" viewBox="7 7 46 46" aria-hidden="true">
+        <rect class="bracket" x="9" y="9" width="7" height="42" />
+        <rect class="bracket" x="9" y="9" width="13" height="7" />
+        <rect class="bracket" x="9" y="44" width="13" height="7" />
+        <rect class="bracket" x="44" y="9" width="7" height="42" />
+        <rect class="bracket" x="38" y="9" width="13" height="7" />
+        <rect class="bracket" x="38" y="44" width="13" height="7" />
+        <rect class="accent" x="25" y="25" width="10" height="10" />
+      </svg>
+      <span class="word">HATCHDOOR</span>
+    </div>
+  </body>
+</html>

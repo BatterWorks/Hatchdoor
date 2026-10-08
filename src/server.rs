@@ -37,10 +37,10 @@ use crate::handlers::{
     generate_mcp_token_handler, get_settings_handler, health_handler, list_folders_handler,
     list_vaults_handler, patch_settings_handler, publish_recovery_branch_handler,
     refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    spa_index_handler, spa_not_found_handler, sync_vault_handler, upload_transfer_handler,
-    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
-    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
-    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    spa_index_handler, spa_not_found_handler, spa_note_handler, sync_vault_handler,
+    upload_transfer_handler, vault_collection_events_handler, vault_scope_graph_handler,
+    vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
+    vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
     vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
@@ -635,7 +635,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         // when multiple Vaults contain the same slug. The legacy slug-only
         // `/n/{slug}` route is retired in #101 along with the rest of the
         // unscoped API — frontend consumption of this route is #67.
-        .route("/v/{vault_id}/n/{slug}", get(spa_index_handler))
+        .route("/v/{vault_id}/n/{slug}", get(spa_note_handler))
         .route("/stats", get(spa_index_handler))
         .route("/graph", get(spa_index_handler))
         .route("/settings", get(spa_index_handler))
@@ -652,7 +652,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         // An address no route or built file matches still loads the app, which
         // renders its own not-found state (#302); the reserved prefixes keep a
         // bare 404.
-        .fallback_service(ServeDir::new("frontend/dist").fallback(get(spa_not_found_handler)))
+        .fallback_service(
+            ServeDir::new("frontend/dist")
+                .fallback(get(spa_not_found_handler).with_state(state.clone())),
+        )
         .layer(
             TraceLayer::new(MakeFailureClassifier)
                 // Custom span so the URI logged never contains the raw web token
@@ -9638,6 +9641,320 @@ mod tests {
                 built,
                 "{uri} must be answered with the app shell when it is built, got {body:?}"
             );
+        }
+    }
+
+    /// The built page, stood in for `frontend/dist/index.html` so the link
+    /// preview tests (#512) do not depend on an untracked build artifact.
+    const BUILT_PAGE: &str = "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>Hatchdoor</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n  </body>\n</html>\n";
+
+    const GENERAL_DESCRIPTION_TAG: &str = "<meta name=\"description\" content=\"Self-host your Obsidian vaults: a web UI for you, MCP for your AI agents. No Obsidian, no plugins required.\" />";
+
+    /// A router over one enabled Vault and one disabled one, both registered
+    /// directly because a demo instance refuses Vault creation. Returns the
+    /// two Vault IDs, enabled first.
+    async fn app_with_link_preview_vaults(
+        web_bearer_token: Option<Arc<str>>,
+        demo_mode: bool,
+    ) -> (Router, TempDir, AppState, String, String) {
+        crate::handlers::serve_test_index(BUILT_PAGE);
+        let (app, tmp, state) =
+            app_for_tests_with_web_auth_and_demo_mode(web_bearer_token, demo_mode);
+        let public = tmp.path().join("public");
+        std::fs::create_dir_all(public.join("sources")).expect("create layer directory");
+        for (relative_path, contents) in [
+            (
+                "Beacon Launch.md",
+                "---\ntags: [project]\n---\n# Beacon Launch\n\nThe **launch** plan for [[Beacon|the beacon]], run with `just launch`.\n\nA second paragraph.\n",
+            ),
+            (
+                "Described.md",
+                "---\ndescription: A summary the author wrote.\n---\nBody prose that loses to the property.\n",
+            ),
+            ("Diagram.md", "```mermaid\ngraph TD\n  A --> B\n```\n"),
+            (
+                "Rock & \"Roll\" <b>.md",
+                "---\ndescription: 'Say \"hi\" &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; <b>now</b>'\n---\n",
+            ),
+            ("sources/.hatchdoor-layer", "sources"),
+            (
+                "sources/Clipping.md",
+                "A demoted clipping nobody browses.\n",
+            ),
+        ] {
+            std::fs::write(public.join(relative_path), contents).expect("write fixture file");
+        }
+        let private = tmp.path().join("private");
+        std::fs::create_dir_all(&private).expect("create disabled vault");
+        std::fs::write(private.join("Secret Plan.md"), "Nobody may read this.\n")
+            .expect("write disabled note");
+
+        let ids = register_vaults_directly(
+            &state,
+            &[
+                ("Public", public.as_path(), true),
+                ("Private", private.as_path(), false),
+            ],
+        )
+        .await;
+        (app, tmp, state, ids[0].to_string(), ids[1].to_string())
+    }
+
+    async fn get_page(app: &Router, uri: &str) -> (StatusCode, String) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    // A link preview must never be built from these.
+                    .header("host", "attacker.example")
+                    .header("x-forwarded-host", "forwarded.example")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn set_public_url(state: &AppState, value: &str) {
+        state
+            .runtime_config
+            .save([("HATCHDOOR_PUBLIC_URL".to_string(), value.to_string())])
+            .expect("save public address");
+    }
+
+    #[tokio::test]
+    async fn demo_note_address_previews_the_note_at_the_public_address() {
+        let (app, _tmp, state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+        set_public_url(&state, "https://demo.example.com/");
+
+        let (status, page) = get_page(&app, &format!("/v/{vault_id}/n/beacon-launch")).await;
+        assert_eq!(status, StatusCode::OK);
+        let description = "The launch plan for the beacon, run with just launch.";
+        for tag in [
+            "<title>Beacon Launch · Hatchdoor</title>".to_string(),
+            format!("<meta name=\"description\" content=\"{description}\" />"),
+            "<meta property=\"og:title\" content=\"Beacon Launch\" />".to_string(),
+            format!("<meta property=\"og:description\" content=\"{description}\" />"),
+            "<meta property=\"og:type\" content=\"article\" />".to_string(),
+            "<meta property=\"og:site_name\" content=\"Hatchdoor\" />".to_string(),
+            format!(
+                "<meta property=\"og:url\" content=\"https://demo.example.com/v/{vault_id}/n/beacon-launch\" />"
+            ),
+            "<meta property=\"og:image\" content=\"https://demo.example.com/link-preview.png\" />"
+                .to_string(),
+            "<meta property=\"og:image:width\" content=\"1200\" />".to_string(),
+            "<meta property=\"og:image:height\" content=\"630\" />".to_string(),
+            "<meta name=\"twitter:card\" content=\"summary_large_image\" />".to_string(),
+        ] {
+            assert!(page.contains(&tag), "{tag} missing from {page}");
+        }
+        assert!(page.contains("<div id=\"root\"></div>"));
+        assert!(!page.contains(".example\"") && !page.contains("attacker"));
+
+        // The setting applies live: clearing it drops the two absolute tags.
+        set_public_url(&state, "");
+        let (_, page) = get_page(&app, &format!("/v/{vault_id}/n/beacon-launch")).await;
+        assert!(page.contains("<meta property=\"og:title\" content=\"Beacon Launch\" />"));
+        assert!(!page.contains("og:image") && !page.contains("og:url"));
+    }
+
+    #[tokio::test]
+    async fn demo_note_description_prefers_the_property_and_falls_back_to_the_general_one() {
+        let (app, _tmp, _state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+
+        let (_, described) = get_page(&app, &format!("/v/{vault_id}/n/described")).await;
+        assert!(described.contains(
+            "<meta property=\"og:description\" content=\"A summary the author wrote.\" />"
+        ));
+        assert!(!described.contains("Body prose"));
+
+        let (_, diagram) = get_page(&app, &format!("/v/{vault_id}/n/diagram")).await;
+        assert!(diagram.contains("<meta property=\"og:title\" content=\"Diagram\" />"));
+        assert!(diagram.contains(GENERAL_DESCRIPTION_TAG));
+        assert!(!diagram.contains("graph TD"));
+    }
+
+    #[tokio::test]
+    async fn demo_preview_without_a_public_address_names_no_host() {
+        let (app, _tmp, _state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+        for uri in [
+            format!("/v/{vault_id}/n/beacon-launch"),
+            "/graph".to_string(),
+        ] {
+            let (status, page) = get_page(&app, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(page.contains("<meta property=\"og:title\""), "{uri}");
+            assert!(page.contains("<meta property=\"og:description\""), "{uri}");
+            assert!(page.contains("<meta name=\"twitter:card\" content=\"summary\" />"));
+            for absent in [
+                "og:image",
+                "og:url",
+                "attacker.example",
+                "forwarded.example",
+                "http",
+            ] {
+                assert!(
+                    !page.contains(absent),
+                    "{uri} must not carry {absent}: {page}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_general_pages_carry_the_general_wording() {
+        let (app, _tmp, state, _, _) = app_with_link_preview_vaults(None, true).await;
+        set_public_url(&state, "https://demo.example.com");
+        for (uri, status, title) in [
+            ("/", StatusCode::OK, "Hatchdoor"),
+            ("/graph", StatusCode::OK, "Graph · Hatchdoor"),
+            ("/stats", StatusCode::OK, "Stats · Hatchdoor"),
+            ("/settings", StatusCode::OK, "Settings · Hatchdoor"),
+            ("/nope", StatusCode::NOT_FOUND, "Hatchdoor"),
+        ] {
+            let (answered, page) = get_page(&app, uri).await;
+            assert_eq!(answered, status, "{uri}");
+            assert!(
+                page.contains(&format!("<title>{title}</title>")),
+                "{uri}: {page}"
+            );
+            assert!(page.contains(GENERAL_DESCRIPTION_TAG), "{uri}");
+            assert!(page.contains("<meta property=\"og:title\" content=\"Hatchdoor\" />"));
+            assert!(page.contains("<meta property=\"og:type\" content=\"website\" />"));
+            assert!(page.contains(&format!(
+                "<meta property=\"og:url\" content=\"https://demo.example.com{uri}\" />"
+            )));
+        }
+        // A reserved prefix still gets its bare 404, preview or not.
+        assert_eq!(
+            get_page(&app, "/api/nope").await,
+            (StatusCode::NOT_FOUND, String::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn demo_preview_names_nothing_the_demo_read_refuses() {
+        let (app, _tmp, _state, vault_id, disabled_vault_id) =
+            app_with_link_preview_vaults(None, true).await;
+        for uri in [
+            format!("/v/{vault_id}/n/no-such-note"),
+            // A note on a demoted layer, which the demo does not serve.
+            format!("/v/{vault_id}/n/clipping"),
+            format!("/v/{disabled_vault_id}/n/secret-plan"),
+            "/v/00000000-0000-4000-8000-000000000000/n/beacon-launch".to_string(),
+            "/v/not-a-vault-id/n/beacon-launch".to_string(),
+            format!("/v/{vault_id}/n/%FF"),
+        ] {
+            let (status, page) = get_page(&app, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(page.contains("<title>Hatchdoor</title>"), "{uri}: {page}");
+            assert!(page.contains(GENERAL_DESCRIPTION_TAG), "{uri}");
+            assert!(page.contains("<meta property=\"og:type\" content=\"website\" />"));
+            for withheld in [
+                "Clipping",
+                "clipping nobody",
+                "Secret",
+                "Nobody may",
+                "Private",
+            ] {
+                assert!(!page.contains(withheld), "{uri} leaked {withheld}: {page}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_preview_escapes_a_hostile_title_and_description() {
+        let (app, _tmp, _state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+        let slug = crate::vault::slugify("Rock & \"Roll\" <b>");
+        let (status, page) = get_page(
+            &app,
+            &format!("/v/{vault_id}/n/{}", slug.replace(' ', "%20")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            page.contains("<title>Rock &amp; &quot;Roll&quot; &lt;b&gt; · Hatchdoor</title>"),
+            "{page}"
+        );
+        assert!(page.contains(
+            "<meta property=\"og:title\" content=\"Rock &amp; &quot;Roll&quot; &lt;b&gt;\" />"
+        ));
+        assert!(page.contains(
+            "content=\"Say &quot;hi&quot; &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; now\" />"
+        ));
+        assert_eq!(page.matches("</title>").count(), 1);
+        assert!(!page.contains("<script") && !page.contains("<b>"));
+    }
+
+    #[tokio::test]
+    async fn outside_demo_mode_the_page_is_the_built_file_byte_for_byte() {
+        for web_bearer_token in [None, Some(Arc::<str>::from("secret"))] {
+            let (app, _tmp, state, vault_id, _) =
+                app_with_link_preview_vaults(web_bearer_token.clone(), false).await;
+            set_public_url(&state, "https://notes.example.com");
+            for (uri, status) in [
+                ("/".to_string(), StatusCode::OK),
+                ("/graph".to_string(), StatusCode::OK),
+                ("/stats".to_string(), StatusCode::OK),
+                ("/settings".to_string(), StatusCode::OK),
+                (format!("/v/{vault_id}/n/beacon-launch"), StatusCode::OK),
+                (format!("/v/{vault_id}/n/no-such-note"), StatusCode::OK),
+                ("/nope".to_string(), StatusCode::NOT_FOUND),
+            ] {
+                assert_eq!(
+                    get_page(&app, &uri).await,
+                    (status, BUILT_PAGE.to_string()),
+                    "{uri} with token {web_bearer_token:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_link_preview_picture_is_1200_by_630_and_small_enough_for_chat_apps() {
+        let picture = std::fs::read("frontend/public/link-preview.png").expect("picture");
+        assert_eq!(&picture[..8], b"\x89PNG\r\n\x1a\n");
+        // The IHDR chunk opens every PNG: width then height, big-endian.
+        let dimension = |at: usize| u32::from_be_bytes(picture[at..at + 4].try_into().unwrap());
+        assert_eq!((dimension(16), dimension(20)), (1200, 630));
+        assert!(picture.len() < 300 * 1024, "{} bytes", picture.len());
+    }
+
+    #[tokio::test]
+    async fn the_link_preview_picture_needs_no_token() {
+        // A chat app's fetcher holds no token. Whether the file is there to
+        // serve depends on `frontend/dist` (see the canonical Note URL test
+        // above), so an unbuilt frontend pins only that no token was asked for.
+        let built = std::path::Path::new("frontend/dist/link-preview.png").exists();
+        for demo_mode in [true, false] {
+            let web_bearer_token = (!demo_mode).then(|| Arc::<str>::from("secret"));
+            let (app, _tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_bearer_token, demo_mode);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/link-preview.png")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let expected = if built {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(response.status(), expected, "demo mode {demo_mode}");
+            if built {
+                assert_eq!(response.headers()["content-type"], "image/png");
+            }
         }
     }
 

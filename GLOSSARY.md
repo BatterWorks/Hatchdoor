@@ -135,6 +135,10 @@ _Avoid_: Exact search, keyword search, grep, literal query
 A short-lived address, handed to an agent by an authenticated call, that lets whoever holds it download one attachment or upload one file to one named location, without the agent's own token. It is narrower than the token that produced it: one file, one direction, a few minutes.
 _Avoid_: Presigned URL, signed URL, download URL (when meant as the credentialed link)
 
+**Link preview**:
+The title, short description and picture a chat app or search engine shows for a shared Hatchdoor address, read from tags in the page the server returns. Only a demo instance sends one. A note address previews that note's title and its description, which is the note's `description` property or else its opening words; every other address previews Hatchdoor itself. The picture is the same for every address.
+_Avoid_: Unfurl, social card, Open Graph (when meant as the preview itself)
+
 **Usage report**:
 The small report an instance sends once a day, only when its operator has turned it on, saying what the install runs on and which parts of Hatchdoor it uses. It is telemetry and is called that. Every value is a fixed word, a yes or no, or a range, and none describes a note.
 _Avoid_: Analytics, statistics, phone-home, diagnostics
