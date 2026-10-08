@@ -1291,7 +1291,8 @@ ID.
 `src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument, and
 `VERSION`, compiled in as `HATCHDOOR_RELEASE_VERSION`, which marks a release,
 #504),
-`.env.example`, the frontend Settings page and its `settings.css`,
+`README.md` (the paragraph under Configuration that names the setting, which
+`.env.example` leaves out on purpose, #479), the frontend Settings page and its `settings.css`,
 `frontend/src/features/help/contextualLinks.ts`,
 `docs/design/design-system.html` (the report block and its last-report
 row), `src/docs_bundle.rs` and
