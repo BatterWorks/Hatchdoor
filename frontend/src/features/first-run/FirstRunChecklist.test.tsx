@@ -34,6 +34,8 @@ function settings({
   writes = false,
   token = false,
   update = false,
+  usage = false,
+  usageLocked = null as null | "environment",
   lastAgent = null as null | { name: string; connected_at: string },
 } = {}) {
   return {
@@ -55,6 +57,11 @@ function settings({
         key: "HATCHDOOR_UPDATE_CHECK_ENABLED",
         value: String(update),
         locked: null,
+      },
+      {
+        key: "HATCHDOOR_USAGE_REPORT_ENABLED",
+        value: String(usage),
+        locked: usageLocked,
       },
     ],
     last_agent: lastAgent,
@@ -391,6 +398,7 @@ describe("FirstRunChecklist", () => {
       "How does this work? Connecting your agent",
       "How does this work? Letting your agent change notes",
       "How does this work? Hearing about new releases",
+      "How does this work? What the usage report sends",
     ]);
     for (const link of links) {
       expect(link).toHaveTextContent(/^How does this work\?$/);
@@ -413,5 +421,59 @@ describe("FirstRunChecklist", () => {
       updates: { HATCHDOOR_UPDATE_CHECK_ENABLED: "true" },
       confirm: [],
     });
+    expect(
+      screen.getByRole("button", { name: "Send a usage report" }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("offers the usage report off, with its sentence and Help link, and changes only that setting", async () => {
+    serve({
+      "GET /api/settings": settings(),
+      "PATCH /api/settings": settings({ usage: true }),
+    });
+    renderChecklist();
+    const toggle = await screen.findByRole("button", {
+      name: "Send a usage report",
+    });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    const row = screen
+      .getByText("Optional: send a usage report")
+      .closest(".first-run-update") as HTMLElement;
+    expect(row).toHaveTextContent(
+      "This is telemetry, and it is off unless you turn it on. Once a day, Hatchdoor sends its maintainer a short report of how this server is set up, and nothing about your notes, to decide which platforms to test and which parts of Hatchdoor people rely on.",
+    );
+    expect(
+      within(row).getByRole("button", {
+        name: "How does this work? What the usage report sends",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      updates: { HATCHDOOR_USAGE_REPORT_ENABLED: "true" },
+      confirm: [],
+    });
+    expect(
+      screen.getByRole("button", {
+        name: "Tell me when there is a new version",
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("shows the usage report locked, with the reason, when the configuration file holds it", async () => {
+    serve({
+      "GET /api/settings": settings({ usageLocked: "environment" }),
+    });
+    renderChecklist();
+    const row = (
+      await screen.findByText("Optional: send a usage report")
+    ).closest(".first-run-update") as HTMLElement;
+    expect(row).toHaveTextContent(
+      "Off, set in the server's configuration file",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Send a usage report" }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -20,6 +20,7 @@ import {
   reopenFirstRun,
   resetFirstRunForTests,
   SEARCH_KEY,
+  setUsageReport,
   shouldShowFirstRun,
   TOKEN_PLACEHOLDER,
   type AgentSetup,
@@ -92,6 +93,8 @@ const OFF: AgentSetup = {
   publicUrl: "",
   updateCheckEnabled: false,
   updateCheckLocked: false,
+  usageReportEnabled: false,
+  usageReportLocked: false,
   lastAgent: null,
 };
 
@@ -216,6 +219,49 @@ describe("fetchAgentSetup", () => {
           connected_at: "2026-10-03T09:00:00Z",
         },
       },
+    });
+  });
+});
+
+describe("the usage report setting", () => {
+  it("is read as on and locked when the configuration file holds it on", async () => {
+    serve({
+      "GET /api/settings": {
+        body: settingsBody({
+          HATCHDOOR_USAGE_REPORT_ENABLED: setting(
+            "HATCHDOOR_USAGE_REPORT_ENABLED",
+            "true",
+            { locked: "environment" },
+          ),
+        }),
+      },
+    });
+    const result = await fetchAgentSetup();
+    expect(result).toEqual({
+      ok: true,
+      value: { ...OFF, usageReportEnabled: true, usageReportLocked: true },
+    });
+  });
+
+  it("is saved alone, leaving the update check as it was", async () => {
+    const { calls } = serve({
+      "PATCH /api/settings": {
+        body: settingsBody({
+          HATCHDOOR_USAGE_REPORT_ENABLED: setting(
+            "HATCHDOOR_USAGE_REPORT_ENABLED",
+            "true",
+          ),
+        }),
+      },
+    });
+    const result = await setUsageReport(true);
+    expect(result).toEqual({
+      ok: true,
+      value: { ...OFF, usageReportEnabled: true },
+    });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      updates: { HATCHDOOR_USAGE_REPORT_ENABLED: "true" },
+      confirm: [],
     });
   });
 });

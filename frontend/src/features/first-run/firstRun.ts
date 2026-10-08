@@ -137,7 +137,7 @@ type SettingRecord = {
   locked: string | null;
 };
 
-/** What the connect step and the update-check row read from the settings. */
+/** What the connect step and the two optional rows read from the settings. */
 export type AgentSetup = {
   mcpEnabled: boolean;
   mcpLocked: boolean;
@@ -148,6 +148,8 @@ export type AgentSetup = {
   publicUrl: string;
   updateCheckEnabled: boolean;
   updateCheckLocked: boolean;
+  usageReportEnabled: boolean;
+  usageReportLocked: boolean;
   lastAgent: LastAgentConnection | null;
 };
 
@@ -156,6 +158,7 @@ const MCP_WRITE_ENABLED = "HATCHDOOR_MCP_WRITE_ENABLED";
 const MCP_TOKEN = "HATCHDOOR_MCP_BEARER_TOKEN";
 const PUBLIC_URL = "HATCHDOOR_PUBLIC_URL";
 const UPDATE_CHECK = "HATCHDOOR_UPDATE_CHECK_ENABLED";
+const USAGE_REPORT = "HATCHDOOR_USAGE_REPORT_ENABLED";
 
 /** The server's own truthy spellings (`is_truthy`), since a value from the
  * configuration file arrives as written there. */
@@ -182,6 +185,8 @@ function toSetup(payload: {
     publicUrl: (get(PUBLIC_URL)?.value ?? "").trim(),
     updateCheckEnabled: isOn(get(UPDATE_CHECK)?.value),
     updateCheckLocked: Boolean(get(UPDATE_CHECK)?.locked),
+    usageReportEnabled: isOn(get(USAGE_REPORT)?.value),
+    usageReportLocked: Boolean(get(USAGE_REPORT)?.locked),
     lastAgent: payload.last_agent ?? null,
   };
 }
@@ -289,6 +294,13 @@ export async function setUpdateCheck(
   on: boolean,
 ): Promise<SetupResult<AgentSetup>> {
   return saveSettings({ [UPDATE_CHECK]: on ? "true" : "false" });
+}
+
+/** The opt-in usage report (ADR-45). Changes that setting and no other. */
+export async function setUsageReport(
+  on: boolean,
+): Promise<SetupResult<AgentSetup>> {
+  return saveSettings({ [USAGE_REPORT]: on ? "true" : "false" });
 }
 
 /** Where an agent reaches MCP: the public address when one is set, else the

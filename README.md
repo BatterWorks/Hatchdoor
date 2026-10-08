@@ -369,6 +369,15 @@ Two defaults worth knowing before you deploy:
   query, note downloads bundle attachments in memory), so put a
   rate-limiting reverse proxy in front before exposing it publicly.
 
+One optional setting is left out of `.env.example` on purpose:
+`HATCHDOOR_USAGE_REPORT_ENABLED`. It is telemetry, and it is off unless you
+turn it on, in **Settings** under **Usage report** or by setting it to `true`
+in `.env`. On, Hatchdoor sends its maintainer one small report a day of how
+the install is set up, and nothing about your notes, to decide which platforms
+to test and which parts of Hatchdoor people rely on. [Usage report
+reference](https://docs-hatchdoor.battercloud.cc/v/bef3df28-8c2e-4722-89ad-bd4d0bcb3def/n/usage-report-reference)
+lists every field.
+
 Every deployment variable, every live Settings-editable value, layer and
 exclusion rules, and how the search index and cache work are documented in
 full in [Settings and environment variables

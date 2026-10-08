@@ -33,7 +33,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
-use crate::instance_state::InstanceStateStore;
+use crate::instance_state::{InstanceStateStore, VersionRecord};
 use crate::model_setup::SelectedModel;
 use crate::runtime_config::{ConfigSnapshot, RuntimeConfig, is_truthy};
 use crate::vault_registry::{VaultGitMode, VaultRegistryState, VaultSource};
@@ -43,6 +43,11 @@ pub const USAGE_REPORT_SETTING: &str = "HATCHDOOR_USAGE_REPORT_ENABLED";
 
 /// The instance state section this module owns.
 const USAGE_REPORT_SECTION: &str = "usage_report";
+
+/// The section of `state/instance.json` that remembers the one-time sentence
+/// to agents was spent (#479). A section of its own, because the report's
+/// section is empty while the report is off and cleared on every switch-off.
+const USAGE_REPORT_NOTICE_SECTION: &str = "usage_report_notice";
 
 /// The report format. A field added, or an agent family added, is a new
 /// schema (ADR-45).
@@ -280,6 +285,10 @@ struct SectionState {
     /// Kept in memory only: a state file that cannot be written cannot hold
     /// the mark either, and the next start clears the section if it is off.
     stale_on_disk: bool,
+    /// This process already settled whether the one-time sentence to agents
+    /// is due. Kept in memory as well as in its section, so a state file
+    /// that cannot be written repeats the sentence after a restart at most.
+    notice_settled: bool,
 }
 
 impl UsageReport {
@@ -366,6 +375,49 @@ impl UsageReport {
         };
         state.stale_on_disk = false;
         state.record = Some(record);
+    }
+
+    /// Whether this opening handshake carries the one-time sentence telling
+    /// an agent that the usage report exists (#479), marking it delivered
+    /// either way. `true` at most once per install: only on an install that
+    /// existed before it kept a version record (`fresh_install` is `None`),
+    /// and only while the setting is off and not pinned by the environment.
+    /// An install with the setting on or pinned is marked without the
+    /// sentence, and a fresh install or a demo instance never gets it.
+    ///
+    /// Never fails. A mark that cannot be saved is logged and held in memory,
+    /// so the sentence can repeat after a restart but never within one run.
+    pub fn take_notice(&self, versions: &VersionRecord) -> bool {
+        let Some(backing) = &self.backing else {
+            return false;
+        };
+        let mut state = self.lock();
+        if state.notice_settled {
+            return false;
+        }
+        state.notice_settled = true;
+        if versions.fresh_install.is_some()
+            || backing
+                .store
+                .section::<serde_json::Value>(USAGE_REPORT_NOTICE_SECTION)
+                .is_some()
+        {
+            return false;
+        }
+        if let Err(message) = backing.store.write_section(
+            USAGE_REPORT_NOTICE_SECTION,
+            &serde_json::json!({ "delivered": true }),
+        ) {
+            tracing::warn!(
+                path = %backing.store.path().display(),
+                "{message}; agents may be told about the usage report again after a restart"
+            );
+        }
+        !backing
+            .runtime_config
+            .snapshot()
+            .setting(USAGE_REPORT_SETTING)
+            .is_some_and(|setting| setting.pinned || is_truthy(&setting.value))
     }
 
     /// The saved install ID, or `None` while the report is off.
@@ -1142,6 +1194,99 @@ mod tests {
         assert_eq!(handle.install_id(), None);
         assert!(!handle.observe_web_request(at_day("2026-10-07")));
         assert_eq!(handle.activity(day("2026-10-07")), Activity::default());
+    }
+
+    fn upgraded() -> VersionRecord {
+        VersionRecord {
+            current: "2.8.0".into(),
+            previous: Some("2.7.0".into()),
+            fresh_install: None,
+        }
+    }
+
+    fn fresh() -> VersionRecord {
+        VersionRecord {
+            current: "2.8.0".into(),
+            previous: None,
+            fresh_install: Some("2.8.0".into()),
+        }
+    }
+
+    fn notice_stored(fixture: &Fixture) -> Option<serde_json::Value> {
+        fixture.store.section(USAGE_REPORT_NOTICE_SECTION)
+    }
+
+    #[test]
+    fn an_upgraded_install_gets_the_notice_once_and_never_after_a_restart() {
+        let fixture = Fixture::new();
+        let handle = fixture.handle();
+
+        assert!(handle.take_notice(&upgraded()));
+        assert!(!handle.take_notice(&upgraded()));
+        assert_eq!(
+            notice_stored(&fixture),
+            Some(serde_json::json!({ "delivered": true }))
+        );
+
+        assert!(!fixture.handle().take_notice(&upgraded()));
+    }
+
+    #[test]
+    fn a_fresh_install_never_gets_the_notice() {
+        let fixture = Fixture::new();
+
+        assert!(!fixture.handle().take_notice(&fresh()));
+        assert!(!fixture.handle().take_notice(&fresh()));
+        assert_eq!(notice_stored(&fixture), None);
+    }
+
+    #[test]
+    fn an_install_with_the_report_on_is_marked_without_the_notice() {
+        let fixture = Fixture::new();
+        let handle = fixture.handle();
+        fixture.set_enabled(&handle, true);
+
+        assert!(!handle.take_notice(&upgraded()));
+        assert!(notice_stored(&fixture).is_some());
+
+        // Off again later, and after a restart: the mark outlives the
+        // report's own section, which the switch-off cleared.
+        fixture.set_enabled(&handle, false);
+        assert!(!handle.take_notice(&upgraded()));
+        assert!(!fixture.handle().take_notice(&upgraded()));
+    }
+
+    #[test]
+    fn an_install_with_the_setting_pinned_is_marked_without_the_notice() {
+        for pinned in ["true", "false"] {
+            let fixture = Fixture::in_dir(tempfile::tempdir().unwrap(), Some(pinned));
+
+            assert!(!fixture.handle().take_notice(&upgraded()), "{pinned}");
+            assert!(notice_stored(&fixture).is_some(), "{pinned}");
+
+            let unpinned = Fixture::in_dir(fixture.dir, None);
+            assert!(!unpinned.handle().take_notice(&upgraded()), "{pinned}");
+        }
+    }
+
+    #[test]
+    fn a_demo_instance_never_gets_the_notice() {
+        let fixture = Fixture::new();
+
+        assert!(!fixture.handle_in_demo_mode(true).take_notice(&upgraded()));
+        assert!(!fixture.store.path().exists());
+    }
+
+    #[test]
+    fn a_notice_mark_that_cannot_be_saved_repeats_after_a_restart_at_most() {
+        let fixture = Fixture::new();
+        // A file where the state directory should be: nothing can be written.
+        std::fs::write(fixture.dir.path().join("state"), b"in the way").unwrap();
+        let handle = fixture.handle();
+
+        assert!(handle.take_notice(&upgraded()));
+        assert!(!handle.take_notice(&upgraded()));
+        assert!(fixture.handle().take_notice(&upgraded()));
     }
 
     #[test]

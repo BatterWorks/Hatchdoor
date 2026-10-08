@@ -24,9 +24,11 @@ import {
   mcpAddress,
   replaceToken,
   setUpdateCheck,
+  setUsageReport,
   useFirstRunState,
   type AgentSetup,
   type ClientId,
+  type SetupResult,
 } from "./firstRun";
 
 /** How often the connect step asks whether an agent has arrived. */
@@ -202,6 +204,7 @@ export function FirstRunChecklist({
       </ol>
 
       <UpdateCheckRow setup={setup} onSetup={setSetup} />
+      <UsageReportRow setup={setup} onSetup={setSetup} />
 
       <div className="first-run-foot">
         {allDone ? (
@@ -625,21 +628,33 @@ function WritesLine({ setup }: { setup: AgentSetup }) {
   );
 }
 
-function UpdateCheckRow({
-  setup,
+/** One optional switch below the steps: a setting the checklist offers and
+ * never turns on by itself. `locked` is a value held by the server's
+ * configuration file, which the switch then only reports. */
+function OptionalSwitch({
+  label,
+  switchName,
+  on,
+  locked,
+  save,
   onSetup,
+  children,
 }: {
-  setup: AgentSetup | null;
+  label: string;
+  /** The switch's accessible name. */
+  switchName: string;
+  on: boolean;
+  locked: boolean;
+  save: (on: boolean) => Promise<SetupResult<AgentSetup>>;
   onSetup: (setup: AgentSetup) => void;
+  children: ReactNode;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (!setup) return null;
-  const on = setup.updateCheckEnabled;
   const toggle = async () => {
     setBusy(true);
     setError(null);
-    const result = await setUpdateCheck(!on);
+    const result = await save(!on);
     setBusy(false);
     if (result.ok) onSetup(result.value);
     else setError(result.message);
@@ -647,10 +662,8 @@ function UpdateCheckRow({
   return (
     <div className="first-run-update">
       <div className="first-run-update-head">
-        <span className="settings-row-label">
-          Optional: tell me when there is a new version
-        </span>
-        {setup.updateCheckLocked ? (
+        <span className="settings-row-label">{label}</span>
+        {locked ? (
           <span className="first-run-muted">
             {on ? "On" : "Off"}, set in the server's configuration file
           </span>
@@ -658,7 +671,7 @@ function UpdateCheckRow({
           <button
             type="button"
             className="settings-toggle"
-            aria-label="Tell me when there is a new version"
+            aria-label={switchName}
             aria-pressed={on}
             disabled={busy}
             onClick={() => void toggle()}
@@ -670,14 +683,62 @@ function UpdateCheckRow({
           </button>
         )}
       </div>
-      <p>
-        Once a day, Hatchdoor sends one request to GitHub's public list of
-        Hatchdoor releases, carrying this server's IP address and the user-agent
-        Hatchdoor, nothing else. A banner says when a newer version is out;
-        Hatchdoor never updates itself.{" "}
-        <ContextualHelpLink to={CONTEXTUAL_HELP.updateCheck} />
-      </p>
+      <p>{children}</p>
       {error ? <ErrorNotice message={error} /> : null}
     </div>
+  );
+}
+
+function UpdateCheckRow({
+  setup,
+  onSetup,
+}: {
+  setup: AgentSetup | null;
+  onSetup: (setup: AgentSetup) => void;
+}) {
+  if (!setup) return null;
+  return (
+    <OptionalSwitch
+      label="Optional: tell me when there is a new version"
+      switchName="Tell me when there is a new version"
+      on={setup.updateCheckEnabled}
+      locked={setup.updateCheckLocked}
+      save={setUpdateCheck}
+      onSetup={onSetup}
+    >
+      Once a day, Hatchdoor sends one request to GitHub's public list of
+      Hatchdoor releases, carrying this server's IP address and the user-agent
+      Hatchdoor, nothing else. A banner says when a newer version is out;
+      Hatchdoor never updates itself.{" "}
+      <ContextualHelpLink to={CONTEXTUAL_HELP.updateCheck} />
+    </OptionalSwitch>
+  );
+}
+
+/** The usage report question (#479), in the wording approved there. Its
+ * switch is independent of the update check's: neither changes the other. */
+function UsageReportRow({
+  setup,
+  onSetup,
+}: {
+  setup: AgentSetup | null;
+  onSetup: (setup: AgentSetup) => void;
+}) {
+  if (!setup) return null;
+  return (
+    <OptionalSwitch
+      label="Optional: send a usage report"
+      switchName="Send a usage report"
+      on={setup.usageReportEnabled}
+      locked={setup.usageReportLocked}
+      save={setUsageReport}
+      onSetup={onSetup}
+    >
+      This is telemetry, and it is off unless you turn it on. Once a day,
+      Hatchdoor sends its maintainer a short report of how this server is set
+      up, and nothing about your notes, to decide which platforms to test and
+      which parts of Hatchdoor people rely on.{" "}
+      <ContextualHelpLink to={CONTEXTUAL_HELP.usageReport} />
+    </OptionalSwitch>
   );
 }
