@@ -32,10 +32,11 @@ pub struct CompactSearchResult {
     pub heading_path: Option<String>,
     pub score: f32,
     pub layer: Option<String>,
-    /// At most 200 characters of the matched chunk, copied verbatim. A
-    /// keyword hit's snippet is centred on the first matched query word; any
-    /// other hit's snippet is the start of the chunk. `…` marks each side
-    /// where text was dropped.
+    /// At most 200 characters. For a `#tag` query it is the line
+    /// `Matched tag: #<tag>`. Otherwise it is copied verbatim from the
+    /// matched chunk: centred on the first matched query word in a keyword
+    /// hit, the start of the chunk in any other. `…` marks each side where
+    /// text was dropped.
     pub snippet: String,
 }
 

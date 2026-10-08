@@ -5403,7 +5403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_notes_semantic_and_tag_snippets_start_the_chunk() {
+    async fn search_notes_semantic_snippets_start_the_chunk_and_tag_snippets_name_the_tag() {
         let (state, _tmp) = search_shape_state();
         let compact = call_tool(&state, "search_notes", json!({"query": "needle"})).await;
         let full = call_tool(
