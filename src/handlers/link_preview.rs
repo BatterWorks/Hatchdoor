@@ -11,7 +11,7 @@ use crate::vault::Note;
 const PICTURE_PATH: &str = "/link-preview.png";
 const PICTURE_WIDTH: u32 = 1200;
 const PICTURE_HEIGHT: u32 = 630;
-const PICTURE_ALT: &str = "Hatchdoor: self-host your Obsidian vaults";
+const PICTURE_ALT: &str = "The Hatchdoor mark and wordmark";
 
 const SITE_NAME: &str = "Hatchdoor";
 const GENERAL_DESCRIPTION: &str = "Self-host your Obsidian vaults: a web UI for you, MCP for your AI agents. No Obsidian, no plugins required.";

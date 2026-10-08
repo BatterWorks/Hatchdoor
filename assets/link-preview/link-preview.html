@@ -2,9 +2,11 @@
 <!--
   Source of the link preview picture (ADR-47), frontend/public/link-preview.png.
 
-  It draws the mark and the wordmark on the app's paper background with the
-  app's own tokens and typefaces, so a token change shows up here on the next
-  export. Export with a Chrome-family browser from the repository root:
+  It draws the mark and the wordmark with the app's own tokens and typefaces,
+  so a token change shows up here on the next export. Everything sits inside
+  the middle 630 by 630 square, which is what a chat app keeps when it crops
+  the picture to a small thumbnail. Export with a Chrome-family browser from
+  the repository root:
 
     google-chrome --headless=new --hide-scrollbars --force-device-scale-factor=1 \
       --window-size=1200,630 --screenshot=frontend/public/link-preview.png \
@@ -27,173 +29,56 @@
         overflow: hidden;
       }
       body {
-        background: var(--paper);
+        background: var(--bg);
+        display: flex;
+        justify-content: center;
       }
-      .card {
+      .square {
         box-sizing: border-box;
-        width: 1200px;
+        width: 630px;
         height: 630px;
-        display: none;
-      }
-      /* The mark is drawn once and reused, and a reused shape only sees
-         inherited values, so its two colours travel as custom properties. */
-      .mark {
-        --mark-bracket: var(--ink);
-        --mark-accent: var(--hot);
-      }
-      .word {
-        font-family: var(--font-display);
-        font-weight: 800;
-        font-stretch: 78%;
-        letter-spacing: 0.04em;
-        color: var(--ink);
-        line-height: 1;
-      }
-      .line {
-        font-family: var(--font-sans);
-        color: var(--muted);
-        margin: 0;
-      }
-
-      /* A: the lockup centred, tagline beneath, inside a ruled frame. */
-      body.a .card.a {
+        background: var(--paper);
+        border-left: 1px solid var(--rule-strong);
+        border-right: 1px solid var(--rule-strong);
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
         gap: 44px;
-        border: 24px solid var(--bg);
-        outline: 1px solid var(--rule-strong);
-        outline-offset: -25px;
       }
-      .card.a .lockup {
-        display: flex;
-        align-items: center;
-        gap: 28px;
+      .mark {
+        width: 300px;
+        height: 300px;
       }
-      .card.a .mark {
-        width: 150px;
-        height: 150px;
+      .mark .bracket {
+        fill: var(--ink);
       }
-      .card.a .word {
-        font-size: 132px;
+      .mark .accent {
+        fill: var(--hot);
       }
-      .card.a .line {
-        font-size: 36px;
-      }
-
-      /* B: small lockup on top, the description set large as a headline. */
-      body.b .card.b {
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        padding: 72px 80px;
-        border-bottom: 16px solid var(--hot);
-      }
-      .card.b .lockup {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-      }
-      .card.b .mark {
-        width: 72px;
-        height: 72px;
-      }
-      .card.b .word {
-        font-size: 60px;
-      }
-      .card.b h1 {
+      .word {
         font-family: var(--font-display);
         font-weight: 800;
         font-stretch: 78%;
-        font-size: 104px;
-        line-height: 1.02;
-        letter-spacing: -0.01em;
+        font-size: 92px;
+        letter-spacing: 0.04em;
+        line-height: 1;
         color: var(--ink);
-        margin: 0 0 28px;
-      }
-      .card.b .line {
-        font-size: 36px;
-      }
-
-      /* C: the mark large on an ink panel, wordmark and tagline beside it. */
-      body.c .card.c {
-        display: grid;
-        grid-template-columns: 470px 1fr;
-      }
-      .card.c .panel {
-        background: var(--ink);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .card.c .panel .mark {
-        width: 330px;
-        height: 330px;
-      }
-      .card.c .panel .mark {
-        --mark-bracket: var(--paper);
-      }
-      .card.c .text {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 32px;
-        padding: 0 64px;
-      }
-      .card.c .word {
-        font-size: 104px;
-      }
-      .card.c .line {
-        font-size: 32px;
-        line-height: 1.25;
       }
     </style>
   </head>
   <body>
-    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
-      <symbol id="mark" viewBox="7 7 46 46">
-        <rect style="fill: var(--mark-bracket)" x="9" y="9" width="7" height="42" />
-        <rect style="fill: var(--mark-bracket)" x="9" y="9" width="13" height="7" />
-        <rect style="fill: var(--mark-bracket)" x="9" y="44" width="13" height="7" />
-        <rect style="fill: var(--mark-bracket)" x="44" y="9" width="7" height="42" />
-        <rect style="fill: var(--mark-bracket)" x="38" y="9" width="13" height="7" />
-        <rect style="fill: var(--mark-bracket)" x="38" y="44" width="13" height="7" />
-        <rect style="fill: var(--mark-accent)" x="25" y="25" width="10" height="10" />
-      </symbol>
-    </svg>
-
-    <div class="card a">
-      <div class="lockup">
-        <svg class="mark"><use href="#mark" /></svg>
-        <span class="word">HATCHDOOR</span>
-      </div>
-      <p class="line">Self-host your Obsidian vaults. Web UI for you, MCP for your agents.</p>
+    <div class="square">
+      <svg class="mark" viewBox="7 7 46 46" aria-hidden="true">
+        <rect class="bracket" x="9" y="9" width="7" height="42" />
+        <rect class="bracket" x="9" y="9" width="13" height="7" />
+        <rect class="bracket" x="9" y="44" width="13" height="7" />
+        <rect class="bracket" x="44" y="9" width="7" height="42" />
+        <rect class="bracket" x="38" y="9" width="13" height="7" />
+        <rect class="bracket" x="38" y="44" width="13" height="7" />
+        <rect class="accent" x="25" y="25" width="10" height="10" />
+      </svg>
+      <span class="word">HATCHDOOR</span>
     </div>
-
-    <div class="card b">
-      <div class="lockup">
-        <svg class="mark"><use href="#mark" /></svg>
-        <span class="word">HATCHDOOR</span>
-      </div>
-      <div>
-        <h1>Self-host your<br />Obsidian vaults.</h1>
-        <p class="line">A web UI for you, MCP for your AI agents.</p>
-      </div>
-    </div>
-
-    <div class="card c">
-      <div class="panel">
-        <svg class="mark"><use href="#mark" /></svg>
-      </div>
-      <div class="text">
-        <span class="word">HATCHDOOR</span>
-        <p class="line">Self-host your Obsidian vaults.<br />A web UI for you, MCP for your AI agents.</p>
-      </div>
-    </div>
-
-    <script>
-      document.body.className = location.hash.slice(1) || "a";
-    </script>
   </body>
 </html>
