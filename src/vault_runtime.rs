@@ -1542,7 +1542,7 @@ struct VaultCollectionState {
     /// watcher or local-file status moving. It does not count note
     /// content. A note write never advances it; the Index turn that write
     /// arms usually does, twice, but only because the Vault's search status
-    /// passes through `indexing` and back. Neither its moving nor its
+    /// passes through `stale` and back. Neither its moving nor its
     /// holding still says whether a read includes a given write: that is
     /// what a collection read's `participants[].state` answers (#259).
     collection_revision: u64,

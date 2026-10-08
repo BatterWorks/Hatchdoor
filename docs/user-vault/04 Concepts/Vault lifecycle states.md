@@ -30,7 +30,7 @@ Beside the axes, `index_turn` says where the Vault's indexing stands in the inst
 
 **Search** deserves the closest look, because its middle values are easy to misread:
 
-- `indexing`: building its first index; nothing usable yet for this axis.
+- `indexing`: building its first index; nothing usable yet for this axis. A Vault that was already searchable never shows it during a reindex. It shows `stale`, with `index_turn` `running`.
 - `browsable`: a real state, not a typo for "ready". The Vault's structure (notes, links, headings) is published and current, but this generation has no vectors yet. You can open and read every note; semantic search returns nothing. `query_notes` works in full at this point too, and so does a note's saved query table, since selecting notes by tag, path or property needs the structure and no vectors at all. A Vault passes through it once, on its very first index, between reading the notes and preparing search by meaning. A later rebuild of an already-searchable Vault never drops back to it; search keeps answering from the previous build while the rebuild runs.
 - `ready`: fully current, structure and vectors both.
 - `stale`: search still works, but what it answers from is a build behind. Three ways to get here: a newer build is in progress (or paused, waiting its turn behind another Vault), the last build failed, or a note was written *during* the build that just finished, so the generation it published was already behind the moment it landed. That last one is normal during a bulk edit or migration: every write schedules the next reindex, and the Vault settles on `ready` once the writing stops. Not an error by itself, just "what you're seeing might be a build behind."
@@ -40,7 +40,7 @@ Beside the axes, `index_turn` says where the Vault's indexing stands in the inst
 `browse`, `search`, `mutate`, `pull`, `push`, `retry`, `commit`, `sync` and `publish_recovery`, the nine flags that decide what the UI shows and what an MCP/API write is allowed to do, are derived from the axes above and from the Vault's own definition, not from any single axis:
 
 - **`browse`**: true whenever local content is `read_write` or `read_only`. Notably independent of the search axis: a Vault mid-index (or even stuck at `browsable`) is still fully browsable.
-- **`search`**: true only for `ready` or `stale`. `browsable` and `indexing` both grant `browse` but not `search`.
+- **`search`**: true only for `ready` or `stale`. `browsable` and `indexing` both grant `browse` but not `search`. A reindex of a searchable Vault is `stale`, so the flag stays true from the first index onward unless search itself breaks.
 - **`mutate`**: true only when local content is `read_write` *and* the Vault isn't a `pull_only` Git Vault. A `pull_only` Vault never allows local edits, regardless of how healthy everything else looks, since edits would just conflict with the next pull.
 - **`pull`** / **`push`**: true only when Git status is `ready`, gated further by the configured Git mode (`pull_only` or `two_way` for pull; `two_way` only for push).
 - **`commit`** / **`sync`**. `commit` is true when the Vault keeps Git history of its own (`local_history` or `two_way`); `sync` is true when it has a remote to talk to (`pull_only` or `two_way`). Unlike `pull` and `push` these come from the Vault's definition, not its current Git status, so they keep their answer while the Vault is failing. That is what lets the Settings console offer **Commit now** rather than **Sync now** on a Vault with no remote without having to guess from the Git mode.

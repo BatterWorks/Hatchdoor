@@ -687,8 +687,17 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
                 .expect("active runtime")
                 .snapshot()
                 .search,
-            VaultSearchStatus::Indexing,
-            "runtime status reflects the active turn"
+            VaultSearchStatus::Stale,
+            "runtime status says what the retained generation answers during the turn"
+        );
+        assert!(
+            collection
+                .runtime(vault_id)
+                .expect("active runtime")
+                .snapshot()
+                .capabilities
+                .search,
+            "the search capability holds through the embedding pass"
         );
         assert_eq!(
             cache.snapshot_status(vault_id).expect("read status"),
@@ -752,12 +761,46 @@ struct EmbeddingTurnFixture {
     directory: tempfile::TempDir,
     vault_id: VaultId,
     collection: VaultCollectionRuntime,
+    coordinator: VaultWorkCoordinator,
     worker: Option<crate::vault_work::VaultWorkWorker>,
     cache: Arc<SqliteCache>,
 }
 
 impl EmbeddingTurnFixture {
     async fn new() -> Self {
+        let mut fixture = Self::unindexed().await;
+        let mut worker = fixture.worker.take().expect("the fixture's worker");
+        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let published = worker
+            .run_next({
+                let collection = fixture.collection.clone();
+                let cache = fixture.cache.clone();
+                move |request| async move {
+                    dispatch_vault_index_turn(&collection, cache, working, request).await
+                }
+            })
+            .await
+            .expect("initial Index turn");
+        published.result.expect("initial publication succeeds");
+        fixture.worker = Some(worker);
+
+        // A write burst lands, which is what arms the next Index turn in
+        // production: the watcher forwards the change intent to this
+        // coordinator.
+        std::fs::write(
+            fixture.vault_path().join("Home.md"),
+            "# Home\n\nmelatonin updated",
+        )
+        .expect("update note");
+        fixture
+            .coordinator
+            .request(fixture.vault_id, VaultWorkKind::Index);
+        fixture
+    }
+
+    /// The same Vault before its first Index turn, which activation has
+    /// already armed: nothing published, nothing retained.
+    async fn unindexed() -> Self {
         let directory = tempdir().expect("temporary state directory");
         let vault_path = directory.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create Vault directory");
@@ -773,37 +816,18 @@ impl EmbeddingTurnFixture {
         let vault_id = vault_id_named(&snapshot, "Only");
 
         let collection = VaultCollectionRuntime::new();
-        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let (coordinator, worker) = VaultWorkCoordinator::new();
         let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
         collection
             .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
             .await;
         let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
-        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-
-        let published = worker
-            .run_next({
-                let collection = collection.clone();
-                let cache = cache.clone();
-                move |request| async move {
-                    dispatch_vault_index_turn(&collection, cache, working, request).await
-                }
-            })
-            .await
-            .expect("initial Index turn");
-        published.result.expect("initial publication succeeds");
-
-        // A write burst lands, which is what arms the next Index turn in
-        // production: the watcher forwards the change intent to this
-        // coordinator.
-        std::fs::write(vault_path.join("Home.md"), "# Home\n\nmelatonin updated")
-            .expect("update note");
-        coordinator.request(vault_id, VaultWorkKind::Index);
 
         Self {
             directory,
             vault_id,
             collection,
+            coordinator,
             worker: Some(worker),
             cache,
         }
@@ -911,6 +935,102 @@ async fn finish_held_turn(
         .expect("Index turn ran")
         .result
         .expect("Index turn publishes successfully");
+}
+
+/// Issue #483. An Index turn on a Vault that already answers search used to
+/// report `Indexing` for its whole length, which withdraws the search
+/// capability, while search went on answering from the retained generation.
+/// The status now says what that generation supports. Held open in the read
+/// phase, the earliest point a turn can be observed, and the status already
+/// agrees with the snapshot.
+#[tokio::test]
+async fn an_index_turn_on_a_searchable_vault_reports_stale_and_keeps_the_search_capability() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let control = fixture.control();
+    assert_eq!(control.snapshot().search, VaultSearchStatus::Ready);
+    let (entered, release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&entered).await;
+
+    let during = control.snapshot();
+    let snapshot_during = fixture.snapshot_status();
+
+    finish_held_turn(&release, turn).await;
+
+    assert_eq!(
+        during.search,
+        VaultSearchStatus::Stale,
+        "a rebuild of a searchable Vault reports what its retained generation answers"
+    );
+    assert!(
+        during.capabilities.search,
+        "a Vault that keeps answering search keeps the search capability"
+    );
+    assert_eq!(
+        during.search_error, None,
+        "a running rebuild is not a failure"
+    );
+    assert_eq!(
+        snapshot_during.map(|status| status.freshness),
+        Some(VaultSnapshotFreshness::Stale),
+        "the status and the snapshot's freshness agree while the turn runs"
+    );
+    assert_eq!(
+        control.snapshot().search,
+        VaultSearchStatus::Ready,
+        "a turn that publishes cleanly ends ready"
+    );
+}
+
+/// The other side of #483: a Vault with nothing retained has nothing to
+/// answer from, so its first turn still reports `Indexing` and no search
+/// capability.
+#[tokio::test]
+async fn a_first_index_turn_still_reports_indexing_without_the_search_capability() {
+    let mut fixture = EmbeddingTurnFixture::unindexed().await;
+    let control = fixture.control();
+    let (entered, release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&entered).await;
+
+    let during = control.snapshot();
+
+    finish_held_turn(&release, turn).await;
+
+    assert_eq!(during.search, VaultSearchStatus::Indexing);
+    assert!(!during.capabilities.search);
+    assert_eq!(control.snapshot().search, VaultSearchStatus::Ready);
+}
+
+/// A retained generation with no vectors participates but can only answer a
+/// search with nothing, so a rebuild over it never grants the capability,
+/// the rule `retained_search_status` applies to a paused or failed turn.
+#[tokio::test]
+async fn an_index_turn_over_a_vectorless_generation_never_grants_the_search_capability() {
+    let mut fixture = EmbeddingTurnFixture::unindexed().await;
+    let control = fixture.control();
+    let index = control.authoritative_index().expect("scan the Vault");
+    assert!(
+        fixture
+            .cache
+            .publish_vault_structure_snapshot(
+                fixture.vault_id,
+                &index,
+                &StubEmbedder::new(384),
+                true,
+            )
+            .expect("publish the structure-only generation"),
+        "the Vault retains a participating generation with no vectors"
+    );
+
+    let (read_entered, read_release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&read_entered).await;
+    let during = control.snapshot();
+    finish_held_turn(&read_release, turn).await;
+
+    assert_eq!(during.search, VaultSearchStatus::Indexing);
+    assert!(
+        !during.capabilities.search,
+        "a vectorless retained generation must not grant the search capability"
+    );
 }
 
 /// The narrowing stops at the read phase. A foreground mutation arriving while
@@ -3327,7 +3447,7 @@ async fn one_vaults_failed_index_turn_leaves_the_collection_ready() {
 }
 
 /// A routine reindex after the collection settled is one Vault's upkeep and
-/// reports its own `Indexing`; it must not move the instance tracker, which
+/// reports on that Vault's own status; it must not move the instance tracker, which
 /// `/ready` reads, back out of `Ready` (#326).
 #[tokio::test]
 async fn a_routine_reindex_does_not_leave_startup_readiness() {

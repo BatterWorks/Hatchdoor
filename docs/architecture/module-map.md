@@ -560,6 +560,16 @@ whichever lane the turn ran in.
   snapshot, and publishes Ready, Stale, or Unavailable search state without
   changing another Vault's snapshot or status. A retained snapshot is marked
   stale for the duration of the rebuild, not only after a failure.
+  The status the turn publishes as it starts follows that retained
+  generation (`opening_search_status`, #483): `Stale`, which keeps the search
+  capability, when the generation is participating and searchable, and
+  `Indexing` otherwise, a vectorless generation included. It is published
+  after the stale mark, so the status never leaves `Ready` while the snapshot
+  still reads fresh, unless the mark itself failed, which is logged. A clean
+  rebuild of a searchable Vault likewise reports `Ready` just before its
+  fresh row is published, under the retaken mutation guard, and a turn whose
+  structure pass wiped that generation (a changed search model) without
+  replacing it drops back to `Indexing`.
   The foreground mutation guard spans the read phase only — the authoritative
   scan, the structure pass, and every per-note content read — so a turn can
   never observe half of a multi-file foreground mutation, and is released at
@@ -3154,7 +3164,8 @@ and #185 removed the repository work they described, so a `HATCHDOOR_GIT_*`
 save now only persists a value. Saves persist before rebuilding. A confirmed indexing-setting save requests one Index turn per
 active Vault through the shared work coordinator
 (`app_state::request_collection_reindex`), never the legacy instance-wide
-rebuild: each Vault reports its own `indexing` condition and keeps serving
+rebuild: each Vault reports its own rebuild (`stale` with `index_turn`
+`running` when it was already searchable, `indexing` when it was not) and keeps serving
 reads from its previous snapshot until its new one is published, and a
 disabled Vault has no active runtime so it is not queued.
 A save that flips
