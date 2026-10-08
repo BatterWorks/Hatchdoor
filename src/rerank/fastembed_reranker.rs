@@ -92,22 +92,44 @@ impl Reranker for FastembedReranker {
 mod tests {
     use super::*;
 
+    /// Held while a test loads a model. Cargo runs these tests in parallel, and
+    /// on a cold cache two loads of one model race for the same download:
+    /// `hf-hub` gives up on a held file lock after five seconds, long before a
+    /// large weight file arrives (#510).
+    static MODEL_LOAD: Mutex<()> = Mutex::new(());
+
+    fn model_load_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A test that panics mid-load must not fail the others.
+        MODEL_LOAD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn jina_v1_turbo_loads_and_ids_match() {
-        let r = FastembedReranker::jina_v1_turbo().expect("load");
+        let r = {
+            let _loading = model_load_lock();
+            FastembedReranker::jina_v1_turbo().expect("load")
+        };
         assert_eq!(r.id(), "JINARerankerV1TurboEn");
     }
 
     #[test]
     fn jina_v2_multilingual_loads_and_ids_match() {
-        let r = FastembedReranker::jina_v2_multilingual().expect("load");
+        let r = {
+            let _loading = model_load_lock();
+            FastembedReranker::jina_v2_multilingual().expect("load")
+        };
         assert_eq!(r.id(), "JINARerankerV2BaseMultilingual");
     }
 
     #[test]
     fn jina_v1_turbo_reranks_two_candidates() {
         use crate::cache::SemanticHit;
-        let r = FastembedReranker::jina_v1_turbo().expect("load");
+        let r = {
+            let _loading = model_load_lock();
+            FastembedReranker::jina_v1_turbo().expect("load")
+        };
         let cands = vec![
             SemanticHit {
                 chunk_id: 1,
