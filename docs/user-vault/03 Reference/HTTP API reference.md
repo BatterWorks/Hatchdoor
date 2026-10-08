@@ -74,7 +74,7 @@ In demo mode (`HATCHDOOR_DEMO_MODE=true`) the page carries a link preview, the t
 
 | Address | `<title>` | `og:title` | Description | `og:type` |
 | --- | --- | --- | --- | --- |
-| `/v/{vault_id}/n/{slug}`, when the demo serves that note | `<note title> · Hatchdoor` | The note title | The note's `description` property when it is a non-empty string, otherwise its first paragraph of prose as plain text. At most 200 characters, cut on a word with `…`. A note with neither gets the general description | `article` |
+| `/v/{vault_id}/n/{slug}`, when the demo serves that note | `<note title> · Hatchdoor` | The note title | The note's `description` property when it is a non-empty string, otherwise its first paragraph of prose. Either is reduced to plain text, with Markdown, wikilink and HTML syntax removed. At most 200 characters, cut on a word with `…`. A note with neither gets the general description | `article` |
 | `/`, `/graph`, `/stats`, `/settings` | `Hatchdoor`, `Graph · Hatchdoor`, `Stats · Hatchdoor`, `Settings · Hatchdoor` | `Hatchdoor` | `Self-host your Obsidian vaults: a web UI for you, MCP for your AI agents. No Obsidian, no plugins required.` | `website` |
 | Any other address the app answers, and a note address the demo does not serve | `Hatchdoor` | `Hatchdoor` | The same general description | `website` |
 

@@ -136,7 +136,7 @@ A short-lived address, handed to an agent by an authenticated call, that lets wh
 _Avoid_: Presigned URL, signed URL, download URL (when meant as the credentialed link)
 
 **Link preview**:
-The title, short description and picture a chat app or search engine shows for a shared Hatchdoor address, read from tags in the page the server returns. Only a demo instance sends one. A note address previews that note's title and opening words; every other address previews Hatchdoor itself. The picture is the same for every address.
+The title, short description and picture a chat app or search engine shows for a shared Hatchdoor address, read from tags in the page the server returns. Only a demo instance sends one. A note address previews that note's title and its description, which is the note's `description` property or else its opening words; every other address previews Hatchdoor itself. The picture is the same for every address.
 _Avoid_: Unfurl, social card, Open Graph (when meant as the preview itself)
 
 **Usage report**:

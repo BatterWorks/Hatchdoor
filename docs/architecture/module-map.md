@@ -3407,6 +3407,7 @@ index, search and its links' destinations for anyone else and out of
 `auth::request_is_authorized` to tell whether a caller holds the web token),
 the Bundled manual (`docs.rs` only), `chunk::normalize::strip_frontmatter`
 (`link_preview.rs` only), `mcp::config::parse_public_url` (`settings.rs` and
+`spa.rs`), `vault_management::parse_vault_id` (the Vault-scoped handlers and
 `spa.rs`), and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,
 `VaultCollectionRuntime::{snapshot, reconcile_and_reconstruct,

@@ -57,7 +57,7 @@ impl LinkPreview {
     ) -> Self {
         let title = collapse_whitespace(&note.title);
         if title.is_empty() {
-            return Self::general("");
+            return Self::general("/");
         }
         Self {
             page_title: format!("{title} · {SITE_NAME}"),
@@ -108,8 +108,11 @@ impl LinkPreview {
     }
 }
 
-fn meta(key: &str, name: &str, content: &str) -> String {
-    format!("<meta {key}=\"{name}\" content=\"{}\" />", escape(content))
+fn meta(attribute: &str, name: &str, content: &str) -> String {
+    format!(
+        "<meta {attribute}=\"{name}\" content=\"{}\" />",
+        escape(content)
+    )
 }
 
 /// Escape `text` for an HTML element's text or a quoted attribute value
@@ -134,8 +137,8 @@ fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The note's `description` property when it is a non-empty string, taken as
-/// written, otherwise its opening prose. Either is cut to the limit.
+/// The note's `description` property when it is a non-empty string, otherwise
+/// its opening prose. Either is reduced to plain text and cut to the limit.
 fn note_description(
     content: &str,
     properties: &serde_json::Map<String, serde_json::Value>,
@@ -143,7 +146,7 @@ fn note_description(
     let property = properties
         .get("description")
         .and_then(serde_json::Value::as_str)
-        .map(collapse_whitespace)
+        .map(plain_text)
         .filter(|description| !description.is_empty());
     let description = property.or_else(|| opening_prose(content))?;
     Some(cut(&description))
@@ -160,8 +163,10 @@ fn opening_prose(content: &str) -> Option<String> {
     let mut in_math = false;
     let mut in_table = false;
     let mut comment = Comment::None;
+    let mut pushed = false;
 
     for line in strip_frontmatter(content).lines() {
+        let previous_line_pushed = std::mem::take(&mut pushed);
         let line = strip_quote_markers(line.trim());
 
         if let Some((marker, length)) = fence {
@@ -200,7 +205,9 @@ fn opening_prose(content: &str) -> Option<String> {
         }
         if is_table_separator(line) {
             // The line above was this table's header, not prose.
-            paragraph.pop();
+            if previous_line_pushed {
+                paragraph.pop();
+            }
             if !paragraph.is_empty() {
                 break;
             }
@@ -229,6 +236,7 @@ fn opening_prose(content: &str) -> Option<String> {
         let text = plain_text(strip_list_marker(line));
         if !text.is_empty() {
             paragraph.push(text);
+            pushed = true;
         }
     }
 
@@ -372,7 +380,13 @@ fn is_definition(line: &str) -> bool {
 /// wikilinks leave their text, images, embeds, footnote marks and HTML tags
 /// leave nothing, and emphasis, code and highlight marks are dropped.
 fn plain_text(line: &str) -> String {
-    let chars: Vec<char> = strip_block_id(line).chars().collect();
+    collapse_whitespace(&decode_entities(&without_markup(strip_block_id(line))))
+}
+
+/// [`plain_text`] before entities are decoded, so a link's label, which is
+/// reduced on its own, is decoded once with the line around it.
+fn without_markup(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
     let mut text = String::new();
     let mut at = 0;
     while at < chars.len() {
@@ -422,29 +436,17 @@ fn plain_text(line: &str) -> String {
                     None => at = inside,
                 }
             }
-            '*' => {
-                let spaced = previous.is_none_or(char::is_whitespace)
-                    && next.is_none_or(char::is_whitespace);
-                if spaced {
-                    text.push(character);
-                }
-                at += 1;
-            }
-            '_' => {
-                let inside_word = previous.is_some_and(char::is_alphanumeric)
-                    && next.is_some_and(char::is_alphanumeric);
-                let spaced = previous.is_none_or(char::is_whitespace)
-                    && next.is_none_or(char::is_whitespace);
-                if inside_word || spaced {
+            // An emphasis mark hugs a word on one side only. Between two
+            // words (`2*3`, `snake_case`) or between two spaces (`2 * 3`) it
+            // is a character the author meant.
+            '*' | '_' => {
+                if is_literal_mark(previous, next) {
                     text.push(character);
                 }
                 at += 1;
             }
             '~' | '=' if next == Some(character) => {
-                let after = chars.get(at + 2).copied();
-                let spaced = previous.is_none_or(char::is_whitespace)
-                    && after.is_none_or(char::is_whitespace);
-                if spaced {
+                if is_literal_mark(previous, chars.get(at + 2).copied()) {
                     text.push(character);
                     text.push(character);
                 }
@@ -456,7 +458,15 @@ fn plain_text(line: &str) -> String {
             }
         }
     }
-    collapse_whitespace(&decode_entities(&text))
+    text
+}
+
+/// Whether a would-be emphasis mark with these neighbours is plain text.
+fn is_literal_mark(before: Option<char>, after: Option<char>) -> bool {
+    let inside_word =
+        before.is_some_and(char::is_alphanumeric) && after.is_some_and(char::is_alphanumeric);
+    let spaced = before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace);
+    inside_word || spaced
 }
 
 /// `line` without a trailing Obsidian block identifier such as ` ^a1b2c3`.
@@ -513,7 +523,7 @@ fn bracketed(chars: &[char], open: usize) -> Option<(String, usize)> {
         Some('[') => find_run(chars, close + 2, ']', 1)? + 1,
         _ => return None,
     };
-    Some((plain_text(&label), end))
+    Some((without_markup(&label), end))
 }
 
 /// An autolink shows its address; any other tag shows nothing. `None` when
@@ -552,8 +562,8 @@ fn decode_entities(text: &str) -> String {
 }
 
 /// `text` within [`DESCRIPTION_CHARS`], ending on a whole word and an
-/// ellipsis when something was dropped. Text with no space to cut at (a
-/// script written without them, a long address) is cut between characters,
+/// ellipsis when something was dropped. Text with no space in its second
+/// half (a script written without them, a long address) is cut between characters,
 /// never between a letter and its accent or an emoji and its joiners.
 fn cut(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -564,9 +574,11 @@ fn cut(text: &str) -> String {
     let limit = DESCRIPTION_CHARS - 1;
     let mut end = limit;
     if !chars[limit].is_whitespace() {
+        // A space in the first half is no place to cut: it would throw most
+        // of the text away to save one long word.
         match chars[..limit].iter().rposition(|c| c.is_whitespace()) {
-            Some(space) => end = space,
-            None => {
+            Some(space) if space >= limit / 2 => end = space,
+            _ => {
                 while end > 1 && (joins_previous(chars[end]) || chars[end - 1] == '\u{200d}') {
                     end -= 1;
                 }
@@ -616,7 +628,7 @@ mod tests {
         let preview = preview(
             "Beacon",
             "---\ndescription: ignored here\n---\n# Beacon\n\nThe body opens here.\n",
-            serde_json::json!({ "description": "  A launch plan\n for Beacon. " }),
+            serde_json::json!({ "description": "  A **launch** plan\n for [[Beacon]]. " }),
         );
         assert_eq!(preview.description, "A launch plan for Beacon.");
     }
@@ -667,6 +679,11 @@ mod tests {
         );
         assert_eq!(
             prose("Prose first.\n# Then a heading\nMore.\n"),
+            Some("Prose first.".to_string())
+        );
+        // A table whose header row leaves no text takes no prose with it.
+        assert_eq!(
+            prose("Prose first.\n![[a.png]] | ![[b.png]]\n--- | ---\n"),
             Some("Prose first.".to_string())
         );
     }
@@ -752,6 +769,14 @@ At last, prose.
                 "Keep snake_case, 2 * 3 and a == b.",
                 "Keep snake_case, 2 * 3 and a == b.",
             ),
+            (
+                "Keep 2*3, x==y and a~~b too.",
+                "Keep 2*3, x==y and a~~b too.",
+            ),
+            (
+                "A [&amp;lt; label](x) decodes once.",
+                "A &lt; label decodes once.",
+            ),
             ("Run `cargo test` now.", "Run cargo test now."),
             ("Double ``a ` b`` ticks.", "Double a ` b ticks."),
             (
@@ -816,6 +841,12 @@ At last, prose.
         // Trailing punctuation does not sit before the ellipsis.
         let text = format!("{}, {}", "b".repeat(150), "c".repeat(80));
         assert_eq!(cut(&text), format!("{}…", "b".repeat(150)));
+
+        // One early space is no reason to drop everything after it.
+        let text = format!("Hello {}", "語".repeat(300));
+        let cut_text = cut(&text);
+        assert_eq!(cut_text.chars().count(), DESCRIPTION_CHARS);
+        assert!(cut_text.starts_with("Hello 語"));
 
         let exact = "d".repeat(DESCRIPTION_CHARS);
         assert_eq!(cut(&exact), exact);
@@ -912,7 +943,11 @@ At last, prose.
         let preview = preview(
             hostile,
             "",
-            serde_json::json!({ "description": format!("\"><img src=x onerror=alert(1)> {hostile}") }),
+            // Written as entities, so reducing the value to plain text leaves
+            // real angle brackets for the escaping to deal with.
+            serde_json::json!({
+                "description": "\"> 3 < 4 &lt;img src=x onerror=alert(1)&gt; &lt;/title&gt; 'q' & <b>bold</b>"
+            }),
         );
         let page = preview.write_into(INDEX, Some("https://notes.example.com"), "/v/abc/n/a\"b<c>");
         // The page's own script element is the only one, and the title
@@ -924,9 +959,9 @@ At last, prose.
         assert!(page.contains(
             "<title>&lt;/title&gt;&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &#39;q&#39; &amp; &lt;b&gt; · Hatchdoor</title>"
         ));
-        assert!(
-            page.contains("content=\"&quot;&gt;&lt;img src=x onerror=alert(1)&gt; &lt;/title&gt;")
-        );
+        assert!(page.contains(
+            "content=\"&quot;&gt; 3 &lt; 4 &lt;img src=x onerror=alert(1)&gt; &lt;/title&gt; &#39;q&#39; &amp; bold\""
+        ));
         assert!(page.contains("content=\"https://notes.example.com/v/abc/n/a&quot;b&lt;c&gt;\""));
         // Every attribute value holds no raw quote: each tag line still has
         // exactly its own four.

@@ -9674,7 +9674,7 @@ mod tests {
             ("Diagram.md", "```mermaid\ngraph TD\n  A --> B\n```\n"),
             (
                 "Rock & \"Roll\" <b>.md",
-                "---\ndescription: 'Say \"hi\" </title><script>alert(1)</script>'\n---\n",
+                "---\ndescription: 'Say \"hi\" &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; <b>now</b>'\n---\n",
             ),
             ("sources/.hatchdoor-layer", "sources"),
             (
@@ -9887,7 +9887,7 @@ mod tests {
             "<meta property=\"og:title\" content=\"Rock &amp; &quot;Roll&quot; &lt;b&gt;\" />"
         ));
         assert!(page.contains(
-            "content=\"Say &quot;hi&quot; &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;\" />"
+            "content=\"Say &quot;hi&quot; &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; now\" />"
         ));
         assert_eq!(page.matches("</title>").count(), 1);
         assert!(!page.contains("<script") && !page.contains("<b>"));
@@ -9913,6 +9913,47 @@ mod tests {
                     (status, BUILT_PAGE.to_string()),
                     "{uri} with token {web_bearer_token:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_link_preview_picture_is_1200_by_630_and_small_enough_for_chat_apps() {
+        let picture = std::fs::read("frontend/public/link-preview.png").expect("picture");
+        assert_eq!(&picture[..8], b"\x89PNG\r\n\x1a\n");
+        // The IHDR chunk opens every PNG: width then height, big-endian.
+        let dimension = |at: usize| u32::from_be_bytes(picture[at..at + 4].try_into().unwrap());
+        assert_eq!((dimension(16), dimension(20)), (1200, 630));
+        assert!(picture.len() < 300 * 1024, "{} bytes", picture.len());
+    }
+
+    #[tokio::test]
+    async fn the_link_preview_picture_needs_no_token() {
+        // A chat app's fetcher holds no token. Whether the file is there to
+        // serve depends on `frontend/dist` (see the canonical Note URL test
+        // above), so an unbuilt frontend pins only that no token was asked for.
+        let built = std::path::Path::new("frontend/dist/link-preview.png").exists();
+        for demo_mode in [true, false] {
+            let web_bearer_token = (!demo_mode).then(|| Arc::<str>::from("secret"));
+            let (app, _tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_bearer_token, demo_mode);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/link-preview.png")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let expected = if built {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(response.status(), expected, "demo mode {demo_mode}");
+            if built {
+                assert_eq!(response.headers()["content-type"], "image/png");
             }
         }
     }
