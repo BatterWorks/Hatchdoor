@@ -390,30 +390,55 @@ mod identity_tests {
 mod tests {
     use super::*;
 
+    /// Held while a test loads a model. Cargo runs these tests in parallel, and
+    /// on a cold cache two loads of one model race for the same download:
+    /// `hf-hub` gives up on a held file lock after five seconds, long before a
+    /// large weight file arrives (#510).
+    static MODEL_LOAD: Mutex<()> = Mutex::new(());
+
+    fn model_load_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A test that panics mid-load must not fail the others.
+        MODEL_LOAD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn bge_small_has_384_dim_and_correct_id() {
-        let e = FastembedEmbedder::bge_small().expect("load");
+        let e = {
+            let _loading = model_load_lock();
+            FastembedEmbedder::bge_small().expect("load")
+        };
         assert_eq!(e.embedding_dim(), 384);
         assert_eq!(e.id(), "BGESmallENV15");
     }
 
     #[test]
     fn nomic_v1_5_has_768_dim_and_correct_id() {
-        let e = FastembedEmbedder::nomic_v1_5().expect("load");
+        let e = {
+            let _loading = model_load_lock();
+            FastembedEmbedder::nomic_v1_5().expect("load")
+        };
         assert_eq!(e.embedding_dim(), 768);
         assert_eq!(e.id(), "NomicEmbedTextV15");
     }
 
     #[test]
     fn mxbai_large_has_1024_dim_and_correct_id() {
-        let e = FastembedEmbedder::mxbai_large().expect("load");
+        let e = {
+            let _loading = model_load_lock();
+            FastembedEmbedder::mxbai_large().expect("load")
+        };
         assert_eq!(e.embedding_dim(), 1024);
         assert_eq!(e.id(), "MxbaiEmbedLargeV1");
     }
 
     #[test]
     fn gemma_keeps_its_identity() {
-        let e = FastembedEmbedder::embedding_gemma_300m_q4().expect("load");
+        let e = {
+            let _loading = model_load_lock();
+            FastembedEmbedder::embedding_gemma_300m_q4().expect("load")
+        };
         assert_eq!(e.embedding_dim(), 768);
         assert_eq!(
             e.identity(),
@@ -426,6 +451,7 @@ mod tests {
         // The reference is FastEmbed's own enum route, which hands ONNX Runtime
         // the model by path. Stored vectors were produced through it, so the
         // production load must agree or an existing index goes stale (#469).
+        let loading = model_load_lock();
         let reference = FastembedEmbedder::load_in(
             EmbeddingModel::EmbeddingGemma300MQ4,
             768,
@@ -437,6 +463,7 @@ mod tests {
         )
         .expect("reference load");
         let e = FastembedEmbedder::embedding_gemma_300m_q4().expect("load");
+        drop(loading);
 
         let texts = vec![
             e.document_input(
