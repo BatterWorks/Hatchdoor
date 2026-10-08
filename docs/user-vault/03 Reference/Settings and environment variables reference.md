@@ -41,7 +41,7 @@ Read once at process startup via `AppConfig::from_env`. Docker Compose fixes mos
 
 ## Live settings
 
-These live in `settings.json`, not `.env` — leave them unset in `.env` to manage them from **Settings** with no restart. A non-empty `.env` value pins that one setting until it's removed from `.env` and the instance restarted. Each entry's **Class** says what a change costs: `instant` applies immediately, `reindex` rebuilds each Vault's search index in the background. A `reindex` save asks you to confirm first, then queues one rebuild per Vault that's turned on: each Vault shows as **indexing** while its own rebuild runs, and searching or browsing it keeps working the whole time — it just answers from the previous index until the new one is ready. Vaults you've turned off aren't touched.
+These live in `settings.json`, not `.env` — leave them unset in `.env` to manage them from **Settings** with no restart. A non-empty `.env` value pins that one setting until it's removed from `.env` and the instance restarted. Each entry's **Class** says what a change costs: `instant` applies immediately, `reindex` rebuilds each Vault's search index in the background. A `reindex` save asks you to confirm first, then queues one rebuild per Vault that's turned on: each Vault's `search` status reads `stale` while its own rebuild runs, and searching or browsing it keeps working the whole time — it just answers from the previous index until the new one is ready. Vaults you've turned off aren't touched.
 
 **Note handling**
 

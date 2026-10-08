@@ -3889,6 +3889,9 @@ count-or-condition slot and the shared All-Vaults/collapsed-head aggregate
 from `VaultSummary`'s status fields alone — no new endpoint. A Vault whose
 `index_turn` is `waiting` (ADR-35) shows the still `waiting` word wherever it
 would otherwise show indexing, unless it is ready or carries a search error.
+A searchable Vault whose own Index turn is `running` reports `stale` with no
+error and keeps its count, so a routine reindex changes nothing on screen
+(#483).
 `vaultSlotLogic.ts`'s `noteInSyncConflict` is also imported by Note reading's
 `NotePage.tsx` (ADR-30) to tell whether the open note is on its Vault's
 conflict list; this is a deliberate cross-capability import of one pure
