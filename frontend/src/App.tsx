@@ -31,6 +31,7 @@ import {
   SIDEBAR_WIDTH_KEY,
 } from "./app/constants";
 import { ExplorerPane, type StartupProgress } from "./app/ExplorerPane";
+import { usePageTitle } from "./app/pageTitle";
 import {
   clampSidebarWidth,
   getStoredNumber,
@@ -123,6 +124,7 @@ function VaultWorkspace({
   // allowed to navigate out of. Matched by the router itself rather than by a
   // second spelling of the path.
   const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
+  usePageTitle(activeNote);
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
   const help = useHelp();
