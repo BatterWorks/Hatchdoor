@@ -454,7 +454,7 @@ fn fold(text: &str, case_sensitive: bool) -> String {
 /// Where the body begins: just past the line closing a leading frontmatter
 /// block, or `0` when the Note has none. The same block the canonical parser
 /// and the write layer recognise.
-fn body_start(content: &str) -> usize {
+pub(super) fn body_start(content: &str) -> usize {
     let Some((_, inner_end)) = frontmatter_span(content) else {
         return 0;
     };

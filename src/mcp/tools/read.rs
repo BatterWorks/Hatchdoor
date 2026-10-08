@@ -199,6 +199,16 @@ struct ExactSlugArgs {
     slug: String,
 }
 
+/// `get_note_section`'s arguments. How many `headings` a call may carry, and
+/// what each may be, is the read core's rule.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteSectionArgs {
+    vault_id: String,
+    slug: String,
+    headings: Vec<String>,
+}
+
 /// `evaluate_saved_query`'s arguments. There is deliberately no `scope`: a
 /// saved query reads its Note's own Vault whoever asks (ADR-21 part 2), so a
 /// caller sending one is refused like any other unknown argument.
@@ -329,6 +339,46 @@ pub(super) async fn get_note_tool(
         .await
     {
         Ok(Some(note)) => Ok(tool_result::<results::GetNoteResult>(&note)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn get_note_outline_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ExactSlugArgs = parse("get_note_outline", arguments)?;
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.note_outline(vault_id, &slug))
+        .await
+    {
+        Ok(Some(outline)) => Ok(tool_result::<results::GetNoteOutlineResult>(&outline)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn get_note_section_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: NoteSectionArgs = parse("get_note_section", arguments)?;
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.note_sections(vault_id, &slug, &args.headings))
+        .await
+    {
+        Ok(Some(sections)) => Ok(tool_result::<results::GetNoteSectionResult>(&sections)),
         Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
         Err(error) => read_failure(error),
     }
@@ -1269,7 +1319,9 @@ pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
         json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants. index_turn is running while a Vault indexes and waiting while its indexing is queued behind another Vault's or paused to let one through; search says what the Vault answers meanwhile.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified. Hits are compact by default: each names its note and carries a snippet of at most 200 characters, centred on the first matched word in keyword mode and otherwise the start of the matched chunk. get_note returns the content. Pass detail: \"full\" to get the whole matched chunk, the note's outbound links, its tags and aliases and the chunk_id on every hit instead of the snippet. Results are ranked and may include notes that do not contain the query's words, so to learn which notes contain exactly a given string, or how many times, use find_text."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]},"detail":{"type":"string","enum":["compact","full"],"default":"compact","description":"compact returns a snippet per hit; full returns the matched chunk, outbound links and metadata."}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name. For a long note, get_note_outline lists its headings with their sizes and get_note_section returns only the sections you name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        get_note_outline_tool_schema(),
+        get_note_section_tool_schema(),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         tree_tool(),
@@ -1386,6 +1438,51 @@ fn evaluate_saved_query_tool_schema() -> Value {
             "additionalProperties": false
         },
         "annotations": read_only_tool_annotations(),
+    })
+}
+
+/// `get_note_outline` (#502). The description has to say what a section's
+/// size measures, since that number is what an agent budgets a read on.
+fn get_note_outline_tool_schema() -> Value {
+    json!({
+        "name": "get_note_outline",
+        "description": "List one exact Note's headings and sizes without returning any of its text, read from its authoritative Vault Markdown directory. Use it on a long note to choose which sections to read with get_note_section. Returns the note's content_hash (the same string get_note reports, so a hash-protected write can follow), size_bytes for the whole file, frontmatter_bytes, opening_text_bytes for the text between the frontmatter and the first heading, and headings in document order. Each heading has its text without the '#' characters, its level (1 to 6), its heading_path (the headings above it and its own text joined with ' > ', the form a search_notes hit's heading_path has) and size_bytes, the size of its section: the heading line and everything under it up to the next heading of the same or a higher level, subsections included, which is exactly what get_note_section returns for it and what replace_section replaces. A '#' line inside a fenced code block is not a heading. A note with no headings returns an empty list, not an error.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "slug": {"type": "string", "minLength": 1}
+            },
+            "required": ["vault_id", "slug"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
+}
+
+/// `get_note_section` (#502). The description has to keep an agent from
+/// handing a section to `update_note` as if it were the whole note.
+fn get_note_section_tool_schema() -> Value {
+    json!({
+        "name": "get_note_section",
+        "description": "Read whole sections of one exact Note, picked by heading, without the rest of the note. The note is read once from its authoritative Vault Markdown directory and the reply has one entry per requested heading, in the order asked. A section is the heading line and everything under it up to the next heading of the same or a higher level, subsections included: the span replace_section replaces. A found entry has requested (the string you sent), the heading_path it resolved to, its level, and the text in section, byte for byte as the file holds it. This is part of a note, never a whole one: do not pass it to update_note, which replaces the entire note. A string that matches nothing has error.code heading_not_found in its entry. One that matches several headings has heading_ambiguous, with error.matches listing each matching heading_path to ask for next; two headings that share a full heading path cannot be told apart. The other entries still come back. The reply's content_hash is the whole note's, the same string get_note reports, so edit_note or replace_section can follow. The frontmatter and the text before the first heading are not sections: use get_frontmatter or get_note for those. Call get_note_outline first when you do not know the headings.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "slug": {"type": "string", "minLength": 1},
+                "headings": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "maxItems": crate::vault_read::MAX_SECTION_HEADINGS,
+                    "description": "One to ten headings. Each is a heading's exact text without its '#' characters, such as Filing rules, or a heading path such as Rules > Filing rules, as get_note_outline and search_notes report it. A string that is the text of exactly one heading selects it; otherwise it is read as a heading path. Matching is exact, including case. An empty list, an empty string or more than ten is refused with the structured invalid_heading_selection error."
+                }
+            },
+            "required": ["vault_id", "slug", "headings"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
     })
 }
 

@@ -47,6 +47,8 @@ Use `resolve_wikilink` when the user names a note as an Obsidian wikilink target
 
 Use `get_note` only after search or wikilink resolution has found the note you need.
 
+For a long note where you want a few sections, do not read it all. `get_note_outline` lists its headings with the size of each section and returns no text, and `get_note_section` returns only the sections you name, by heading text or by the `heading_path` a search hit carries. A Vault's own rules note is the usual case: read the two rules you need, not all of them.
+
 A search hit is small on purpose. It names the note and carries a `snippet` of at most 200 characters, so you can raise `limit` up to 50 without filling your context. Pick the note from its title, path, heading and snippet, then read it with `get_note`. Pass `detail: "full"` only when you need the whole matched chunk, the note's outbound links or its tags on every hit, and keep `limit` low when you do.
 
 Use `get_tree` only when folder structure or broad navigation is the task.
@@ -67,7 +69,7 @@ An entry reading `stale` is the case you can do something about: that Vault's sn
 
 Before changing an existing note:
 
-1. Fetch it with `get_note`, or with `get_frontmatter` when only its properties are changing. That answer carries the same content hash without the body.
+1. Fetch it with `get_note`, or with `get_frontmatter` when only its properties are changing, or with `get_note_section` when only one section is. Those answers carry the same content hash without the whole body.
 2. Pass the returned content hash as the expected hash.
 3. Make the smallest change that does what was asked.
 

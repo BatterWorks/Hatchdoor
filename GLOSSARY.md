@@ -119,6 +119,14 @@ _Avoid_: Base, view, aggregator note, dashboard
 The notes a query selects, projected as rows carrying the properties the query asked for. Derived state: recomputed on demand and never written into a note. A saved query's result is not vault content, so it is absent from search, backlinks, statistics, and the graph.
 _Avoid_: Computed content, rendered note
 
+**Section**:
+A heading and everything under it up to the next heading of the same or a higher level, heading line included and subsections included. A heading inside a fenced code block opens no section. It is the unit `replace_section` writes and `get_note_section` reads, by one shared rule. The frontmatter block and the text before the first heading are not sections.
+_Avoid_: Block, part, chapter
+
+**Heading path**:
+The chain of headings above and including a heading, each without its `#` characters, joined with ` > `. It names a section when a heading's text alone is not unique in the note. A search hit carries one built from the first three heading levels.
+_Avoid_: Breadcrumb, anchor
+
 **Text match**:
 A request for every note whose text contains a given literal string. A text match selects: a note either contains the string or it does not, each matching note reports how many times, and the notes come back in a stable order. It covers the whole of a note as written, in every layer. Distinct from a search, which ranks by relevance and may return notes that contain none of the words asked for, and from a query, which tests a note's properties, tags, or path rather than its text.
 _Avoid_: Exact search, keyword search, grep, literal query

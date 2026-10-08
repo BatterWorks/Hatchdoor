@@ -55,6 +55,8 @@ pub enum SearchNotesData {
 }
 
 pub type GetNoteResult = crate::vault_read::VaultQualifiedNote;
+pub type GetNoteOutlineResult = crate::vault_read::NoteOutline;
+pub type GetNoteSectionResult = crate::vault_read::NoteSectionsResponse;
 pub type GetNoteLinksResult = VaultQualifiedLinks;
 pub type ResolveWikilinkResult = VaultResolveResponse;
 pub type GetTreeResult = VaultReadProjection<Vec<VaultTree>>;
@@ -462,6 +464,8 @@ output_schemas! {
     "list_vaults" => ListVaultsResult,
     "search_notes" => SearchNotesResult,
     "get_note" => GetNoteResult,
+    "get_note_outline" => GetNoteOutlineResult,
+    "get_note_section" => GetNoteSectionResult,
     "get_note_links" => GetNoteLinksResult,
     "resolve_wikilink" => ResolveWikilinkResult,
     "get_tree" => GetTreeResult,
@@ -558,12 +562,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 49,
-            "3 setup + 16 read + 2 manual + 1 batch + 9 management + 18 write tools"
+            total, 51,
+            "3 setup + 18 read + 2 manual + 1 batch + 9 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 49, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 51, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

@@ -38,6 +38,7 @@ You don't need to know the tool names; the agent picks them. This table is for c
 | Find every note with a tag, in a folder, or with a property | `list_vaults` → `query_notes` |
 | Find every note that contains an exact string | `list_vaults` → `find_text` |
 | Inspect it | `get_note` |
+| Read a few sections of a long note | `get_note_outline` to see its headings, then `get_note_section` with the ones you want |
 | Get the rows a note's saved query lists | `get_note` to see its `saved_queries`, then `evaluate_saved_query` with the name |
 | Add one item under a heading | `edit_note` or `replace_section`, with the returned content hash |
 | Change its tags or other metadata | `get_frontmatter` to see what's there, then `update_frontmatter` with the content hash `get_frontmatter` returned alongside it |
