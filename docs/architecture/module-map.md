@@ -3389,6 +3389,9 @@ opening prose reduced to plain text, cut to 200 characters), and escapes every
 value. Only `spa_note_handler` reads a note, through
 `VaultReadCore::{exact_note, exact_note_frontmatter}` on the demo browse
 surface, so any note that read refuses previews as the general wording.
+The `<title>` wording has a second copy in the web app,
+`frontend/src/app/pageTitle.ts` (#514), which takes the tab over once the page
+loads: change the two together.
 `og:url` and `og:image` are built on `HATCHDOOR_PUBLIC_URL` alone and are left
 out when it is empty; no request header is read. The picture is
 `frontend/public/link-preview.png`. `docs.rs` (#422, ADR-38) exports
@@ -3850,6 +3853,7 @@ boundaries are currently documentation-enforced.
 - `frontend/src/app/AppErrorBoundary.tsx`
 - `frontend/src/app/AppTopbar.tsx`
 - `frontend/src/app/ExplorerPane.tsx`
+- `frontend/src/app/pageTitle.ts`
 - `frontend/src/app/vaultSlot.tsx`
 - `frontend/src/app/vaultSlotLogic.ts`
 - `frontend/src/app/vaultAccordion.ts`
@@ -3885,6 +3889,16 @@ so `lib/storage.ts` exports `safeGetItem`/`safeSetItem`/`safeRemoveItem`
 `App.tsx`'s `<Routes>` ends in a `path="*"` catch-all (#339) that renders a
 "Page Not Found" `StateBlock` with a "Go to notes" action, so a stale or
 pre-#137 link never leaves the note pane empty.
+`app/pageTitle.ts` (#514) owns the browser tab title. `pageTitle` maps an
+address and the shell's `activeNote` to the wording, `<note title> ·
+Hatchdoor` on a note, `Graph`/`Stats`/`Settings · Hatchdoor`, bare
+`Hatchdoor` on `"/"` and `Page not found · Hatchdoor` on anything else, and
+`usePageTitle`, called once from `App.tsx`, writes it to `document.title`.
+`activeNote` outlives the note route and lags a move between notes, so it
+counts only while its Vault and slug are the ones the address names: a note
+that is loading or failed reads `Hatchdoor`, never the previous note. The
+wording is `src/handlers/link_preview.rs`'s for the page a demo instance
+serves, apart from an unknown address, which the server leaves as `Hatchdoor`.
 `main.tsx` also owns when the app may reload itself for a new service worker
 (#330). Registration stays `autoUpdate`, but the reload runs through
 `onNeedReload`, and both that and every `registration.update()` ask
@@ -4036,8 +4050,9 @@ surface is a coordination seam, not permission to move feature behavior into
 the shell.
 
 **Validation:** the applicable `App.*.test.tsx` (including
-`App.demo-mode.test.tsx`, #152, and `App.demo-startup-boundary.test.tsx`,
-#339), `app/AppErrorBoundary.test.tsx`, `app/ExplorerPane.test.tsx`,
+`App.demo-mode.test.tsx`, #152, `App.demo-startup-boundary.test.tsx`,
+#339, and `App.page-title.test.tsx`, #514), `app/pageTitle.test.tsx`,
+`app/AppErrorBoundary.test.tsx`, `app/ExplorerPane.test.tsx`,
 `app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
 `App.scope-reconcile.test.tsx` (#335),
 `vaults/vaultCollection.test.ts`, `useTheme.test.tsx`, storage tests, then full
