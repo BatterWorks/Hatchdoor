@@ -220,14 +220,15 @@ Notes inside a tree carry `title` and `slug` but no `vault_id`: the tree they si
 
 A compact hit, the default, has eight fields: `vault_id`, `note_slug`, `note_title`, `note_path`, `heading_path`, `score`, `layer` and `snippet`. It has no `content`, `outbound_links`, `metadata` or `chunk_id`.
 
-The `snippet` is at most 200 characters copied from the matched chunk, and its length cannot be changed:
+The `snippet` is at most 200 characters, and its length cannot be changed. Except for a `#tag` query, it is copied from the matched chunk:
 
 - In keyword mode it is centred on the first query word the chunk contains.
-- In semantic mode, and for a `#tag` query, it is the start of the chunk.
+- In semantic mode it is the start of the chunk.
+- For a `#tag` query it is the line `Matched tag: #<tag>`, which names the tag and is not copied from the note. A tag match has no matched chunk to quote.
 - `…` marks each side where text was left out. A chunk of 200 characters or fewer comes back whole, with no `…`.
 - A cut falls between words. Text with no spaces near the cut, such as Chinese or Japanese or a very long URL, is cut between characters instead, never inside one.
 
-Pass `detail: "full"` to get the earlier shape: every hit carries the whole chunk in `content`, the note's `outbound_links`, its `metadata` (tags and aliases) and the `chunk_id`, and no `snippet`. Any other `detail` value is refused as invalid input.
+Pass `detail: "full"` to get the earlier shape: every hit carries the whole chunk in `content`, the note's `outbound_links`, its `metadata` (tags and aliases) and the `chunk_id`, and no `snippet`. For a `#tag` query, `content` holds the line `Matched tag: #<tag>` instead of note text. Any other `detail` value is refused as invalid input.
 
 Both shapes return the same hits, with the same scores, in the same order. `detail` changes only what each hit carries. A `search_notes` item inside `batch` follows the same default.
 
