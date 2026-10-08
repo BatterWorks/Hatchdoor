@@ -4519,6 +4519,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_note_carries_the_metadata_get_frontmatter_reports() {
+        let (state, _tmp) = test_state();
+        let vault_path = registered_vault_path(&state);
+        let broken = "---\ntags: [unclosed\n---\n# Broken\n";
+        std::fs::write(
+            vault_path.join("Tagged.md"),
+            "---\ntags: [Space/Hobby, status/on-track]\naliases: [Tagged Home]\ndue: 2026-09-01\n---\n# Tagged\n",
+        )
+        .expect("write tagged note");
+        std::fs::write(vault_path.join("Broken.md"), broken).expect("write broken note");
+        let index = crate::vault::VaultIndex::build(&vault_path).expect("index");
+        let vault_id = match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot
+                .definitions()
+                .next()
+                .expect("test definition")
+                .vault_id(),
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("test recovery"),
+        };
+        state
+            .startup_sqlite
+            .replace_vault_snapshot(vault_id, &index, state.embedder.as_ref())
+            .expect("republish snapshot");
+        let schema = serde_json::to_value(
+            crate::mcp::results::output_schema_for("get_note").expect("schema"),
+        )
+        .expect("schema value");
+        let validator = jsonschema::validator_for(&schema).expect("valid schema");
+
+        let body = call_tool(&state, "get_note", json!({"slug": "tagged"})).await;
+        let tagged = &body["result"]["structuredContent"];
+        assert_eq!(
+            tagged["note"]["metadata"],
+            json!({
+                "tags": ["space/hobby", "status/on-track"],
+                "aliases": ["Tagged Home"],
+                "properties": {"due": "2026-09-01"},
+            })
+        );
+        assert!(validator.is_valid(tagged), "populated metadata: {tagged}");
+        let body = call_tool(&state, "get_frontmatter", json!({"slug": "tagged"})).await;
+        let frontmatter = &body["result"]["structuredContent"];
+        for field in ["tags", "aliases", "properties"] {
+            assert_eq!(tagged["note"]["metadata"][field], frontmatter[field]);
+        }
+
+        // test_state's Home has no frontmatter block.
+        let body = call_tool(&state, "get_note", json!({"slug": "home"})).await;
+        let plain = &body["result"]["structuredContent"];
+        assert_eq!(
+            plain["note"]["metadata"],
+            json!({"tags": [], "aliases": [], "properties": {}})
+        );
+        assert!(validator.is_valid(plain));
+
+        // Frontmatter that does not parse: the note still reads, whole.
+        let body = call_tool(&state, "get_note", json!({"slug": "broken"})).await;
+        let unparsed = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], false, "{body}");
+        assert_eq!(unparsed["note"]["metadata"], Value::Null);
+        assert_eq!(unparsed["note"]["content"], broken);
+        assert_eq!(
+            unparsed["note"]["content_hash"],
+            crate::cache::parse::content_hash(broken)
+        );
+        assert!(validator.is_valid(unparsed), "null metadata: {unparsed}");
+        let body = call_tool(&state, "get_frontmatter", json!({"slug": "broken"})).await;
+        assert_eq!(body["result"]["isError"], true, "{body}");
+    }
+
+    #[tokio::test]
     async fn get_frontmatter_reports_the_same_content_hash_get_note_does() {
         // A note with no frontmatter block still answers a hash, because the
         // hash covers the whole file rather than the frontmatter span (#227).

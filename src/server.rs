@@ -5953,6 +5953,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_scoped_note_read_carries_frontmatter_metadata() {
+        // The mapping proof that the HTTP read serialises the metadata the
+        // read core fills (#521); the three cases are asserted at the core.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &tmp.path().join("notes"),
+            &[
+                (
+                    "Home.md",
+                    "---\ntags: [Project/Active]\naliases: [Base]\ndue: 2026-09-01\n---\n# Home\n",
+                ),
+                ("Plain.md", "# Plain\n"),
+                ("Broken.md", "---\ntags: [unclosed\n---\n# Broken\n"),
+            ],
+            0,
+        )
+        .await;
+        let read = async |slug: &str| {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/notes/{slug}"))
+                        .method("GET")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        };
+
+        assert_eq!(
+            read("home").await["note"]["metadata"],
+            serde_json::json!({
+                "tags": ["project/active"],
+                "aliases": ["Base"],
+                "properties": {"due": "2026-09-01"},
+            })
+        );
+        assert_eq!(
+            read("plain").await["note"]["metadata"],
+            serde_json::json!({"tags": [], "aliases": [], "properties": {}})
+        );
+        assert_eq!(
+            read("broken").await["note"]["metadata"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
     async fn vault_scoped_update_note_rejects_stale_hash() {
         // The mapping proof for `write_conflict`, which every hash-checked
         // route shares; the concurrency rule itself is asserted at the
