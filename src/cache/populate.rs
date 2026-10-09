@@ -172,6 +172,11 @@ pub enum UpsertOutcome {
     },
 }
 
+/// Names the shape of the text a chunk row stores. Change it when that shape
+/// changes without the embedded text changing, so existing indexes are
+/// re-chunked once and keep their vectors.
+const CHUNK_STORED_TEXT_SHAPE: &str = "fence-markers";
+
 const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -308,6 +313,15 @@ impl SqliteCache {
             tracing::info!("Layer marker set changed; reclassifying every note");
         }
 
+        // The text a chunk row stores can change shape between versions while
+        // the note and its vectors stay the same (#532 put fence markers back
+        // around code). An index built before such a change holds the old
+        // shape for every note the upsert would skip, so a stamp that differs
+        // sends every note through the write path once. Vectors are reused by
+        // hash, so the pass re-chunks without re-embedding.
+        let stored_text_changed =
+            self.get_metadata("chunk_stored_text")?.as_deref() != Some(CHUNK_STORED_TEXT_SHAPE);
+
         // Guard against silent promotion: if a `.hatchdoor-layer` marker present
         // at the last index has vanished (a sync tool dropped the dotfile), keep
         // its notes on their prior layer rather than leaking them onto the default
@@ -413,7 +427,7 @@ impl SqliteCache {
         // of the measured full-vault runtime, and retaining these results gives
         // the heartbeat an exact embedding-work denominator without chunking
         // notes twice.
-        let force_note_refresh = marker_set_changed || embed_layers_changed;
+        let force_note_refresh = marker_set_changed || embed_layers_changed || stored_text_changed;
         for entry in &entries {
             let note_sync_started = Instant::now();
             let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
@@ -628,6 +642,7 @@ impl SqliteCache {
         set_metadata_in_transaction(&tx, "marker_set_hash", &marker_set_hash)?;
         set_metadata_in_transaction(&tx, "marker_set", &effective_markers_json)?;
         set_metadata_in_transaction(&tx, "embed_layers", embed_layers_value)?;
+        set_metadata_in_transaction(&tx, "chunk_stored_text", CHUNK_STORED_TEXT_SHAPE)?;
         set_metadata_in_transaction(&tx, "layer_catalog", &layer_catalog_json)?;
         if let Some(stamp) = build_stamp {
             set_metadata_in_transaction(
@@ -3170,6 +3185,98 @@ mod chunk_integration_tests {
         fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
             self.inner.token_count(text, add_special_tokens)
         }
+    }
+
+    const FENCED_NOTE: &str =
+        "# Atlas\n\nOne row per host.\n\n```mermaid\ngraph LR; zebrafish --> Gate\n```\n";
+
+    fn stored_chunk_contents(cache: &SqliteCache) -> Vec<String> {
+        let conn = cache.connection().expect("connection");
+        let mut stmt = conn
+            .prepare("SELECT content FROM chunks ORDER BY id")
+            .expect("prepare");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<Vec<String>, _>>()
+            .expect("rows")
+    }
+
+    #[test]
+    fn a_fenced_block_is_stored_with_its_markers_and_embedded_without_them() {
+        let dir = make_vault(&[("atlas.md", FENCED_NOTE)]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        let embedder = RecordingEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+
+        // The embedder input is what it was before #532: the title, the
+        // heading path and the chunk with the marker lines dropped (ADR-16).
+        let title = index.ordered_entries()[0].title.clone();
+        assert_eq!(
+            embedder.recorded(),
+            vec![embedder.document_input(
+                &title,
+                Some("Atlas"),
+                "# Atlas\n\nOne row per host.\n\ngraph LR; zebrafish --> Gate",
+            )]
+        );
+        assert_eq!(
+            stored_chunk_contents(&cache),
+            vec![
+                "# Atlas\n\nOne row per host.\n\n```mermaid\ngraph LR; zebrafish --> Gate\n```"
+                    .to_string()
+            ]
+        );
+        // The keyword index still matches a word that occurs only in the code.
+        let conn = cache.connection().expect("connection");
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_fts WHERE chunk_fts MATCH 'zebrafish'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts");
+        assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn an_index_from_before_fence_markers_is_rewritten_without_re_embedding() {
+        let dir = make_vault(&[("atlas.md", FENCED_NOTE)]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        let embedder = RecordingEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+        let with_markers = stored_chunk_contents(&cache);
+
+        // Put the index back the way an earlier version left it: no stamp, and
+        // chunk text without marker lines.
+        {
+            let conn = cache.connection().expect("connection");
+            conn.execute("DELETE FROM metadata WHERE key = 'chunk_stored_text'", [])
+                .expect("drop stamp");
+            conn.execute(
+                "UPDATE chunks SET content = replace(replace(content, '```mermaid\n', ''), '\n```', '')",
+                [],
+            )
+            .expect("old text");
+        }
+        assert_ne!(stored_chunk_contents(&cache), with_markers);
+
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("repopulate");
+        assert_eq!(stored_chunk_contents(&cache), with_markers);
+        assert_eq!(embedder.recorded().len(), 1, "the vector must be reused");
+
+        // With the stamp in place, an unchanged note is skipped again.
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("third pass");
+        assert_eq!(embedder.recorded().len(), 1);
     }
 
     #[test]
