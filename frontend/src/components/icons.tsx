@@ -7,14 +7,29 @@
  *
  * Path data is copied verbatim from `google/material-design-icons` (Apache
  * 2.0); only the surrounding markup differs. See `THIRD_PARTY_NOTICES.md`.
- * Nothing is installed — eighteen icons do not justify a dependency (ADR-13).
+ * Nothing is installed — a few dozen icons do not justify a dependency (ADR-13).
  *
  * Icons size to `1em` and paint with `currentColor`, so a caller controls both
  * through ordinary font-size and color. They are `aria-hidden`: every icon here
  * sits inside a control that carries its own accessible name.
  */
 
-const VIEW_BOX = "0 -960 960 960";
+import {
+  FORMAT_INDENT_DECREASE_PATH,
+  FORMAT_INDENT_INCREASE_PATH,
+  FORMAT_LIST_BULLETED_PATH,
+  CHECKLIST_PATH,
+  FORMAT_H2_PATH,
+  FORMAT_BOLD_PATH,
+  FORMAT_ITALIC_PATH,
+  FORMAT_STRIKETHROUGH_PATH,
+  CODE_PATH,
+  FORMAT_INK_HIGHLIGHTER_PATH,
+  LINK_PATH,
+  UNDO_PATH,
+  REDO_PATH,
+  VIEW_BOX,
+} from "./iconPaths";
 
 function Icon({ path }: { path: string }) {
   return (
@@ -138,4 +153,73 @@ export function CloseFullscreenIcon() {
   return (
     <Icon path="m136-80-56-56 264-264H160v-80h320v320h-80v-184L136-80Zm344-400v-320h80v184l264-264 56 56-264 264h184v80H480Z" />
   );
+}
+
+/* The live editor's formatting (#541): the keyboard bar on touch and the
+   floating toolbar on desktop. The toolbar is built outside React, so the
+   paths live in `iconPaths.ts`, which both read. */
+
+/** Material Symbols `format_indent_decrease`. */
+export function FormatIndentDecreaseIcon() {
+  return <Icon path={FORMAT_INDENT_DECREASE_PATH} />;
+}
+
+/** Material Symbols `format_indent_increase`. */
+export function FormatIndentIncreaseIcon() {
+  return <Icon path={FORMAT_INDENT_INCREASE_PATH} />;
+}
+
+/** Material Symbols `format_list_bulleted`. */
+export function FormatListBulletedIcon() {
+  return <Icon path={FORMAT_LIST_BULLETED_PATH} />;
+}
+
+/** Material Symbols `checklist`. */
+export function ChecklistIcon() {
+  return <Icon path={CHECKLIST_PATH} />;
+}
+
+/** Material Symbols `format_h2`. */
+export function FormatH2Icon() {
+  return <Icon path={FORMAT_H2_PATH} />;
+}
+
+/** Material Symbols `format_bold`. */
+export function FormatBoldIcon() {
+  return <Icon path={FORMAT_BOLD_PATH} />;
+}
+
+/** Material Symbols `format_italic`. */
+export function FormatItalicIcon() {
+  return <Icon path={FORMAT_ITALIC_PATH} />;
+}
+
+/** Material Symbols `format_strikethrough`. */
+export function FormatStrikethroughIcon() {
+  return <Icon path={FORMAT_STRIKETHROUGH_PATH} />;
+}
+
+/** Material Symbols `code`. */
+export function CodeIcon() {
+  return <Icon path={CODE_PATH} />;
+}
+
+/** Material Symbols `format_ink_highlighter`. */
+export function FormatInkHighlighterIcon() {
+  return <Icon path={FORMAT_INK_HIGHLIGHTER_PATH} />;
+}
+
+/** Material Symbols `link`. */
+export function LinkIcon() {
+  return <Icon path={LINK_PATH} />;
+}
+
+/** Material Symbols `undo`. */
+export function UndoIcon() {
+  return <Icon path={UNDO_PATH} />;
+}
+
+/** Material Symbols `redo`. */
+export function RedoIcon() {
+  return <Icon path={REDO_PATH} />;
 }

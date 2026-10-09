@@ -187,6 +187,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
+    // The live editor's library ships extensionless ESM imports, which Node's
+    // resolver refuses; served through Vite's instead, as the browser gets it.
+    server: { deps: { inline: ["@atomic-editor/editor"] } },
     // One jsdom per worker instead of one per file: about 20 s instead of 80 s
     // on 4 cores. The setup file resets what files would otherwise leak.
     isolate: false,

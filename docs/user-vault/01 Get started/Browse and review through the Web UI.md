@@ -36,7 +36,7 @@ Search always looks in every Vault that is turned on, whichever one the selector
 
 ## Edit notes
 
-On a Vault Hatchdoor can write to, you can edit notes in the browser. **New note**, at the bottom of the sidebar, creates a note. Click any paragraph, heading, list item or table row to edit it in place, or select **Edit** above the note (or press `E`) to open the whole note in a Markdown editor; [[How to edit notes with the live editor]] covers it in full. The **…** menu in the top bar holds the other things you can do with the open note: rename, move, copy its text or its link, download it, archive or delete it.
+On a Vault Hatchdoor can write to, you can edit notes in the browser. **New note**, at the bottom of the sidebar, creates a note. The note opens in a live editor: click anywhere in the body and type, with Markdown syntax showing only on the line you are on. **Reading** above the note shows the rendered page instead, and **Source** (or `E`) opens the whole note as Markdown with a Save button; [[How to edit notes with the live editor]] covers it in full. The **…** menu in the top bar holds the other things you can do with the open note: rename, move, copy its text or its link, download it, archive or delete it.
 
 If those controls are missing, the Vault is read-only or the instance is a public demo. If they carry a warning that the Vault's filesystem cannot swap two files in one step, editing still works; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains what that costs.
 

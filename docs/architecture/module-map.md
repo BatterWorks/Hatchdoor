@@ -3987,9 +3987,6 @@ error and keeps its count, so a routine reindex changes nothing on screen
 `NotePage.tsx` (ADR-30) to tell whether the open note is on its Vault's
 conflict list; this is a deliberate cross-capability import of one pure
 function rather than a duplicated copy of the Git code it checks.
-`lib/storage.ts`'s `isEditableTarget` is imported by `NotePage.tsx` on the
-same terms (#331), so document-level undo recognises editable targets with the
-shell's own keyboard-shortcut test.
 Note counts reach the slot from the
 collection client, which reads them at `"all"` scope independently of the
 browsing scope and refreshes them on the collection revision. The topbar's `Tree Stale` badge is deleted (#139) with
@@ -4842,8 +4839,12 @@ resolved one is pointed at the asset route, so a root-anchored or bare-name
 `![](path)`, the forms ADR-33's inserts can write, renders; an unresolved
 image keeps its destination. `resolveAssetTargets` is the uncached form the
 editor asks when choosing a `shortest` attachment path — heading/search-hit navigation, Markdown transformations,
-note navigation/rendering behavior, the editable-block component map produced by
-`createNoteMarkdownComponents`, the Vault-free `createManualMarkdownComponents`
+note navigation/rendering behavior, the reading view's component map produced by
+`createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
+`NotePage` shows the live editor on a writable Vault unless the browser's
+remembered `hatchdoor.noteReadingView` says otherwise, and the rendered page
+always on a read-only or demo Vault; headings and search hits are scrolled to
+through the editor's handle when it is mounted), the Vault-free `createManualMarkdownComponents`
 (#417: the same callouts, code, tables and headings, a `base` block shown as
 its source, no Vault endpoint, and links left to the caller's `renderLink`),
 consumed by the Help reader, the paragraph marker `CalloutOrQuote` uses to
@@ -4940,15 +4941,14 @@ additionally suppressed whenever `demoMode` is true (#152), regardless of
 `listHeldDrafts`: it names and links to a Settings surface withheld from a
 demo visitor entirely, and a pre-#137 held draft could in principle exist in
 any browser profile a demo instance happens to be served from. The
-`lib/writeDrafts.ts` draft now covers the inline write surface too (#330),
+`lib/writeDrafts.ts` draft now covers the live editor too (#330),
 not source mode alone: one debounced writer takes `handleInlineChange`,
-`handleInProgressChange` (text living only inside an open block) and source
+`handleInProgressChange` (text the editor holds that no save has seen) and source
 mode's `draftContent`, captures which note a scheduled write belongs to so a
 pending one cannot follow the page onto the next note, and forces the write out
 synchronously on `pagehide`, on `visibilitychange` to hidden, and on unmount —
 the window a closing tab or a service-worker auto-reload falls into. Because
-the inline editor has no open/close moment to read a draft at, recovery happens
-when the note lands: a draft naming the hash now on disk is the interrupted
+the live editor is always open, recovery happens when the note lands: a draft naming the hash now on disk is the interrupted
 write, so it goes back into the body and is handed to autosave to finish once
 inline editing is actually enabled (not on the commit the note arrives on,
 where wikilink resolution has not settled and autosave would swallow it); one
@@ -4964,19 +4964,17 @@ own reading-view notice, rather than refetched, because refetching is what
 would replace the unsaved text. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp has nothing
-to touch there. `handleSave`'s catch and `handleBodyDrop`'s attachment-upload
-catch both take the optional `onDemoRefusal` prop (#152, Note editing and
+to touch there. `handleSave`'s catch and the live editor's `onUploadError`
+both take the optional `onDemoRefusal` prop (#152, Note editing and
 vault actions), checked first — `handleSave` falls back to its existing
-`ConflictError`/generic-error branches on a miss, `handleBodyDrop` to its
-existing generic `onWriteNotice` fallback.
+`ConflictError`/generic-error branches on a miss, the upload to its
+generic `onWriteNotice` fallback.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, note editing (including its held-draft recovery
-model, #151), `app/vaultSlotLogic.ts`'s `noteInSyncConflict` (Application
-shell and navigation, ADR-30), and `lib/storage.ts`'s `isEditableTarget` (Application
-shell and navigation, #331), which `NotePage`'s document-level undo listener
-uses to leave Ctrl/Cmd+Z and Y typed into inputs, textareas and
-contenteditables outside the open block to the browser.
+model, #151), and `app/vaultSlotLogic.ts`'s `noteInSyncConflict` (Application
+shell and navigation, ADR-30). Undo is the live editor's own (CodeMirror
+history), so the page keeps no document history and no undo listener.
 
 **Coordination paths:** `App.tsx`, `types.ts`, `app/vaultSlotLogic.ts`,
 note/link/resolve/download handlers, `NoteEditor.tsx`,
@@ -4985,15 +4983,10 @@ query navigation, shared and responsive CSS.
 
 **Invariants:** vault Markdown remains the rendered source; vault content is
 data rather than trusted executable instructions; asset URLs retain auth and
-path safety; **the rendered body keeps one line per source line**, since inline
-editing addresses blocks by line number and a transform that collapses lines
-would write to the wrong place (`linesMatch` enforces this at runtime and
-disables inline editing for that note); a callout body and a wrapped list item
-are rebuilt rather than passed through, so their positions do not survive and a
-line's **index** is the only thing mapping it back to the file, which is why no
-interior line is dropped while splitting and why a list item whose rendered line
-count disagrees with the span it claims is addressed whole rather than written to
-a guessed line. The note body never waits for the links read (#361): the note
+path safety; **the reading view never writes**: it renders the note's text and toggles
+nothing, every edit going through the live editor or source mode; a callout
+body is rebuilt line by line rather than passed through, so no interior line
+is dropped while splitting. The note body never waits for the links read (#361): the note
 page fetches the note and its links at once, drops the skeleton when the note
 lands, and fills the links panel when its read settles, so a failed links read
 hides only the panel.
@@ -5016,28 +5009,22 @@ fragment jump), Markdown/heading/search/state tests,
 - `frontend/src/hooks/useNoteActions.ts`
 - `frontend/src/hooks/useNoteAutosave.ts`
 - `frontend/src/hooks/useWriteMode.ts`
-- `frontend/src/lib/blockOps.ts`
-- `frontend/src/lib/caretMap.ts`
-- `frontend/src/lib/caretPoint.ts`
-- `frontend/src/lib/editHistory.ts`
 - `frontend/src/lib/imageUpload.ts`
-- `frontend/src/lib/linePrefix.ts`
 - `frontend/src/lib/sourceMap.ts`
 - `frontend/src/lib/reloadGuard.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
-- `frontend/src/components/note-page/BlockGap.tsx`
-- `frontend/src/components/note-page/BlockInput.tsx`
-- `frontend/src/components/note-page/EditableBlock.tsx`
-- `frontend/src/components/note-page/InlineEditorProvider.tsx`
-- `frontend/src/components/note-page/blockEditorSetup.ts`
-- `frontend/src/components/note-page/editorFont.ts`
+- `frontend/src/components/note-page/live-editor/LiveEditor.tsx`
+- `frontend/src/components/note-page/live-editor/KeyboardBar.tsx`
+- `frontend/src/components/note-page/live-editor/commands.ts`
+- `frontend/src/components/note-page/live-editor/imageWidgets.ts`
+- `frontend/src/components/note-page/live-editor/menus.ts`
+- `frontend/src/components/note-page/live-editor/searchHighlight.ts`
 - `frontend/src/components/note-page/SaveState.tsx`
 - `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
 - `frontend/src/components/note-page/conflictDiff.ts`
 - `frontend/src/components/note-page/frontmatter.ts`
-- `frontend/src/components/note-page/inlineEditorContext.ts`
 - `frontend/src/components/note-page/linkStyle.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
@@ -5046,15 +5033,18 @@ validation, upload normalization, frontmatter editing, conflict display,
 note-link autocomplete and attachment inserts written in the Vault's link
 style (`linkStyle.ts`, ADR-33: `[[Title]]`/`![[path]]` in a wikilink Vault,
 `[Title](path.md)`/`![](path)` in a Markdown one, with paths encoded as the
-rename rewriter encodes them), inline block editing (the editor
-provider/context, the
-per-block wrapper, the CodeMirror block input and its markdown syntax
-highlighting, click-to-write in the space between blocks, structural block
-operations, document-level undo, which ignores Ctrl/Cmd+Z and Y aimed at an
-editable target outside `.block-input` (#331), autosave scheduling and save
-state), line
-mapping between rendered nodes and file lines, and attachment acceptance and
-insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
+rename rewriter encodes them), the live editor (#540, #541: `live-editor/`
+holds one CodeMirror 6 view over the whole note body in the Obsidian Live
+Preview manner, built on `@atomic-editor/editor`'s inline-preview, table and
+wikilink extensions; `LiveEditor` is uncontrolled and reconciles `value` only
+when it differs from its document, reports every change through `onChange`
+for the idle flush and the draft and the document through `onCommit` on blur
+or Escape, exposes `scrollToLine`/`scrollToHit`/`focus`/`blur` through its
+handle, and owns the `[[` completion in the Vault's link style, the `/` menu,
+the desktop-only selection toolbar, the touch keyboard bar, the image widgets
+under their lines, paste/drop attachment uploads and the `?q=` highlight;
+undo is CodeMirror's own, so the page keeps no document history), autosave
+scheduling and save state, and attachment acceptance and insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
 `UnsavedDrafts.tsx`; ordinary per-note and create drafts
@@ -5087,20 +5077,6 @@ that has already activated.
 — draft recovery — can pin which Vault a note is created in, overriding
 `resolvePrimaryVaultId`'s inference for that one dialog session.
 
-`lib/linePrefix.ts`'s `linePrefix` (#286) reads a line's whole invisible
-leading run - its indentation, then any list marker, task box, heading hashes,
-or quote arrows behind it - rather than only a marker and the indent ahead of
-one. Indentation counts with no marker required, so a wrapped list item's
-continuation line (addressed alone under D25a) reports the indent that has no
-rendered counterpart. `caretMap.ts` consumes it directly; its former private
-`invisiblePrefix`, which widened the answer for the caret only, is gone, and the
-two no longer disagree on an indented heading or quote. `note-page/editorFont.ts`'s
-`resolveFont` is the other half of making that hang land: `getComputedStyle().font`
-serializes empty whenever a longhand cannot fold back into the shorthand, which
-the heading fonts do through `font-variation-settings`, so the longhands are
-composed instead. `BlockInput.tsx` hangs nothing for a `code block` unit, whose
-leading spaces are partly rendered.
-
 `hooks/useWriteMode.ts` fails closed in demo mode on the server's word
 (#152): `GET .../write-capabilities` carries the same `demo_guard` layer every
 mutation route does (`src/server.rs`'s route registration, grouped with
@@ -5131,12 +5107,12 @@ return;`; closes the action dialog on a hit rather than leaving it open —
 extracted rather than repeated five times once the fifth call site made the
 duplication real, not premature); into `NotePage.tsx`'s `handleSave` catch
 (exits editing rather than showing `ConflictError`'s or a generic error's
-inline banner); into its `handleBodyDrop` attachment-upload catch (Note
+inline banner); into the live editor's `onUploadError` attachment-upload catch (Note
 reading and rendering, above); into `NoteEditor.tsx`'s own `uploadEditorFile`
 catch via a new `onDemoRefusal` prop `NotePage.tsx` passes straight through,
 so a demo refusal on an in-editor attachment drop or paste clears the
 editor's own inline `attachmentNotice` rather than showing it there; and into
-the block-editor autosave `save` callback `useNoteAutosave` wraps (`NotePage.tsx`
+the live-editor autosave `save` callback `useNoteAutosave` wraps (`NotePage.tsx`
 sets a local `autosaveDemoRefusal` flag on a hit, rethrows so the hook still
 halts autosave for the rest of this note session the same as any other
 failure, and that flag suppresses only the generic "could not reach the
@@ -5148,24 +5124,26 @@ message and carries no instruction either way).
 note candidates, and backend HTTP write endpoints.
 
 **Coordination paths:** `App.tsx`, `NotePage.tsx`, `types.ts`,
-`noteEnhancements.css`, `features/settings/UnsavedDrafts.tsx` (consumes the
+`noteEnhancements.css`, `vite.config.ts` and `src/test/setup.ts` (vitest
+inlines `@atomic-editor/editor`, whose ESM imports carry no extensions, and
+polyfills the `Range` rects CodeMirror measures with), `features/settings/UnsavedDrafts.tsx` (consumes the
 held-draft model and `openCreateDialog`'s target-Vault override), backend
 `handlers/vault_write.rs`, and `vault/write/**`.
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
 safety; every mutation continues through backend `vault/write` (ADR-03/11);
-**nothing re-serializes a note** — edits replace only the lines a block owns and
-reproduce the file's own line endings; **block operations refuse rather than
-guess** when a range no block owns lies between them, or when the rendered tree
-is still settling behind a wikilink resolve.
+**nothing re-serializes a note** — the editor's document is the file's text,
+the body is put back under the current frontmatter in the file's own line
+ending, and no save ever rewrites what was not typed; **the floating toolbar
+never mounts on a coarse pointer** (#540), where the keyboard bar carries the
+formatting instead.
 
 **Validation:** write API (`writeApi.test.ts`, including the demo_read_only
 code-carrying cases), editor, action dialog, upload, draft, path,
-frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
-`caretMap`, `caretPoint`, `editHistory`, `linePrefix`, `editorFont`,
-`useNoteAutosave`,
-`attachmentDrop`, `inlineEditing`, and `properties` tests;
+frontmatter, conflict, and autocomplete tests; `sourceMap`,
+`useNoteAutosave`, `attachmentDrop`, `live-editor/LiveEditor`,
+`live-editor/commands`, and `properties` tests;
 `useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
 `App.demo-mode.test.tsx` (#152), and full frontend checks.
 
@@ -5534,6 +5512,7 @@ frontend typecheck, then full frontend checks.
 
 - `frontend/src/components/ui.tsx`
 - `frontend/src/components/icons.tsx`
+- `frontend/src/components/iconPaths.ts`
 - `frontend/src/index.css`
 - `frontend/src/App.css`
 - `frontend/src/assets/fonts/fonts.css`
@@ -5548,7 +5527,7 @@ The tokens in `base.css` are governed by
 [`docs/design/design-system.html`](../design/design-system.html), which is
 authoritative for visual decisions across every feature stylesheet; a component
 the system does not yet cover gets its section added by the change that ships
-it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to
+it. `icons.tsx` holds the inlined Material Symbols (Sharp) set, with `iconPaths.ts` carrying the path data and a DOM builder for the live editor's floating toolbar, which CodeMirror draws outside React (#541); icons size to
 `1em` and paint with `currentColor`, so callers control them through font-size
 and color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `assets/fonts/fonts.css`
 (#475) declares the four families the `base.css` font tokens name, from `woff2`

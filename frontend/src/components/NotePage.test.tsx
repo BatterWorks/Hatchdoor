@@ -1,6 +1,5 @@
 import {
   cleanup,
-  createEvent,
   fireEvent,
   render,
   screen,
@@ -134,7 +133,7 @@ describe("NotePage saves through every Vault condition (#372)", () => {
   }
 
   async function saveFromSourceMode(saved: string[]): Promise<void> {
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
     const textarea = await screen.findByRole("textbox");
     fireEvent.change(textarea, { target: { value: "Body, edited." } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -162,7 +161,7 @@ describe("NotePage saves through every Vault condition (#372)", () => {
 
     renderNote(vault.vault_id, { vaults: [vault] });
 
-    await screen.findByRole("button", { name: "Edit" });
+    await screen.findByRole("button", { name: "Source" });
     expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
     expect(screen.queryByText(/Edits aren.t saving/)).not.toBeInTheDocument();
     expect(
@@ -199,7 +198,9 @@ describe("NotePage saves through every Vault condition (#372)", () => {
     renderNote(vault.vault_id, { vaults: [vault] });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Source" }),
+      ).toBeInTheDocument();
     });
     expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
     expect(
@@ -261,14 +262,14 @@ describe("NotePage sync conflict notice (ADR-30)", () => {
       await screen.findByText(/This note is part of a sync conflict/),
     ).toBeInTheDocument();
     expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Source" })).toBeInTheDocument();
   });
 
   it("says nothing on a note the conflict does not list", async () => {
     const vault = conflictedVault(["Other.md"]);
     serveHome(vault.vault_id);
     renderNote(vault.vault_id, { vaults: [vault] });
-    await screen.findByRole("button", { name: "Edit" });
+    await screen.findByRole("button", { name: "Source" });
     expect(
       screen.queryByText(/This note is part of a sync conflict/),
     ).not.toBeInTheDocument();
@@ -641,7 +642,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
 
     renderNote("vault-1", { vaults: [] });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
     const textarea = await screen.findByRole("textbox");
     fireEvent.change(textarea, { target: { value: "Body being typed." } });
 
@@ -661,7 +662,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
 
     renderNote("vault-1", { vaults: [] });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
     const textarea = await screen.findByRole("textbox");
     fireEvent.change(textarea, { target: { value: "Body being typed." } });
 
@@ -683,34 +684,6 @@ describe("NotePage crash-safe inline editing (#330)", () => {
   // not write a draft. On a Vault that refuses the commit, the draft left on
   // disk held the pre-undo text, so the page going away restored the edit the
   // user had just taken back.
-  it("writes the draft for an undo the Vault will not take", async () => {
-    const sent = mockVault("First paragraph.\n", "hash", "vault-1", {
-      refuseWrites: true,
-    });
-
-    renderNote("vault-1", { vaults: [] });
-
-    fireEvent.click(await screen.findByText("First paragraph."));
-    typeInOpenBlock("First paragraph, edited.");
-    fireEvent.blur(screen.getByRole("textbox"));
-    await screen.findByText("First paragraph, edited.");
-    await screen.findByText(/Hatchdoor could not reach the vault/);
-
-    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
-    await screen.findByText("First paragraph.");
-
-    act(() => {
-      window.dispatchEvent(new Event("pagehide"));
-    });
-
-    // The edit was refused and autosave stopped, so the undo is never sent and
-    // the draft is the only copy of what the user is looking at.
-    expect(sent).toHaveLength(1);
-    const draft = loadNoteDraft("vault-1", "home");
-    expect(draft?.content).toContain("First paragraph.");
-    expect(draft?.content).not.toContain("edited");
-  });
-
   it("autosaves an inline edit in a Vault whose sync stopped (#372)", async () => {
     const vault = syncStoppedVault("Beta");
     const sent = mockVault("First paragraph.\n", "hash", vault.vault_id);
@@ -786,6 +759,21 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     await waitFor(() => expect(isAppReloadHeld()).toBe(false));
   });
 
+  it("puts the edited body back under the frontmatter in the file's own line ending", async () => {
+    const sent = mockVault("---\r\ntags: [a]\r\n---\r\nBody line.\r\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    await screen.findByText("Body line.");
+    typeInOpenBlock("Body line, edited.\nSecond line.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    const body = JSON.parse(String(sent[0].init?.body)) as { content: string };
+    expect(body.content).toBe(
+      "---\r\ntags: [a]\r\n---\r\nBody line, edited.\r\nSecond line.\r\n",
+    );
+  });
+
   // The full source editor keeps its text in a debounced draft, so a reload
   // between a keystroke and that write loses it just as surely (#332).
   it("holds off the service-worker reload while the source editor is open", async () => {
@@ -793,7 +781,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
 
     renderNote("vault-1", { vaults: [] });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
     const textarea = await screen.findByRole("textbox");
     fireEvent.change(textarea, { target: { value: "Body being typed." } });
     expect(isAppReloadHeld()).toBe(true);
@@ -910,10 +898,10 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
 
   function openBlock(): HTMLElement {
     const block = document.querySelector<HTMLElement>(
-      ".block-input .cm-content",
+      ".live-editor .cm-content",
     );
     if (!block) {
-      throw new Error("no block is open");
+      throw new Error("no live editor is mounted");
     }
     return block;
   }
@@ -938,7 +926,7 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     const sent = mockTwoNotes(disk);
     renderWithNav();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
     fireEvent.change(await screen.findByRole("textbox"), {
       target: { value: "Home body, edited here.\n" },
     });
@@ -953,7 +941,7 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     // inherit a review of home's disk version against other's text.
     fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
     expect(await screen.findByText("Other body.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source" }));
     await screen.findByRole("textbox");
     expect(
       screen.queryByRole("region", { name: "Conflict review" }),
@@ -990,7 +978,7 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     });
     renderWithNav();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
     fireEvent.change(await screen.findByRole("textbox"), {
       target: { value: "Home body, edited here.\n" },
     });
@@ -1005,49 +993,11 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source" }));
     await screen.findByRole("textbox");
     expect(
       screen.queryByRole("region", { name: "Conflict review" }),
     ).not.toBeInTheDocument();
-  });
-
-  it("does not run document undo for Ctrl+Z typed into another text field", async () => {
-    const disk = {
-      home: { content: "First paragraph.\n", hash: "home-1" },
-      other: { content: "Other body.\n", hash: "other-1" },
-    };
-    const sent = mockTwoNotes(disk);
-    renderWithNav(
-      <>
-        <input aria-label="Search box" />
-        <textarea aria-label="Property box" />
-      </>,
-    );
-
-    fireEvent.click(await screen.findByText("First paragraph."));
-    typeInOpenBlock("First paragraph, edited.");
-    fireEvent.blur(openBlock());
-    await screen.findByText("First paragraph, edited.");
-    await waitFor(() => expect(sent).toHaveLength(1));
-
-    const input = screen.getByLabelText("Search box");
-    const inputUndo = fireEvent.keyDown(input, { key: "z", ctrlKey: true });
-    const textareaUndo = fireEvent.keyDown(
-      screen.getByLabelText("Property box"),
-      { key: "z", metaKey: true },
-    );
-
-    // The field keeps its own native undo, and the note is left alone.
-    expect(inputUndo).toBe(true);
-    expect(textareaUndo).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(screen.getByText("First paragraph, edited.")).toBeInTheDocument();
-    expect(sent).toHaveLength(1);
-
-    // Outside any field, document undo still answers.
-    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
-    expect(await screen.findByText("First paragraph.")).toBeInTheDocument();
   });
 
   it("never restores a draft older than the last inline save into source mode", async () => {
@@ -1071,101 +1021,20 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     fireEvent.blur(screen.getByRole("textbox"));
     await waitFor(() => expect(sent).toHaveLength(1));
     await waitFor(() =>
-      expect(disk.home.content).toBe("First paragraph, saved inline.\n"),
+      expect(disk.home.content).toBe("First paragraph, saved inline."),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source" }));
     const textarea = (await screen.findByRole(
       "textbox",
     )) as HTMLTextAreaElement;
-    expect(textarea.value).toBe("First paragraph, saved inline.\n");
+    expect(textarea.value).toBe("First paragraph, saved inline.");
     expect(screen.queryByText(/Restored an earlier draft/)).toBeNull();
-  });
-
-  it("places a dropped attachment after the block aimed at when the open block gained lines", async () => {
-    const disk = {
-      home: {
-        content: "First paragraph.\n\nSecond paragraph.\n",
-        hash: "home-1",
-      },
-      other: { content: "Other body.\n", hash: "other-1" },
-    };
-    const sent = mockTwoNotes(disk);
-    // jsdom lays nothing out, so each block is given a band by its first line.
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
-      function (this: HTMLElement) {
-        const start = Number(this.dataset.startLine);
-        const top = Number.isFinite(start) ? start * 100 : 0;
-        return {
-          top,
-          bottom: top + 50,
-          left: 0,
-          right: 100,
-          width: 100,
-          height: 50,
-          x: 0,
-          y: top,
-          toJSON: () => ({}),
-        } as DOMRect;
-      },
-    );
-    const { container } = renderWithNav();
-
-    fireEvent.click(await screen.findByText("First paragraph."));
-    // Still open when the file lands: the drop's own blur commits it, and the
-    // commit turns one line into two.
-    typeInOpenBlock("First line.\nAn added line.");
-
-    const file = new File(["%PDF-1.4"], "scan.pdf", {
-      type: "application/pdf",
-    });
-    const dropZone = container.querySelector(".note-body-drop")!;
-    // jsdom has no DragEvent, so the coordinates are put on by hand.
-    const drop = createEvent.drop(dropZone);
-    Object.defineProperty(drop, "clientY", { value: 320 });
-    Object.defineProperty(drop, "dataTransfer", {
-      value: { files: [file], types: ["Files"] },
-    });
-    fireEvent(dropZone, drop);
-
-    await waitFor(() =>
-      expect(
-        sent.filter((entry) => entry.init.method === "PUT").length,
-      ).toBeGreaterThan(0),
-    );
-    await waitFor(() =>
-      expect(disk.home.content).toContain("![[Attachments/scan.pdf]]"),
-    );
-    expect(disk.home.content).toBe(
-      "First line.\nAn added line.\n\nSecond paragraph.\n\n![[Attachments/scan.pdf]]\n",
-    );
   });
 
   // Found in the live pass for #331: the history for the note just opened was
   // seeded while the page still held the previous note, so undoing the first
   // edit there wrote the previous note's whole text over this one.
-  it("never undoes into the text of the note that was open before", async () => {
-    const disk = {
-      home: { content: "Home body.\n", hash: "home-1" },
-      other: { content: "Other body.\n", hash: "other-1" },
-    };
-    const sent = mockTwoNotes(disk);
-    renderWithNav();
-
-    await screen.findByText("Home body.");
-    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
-    fireEvent.click(await screen.findByText("Other body."));
-    typeInOpenBlock("Other body, edited.");
-    fireEvent.blur(openBlock());
-    await waitFor(() =>
-      expect(disk.other.content).toBe("Other body, edited.\n"),
-    );
-
-    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
-    await waitFor(() => expect(sent).toHaveLength(2));
-    await waitFor(() => expect(disk.other.content).toBe("Other body.\n"));
-    expect(disk.home.content).toBe("Home body.\n");
-  });
 });
 
 describe("NotePage body before links (#361)", () => {
@@ -1324,6 +1193,8 @@ describe("NotePage reading chrome (#530)", () => {
     );
     renderNote(vaultId);
     await screen.findByRole("heading", { level: 2, name: "Home" });
+    // The rendered page is the reading view; the editor is the default.
+    fireEvent.click(await screen.findByRole("button", { name: "Reading" }));
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { level: 2, name: "Role" }),
@@ -1354,7 +1225,7 @@ describe("NotePage reading chrome (#530)", () => {
     });
   });
 
-  it("shows the Edit button's shortcut hint on desktop", async () => {
+  it("shows the Source button's shortcut hint on desktop", async () => {
     const vaultId = "vault-1";
     mockNote(vaultId, async () =>
       jsonResponse({ vault_id: vaultId, results: [] }),
@@ -1362,11 +1233,11 @@ describe("NotePage reading chrome (#530)", () => {
 
     renderNote(vaultId);
 
-    const edit = await screen.findByRole("button", { name: "Edit" });
+    const edit = await screen.findByRole("button", { name: "Source" });
     expect(edit.querySelector(".shortcut-hint")).toHaveTextContent("E");
   });
 
-  it("leaves the shortcut hint off the Edit button on a phone", async () => {
+  it("leaves the shortcut hint off the Source button on a phone", async () => {
     const vaultId = "vault-1";
     await atPhoneWidth(async () => {
       mockNote(vaultId, async () =>
@@ -1375,9 +1246,9 @@ describe("NotePage reading chrome (#530)", () => {
 
       renderNote(vaultId);
 
-      const edit = await screen.findByRole("button", { name: "Edit" });
+      const edit = await screen.findByRole("button", { name: "Source" });
       expect(edit.querySelector(".shortcut-hint")).toBeNull();
-      expect(edit).toHaveTextContent(/^Edit$/);
+      expect(edit).toHaveTextContent(/^Source$/);
     });
   });
 });

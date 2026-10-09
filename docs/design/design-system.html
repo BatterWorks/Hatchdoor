@@ -137,7 +137,6 @@
     --space-12: 3rem;
     --space-16: 4rem;
     --radius-pill: 999px;
-    --edit-gutter: 0.75rem;
     --radius-none: 0;
     --dur-fast: 120ms;
     --dur: 200ms;
@@ -1644,76 +1643,10 @@
   .stage-note > .note-body { max-width: 798px; }
 
   /* ════════════════════════════════════════════════════════════════
-     COMPONENT — Inline editing
+     COMPONENT — Live editor
      ════════════════════════════════════════════════════════════════ */
-  .editable-block { position: relative; cursor: text; }
-  .editable-block::after {
-    content: "";
-    position: absolute;
-    left: calc(var(--edit-gutter) * -1);
-    top: 0.15em; bottom: 0.15em;
-    width: 1px;
-    background: var(--hot);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--dur-fast) var(--ease);
-  }
-  .editable-block:hover::after, .editable-block.is-hover::after { opacity: 0.45; }
-  .editable-block.is-active::after { width: 2px; opacity: 1; }
-
-  .block-input {
-    display: block;
-    width: 100%;
-    box-sizing: border-box;
-    margin: 0; padding: 0; border: 0;
-    border-radius: var(--radius-none);
-    background: transparent;
-    resize: none;
-    overflow: hidden;
-    outline: none;
-    font: inherit;
-    color: inherit;
-    letter-spacing: inherit;
-    text-transform: none;
-    caret-color: var(--hot);
-  }
-
-  .save-state {
-    font-family: var(--font-sans);
-    font-size: 0.72rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .save-state.is-error { color: var(--err-fg); }
-
-  .write-notice {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.6rem 0.85rem;
-    border: 1px solid var(--rule);
-    border-radius: var(--radius-none);
-    background: var(--paper);
-    color: var(--ink);
-    font-family: var(--font-sans);
-    font-size: 0.9rem;
-  }
-
-  .note-property-input {
-    width: 100%;
-    box-sizing: border-box;
-    border: 1px solid var(--rule-strong);
-    border-radius: var(--radius-none);
-    background: var(--paper);
-    font-family: var(--font-sans);
-    font-size: 0.88rem;
-    color: var(--ink);
-    padding: 0.15rem 0.35rem;
-  }
-  .note-property-input:focus { outline: none; border-color: var(--hot); }
+  .live-editor-demo { font-family: var(--font-serif); font-size: 1.18rem; line-height: 1.62; }
+  .live-editor-demo .syntax { color: var(--muted); opacity: 0.65; }
 
   /* ════════════════════════════════════════════════════════════════
      UTIL — keys/values list for tokens display
@@ -1849,7 +1782,7 @@
     <a href="#home">Home</a>
 
     <h3>Editing</h3>
-    <a href="#editing">Inline editing</a>
+    <a href="#editing">Live editor</a>
     <a href="#save-state">Save state</a>
     <a href="#write-notice">Notices &amp; banners</a>
 
@@ -2725,51 +2658,34 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <!-- ───────── INLINE EDITING ───────── -->
     <section class="doc-section" id="editing">
       <div class="doc-section-num">§20</div>
-      <h2>Inline editing</h2>
-      <p class="blurb">Clicking a block swaps it for a textarea holding that block&rsquo;s own markdown. The affordance is a <b>rule in the left gutter</b>, not a fill and not a box: it reuses the device the list bullet already uses, so it reads as content rather than as a control, and it costs no horizontal space, so nothing reflows.</p>
-      <p class="blurb">It is drawn with <span class="key">::after</span> because <span class="key">::before</span> is already the list marker, and <span class="key">.editable-block</span> is the rendered element itself. Wrapping blocks in a div would sit between a <code>ul</code> and its <code>li</code> children and break every marker rule.</p>
+      <h2>Live editor</h2>
+      <p class="blurb">On a writable Vault the note body <b>is</b> one CodeMirror editor, Obsidian Live Preview style (#540). Markdown syntax shows on the caret line and renders everywhere else; the document is the file&rsquo;s text and nothing re-serializes it. The editor carries no chrome of its own: no border, no fill, no gutter, so a note in the editor and a note in Reading view sit on the same paper at the same measure.</p>
+      <p class="blurb">The library exposes its typography and palette as custom properties. They are <b>mapped onto Forge tokens</b> in <span class="key">note-content.css</span> and never set to a literal: prose is <span class="key">--font-serif</span> at the paragraph&rsquo;s own 1.18rem / 1.62, the caret and links are <span class="key">--hot</span>, selection and search hits are <span class="key">--highlight</span>, code is the dark <span class="key">--code-surface</span> slab. Headings take the level&rsquo;s own face on their line, transforms excepted, so the typist sees the string being written.</p>
+      <div class="tag-row"><span class="key">.live-editor</span><span class="key">.atomic-cm-editor</span><span class="key">--atomic-editor-*</span><span class="key">caret-color: --hot</span></div>
 
-      <div class="stage stage-note paper">
-        <div class="note-body">
-          <p class="editable-block">Resting: no mark at all, so a note reads as a document.</p>
-          <p class="editable-block is-hover">Hovered: a 1px hot hairline at 45% in the gutter.</p>
-          <p class="editable-block is-active">Active: the same device at 2px and full weight. No ring, no fill, so it does not fight the borders callouts and tables already carry.</p>
-        </div>
-      </div>
-      <div class="tag-row"><span class="key">.editable-block</span><span class="key">.editable-block:hover</span><span class="key">.editable-block.is-active</span><span class="key">--edit-gutter</span></div>
+      <h3 class="doc-sub">The pane scrolls, not the editor</h3>
+      <p class="blurb">The editor&rsquo;s scroller is <code>overflow: visible</code> and its height is auto, so it grows with the text and the note pane remains the one scroll container. A jump from the table of contents or a search hit is a CodeMirror scroll-into-view, which scrolls the pane.</p>
 
-      <h3 class="doc-sub">The gutter is borrowed, not owned</h3>
-      <p class="blurb">The note body sits flush against its container. The space the rule occupies is <span class="key">.note-pane</span>&rsquo;s padding, which is <b>56px on desktop and 16px on a phone</b>, and that element is <code>overflow-x: hidden</code>. Clipping happens at the padding box, so a negative-margin rule survives, but the offset has to be a token rather than a constant.</p>
+      <h3 class="doc-sub">Floating toolbar (desktop)</h3>
+      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, as the same Sharp icons the keyboard bar uses. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
+      <div class="tag-row"><span class="key">.live-editor-toolbar</span><span class="key">background: --ink</span><span class="key">--shadow-float</span></div>
 
-      <h3 class="doc-sub">Block input: match the metrics, never the transforms</h3>
-      <p class="blurb">The input inherits family, size, weight, line-height and colour from the block it replaces, and explicitly resets <code>text-transform</code>. Three rendered styles in this system uppercase their text &mdash; <code>h1</code>, <code>h3</code>, <code>h6</code>, callout titles and table headers &mdash; and an input that inherited that would show the typist a different string than the one being written to the file.</p>
-      <p class="blurb">The line&rsquo;s markdown prefix is <b>measured and hung into the gutter</b>, so the visible text does not move on entry. A fixed hang cannot work: <code>- </code> is about 9px while the bullet it replaces is inset 22.4px, and the width varies per prefix. On a phone the hang is clamped to the pane&rsquo;s 16px, so a long prefix shifts slightly rather than being clipped.</p>
-      <div class="tag-row"><span class="key">.block-input</span><span class="key">font: inherit</span><span class="key">text-transform: none</span><span class="key">caret-color: --hot</span></div>
+      <h3 class="doc-sub">Menus</h3>
+      <p class="blurb">The <code>/</code> menu at the start of a line and the <code>[[</code> completion share the search dialog&rsquo;s idiom: paper surface, <span class="key">--rule-strong</span> border, the selected row on <span class="key">--hot-soft</span>, the detail column in mono <span class="key">--muted</span>.</p>
+      <div class="tag-row"><span class="key">.cm-tooltip-autocomplete</span><span class="key">.cm-completionDetail</span></div>
 
-      <h3 class="doc-sub">Per-unit skins</h3>
-      <table class="kv-table">
-        <tr><th>Unit</th><th>Skin</th></tr>
-        <tr><td class="name">paragraph</td><td class="val">serif 1.18rem / 1.62</td></tr>
-        <tr><td class="name">heading</td><td class="val">the level&rsquo;s own family and size, transform reset</td></tr>
-        <tr><td class="name">list item</td><td class="val">sans 1.02rem, marker hidden while active</td></tr>
-        <tr><td class="name">callout title</td><td class="val">band&rsquo;s display face; light on a saturated fill for a known kind, dark on paper otherwise</td></tr>
-        <tr><td class="name">callout body</td><td class="val">serif italic 1.02rem</td></tr>
-        <tr><td class="name">fenced code</td><td class="val">--code-surface / --code-ink, mono 0.82rem</td></tr>
-        <tr><td class="name">fence, no language</td><td class="val">bare <code>pre</code>, a different presentation from .code-block</td></tr>
-        <tr><td class="name">table row</td><td class="val">mono, overlaid on the row (see below)</td></tr>
-      </table>
+      <h3 class="doc-sub">Touch: a bar above the keyboard, no floating toolbar</h3>
+      <p class="blurb">A phone draws its own Cut / Copy / Paste callout over a selection, in exactly the place a floating toolbar would sit, and the two fight. On a coarse pointer the toolbar is not mounted at all, and the formatting lives in a fixed bar above the keyboard, each a Sharp icon from §26: indent, outdent, bullet, to-do, heading, bold, italic, strikethrough, code, highlight, link, undo, redo, and <b>Done</b> as a word in <span class="key">--hot</span>. The bar is lifted by the part of the layout viewport the keyboard hides (iOS overlays it; Android resizes), and pads the safe-area inset. Buttons act on <code>mousedown</code> and prevent it, so focus never leaves the editor and the keyboard stays up.</p>
+      <div class="tag-row"><span class="key">.live-editor-keyboard-bar</span><span class="key">.live-editor-keyboard-done</span><span class="key">env(safe-area-inset-bottom)</span></div>
 
-      <h3 class="doc-sub">Table rows are overlaid, not replaced</h3>
-      <p class="blurb">A <code>tr</code> may not contain a textarea, and swapping its cells for one lets every column resize on entry and again on exit, because widths derive from content. The cells stay in the flow holding the grid still, and the input is laid over the row from inside its first cell.</p>
+      <h3 class="doc-sub">Images</h3>
+      <p class="blurb">An image is drawn as a block under the line that embeds it, in the reading view&rsquo;s frame: <span class="key">--rule</span> border on <span class="key">--paper</span>. The line keeps its source, so the path stays editable.</p>
+      <div class="tag-row"><span class="key">.live-editor-image</span></div>
 
-      <h3 class="doc-sub">Touch</h3>
-      <p class="blurb">A tap reads; a <b>double tap</b> (400ms, within 30px) enters a block. Tap-to-edit would raise the keyboard on every stray touch, and reading is the dominant mode on a phone. This was a 500ms long press until a real phone showed it racing the OS text-selection gesture: nothing sets <code>user-select</code> on the note body, so holding raised selection handles and the copy bar against the block opening. A double tap makes no contact with that gesture, and the window can be generous because a single tap on prose has no action to delay.</p>
-      <p class="blurb"><code>touch-action: manipulation</code> on the block is load-bearing rather than polish. The viewport sets no <code>maximum-scale</code>, so without it a double tap zooms the page instead of opening the block; it drops double-tap zoom while leaving panning and pinch-zoom intact. Only a real touch pointer arms the two-tap requirement, so a screen reader activating the focused block still enters on one activation.</p>
-      <p class="blurb">The gutter rule is drawn persistently at low opacity on coarse pointers, but it is ambient signal, not instruction: a hairline says <i>something is here</i> and cannot say what gesture reaches it. A one-time notice, <span class="mono">Double-tap a line to edit it.</span>, carries the teaching. It retires on the first landed edit rather than on entry, so an accidental double tap does not count as having taught anything.</p>
-      <p class="blurb">It borrows the write notice's shell and its <b>&times;</b> rather than being silently its own dismiss target. On touch, <code>cursor: pointer</code> is the only signal a self-dismissing line has, and there is no cursor: a notice that can be dismissed has to look like one. The <b>&times;</b> takes a 44px target here, because this notice only ever meets a finger, while the shared device keeps its own size where it is also a mouse target.</p>
+      <h3 class="doc-sub">The view toggle</h3>
+      <p class="blurb">Above the note, beside the save badge: <b>Reading</b> switches to the rendered page and reads <b>Editing</b> there, a <code>.close-note</code> button like <b>Source</b> next to it, with <code>aria-pressed</code> carrying the state.</p>
     </section>
 
-    <!-- ───────── SAVE STATE ───────── -->
     <section class="doc-section" id="save-state">
       <div class="doc-section-num">§21</div>
       <h2>Save state</h2>
@@ -2977,6 +2893,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">graph_3</td><td class="val">rail: graph</td></tr>
           <tr><td class="name">inbox</td><td class="val">rail: changed on disk</td></tr>
           <tr><td class="name">settings</td><td class="val">rail: settings</td></tr>
+          <tr><td class="name">format_indent_decrease</td><td class="val">live editor keyboard bar: outdent</td></tr>
+          <tr><td class="name">format_indent_increase</td><td class="val">live editor keyboard bar: indent</td></tr>
+          <tr><td class="name">format_list_bulleted</td><td class="val">live editor keyboard bar: bullet</td></tr>
+          <tr><td class="name">checklist</td><td class="val">live editor keyboard bar: to-do</td></tr>
+          <tr><td class="name">format_h2</td><td class="val">live editor keyboard bar: heading</td></tr>
+          <tr><td class="name">format_bold</td><td class="val">live editor: bold (bar and toolbar)</td></tr>
+          <tr><td class="name">format_italic</td><td class="val">live editor: italic (bar and toolbar)</td></tr>
+          <tr><td class="name">format_strikethrough</td><td class="val">live editor: strikethrough (bar and toolbar)</td></tr>
+          <tr><td class="name">code</td><td class="val">live editor: inline code (bar and toolbar)</td></tr>
+          <tr><td class="name">format_ink_highlighter</td><td class="val">live editor: highlight (bar and toolbar)</td></tr>
+          <tr><td class="name">link</td><td class="val">live editor: link (bar and toolbar)</td></tr>
+          <tr><td class="name">undo</td><td class="val">live editor keyboard bar: undo</td></tr>
+          <tr><td class="name">redo</td><td class="val">live editor keyboard bar: redo</td></tr>
         </tbody>
       </table>
       <div class="tag-row"><span class="key">components/icons.tsx</span><span class="key">.icon-button</span><span class="key">.explorer-rail-item</span></div>

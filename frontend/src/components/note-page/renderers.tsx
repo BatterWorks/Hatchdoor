@@ -10,8 +10,6 @@ import {
   MermaidDiagram,
 } from "./RendererComponents";
 import { markAsParagraph } from "./paragraphs";
-import { EditableBlock } from "./EditableBlock";
-import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
 import { OrphanedMarkerNotice, SavedQueryBlock } from "./SavedQueryBlock";
 import { ORPHANED_MARKER_ELEMENT } from "./savedQueries";
@@ -32,7 +30,6 @@ type MarkdownCodeProps = {
  */
 function createSharedMarkdownComponents(
   headingIdsBySourceLine: Map<number, string>,
-  editable: boolean,
   renderBaseBlock: (content: string, props: MarkdownCodeProps) => ReactNode,
   hiddenHeadingLine?: number,
 ) {
@@ -79,30 +76,16 @@ function createSharedMarkdownComponents(
           type="checkbox"
           className={props.className}
           checked={props.checked ?? false}
-          disabled={!editable}
-          aria-label={editable ? "Toggle task" : undefined}
+          disabled
           onChange={() => {}}
         />
       );
     },
-    li(props: { children?: ReactNode; className?: string; node?: unknown }) {
-      // Absent from EDITABLE_UNITS on purpose: a wrapped item is addressed one
-      // line at a time (D25a), which only this renderer can see, so it owns
-      // its own EditableBlock rather than being wrapped in one.
-      return (
-        <ListItem
-          node={props.node}
-          className={props.className}
-          editable={editable}
-        >
-          {props.children}
-        </ListItem>
-      );
+    li(props: { children?: ReactNode; className?: string }) {
+      return <ListItem className={props.className}>{props.children}</ListItem>;
     },
-    blockquote(props: { children?: ReactNode; node?: unknown }) {
-      return (
-        <CalloutOrQuote node={props.node}>{props.children}</CalloutOrQuote>
-      );
+    blockquote(props: { children?: ReactNode }) {
+      return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
     },
     // A `hatchdoor-query` marker naming no block (#276): see
     // remarkHideQueryMarkers.
@@ -178,16 +161,14 @@ export function createNoteMarkdownComponents(
   noteRelativePath: string,
   headingIdsBySourceLine: Map<number, string>,
   options: {
-    editable?: boolean;
     /** The body line of a heading that only repeats the note's title (#530),
-     * kept in the DOM for line-addressed editing but not drawn. */
+     * kept in the DOM but not drawn. */
     hiddenHeadingLine?: number;
   } = {},
 ) {
   const components = {
     ...createSharedMarkdownComponents(
       headingIdsBySourceLine,
-      options.editable ?? false,
       (content, props) => (
         <SavedQueryBlock
           source={content}
@@ -288,7 +269,7 @@ export function createNoteMarkdownComponents(
     },
   };
 
-  return options.editable ? withEditableBlocks(components) : components;
+  return components;
 }
 
 /**
@@ -302,11 +283,9 @@ export function createManualMarkdownComponents(
   renderLink: (href: string | undefined, children: ReactNode) => ReactNode,
 ) {
   return {
-    ...createSharedMarkdownComponents(
-      headingIdsBySourceLine,
-      false,
-      (content) => <CodeBlock language="base" content={content} />,
-    ),
+    ...createSharedMarkdownComponents(headingIdsBySourceLine, (content) => (
+      <CodeBlock language="base" content={content} />
+    )),
     a(props: { href?: string; children?: ReactNode }) {
       return renderLink(props.href, props.children);
     },
@@ -331,53 +310,6 @@ export function createManualMarkdownComponents(
 // Block-level entries get wrapped so each rendered block can be swapped for its
 // own source lines. Inline entries (a, code, img) are deliberately absent: they
 // belong to the block that contains them, not to a range of their own.
-const EDITABLE_UNITS: Record<string, UnitType> = {
-  p: "paragraph",
-  h1: "heading",
-  h2: "heading",
-  h3: "heading",
-  h4: "heading",
-  h5: "heading",
-  h6: "heading",
-  // D27: the tr is the unit, not the td. mdast gives tr and td identical
-  // ranges, and the delimiter row belongs to no node at all.
-  tr: "table row",
-  pre: "code block",
-};
-
-type ComponentMap = Record<string, (props: never) => ReactNode>;
-
-function withEditableBlocks<T extends ComponentMap>(components: T): T {
-  const wrapped = { ...components } as ComponentMap;
-
-  for (const [tag, unitType] of Object.entries(EDITABLE_UNITS)) {
-    const Original = components[tag];
-    const Wrapped = (props: { node?: unknown; children?: ReactNode }) => (
-      <EditableBlock node={props.node} unitType={unitType}>
-        {/* Called rather than rendered, deliberately: this has to yield the
-            intrinsic element (a <p>, an <li>) so EditableBlock can clone the
-            handlers straight onto it. Rendering it as a component would make
-            the child a component element, which falls back to a wrapper div
-            and takes the tabIndex off the real element. The cost is that a
-            wrapped renderer may not use hooks; none do, and the keyboard-entry
-            tests fail loudly if this changes. */}
-        {Original
-          ? (Original as (p: unknown) => ReactNode)(props)
-          : createElement(tag, null, props.children)}
-      </EditableBlock>
-    );
-    wrapped[tag] = Wrapped as (props: never) => ReactNode;
-  }
-
-  // The paragraph marker must survive wrapping, or callout detection stops
-  // recognising its own first child.
-  if (wrapped.p) {
-    markAsParagraph(wrapped.p);
-  }
-
-  return wrapped as T;
-}
-
 type MarkdownElementNode = {
   children?: Array<{
     type?: string;
