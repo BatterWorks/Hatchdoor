@@ -6,10 +6,14 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { VaultApp as App } from "./App";
-import { LAST_NOTE_BY_VAULT_KEY, LAST_NOTE_KEY } from "./app/constants";
+import {
+  LAST_NOTE_BY_VAULT_KEY,
+  LAST_NOTE_KEY,
+  SCOPE_ZONE_COLLAPSED_KEY,
+} from "./app/constants";
 import { discoveryResponse, THREE_VAULTS } from "./test/fixtures/vaults";
 
 const [ALPHA, BETA] = THREE_VAULTS;
@@ -92,6 +96,11 @@ function renderAt(path: string) {
     </MemoryRouter>,
   );
 }
+
+// The Scope zone starts folded (#530); these tests drive its rows directly.
+beforeEach(() => {
+  window.localStorage.setItem(SCOPE_ZONE_COLLAPSED_KEY, "0");
+});
 
 afterEach(() => {
   cleanup();

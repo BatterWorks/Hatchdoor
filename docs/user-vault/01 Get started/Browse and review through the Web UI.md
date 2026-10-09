@@ -8,8 +8,8 @@ The browser and your agent work on the same notes. In this step you open the not
 
 ## Check the agent's change
 
-1. Open `http://localhost:42824` and enter the web token if it asks.
-2. In the sidebar, open the note the agent changed.
+1. Open `http://localhost:42824` and enter the web token if it asks. With no note open, Hatchdoor shows a home page: the notes last changed on disk, the notes you last read, and **New note** and **Search**.
+2. In the sidebar, open the note the agent changed. It is also at the top of **Changed on disk**, a folding section at the top of the sidebar.
 3. Find the new bullet and check it sits under the heading you asked for.
 
 If it is there and nothing else changed, your agent works the way it should.
@@ -27,7 +27,7 @@ If the Vault you narrowed to is paused, stops working or is disconnected (from S
 Select **Search** in the top bar, or press `/` anywhere outside a text field.
 
 - Normal search finds notes by meaning, so "trip to Japan" can find a note titled "Tokyo itinerary" that never says "trip".
-- Turn on **Keyword mode** when the exact words matter, such as a hostname, tag, filename, command or ID.
+- Switch **Mode** to **Keyword** when the exact words matter, such as a hostname, tag, filename, command or ID.
 
 Search always looks in every Vault that is turned on, whichever one the selector is narrowed to. The list down the left of the search panel says how many matching notes each Vault holds, and starts on the Vault you were browsing. Select another Vault to read its matches, or **All results** to see them together. On a phone the same choice is the **Scope** field under the search box.
 
@@ -36,7 +36,7 @@ Search always looks in every Vault that is turned on, whichever one the selector
 
 ## Edit notes
 
-On a Vault Hatchdoor can write to, you can edit notes in the browser. **New note** creates a note. Click any paragraph, heading, list item or table row to edit it in place; [[How to edit notes with the live editor]] covers it in full.
+On a Vault Hatchdoor can write to, you can edit notes in the browser. **New note**, at the bottom of the sidebar, creates a note. Click any paragraph, heading, list item or table row to edit it in place, or select **Edit** above the note (or press `E`) to open the whole note in a Markdown editor; [[How to edit notes with the live editor]] covers it in full. The **…** menu in the top bar holds the other things you can do with the open note: rename, move, copy its text or its link, download it, archive or delete it.
 
 If those controls are missing, the Vault is read-only or the instance is a public demo. If they carry a warning that the Vault's filesystem cannot swap two files in one step, editing still works; [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]] explains what that costs.
 
@@ -48,7 +48,7 @@ A note can also hold a saved query: a fenced `base` block that lists matching no
 
 ## Get help
 
-Select the **?** button in the top bar to open Help, this manual, beside whatever you are doing. On a phone, Help is the first item of the **…** menu instead, and takes the whole screen. Help always shows the manual for the version of Hatchdoor you are running. Its search box finds pages by the words in them, and **Open full width** gives a long page the whole screen. Press `Escape` or select **Close** to go back where you were.
+Select the **?** button in the top bar to open Help, this manual, beside whatever you are doing. On a phone, Help is the last button at the bottom of the sidebar drawer instead, and takes the whole screen. Help always shows the manual for the version of Hatchdoor you are running. Its search box finds pages by the words in them, and **Open full width** gives a long page the whole screen. Press `Escape` or select **Close** to go back where you were.
 
 Help works before you sign in, too. The token prompt links straight to [[Install Hatchdoor with Docker Compose#Where do I find my token?|where to find your token]].
 

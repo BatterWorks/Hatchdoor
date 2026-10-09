@@ -30,6 +30,21 @@ function decoded(param: string | undefined): string | undefined {
   }
 }
 
+/** The name the topbar's breadcrumb shows for an address that is not a note
+ * (#530): the named routes above, `Home` on `"/"`, and nothing on a note
+ * route, where the crumb carries the note's own path instead. */
+export function pageName(pathname: string): string | null {
+  if (matchPath("/", pathname)) {
+    return "Home";
+  }
+  for (const [path, name] of NAMED_ROUTES) {
+    if (matchPath(path, pathname)) {
+      return name;
+    }
+  }
+  return null;
+}
+
 /** The browser tab title for an address. `activeNote` is the note the shell
  * last saw loaded, which outlives the note route and lags a move from one
  * note to the next, so it only counts while the address names that note. */

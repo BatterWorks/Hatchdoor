@@ -200,7 +200,7 @@ describe("Demo mode (#152)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "Notes Explorer" }),
+        screen.getByRole("heading", { level: 1, name: "Notes" }),
       ).toBeVisible();
     });
     expect(

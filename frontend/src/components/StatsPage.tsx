@@ -473,10 +473,6 @@ export function StatsPage() {
           Vault · {new Date().toISOString().slice(0, 10)}
         </p>
         <h1 className="stats-title">Stats</h1>
-        <p className="stats-subtitle">
-          A complete overview of your vault — notes, links, tags, and writing
-          activity.
-        </p>
       </div>
 
       {results.map((result) => (

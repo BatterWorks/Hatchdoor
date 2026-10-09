@@ -471,7 +471,9 @@ describe("describeScopeSlot", () => {
 
   it("names the shortfall in the slot's own words at all scope", () => {
     const unavailable = unavailableVault("Beta");
-    expect(describeScopeSlot("all", [alpha, unavailable], {})).toBe("1 of 2");
+    expect(describeScopeSlot("all", [alpha, unavailable], {})).toBe(
+      "1 of 2 answering",
+    );
   });
 
   it("names a healthy Vault's note count when narrowed", () => {
@@ -523,7 +525,8 @@ describe("VaultAggregateSlot", () => {
       />,
     );
 
-    const shortfall = screen.getByText("1 of 2");
+    const shortfall = document.querySelector(".vault-slot-shortfall")!;
+    expect(shortfall).toHaveTextContent("1 of 2 answering");
     expect(shortfall).toHaveClass("vault-slot-shortfall");
     expect(shortfall).toHaveClass("vault-tier-error");
   });
@@ -537,7 +540,8 @@ describe("VaultAggregateSlot", () => {
       />,
     );
 
-    const shortfall = screen.getByText("1 of 2");
+    const shortfall = document.querySelector(".vault-slot-shortfall")!;
+    expect(shortfall).toHaveTextContent("1 of 2 answering");
     expect(shortfall).toHaveClass("vault-tier-warn");
     expect(shortfall).not.toHaveClass("vault-tier-error");
   });

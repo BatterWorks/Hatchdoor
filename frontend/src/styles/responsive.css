@@ -100,11 +100,7 @@ body.resizing {
 
   /* Same filter, same semantics, different form (#119, #144): the facet
      rail has no room as a column here, so Scope moves into the field strip
-     beside Mode, and the desktop Mode checkbox stands down. */
-  .search-toggle {
-    display: none;
-  }
-
+     under the Mode row. */
   .search-field-strip {
     display: flex;
   }

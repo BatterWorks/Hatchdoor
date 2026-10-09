@@ -2,6 +2,7 @@
 @import "./styles/base.css";
 @import "./styles/topbar.css";
 @import "./styles/layout-explorer.css";
+@import "./styles/home.css";
 @import "./styles/note-content.css";
 @import "./styles/ui-common.css";
 @import "./features/search/search.css";

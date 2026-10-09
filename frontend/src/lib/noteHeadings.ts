@@ -173,3 +173,29 @@ function extractWikilinkLabel(body: string): string {
   const alias = (aliasRaw || "").trim();
   return alias || target;
 }
+
+const collapseSpace = (text: string) => text.replace(/\s+/g, " ").trim();
+
+/** The body line of a first H1 that only repeats the note's title (#530),
+ * or `undefined`. Only the first heading can qualify, and only when nothing
+ * but blank lines stand before it: an H1 further down is a section. */
+export function duplicateTitleHeadingLine(
+  body: string,
+  headings: NoteHeading[],
+  title: string | undefined,
+): number | undefined {
+  const first = headings[0];
+  if (!first || !title || first.level !== 1) {
+    return undefined;
+  }
+  if (
+    collapseSpace(first.text).toLowerCase() !==
+    collapseSpace(title).toLowerCase()
+  ) {
+    return undefined;
+  }
+  const before = body.split(/\r?\n/).slice(0, first.sourceLine - 1);
+  return before.every((line) => line.trim() === "")
+    ? first.sourceLine
+    : undefined;
+}

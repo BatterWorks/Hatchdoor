@@ -7,7 +7,7 @@
  *
  * Path data is copied verbatim from `google/material-design-icons` (Apache
  * 2.0); only the surrounding markup differs. See `THIRD_PARTY_NOTICES.md`.
- * Nothing is installed — seventeen icons do not justify a dependency (ADR-13).
+ * Nothing is installed — eighteen icons do not justify a dependency (ADR-13).
  *
  * Icons size to `1em` and paint with `currentColor`, so a caller controls both
  * through ordinary font-size and color. They are `aria-hidden`: every icon here
@@ -34,6 +34,13 @@ function Icon({ path }: { path: string }) {
 export function MenuIcon() {
   return (
     <Icon path="M120-240v-80h720v80H120Zm0-200v-80h720v80H120Zm0-200v-80h720v80H120Z" />
+  );
+}
+
+/** Material Symbols `toc`: the phone's "On this page" chip (#530). */
+export function TocIcon() {
+  return (
+    <Icon path="M120-280v-80h480v80H120Zm0-160v-80h480v80H120Zm0-160v-80h480v80H120Zm560 320v-80h160v80H680Zm0-160v-80h160v80H680Zm0-160v-80h160v80H680Z" />
   );
 }
 

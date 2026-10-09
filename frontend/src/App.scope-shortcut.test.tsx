@@ -4,9 +4,10 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { VaultApp as App } from "./App";
 import { SCOPE_ZONE_COLLAPSED_KEY } from "./app/constants";
@@ -65,6 +66,11 @@ function mockThreeVaultFetch() {
     },
   );
 }
+
+// The Scope zone starts folded (#530); these tests drive its rows directly.
+beforeEach(() => {
+  window.localStorage.setItem(SCOPE_ZONE_COLLAPSED_KEY, "0");
+});
 
 afterEach(() => {
   cleanup();
@@ -146,7 +152,10 @@ describe("App scope shortcut (#146)", () => {
     // Vaults" alone is no longer proof discovery has landed — wait for a
     // real Vault's own row.
     await screen.findByRole("radio", { name: /^Alpha/ });
-    const searchTrigger = screen.getByRole("button", { name: "Search" });
+    const searchTrigger = within(screen.getByRole("banner")).getByRole(
+      "button",
+      { name: "Search" },
+    );
     searchTrigger.focus();
 
     fireEvent.keyDown(window, { key: "v" });
@@ -180,7 +189,10 @@ describe("App scope shortcut (#146)", () => {
     // Vault's own row instead.
     await screen.findByRole("radio", { name: /^Alpha/ });
 
-    const searchTrigger = screen.getByRole("button", { name: "Search" });
+    const searchTrigger = within(screen.getByRole("banner")).getByRole(
+      "button",
+      { name: "Search" },
+    );
     searchTrigger.focus();
     expect(searchTrigger).toHaveFocus();
 
@@ -207,7 +219,11 @@ describe("App scope shortcut (#146)", () => {
     const head = await screen.findByRole("button", { name: /Scope/ });
     expect(head).toHaveAttribute("aria-expanded", "false");
 
-    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(
+      within(screen.getByRole("banner")).getByRole("button", {
+        name: "Search",
+      }),
+    );
     const input = await screen.findByPlaceholderText("Search notes…");
     input.focus();
 

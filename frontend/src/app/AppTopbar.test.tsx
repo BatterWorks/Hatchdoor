@@ -36,13 +36,11 @@ function renderTopbar(
     onCopyPageContent: vi.fn(),
     onCopyNoteLink: vi.fn(),
     onDownloadMarkdown: vi.fn(),
-    onEditNote: vi.fn(),
-    onNewNote: vi.fn(),
     onRenameNote: vi.fn(),
     onMoveNote: vi.fn(),
     onArchiveNote: vi.fn(),
     onDeleteNote: vi.fn(),
-    onCycleTheme: vi.fn(),
+    onSetTheme: vi.fn(),
     onScopeChange: vi.fn(),
     viewingVaultId: undefined,
     vaultNoteCounts: {},
@@ -487,8 +485,8 @@ describe("AppTopbar Help entry (#417)", () => {
     );
   });
 
-  it("moves Help into the … menu on phones, first", () => {
-    const props = renderTopbar({
+  it("keeps Help out of the top bar and the … menu on phones; the drawer's rail carries it (#530)", () => {
+    renderTopbar({
       isMobile: true,
       actionsMenuOpen: true,
       writeEnabled: true,
@@ -496,11 +494,83 @@ describe("AppTopbar Help entry (#417)", () => {
     });
 
     expect(screen.queryByRole("button", { name: "Help" })).toBeNull();
-    const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
-    expect(items[0]).toHaveTextContent("Help");
-    fireEvent.click(items[0]);
-    expect(screen.getByRole("button", { name: "More actions" })).toHaveFocus();
-    expect(props.onCloseActionsMenu).toHaveBeenCalled();
-    expect(props.onToggleHelp).toHaveBeenCalledTimes(1);
+    const items = within(screen.getByRole("menu")).queryAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).not.toContain("Help");
+  });
+});
+
+describe("AppTopbar theme menu (#530)", () => {
+  afterEach(cleanup);
+
+  it("opens a three-option menu, focuses the current choice, and picks by name", () => {
+    const props = renderTopbar({ theme: "light" });
+    fireEvent.click(screen.getByRole("button", { name: "Theme: Light" }));
+
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Systemfollows the device",
+      "Light",
+      "Dark",
+    ]);
+    expect(items[1]).toHaveAttribute("aria-checked", "true");
+    expect(items[1]).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(items[2]).toHaveFocus();
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(items[0]).toHaveFocus();
+
+    fireEvent.click(items[2]);
+    expect(props.onSetTheme).toHaveBeenCalledExactlyOnceWith("dark");
+    expect(
+      screen.getByRole("button", { name: "Theme: Light" }),
+    ).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("closes on Escape and gives focus back to the button", () => {
+    renderTopbar({ theme: "auto" });
+    const button = screen.getByRole("button", { name: "Theme: System" });
+    fireEvent.click(button);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(button).toHaveFocus();
+  });
+});
+
+describe("AppTopbar On this page chip (#530)", () => {
+  afterEach(cleanup);
+  const headings = [
+    { level: 2, text: "Role", id: "role", sourceLine: 3 },
+    { level: 3, text: "Ports", id: "ports", sourceLine: 5 },
+  ];
+
+  it("renders below 920px on a note with headings, even at one Vault, and opens a sheet", () => {
+    const onJumpToHeading = vi.fn();
+    renderTopbar({
+      isMobile: true,
+      vaults: [THREE_VAULTS[0]],
+      tocHeadings: headings,
+      onJumpToHeading,
+    });
+    const chip = screen.getByRole("button", { name: /On this page/ });
+    expect(chip).toHaveTextContent("2");
+    fireEvent.click(chip);
+    const sheet = screen.getByRole("dialog", { name: "On this page" });
+    expect(sheet).toHaveAttribute("data-open", "true");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Ports" }));
+    expect(onJumpToHeading).toHaveBeenCalledExactlyOnceWith("ports");
+    expect(sheet).toHaveAttribute("data-open", "false");
+  });
+
+  it("is absent on wide screens and without headings", () => {
+    renderTopbar({ isMobile: false, tocHeadings: headings });
+    expect(
+      screen.queryByRole("button", { name: /On this page/ }),
+    ).not.toBeInTheDocument();
+    cleanup();
+    renderTopbar({ isMobile: true, tocHeadings: [] });
+    expect(
+      screen.queryByRole("button", { name: /On this page/ }),
+    ).not.toBeInTheDocument();
   });
 });

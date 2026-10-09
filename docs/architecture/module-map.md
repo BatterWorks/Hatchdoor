@@ -3863,6 +3863,7 @@ boundaries are currently documentation-enforced.
 - `frontend/src/app/AppErrorBoundary.tsx`
 - `frontend/src/app/AppTopbar.tsx`
 - `frontend/src/app/ExplorerPane.tsx`
+- `frontend/src/app/HomePage.tsx`
 - `frontend/src/app/pageTitle.ts`
 - `frontend/src/app/vaultSlot.tsx`
 - `frontend/src/app/vaultSlotLogic.ts`
@@ -3872,10 +3873,38 @@ boundaries are currently documentation-enforced.
 - `frontend/src/hooks/useTheme.ts`
 - `frontend/src/hooks/useVaultScope.ts`
 - `frontend/src/lib/storage.ts`
+- `frontend/src/styles/home.css`
 
 **Contract and responsibility:** bootstraps React/router/PWA, composes feature
 hooks and routes, owns responsive shell state, navigation, persistent shell
-preferences, topbar actions, and explorer placement. Before the tree ever
+preferences, topbar actions, and explorer placement. `app/HomePage.tsx` (#530)
+is the landing route with no note open: two lists built from state the shell
+already holds for the sidebar (Changed on disk, Recently viewed, each capped
+at six rows with the shared `VaultPrefix` and Settings' `formatWhen`), the
+scope's name and Vault and note counts (a note count only once every Vault in
+scope has reported one), and New note and Search; it replaced the "Select any
+note" empty state. `pageName` in `app/pageTitle.ts` names the fixed pages for
+the topbar's breadcrumb, and `App.tsx` hands `AppTopbar` a null `activeNote`
+off the note route, so Stats, Graph and Settings never read "Notes Explorer"
+with a note's actions behind the "…" menu. That menu is about the open note
+only: New note and Edit left it for their own buttons, Copy note text and
+Download .md file are the utilities' names, and `Escape` closes it. The theme
+button opens a three-option menu (System, Light, Dark) through `useTheme`'s
+`setTheme`, focusing the current choice and moving with the arrows;
+`cycleTheme` stays for callers without a menu. `e` opens the editor on the
+open note, the key the Edit button shows, unless focus sits in a dialog or
+menu, Help is open, or an inline block is open. The Scope zone starts
+folded (`SCOPE_ZONE_COLLAPSED_KEY` unset reads folded) and its folded head
+shows the compact `N of M` aggregate with the full "answering" sentence as its
+name; every other slot says `N of M answering`. The explorer's rail sits in
+its footer beside New note and holds destinations only (Stats, Graph,
+Settings, and Help below 920px through `onToggleHelp`, since the phone's top
+bar has no Help slot); Changed on disk is a folding section of the list
+(`CHANGES_COLLAPSED_KEY`, folded unless `"0"`). Below 920px the meta row also
+carries an "On this page" chip when the open note has headings
+(`tocHeadings`, fed by `NotePage`'s `onHeadingsChange`), which opens a sheet
+of them in the scope sheet's own shell; a pick navigates to the heading's
+fragment, which the note page's own fragment jump follows. Before the tree ever
 renders, `main.tsx` calls `lib/writeDrafts.ts`'s `collectLegacyHeldDrafts`
 and `lib/storage.ts`'s `clearLegacyNoteScopedBrowserState` (#151) once,
 synchronously — the one-time post-#137 sweep and browser-state cleanup, so
@@ -4285,13 +4314,14 @@ Each flattened candidate (`NoteCandidate`) also carries its Vault-relative
 `relativePath`, built from the folder chain and the note's title, which is its
 file name; the editor writes a Markdown link's path from it (ADR-33).
 `WireVaultTree` is the payload shape and `VaultTree` the attributed one every
-component below the hook consumes. The sidebar is three zones — a
-fixed rail, a scrolling nav, a fixed footer — and `.explorer-nav` is the scroll
-container the shell restores scroll position against, not the pane itself. On
-desktop with more than one enabled Vault, the shell-owned Scope zone (#138,
-`app/ExplorerPane.tsx`) pins a fourth zone above the rail; it shares this
+component below the hook consumes. The sidebar is three zones — the
+shell-owned Scope zone, a scrolling nav, and a fixed footer holding the rail
+of whole-vault destinations beside the create action (#530) — and
+`.explorer-nav` is the scroll container the shell restores scroll position
+against, not the pane itself. On desktop with more than one enabled Vault,
+the Scope zone (#138, `app/ExplorerPane.tsx`) is pinned above the nav; it shares this
 file's CSS but is not part of this capability's owned React contract.
-`ChangesPanel` lists notes changed on disk, newest first across every Vault in scope with no per-Vault share (#341). `useVaultTree` asks `/recent` for the API's ceiling of 25 while the panel shows 15, because the server returns no total: the rows past 15 are what make its `and N more` line and its head count true. It deliberately carries no unread
+`ChangesPanel` is a folding section at the top of the nav, in Recently viewed's shape, taking `collapsed`/`onToggleCollapsed` from the shell (#530; it was a panel a rail toggle opened). It lists notes changed on disk, newest first across every Vault in scope with no per-Vault share (#341). `useVaultTree` asks `/recent` for the API's ceiling of 25 while the panel shows 15, because the server returns no total: the rows past 15 are what make its `and N more` line and its head count true. It deliberately carries no unread
 count, because distinguishing external changes from the user's own edits needs
 backend data that does not exist yet. Changed on disk carries the shared
 `VaultPrefix` provenance marker (#140) on each row when scope is `all` and
@@ -4433,10 +4463,11 @@ selection but suppresses the "No results in X" line — the row's own `no
 answer` and #141's partial sentence say what happened, and claiming the
 Vault has no matches would be the exact lie #141 exists to prevent. Two shapes, one meaning: a `.search-facet-rail`
 column beside the results on desktop (absent only at one enabled Vault),
-and a `.search-field-strip` `Scope`-beside-`Mode` pair (§18's field grammar)
-that replaces the desktop Mode checkbox below 920px — both rendered
-unconditionally and toggled by the same CSS breakpoint `responsive.css`
-already uses, so no `isMobile` prop crosses the boundary. Filtering is a
+and a `.search-field-strip` `Scope` field (§18's field grammar) below 920px
+— both rendered unconditionally and toggled by the same CSS breakpoint
+`responsive.css` already uses, so no `isMobile` prop crosses the boundary.
+Mode is one `.search-mode` segmented Semantic / Keyword control at every
+width (#530), the same grammar Settings' Git behaviour uses. Filtering is a
 client-side `Array.filter` over the already-fetched results; no re-fetch, no
 re-ranking. `buildFacetRows` has three row states, not two: a count, the
 inert `no answer` condition for a Vault that was asked and did not answer,
@@ -4446,9 +4477,13 @@ rail a selector from the moment the dialog opens rather than a column of
 
 `SearchDialog` also takes `startupStatus`/`onRetryModelSetup` (#150), the
 shrunk startup gate's own data (`startup/useStartupStatus.ts`): while
-`scanning`/`indexing`, the result area shows a work-in-flight block
-carrying the same percentage the Scope zone shows, with the query input
-left enabled and the topbar's search entry point never greyed; on a failed
+`scanning`/`indexing` (and a post-latch `downloading`), a `.search-progress`
+line under the controls says search is still indexing with the percentage
+the Scope zone shows and which mode already answers (#530); it is never a
+block above the results, Keyword results render under it, and only Keyword
+may say "No matching notes" while it shows, since the semantic index has
+not answered yet. The query input stays enabled and the topbar's search
+entry point is never greyed. On a failed
 model download it shows the reason with a "Retry setup" action instead of
 the ordinary empty/error states. A post-latch `downloading` (the re-download
 "Retry setup" starts) and `terms_required` get their own blocks too (#339),
@@ -4853,7 +4888,20 @@ reads it to add trailing scroll space only for that jump, so a heading near the
 end of a note can reach the top of the pane. It resets when the note changes
 and otherwise stays armed for the rest of the visit, since removing the space
 would clamp `scrollTop` and pull the heading back down.
-`NoteProperties` (`note-page/sections.tsx`) takes an optional `vaultName`
+A note whose first heading is an H1 equal to its title, with nothing but
+blank lines before it, keeps that heading in the file and the DOM but does
+not draw or list it (#530): `lib/noteHeadings.ts`'s `duplicateTitleHeadingLine`
+names the line, `createNoteMarkdownComponents`' `hiddenHeadingLine` option
+renders it `hidden`, and both tables of contents list `visibleHeadings`,
+which `NotePage` also reports through `onHeadingsChange` for the shell's
+phone chip. `NoteLinksPanel` renders after the body in §05's section-head
+grammar, and neither it nor `NoteProperties` renders while the editor is
+open. Properties start folded at every width and remember the phone's answer
+under its own key (`<key>.mobile`, read through `hooks/useIsMobile.ts`).
+`NoteTocMobile` shows only between 921 and 1160px, where the TOC column is
+gone but the topbar is still the wide one. The inline-editing notice waits
+for `settling`, since the mapping is judged against the previous document
+until then. `NoteProperties` (`note-page/sections.tsx`) takes an optional `vaultName`
 (#140): a synthetic, non-editable leading `Vault` row, shown whenever more than
 one Vault is enabled regardless of scope — an exact read is never ambiguous
 about its own Vault — including when the note carries no frontmatter at all,
@@ -5498,14 +5546,22 @@ files beside it, so the app fetches no font from another host; each family's
 folder carries its licence text, and `App.css` imports the sheet first. A new
 family or weight is a design-system change, not a local one. `VaultPrefix` (#140) is
 the one marked-path-root primitive every flattened, scope-spanning surface
-uses for Vault provenance — hot ink, a middot instead of a folder `/`, and
-never eliding; consumers give the adjacent title or path the shrinking room
-instead. `StateBlock` (`ui.tsx`) takes an optional `tone="error"` (#141) for
+uses for Vault provenance — muted mono, a middot instead of a folder `/`,
+capped at 42% of its row and eliding past that (#530), so a long Vault name
+never pushes the title it prefixes off the row; the path beside it in a
+search result elides at its tail, left to right (the head-first `direction:
+rtl` form reordered a numbered folder's digits). `StateBlock` (`ui.tsx`) takes an optional `tone="error"` (#141) for
 the documented §23 red-heading variant — a genuine failure, never the plain
 empty shell — consumed wherever a partial collection read has nothing usable
 and wherever an exact read fails outright. Its optional `help` node (#423)
 renders on its own line under the description, for the start states' "How
 does this work?" links.
+
+`topbar.css` also carries the shell's own topbar furniture that no feature
+owns (#530): the theme menu (`.theme-menu*`), the phone meta row and its
+"On this page" chip and heading sheet (`.topbar-meta-row`, `.topbar-toc-*`,
+`.toc-sheet-*`). They are the Application shell's, rendered by
+`app/AppTopbar.tsx`, and touch no feature.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected
@@ -5530,7 +5586,9 @@ accent or token changes, and full frontend checks.
 clipboard behavior. Vault Explorer consumes tree comparison, while Note reading
 consumes note and link comparison. `vaultParticipants.ts` (#141) — a
 `VaultReadProjection`'s `participants` down to the Vaults that did not answer
-fresh, and the shared "X did not answer." sentence — is consumed by Vault
+at all (`unavailable`; a `stale` participant answered from its previous
+index generation and its rows are on screen, #530), and the shared "X did not
+answer." sentence — is consumed by Vault
 Explorer (`ChangesPanel`, and `useVaultTree` for the tree read's missing
 Vaults), Search (`SearchDialog`), and the Application shell's
 `app/ExplorerPane.tsx` (the tree's trailing line, the accordion's per-Vault

@@ -1574,8 +1574,12 @@ export function GraphPage() {
           )}
         </div>
 
-        {/* Desktop: always visible inline. Mobile: hidden, rendered as overlay below. */}
-        <div className="graph-tags-desktop">{tagChips}</div>
+        {/* Folded behind the Tags toggle at every width (#530): on desktop an
+            inline block under the header, on the phone the overlay below. A
+            row of fifty chips was 100px of header before the canvas. */}
+        {filterOpen ? (
+          <div className="graph-tags-desktop">{tagChips}</div>
+        ) : null}
 
         <p className="graph-hint">
           Scroll to zoom · Drag background to pan · Click node to select ·

@@ -1,18 +1,17 @@
 import type { VaultParticipant } from "../types";
 
 /**
- * The Vaults a collection read asked but did not get a fresh answer from —
- * `stale` or `unavailable` participant state, in the order the envelope
- * listed them. Used to tell the truth about a `partial` read without a
- * banner (#141): the trailing line and the error-block replacement both name
- * only these.
+ * The Vaults a collection read asked and got no answer from — `unavailable`
+ * participant state, in the order the envelope listed them. Used to tell the
+ * truth about a `partial` read without a banner (#141): the trailing line and
+ * the error-block replacement both name only these. A `stale` participant
+ * answered, from the index generation before the one being built, and its
+ * rows are on screen (#530): saying it "did not answer" under its own tree
+ * was the lie this sentence exists to avoid.
  */
 export function missingVaultNames(participants: VaultParticipant[]): string[] {
   return participants
-    .filter(
-      (participant) =>
-        participant.state !== "fresh" && participant.state !== "not_searchable",
-    )
+    .filter((participant) => participant.state === "unavailable")
     .map((participant) => participant.vault_name);
 }
 

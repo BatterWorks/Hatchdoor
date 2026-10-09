@@ -5,6 +5,9 @@ export const EXPANDED_FOLDERS_KEY = "hatchdoor.expandedFolders";
 export const EXPLORER_SCROLL_TOP_KEY = "hatchdoor.explorerScrollTop";
 export const RECENT_NOTES_COLLAPSED_KEY = "hatchdoor.recentNotesCollapsed";
 export const SCOPE_ZONE_COLLAPSED_KEY = "hatchdoor.scopeZoneCollapsed";
+// Changed on disk is a folding section of the explorer (#530), remembered
+// the same way Recently viewed is; folded unless this reads "0".
+export const CHANGES_COLLAPSED_KEY = "hatchdoor.changesCollapsed";
 export const LAST_NOTE_KEY = "hatchdoor.lastNote";
 // Every Vault's own last-viewed note, as `vaultId -> slug`. Switching the
 // browsing scope to one Vault reads it to bring back the note that Vault was

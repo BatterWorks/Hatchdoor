@@ -13,8 +13,9 @@
 /*
  * Sidebar / Explorer pane — three zones.
  *
- * A fixed rail, a scrolling nav, a fixed footer. Only the middle scrolls, so
- * the whole-vault destinations and the create action never scroll away. The
+ * The pinned Scope zone, a scrolling nav, a fixed footer holding the rail of
+ * whole-vault destinations and the create action (#530). Only the middle
+ * scrolls, so the destinations and the create action never scroll away. The
  * pane itself was the scroll container before this; `.explorer-nav` is now.
  */
 .explorer-pane {
@@ -53,6 +54,7 @@
    collapsed zone taller than it reads. */
 .scope-zone .scope-zone-head {
   margin-bottom: 0;
+  min-width: 0;
   cursor: pointer;
 }
 
@@ -72,9 +74,12 @@
   border-radius: var(--radius-pill);
 }
 
-/* Collapsed head names the current scope in place of the usual mono count. */
+/* Collapsed head names the current scope in place of the usual mono count.
+   It gives way before the slot does (#530): a shortfall reading is the one
+   thing the folded head must never clip. */
 .scope-zone-current {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 3.5rem;
   max-width: 9rem;
   overflow: hidden;
   white-space: nowrap;
@@ -270,14 +275,14 @@
   align-items: center;
 }
 
-/* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */
+/* Rail — whole-vault destinations, inside the sidebar so it costs no topbar
+   slot. Sits in the footer beside New note (#530). */
 .explorer-rail {
   display: flex;
   align-items: center;
   gap: 0.15rem;
-  flex: 0 0 auto;
-  padding: 0.35rem 0.5rem;
-  border-bottom: 1px solid var(--rule);
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .explorer-rail-item {
@@ -321,23 +326,34 @@
   margin-left: auto;
 }
 
-/* Footer — the single global create action, and nothing else. */
+/* Footer — the rail and the create action, in one row. */
 .explorer-footer {
   flex: 0 0 auto;
-  padding: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
   border-top: 1px solid var(--rule);
 }
 
 .explorer-new-note {
-  width: 100%;
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
   justify-content: center;
 }
 
-/* Changes panel — opened from the rail. */
+/* Changed on disk — a folding section at the top of the list (#530), set
+   exactly like Recently viewed below it: Hatchdoor's own standing list,
+   aligned with the Scope zone's head rather than the accordion. */
 .explorer-changes {
-  margin: 0 0 1.5rem;
-  padding: 0 0 1rem;
+  margin: 0 -0.5rem 0.75rem;
+  padding: 0 0 0.5rem;
   border-bottom: 1px solid var(--rule);
+}
+
+.explorer-changes .side-head {
+  margin-bottom: 0.35rem;
 }
 
 .explorer-changes-empty,

@@ -18,7 +18,7 @@ function participant(
 }
 
 describe("missingVaultNames", () => {
-  it("names only participants that did not come back fresh", () => {
+  it("names only participants that did not answer", () => {
     const participants = [
       participant("Work", "fresh"),
       participant("Personal", "fresh"),
@@ -27,9 +27,9 @@ describe("missingVaultNames", () => {
     expect(missingVaultNames(participants)).toEqual(["Archive"]);
   });
 
-  it("includes a stale participant, not just unavailable ones", () => {
+  it("leaves out a stale participant, which answered from its last index (#530)", () => {
     const participants = [participant("Archive", "stale")];
-    expect(missingVaultNames(participants)).toEqual(["Archive"]);
+    expect(missingVaultNames(participants)).toEqual([]);
   });
 
   it("is empty when every participant is fresh", () => {

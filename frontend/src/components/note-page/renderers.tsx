@@ -34,6 +34,7 @@ function createSharedMarkdownComponents(
   headingIdsBySourceLine: Map<number, string>,
   editable: boolean,
   renderBaseBlock: (content: string, props: MarkdownCodeProps) => ReactNode,
+  hiddenHeadingLine?: number,
 ) {
   return {
     pre(props: { children?: ReactNode }) {
@@ -121,6 +122,7 @@ function createSharedMarkdownComponents(
         props.children,
         headingIdsBySourceLine,
         props.node,
+        hiddenHeadingLine,
       );
     },
     h2(props: MarkdownHeadingProps) {
@@ -129,6 +131,7 @@ function createSharedMarkdownComponents(
         props.children,
         headingIdsBySourceLine,
         props.node,
+        hiddenHeadingLine,
       );
     },
     h3(props: MarkdownHeadingProps) {
@@ -137,6 +140,7 @@ function createSharedMarkdownComponents(
         props.children,
         headingIdsBySourceLine,
         props.node,
+        hiddenHeadingLine,
       );
     },
     h4(props: MarkdownHeadingProps) {
@@ -145,6 +149,7 @@ function createSharedMarkdownComponents(
         props.children,
         headingIdsBySourceLine,
         props.node,
+        hiddenHeadingLine,
       );
     },
     h5(props: MarkdownHeadingProps) {
@@ -153,6 +158,7 @@ function createSharedMarkdownComponents(
         props.children,
         headingIdsBySourceLine,
         props.node,
+        hiddenHeadingLine,
       );
     },
     h6(props: MarkdownHeadingProps) {
@@ -161,6 +167,7 @@ function createSharedMarkdownComponents(
         props.children,
         headingIdsBySourceLine,
         props.node,
+        hiddenHeadingLine,
       );
     },
   };
@@ -170,7 +177,12 @@ export function createNoteMarkdownComponents(
   vaultId: VaultId,
   noteRelativePath: string,
   headingIdsBySourceLine: Map<number, string>,
-  options: { editable?: boolean } = {},
+  options: {
+    editable?: boolean;
+    /** The body line of a heading that only repeats the note's title (#530),
+     * kept in the DOM for line-addressed editing but not drawn. */
+    hiddenHeadingLine?: number;
+  } = {},
 ) {
   const components = {
     ...createSharedMarkdownComponents(
@@ -182,6 +194,7 @@ export function createNoteMarkdownComponents(
           line={props.node?.position?.start?.line}
         />
       ),
+      options.hiddenHeadingLine,
     ),
     a(props: { href?: string; children?: ReactNode }) {
       const { href, children } = props;
@@ -421,12 +434,20 @@ function renderHeading(
   children: ReactNode,
   headingIdsBySourceLine: Map<number, string>,
   node: MarkdownHeadingProps["node"],
+  hiddenHeadingLine?: number,
 ) {
   const text = flattenText(children).trim();
-  const id =
-    headingIdsBySourceLine.get(node?.position?.start?.line ?? -1) ??
-    slugifyHeading(text);
-  return createElement(tag, { id }, children);
+  const line = node?.position?.start?.line ?? -1;
+  const id = headingIdsBySourceLine.get(line) ?? slugifyHeading(text);
+  // The note's own title, repeated as its first heading, stays in the DOM
+  // (line-addressed editing counts on every block being there) but is not
+  // drawn: the page already set the title above the body (#530).
+  const hidden = hiddenHeadingLine !== undefined && line === hiddenHeadingLine;
+  return createElement(
+    tag,
+    hidden ? { id, className: "note-heading-duplicate", hidden: true } : { id },
+    children,
+  );
 }
 
 function isExternalHref(href: string | undefined): boolean {
