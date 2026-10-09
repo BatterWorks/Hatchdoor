@@ -3987,9 +3987,6 @@ error and keeps its count, so a routine reindex changes nothing on screen
 `NotePage.tsx` (ADR-30) to tell whether the open note is on its Vault's
 conflict list; this is a deliberate cross-capability import of one pure
 function rather than a duplicated copy of the Git code it checks.
-`lib/storage.ts`'s `isEditableTarget` is imported by `NotePage.tsx` on the
-same terms (#331), so document-level undo recognises editable targets with the
-shell's own keyboard-shortcut test.
 Note counts reach the slot from the
 collection client, which reads them at `"all"` scope independently of the
 browsing scope and refreshes them on the collection revision. The topbar's `Tree Stale` badge is deleted (#139) with
@@ -4842,8 +4839,12 @@ resolved one is pointed at the asset route, so a root-anchored or bare-name
 `![](path)`, the forms ADR-33's inserts can write, renders; an unresolved
 image keeps its destination. `resolveAssetTargets` is the uncached form the
 editor asks when choosing a `shortest` attachment path — heading/search-hit navigation, Markdown transformations,
-note navigation/rendering behavior, the editable-block component map produced by
-`createNoteMarkdownComponents`, the Vault-free `createManualMarkdownComponents`
+note navigation/rendering behavior, the reading view's component map produced by
+`createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
+`NotePage` shows the live editor on a writable Vault unless the browser's
+remembered `hatchdoor.noteReadingView` says otherwise, and the rendered page
+always on a read-only or demo Vault; headings and search hits are scrolled to
+through the editor's handle when it is mounted), the Vault-free `createManualMarkdownComponents`
 (#417: the same callouts, code, tables and headings, a `base` block shown as
 its source, no Vault endpoint, and links left to the caller's `renderLink`),
 consumed by the Help reader, the paragraph marker `CalloutOrQuote` uses to
@@ -4940,15 +4941,14 @@ additionally suppressed whenever `demoMode` is true (#152), regardless of
 `listHeldDrafts`: it names and links to a Settings surface withheld from a
 demo visitor entirely, and a pre-#137 held draft could in principle exist in
 any browser profile a demo instance happens to be served from. The
-`lib/writeDrafts.ts` draft now covers the inline write surface too (#330),
+`lib/writeDrafts.ts` draft now covers the live editor too (#330),
 not source mode alone: one debounced writer takes `handleInlineChange`,
-`handleInProgressChange` (text living only inside an open block) and source
+`handleInProgressChange` (text the editor holds that no save has seen) and source
 mode's `draftContent`, captures which note a scheduled write belongs to so a
 pending one cannot follow the page onto the next note, and forces the write out
 synchronously on `pagehide`, on `visibilitychange` to hidden, and on unmount —
 the window a closing tab or a service-worker auto-reload falls into. Because
-the inline editor has no open/close moment to read a draft at, recovery happens
-when the note lands: a draft naming the hash now on disk is the interrupted
+the live editor is always open, recovery happens when the note lands: a draft naming the hash now on disk is the interrupted
 write, so it goes back into the body and is handed to autosave to finish once
 inline editing is actually enabled (not on the commit the note arrives on,
 where wikilink resolution has not settled and autosave would swallow it); one
@@ -4964,19 +4964,17 @@ own reading-view notice, rather than refetched, because refetching is what
 would replace the unsaved text. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp has nothing
-to touch there. `handleSave`'s catch and `handleBodyDrop`'s attachment-upload
-catch both take the optional `onDemoRefusal` prop (#152, Note editing and
+to touch there. `handleSave`'s catch and the live editor's `onUploadError`
+both take the optional `onDemoRefusal` prop (#152, Note editing and
 vault actions), checked first — `handleSave` falls back to its existing
-`ConflictError`/generic-error branches on a miss, `handleBodyDrop` to its
-existing generic `onWriteNotice` fallback.
+`ConflictError`/generic-error branches on a miss, the upload to its
+generic `onWriteNotice` fallback.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, note editing (including its held-draft recovery
-model, #151), `app/vaultSlotLogic.ts`'s `noteInSyncConflict` (Application
-shell and navigation, ADR-30), and `lib/storage.ts`'s `isEditableTarget` (Application
-shell and navigation, #331), which `NotePage`'s document-level undo listener
-uses to leave Ctrl/Cmd+Z and Y typed into inputs, textareas and
-contenteditables outside the open block to the browser.
+model, #151), and `app/vaultSlotLogic.ts`'s `noteInSyncConflict` (Application
+shell and navigation, ADR-30). Undo is the live editor's own (CodeMirror
+history), so the page keeps no document history and no undo listener.
 
 **Coordination paths:** `App.tsx`, `types.ts`, `app/vaultSlotLogic.ts`,
 note/link/resolve/download handlers, `NoteEditor.tsx`,
@@ -4985,15 +4983,10 @@ query navigation, shared and responsive CSS.
 
 **Invariants:** vault Markdown remains the rendered source; vault content is
 data rather than trusted executable instructions; asset URLs retain auth and
-path safety; **the rendered body keeps one line per source line**, since inline
-editing addresses blocks by line number and a transform that collapses lines
-would write to the wrong place (`linesMatch` enforces this at runtime and
-disables inline editing for that note); a callout body and a wrapped list item
-are rebuilt rather than passed through, so their positions do not survive and a
-line's **index** is the only thing mapping it back to the file, which is why no
-interior line is dropped while splitting and why a list item whose rendered line
-count disagrees with the span it claims is addressed whole rather than written to
-a guessed line. The note body never waits for the links read (#361): the note
+path safety; **the reading view never writes**: it renders the note's text and toggles
+nothing, every edit going through the live editor or source mode; a callout
+body is rebuilt line by line rather than passed through, so no interior line
+is dropped while splitting. The note body never waits for the links read (#361): the note
 page fetches the note and its links at once, drops the skeleton when the note
 lands, and fills the links panel when its read settles, so a failed links read
 hides only the panel.
@@ -5114,7 +5107,7 @@ return;`; closes the action dialog on a hit rather than leaving it open —
 extracted rather than repeated five times once the fifth call site made the
 duplication real, not premature); into `NotePage.tsx`'s `handleSave` catch
 (exits editing rather than showing `ConflictError`'s or a generic error's
-inline banner); into its `handleBodyDrop` attachment-upload catch (Note
+inline banner); into the live editor's `onUploadError` attachment-upload catch (Note
 reading and rendering, above); into `NoteEditor.tsx`'s own `uploadEditorFile`
 catch via a new `onDemoRefusal` prop `NotePage.tsx` passes straight through,
 so a demo refusal on an in-editor attachment drop or paste clears the

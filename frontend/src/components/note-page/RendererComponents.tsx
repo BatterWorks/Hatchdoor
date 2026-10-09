@@ -41,9 +41,8 @@ async function waitForDocumentFonts(): Promise<void> {
  * The hairline that carries a callout's kind label to the right edge.
  *
  * It states the block's top boundary, which is why a callout needs no top
- * border. It is an element rather than a `::after` because .editable-block
- * already owns that pseudo-element for the edit-gutter mark, and the title is
- * an editable unit.
+ * border. It is an element rather than a `::after` so the title keeps its
+ * pseudo-elements free for the callout kinds that use them.
  */
 function CalloutLeadRule() {
   return <span className="callout-lead-rule" aria-hidden="true" />;

@@ -84,8 +84,29 @@ describe("LiveEditor", () => {
     expect(view.state.selection.main.from).toBe("alpha beta\n".length);
   });
 
+  it("raises the floating toolbar over a one-line selection on desktop", () => {
+    const { view } = mount();
+    expect(document.querySelector(".live-editor-toolbar")).toBeNull();
+    act(() => {
+      view.dispatch({ selection: { anchor: 2, head: 7 } });
+    });
+    expect(document.querySelector(".live-editor-toolbar")).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Bold (Ctrl+B)" }),
+    ).toBeInTheDocument();
+    // Across lines it is a cut or a move, not a format.
+    act(() => {
+      view.dispatch({ selection: { anchor: 2, head: 12 } });
+    });
+    expect(document.querySelector(".live-editor-toolbar")).toBeNull();
+  });
+
   it("shows the keyboard bar on touch while focused, and no floating toolbar", () => {
-    const { content } = mount({ touch: true });
+    const { view, content } = mount({ touch: true });
+    act(() => {
+      view.dispatch({ selection: { anchor: 2, head: 7 } });
+    });
+    expect(document.querySelector(".live-editor-toolbar")).toBeNull();
     expect(screen.queryByRole("toolbar", { name: "Formatting" })).toBeNull();
     fireEvent.focus(content);
     expect(

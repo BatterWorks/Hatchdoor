@@ -638,7 +638,9 @@
    the marker sits, in the saved query note type above. */
 
 /* Images */
-.note-body img {
+/* Not inside the live editor, whose own image widget and CodeMirror's
+   caret-positioning buffers (also imgs) carry their own sizing. */
+.note-body img:not(.live-editor img) {
   display: block;
   max-width: 100%;
   height: auto;
@@ -1211,19 +1213,6 @@
 }
 .live-editor .cm-cursor {
   border-left-color: var(--hot);
-}
-
-/* `.note-body img` turns every image into a bordered block with margins, and
-   CodeMirror's caret-positioning buffers around widgets are imgs, so without
-   this every line holding a hidden-syntax widget grows by two image margins. */
-.live-editor img.cm-widgetBuffer {
-  display: inline !important;
-  width: 0 !important;
-  height: 1em !important;
-  margin: 0 !important;
-  border: 0 !important;
-  background: transparent !important;
-  vertical-align: text-top !important;
 }
 
 /* Headings in the note's own faces, as the reading view draws them. */

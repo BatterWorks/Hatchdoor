@@ -330,9 +330,9 @@ export function NotePage({
   currentNoteKeyRef.current = noteKey;
 
   // Draft persistence (#330). One writer serves both write surfaces: source
-  // mode's textarea and the inline block editor, including text still sitting
-  // in an open block, which until now existed nowhere but React state and died
-  // with the tab.
+  // mode's textarea and the live editor, including text still sitting in the
+  // editor, which until now existed nowhere but React state and died with the
+  // tab.
   //
   // In source mode the draft is based on the hash the editor saves against; in
   // inline mode autosave keeps moving that hash forward and reports each new
@@ -928,10 +928,10 @@ export function NotePage({
   // Hold off the service worker's own reload while an edit is in the air
   // (#330). A nightly build activates and reloads the page with no prompt, and
   // the trigger for pulling it — coming back to the tab — is exactly the
-  // moment an open block is sitting there unsaved. The draft now survives
-  // that reload, but not causing it is better than recovering from it.
-  // The hold is released the moment the save lands, the block closes, or this
-  // note is left. The source editor holds for as long as it is open: its text
+  // moment the editor is sitting there with unsaved text. The draft now
+  // survives that reload, but not causing it is better than recovering from
+  // it. The hold is released the moment the save lands, the editor loses
+  // focus, or this note is left. The source editor holds for as long as it is open: its text
   // reaches the draft on a debounce, so a reload mid-typing still costs the
   // last few keystrokes (#332).
   const reloadHeld =
@@ -1093,9 +1093,8 @@ export function NotePage({
     };
   }, [markdown, note?.slug, searchQuery, matchHeading]);
 
-  // Jumping to the first hit is a landing gesture, so it is deliberately not
-  // tied to activeUnit the way the recount above is. Entering a block changes
-  // the active unit, and scrolling on that would throw the reader back to the
+  // Jumping to the first hit is a landing gesture: it runs once per arrival,
+  // never again on a later recount, which would throw the reader back to the
   // top of the note the moment they clicked something near the bottom.
   //
   // Runs after the recount effect, which is what fills searchHitsRef: layout
@@ -1403,7 +1402,13 @@ export function NotePage({
   // A wikilink in the editor is matched by title or by Vault path, the two
   // ways Obsidian writes one; the reading view asks the server instead.
   const findNoteTarget = (target: string): NoteCandidate | undefined => {
-    const wanted = target.replace(/\.md$/i, "").toLowerCase();
+    // The target as written may carry a heading or an alias; the note is
+    // the part before either.
+    const wanted = target
+      .split(/[#|]/, 1)[0]
+      .trim()
+      .replace(/\.md$/i, "")
+      .toLowerCase();
     return vaultNoteCandidates.find(
       (candidate) =>
         candidate.title.toLowerCase() === wanted ||

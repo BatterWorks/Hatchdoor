@@ -759,6 +759,21 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     await waitFor(() => expect(isAppReloadHeld()).toBe(false));
   });
 
+  it("puts the edited body back under the frontmatter in the file's own line ending", async () => {
+    const sent = mockVault("---\r\ntags: [a]\r\n---\r\nBody line.\r\n");
+
+    renderNote("vault-1", { vaults: [] });
+
+    await screen.findByText("Body line.");
+    typeInOpenBlock("Body line, edited.\nSecond line.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    const body = JSON.parse(String(sent[0].init?.body)) as { content: string };
+    expect(body.content).toBe(
+      "---\r\ntags: [a]\r\n---\r\nBody line, edited.\r\nSecond line.\r\n",
+    );
+  });
+
   // The full source editor keeps its text in a debounced draft, so a reload
   // between a keystroke and that write loses it just as surely (#332).
   it("holds off the service-worker reload while the source editor is open", async () => {

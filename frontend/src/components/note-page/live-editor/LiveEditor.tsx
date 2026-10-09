@@ -26,7 +26,12 @@ import {
 } from "@codemirror/lang-markdown";
 import { indentOnInput } from "@codemirror/language";
 import { search, searchKeymap } from "@codemirror/search";
-import { EditorSelection, EditorState, Prec } from "@codemirror/state";
+import {
+  EditorSelection,
+  EditorState,
+  Prec,
+  Transaction,
+} from "@codemirror/state";
 import {
   drawSelection,
   dropCursor,
@@ -166,6 +171,8 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
         return;
       }
       const openNote = (target: string) => propsRef.current.onOpenNote(target);
+      const openExternal = (url: string) =>
+        window.open(url, "_blank", "noopener,noreferrer");
       const view = new EditorView({
         parent: host,
         state: EditorState.create({
@@ -213,14 +220,8 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
                 },
               ]),
             ),
-            tables({
-              onLinkClick: (url) =>
-                window.open(url, "_blank", "noopener,noreferrer"),
-            }),
-            inlinePreview({
-              onLinkClick: (url) =>
-                window.open(url, "_blank", "noopener,noreferrer"),
-            }),
+            tables({ onLinkClick: openExternal }),
+            inlinePreview({ onLinkClick: openExternal }),
             wikiLinks({
               onOpen: openNote,
               resolve: async (target) => {
@@ -324,10 +325,13 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
           view.state.selection.main.head,
           props.value.length,
         );
+        // Outside undo history: a Ctrl+Z straight after a reload or a conflict
+        // resolution must not bring the replaced text back and autosave it.
         view.dispatch({
           changes: { from: 0, to: current.length, insert: props.value },
           selection: EditorSelection.cursor(head),
           userEvent: "external",
+          annotations: Transaction.addToHistory.of(false),
         });
       } finally {
         applyingExternalRef.current = false;
