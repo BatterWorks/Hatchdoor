@@ -28,6 +28,16 @@ the outcome or making a breaking change.
 - [ ] List every discovered consumer and its owning boundary, plus how
       consumers were searched for.
 - [ ] State whether the change is additive, behavior-changing, or breaking.
+- [ ] Classify as breaking any change that removes a field from an MCP tool's
+      default reply, or stops requiring it in the tool's `outputSchema`, even
+      when an argument can ask for the old shape. A connected client checks
+      each reply against the `outputSchema` it read when it connected and can
+      keep that copy across a server upgrade, so it rejects the new reply
+      before the agent reads it, and its copy of the tool lacks the new
+      argument (#542). Such a change needs an upgrade note telling people to
+      restart or reconnect agent sessions: an entry under the changelog's
+      breaking-changes heading, which becomes an action-needed line in the
+      release's What's new highlights.
 - [ ] State compatibility expectations, including external or unknown
       consumers.
 - [ ] Describe deployment or migration order and rollback/fallback behavior

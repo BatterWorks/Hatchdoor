@@ -160,11 +160,14 @@ Every release adds a section to the manual's What's new page, `docs/user-vault/W
 
 ### For 2.8.0
 
-The 2.8.0 section must include these three lines:
+The 2.8.0 section must include these four lines:
 
 - **Action needed:** an install on 2.4.x or earlier must upgrade to a 2.5.0 to 2.7.x release before 2.8.0.
+- **Action needed:** after upgrading, start a new session in every agent that was connected to Hatchdoor, or reconnect it, because until then its searches fail with "Structured content does not match the tool's output schema". [[MCP tools reference#Compact and full search hits]]
 - The setup checklist, which Help can reopen.
 - The opt-in daily check for a newer release.
+
+The second line comes from #542. Keep enough of the quoted error for someone to recognise it.
 
 ## The release hook
 
