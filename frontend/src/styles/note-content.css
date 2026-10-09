@@ -1268,14 +1268,15 @@
 }
 .live-editor-toolbar button {
   appearance: none;
+  display: inline-grid;
+  place-items: center;
   border: 0;
   background: transparent;
   color: inherit;
-  font: inherit;
-  font-size: 0.85rem;
+  font-size: 1.15rem;
   min-width: 1.9rem;
   height: 1.9rem;
-  padding: 0 0.4rem;
+  padding: 0 0.3rem;
   cursor: pointer;
 }
 .live-editor-toolbar button:hover {
@@ -1330,6 +1331,8 @@
 }
 .live-editor-keyboard-bar button {
   appearance: none;
+  display: inline-grid;
+  place-items: center;
   flex: 0 0 auto;
   min-width: 2.6rem;
   height: 2.4rem;
@@ -1337,7 +1340,7 @@
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: 1.05rem;
+  font-size: 1.35rem;
   border-radius: var(--radius-none);
 }
 .live-editor-keyboard-bar button:active {
@@ -1352,6 +1355,7 @@
 .live-editor-keyboard-done {
   margin-left: auto;
   color: var(--hot);
+  font-size: 0.95rem;
   font-weight: 600;
   letter-spacing: 0.04em;
 }

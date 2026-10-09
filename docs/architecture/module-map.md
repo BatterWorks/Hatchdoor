@@ -5512,6 +5512,7 @@ frontend typecheck, then full frontend checks.
 
 - `frontend/src/components/ui.tsx`
 - `frontend/src/components/icons.tsx`
+- `frontend/src/components/iconPaths.ts`
 - `frontend/src/index.css`
 - `frontend/src/App.css`
 - `frontend/src/assets/fonts/fonts.css`
@@ -5526,7 +5527,7 @@ The tokens in `base.css` are governed by
 [`docs/design/design-system.html`](../design/design-system.html), which is
 authoritative for visual decisions across every feature stylesheet; a component
 the system does not yet cover gets its section added by the change that ships
-it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to
+it. `icons.tsx` holds the inlined Material Symbols (Sharp) set, with `iconPaths.ts` carrying the path data and a DOM builder for the live editor's floating toolbar, which CodeMirror draws outside React (#541); icons size to
 `1em` and paint with `currentColor`, so callers control them through font-size
 and color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `assets/fonts/fonts.css`
 (#475) declares the four families the `base.css` font tokens name, from `woff2`

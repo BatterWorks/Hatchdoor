@@ -14,6 +14,21 @@ import { redo, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 
 import {
+  ChecklistIcon,
+  CodeIcon,
+  FormatBoldIcon,
+  FormatH2Icon,
+  FormatIndentDecreaseIcon,
+  FormatIndentIncreaseIcon,
+  FormatInkHighlighterIcon,
+  FormatItalicIcon,
+  FormatListBulletedIcon,
+  FormatStrikethroughIcon,
+  LinkIcon,
+  RedoIcon,
+  UndoIcon,
+} from "../../icons";
+import {
   indentLines,
   insertLink,
   setLinePrefix,
@@ -50,25 +65,57 @@ type Item = {
 };
 
 const ITEMS: Array<Item | "gap"> = [
-  { label: "⇤", title: "Outdent", run: (v) => indentLines(v, false) },
-  { label: "⇥", title: "Indent", run: (v) => indentLines(v, true) },
-  { label: "•", title: "Bullet", run: (v) => setLinePrefix(v, "- ") },
-  { label: "☐", title: "To-do", run: (v) => setLinePrefix(v, "- [ ] ") },
-  { label: "H", title: "Heading", run: (v) => setLinePrefix(v, "## ") },
-  "gap",
-  { label: <b>B</b>, title: "Bold", run: (v) => wrapSelection(v, "**") },
-  { label: <i>I</i>, title: "Italic", run: (v) => wrapSelection(v, "*") },
   {
-    label: <s>S</s>,
+    label: <FormatIndentDecreaseIcon />,
+    title: "Outdent",
+    run: (v) => indentLines(v, false),
+  },
+  {
+    label: <FormatIndentIncreaseIcon />,
+    title: "Indent",
+    run: (v) => indentLines(v, true),
+  },
+  {
+    label: <FormatListBulletedIcon />,
+    title: "Bullet",
+    run: (v) => setLinePrefix(v, "- "),
+  },
+  {
+    label: <ChecklistIcon />,
+    title: "To-do",
+    run: (v) => setLinePrefix(v, "- [ ] "),
+  },
+  {
+    label: <FormatH2Icon />,
+    title: "Heading",
+    run: (v) => setLinePrefix(v, "## "),
+  },
+  "gap",
+  {
+    label: <FormatBoldIcon />,
+    title: "Bold",
+    run: (v) => wrapSelection(v, "**"),
+  },
+  {
+    label: <FormatItalicIcon />,
+    title: "Italic",
+    run: (v) => wrapSelection(v, "*"),
+  },
+  {
+    label: <FormatStrikethroughIcon />,
     title: "Strikethrough",
     run: (v) => wrapSelection(v, "~~"),
   },
-  { label: "<>", title: "Code", run: (v) => wrapSelection(v, "`") },
-  { label: "==", title: "Highlight", run: (v) => wrapSelection(v, "==") },
-  { label: "🔗", title: "Link", run: insertLink },
+  { label: <CodeIcon />, title: "Code", run: (v) => wrapSelection(v, "`") },
+  {
+    label: <FormatInkHighlighterIcon />,
+    title: "Highlight",
+    run: (v) => wrapSelection(v, "=="),
+  },
+  { label: <LinkIcon />, title: "Link", run: insertLink },
   "gap",
-  { label: "↶", title: "Undo", run: undo },
-  { label: "↷", title: "Redo", run: redo },
+  { label: <UndoIcon />, title: "Undo", run: undo },
+  { label: <RedoIcon />, title: "Redo", run: redo },
 ];
 
 export function KeyboardBar({ getView }: { getView: () => EditorView | null }) {

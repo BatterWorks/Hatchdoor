@@ -24,6 +24,15 @@ import {
 } from "@codemirror/view";
 
 import type { ExplorerNote } from "../../../types";
+import {
+  CODE_PATH,
+  FORMAT_BOLD_PATH,
+  FORMAT_INK_HIGHLIGHTER_PATH,
+  FORMAT_ITALIC_PATH,
+  FORMAT_STRIKETHROUGH_PATH,
+  LINK_PATH,
+  createIconElement,
+} from "../../iconPaths";
 import { insertLink, wrapSelection } from "./commands";
 
 /* ── `/` menu ─────────────────────────────────────────────────────────── */
@@ -149,16 +158,36 @@ export function completionMenus(
 /* ── Floating toolbar ─────────────────────────────────────────────────── */
 
 const TOOLBAR_ITEMS: Array<{
-  label: string;
+  icon: string;
   title: string;
   run: (view: EditorView) => boolean;
 }> = [
-  { label: "B", title: "Bold (Ctrl+B)", run: (v) => wrapSelection(v, "**") },
-  { label: "I", title: "Italic (Ctrl+I)", run: (v) => wrapSelection(v, "*") },
-  { label: "S", title: "Strikethrough", run: (v) => wrapSelection(v, "~~") },
-  { label: "<>", title: "Code (Ctrl+E)", run: (v) => wrapSelection(v, "`") },
-  { label: "==", title: "Highlight", run: (v) => wrapSelection(v, "==") },
-  { label: "Link", title: "Link (Ctrl+K)", run: insertLink },
+  {
+    icon: FORMAT_BOLD_PATH,
+    title: "Bold (Ctrl+B)",
+    run: (v) => wrapSelection(v, "**"),
+  },
+  {
+    icon: FORMAT_ITALIC_PATH,
+    title: "Italic (Ctrl+I)",
+    run: (v) => wrapSelection(v, "*"),
+  },
+  {
+    icon: FORMAT_STRIKETHROUGH_PATH,
+    title: "Strikethrough",
+    run: (v) => wrapSelection(v, "~~"),
+  },
+  {
+    icon: CODE_PATH,
+    title: "Code (Ctrl+E)",
+    run: (v) => wrapSelection(v, "`"),
+  },
+  {
+    icon: FORMAT_INK_HIGHLIGHTER_PATH,
+    title: "Highlight",
+    run: (v) => wrapSelection(v, "=="),
+  },
+  { icon: LINK_PATH, title: "Link (Ctrl+K)", run: insertLink },
 ];
 
 function selectionTooltip(state: EditorState): Tooltip | null {
@@ -186,7 +215,7 @@ function selectionTooltip(state: EditorState): Tooltip | null {
       for (const item of TOOLBAR_ITEMS) {
         const button = document.createElement("button");
         button.type = "button";
-        button.textContent = item.label;
+        button.appendChild(createIconElement(item.icon));
         button.title = item.title;
         button.setAttribute("aria-label", item.title);
         // mousedown, so the click does not first collapse the selection.

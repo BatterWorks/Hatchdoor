@@ -2667,7 +2667,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb">The editor&rsquo;s scroller is <code>overflow: visible</code> and its height is auto, so it grows with the text and the note pane remains the one scroll container. A jump from the table of contents or a search hit is a CodeMirror scroll-into-view, which scrolls the pane.</p>
 
       <h3 class="doc-sub">Floating toolbar (desktop)</h3>
-      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
+      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, as the same Sharp icons the keyboard bar uses. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
       <div class="tag-row"><span class="key">.live-editor-toolbar</span><span class="key">background: --ink</span><span class="key">--shadow-float</span></div>
 
       <h3 class="doc-sub">Menus</h3>
@@ -2675,7 +2675,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.cm-tooltip-autocomplete</span><span class="key">.cm-completionDetail</span></div>
 
       <h3 class="doc-sub">Touch: a bar above the keyboard, no floating toolbar</h3>
-      <p class="blurb">A phone draws its own Cut / Copy / Paste callout over a selection, in exactly the place a floating toolbar would sit, and the two fight. On a coarse pointer the toolbar is not mounted at all, and the formatting lives in a fixed bar above the keyboard: indent, outdent, bullet, to-do, heading, bold, italic, strikethrough, code, highlight, link, undo, redo, and <b>Done</b> in <span class="key">--hot</span>. The bar is lifted by the part of the layout viewport the keyboard hides (iOS overlays it; Android resizes), and pads the safe-area inset. Buttons act on <code>mousedown</code> and prevent it, so focus never leaves the editor and the keyboard stays up.</p>
+      <p class="blurb">A phone draws its own Cut / Copy / Paste callout over a selection, in exactly the place a floating toolbar would sit, and the two fight. On a coarse pointer the toolbar is not mounted at all, and the formatting lives in a fixed bar above the keyboard, each a Sharp icon from §26: indent, outdent, bullet, to-do, heading, bold, italic, strikethrough, code, highlight, link, undo, redo, and <b>Done</b> as a word in <span class="key">--hot</span>. The bar is lifted by the part of the layout viewport the keyboard hides (iOS overlays it; Android resizes), and pads the safe-area inset. Buttons act on <code>mousedown</code> and prevent it, so focus never leaves the editor and the keyboard stays up.</p>
       <div class="tag-row"><span class="key">.live-editor-keyboard-bar</span><span class="key">.live-editor-keyboard-done</span><span class="key">env(safe-area-inset-bottom)</span></div>
 
       <h3 class="doc-sub">Images</h3>
@@ -2893,6 +2893,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">graph_3</td><td class="val">rail: graph</td></tr>
           <tr><td class="name">inbox</td><td class="val">rail: changed on disk</td></tr>
           <tr><td class="name">settings</td><td class="val">rail: settings</td></tr>
+          <tr><td class="name">format_indent_decrease</td><td class="val">live editor keyboard bar: outdent</td></tr>
+          <tr><td class="name">format_indent_increase</td><td class="val">live editor keyboard bar: indent</td></tr>
+          <tr><td class="name">format_list_bulleted</td><td class="val">live editor keyboard bar: bullet</td></tr>
+          <tr><td class="name">checklist</td><td class="val">live editor keyboard bar: to-do</td></tr>
+          <tr><td class="name">format_h2</td><td class="val">live editor keyboard bar: heading</td></tr>
+          <tr><td class="name">format_bold</td><td class="val">live editor: bold (bar and toolbar)</td></tr>
+          <tr><td class="name">format_italic</td><td class="val">live editor: italic (bar and toolbar)</td></tr>
+          <tr><td class="name">format_strikethrough</td><td class="val">live editor: strikethrough (bar and toolbar)</td></tr>
+          <tr><td class="name">code</td><td class="val">live editor: inline code (bar and toolbar)</td></tr>
+          <tr><td class="name">format_ink_highlighter</td><td class="val">live editor: highlight (bar and toolbar)</td></tr>
+          <tr><td class="name">link</td><td class="val">live editor: link (bar and toolbar)</td></tr>
+          <tr><td class="name">undo</td><td class="val">live editor keyboard bar: undo</td></tr>
+          <tr><td class="name">redo</td><td class="val">live editor keyboard bar: redo</td></tr>
         </tbody>
       </table>
       <div class="tag-row"><span class="key">components/icons.tsx</span><span class="key">.icon-button</span><span class="key">.explorer-rail-item</span></div>
