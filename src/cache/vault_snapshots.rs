@@ -1909,7 +1909,7 @@ mod tests {
         let cache = SqliteCache::in_memory(384).expect("open cache");
         let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
         let (_directory, index) = index(&[("Home.md", "# Home\n\nhome body")]);
-        let logs = crate::cache::populate::log_capture::CapturedLogs::default();
+        let logs = crate::config::log_capture::CapturedLogs::default();
 
         tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::DEBUG), || {
             cache

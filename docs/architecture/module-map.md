@@ -205,6 +205,13 @@ that production inventory are still checked for stale paths and duplicates.
   and unsupported hostnames fail with guidance rather than depending on DNS.
   The built-in `--healthcheck` selects a local target in the listener's address
   family, preserving the IPv6 listener path in the shell-free runtime image.
+- `config.rs` also holds the test-only `log_capture::CapturedLogs`, the one
+  way a test in any module captures log lines, formatted as `init_logging`
+  formats them. Its `dispatch(level)` keeps a second, idle dispatcher alive
+  for the whole test run, without which `tracing` can switch a log statement
+  off for every thread when a thread with no subscriber reaches it first
+  (#535). Tests in `server.rs`, `src/usage_report.rs`,
+  `src/cache/populate.rs` and `src/cache/vault_snapshots.rs` use it.
 - `StartupTracker` exposes startup/model/indexing readiness. `/ready` answers
   from it. The instance is ready when the search model is set up, the Vault
   registry loaded normally, and every active Vault's first index has settled;
@@ -2381,7 +2388,8 @@ but has no range, because no single run of text spells it.
 metadata and cache queries must observe one published generation.
 
 **Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
-FTS5, and sqlite-vec.
+FTS5, and sqlite-vec. Its tests capture log lines with runtime composition's
+test-only `config::log_capture` (#535).
 
 **Consumers:** application state/reindexing, runtime composition's per-Vault
 Index dispatch, the Vault-qualified mutation core (which reaches

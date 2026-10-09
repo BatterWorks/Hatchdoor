@@ -1690,39 +1690,6 @@ mod tests {
         assert_eq!(fixture.sent(), 2);
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedLogs {
-        fn dispatch(&self) -> tracing::Dispatch {
-            let sink = self.clone();
-            tracing::Dispatch::new(
-                tracing_subscriber::fmt()
-                    .with_max_level(tracing::Level::DEBUG)
-                    .with_target(false)
-                    .with_ansi(false)
-                    .compact()
-                    .with_writer(move || sink.clone())
-                    .finish(),
-            )
-        }
-
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn a_failed_send_is_logged_at_debug_retried_an_hour_later_and_leaves_nothing_behind() {
         let fixture = SendFixture::new();
@@ -1730,14 +1697,14 @@ mod tests {
         let before = std::fs::read_to_string(fixture.store.path()).unwrap();
         fixture.fail_sends(true);
         let mut reporter = fixture.reporter();
-        let logs = CapturedLogs::default();
-        let _guard = tracing::dispatcher::set_default(&logs.dispatch());
+        let logs = crate::config::log_capture::CapturedLogs::default();
+        let _guard = tracing::dispatcher::set_default(&logs.dispatch(tracing::Level::DEBUG));
 
         assert!(reporter.tick(at(0)).await);
         assert!(!reporter.tick(at(MINUTE)).await);
         assert!(!reporter.tick(at(HOUR - 2)).await);
         assert_eq!(fixture.sent(), 1);
-        let logged = logs.text();
+        let logged = logs.lines().join("\n");
         assert!(logged.contains("DEBUG"), "{logged}");
         assert!(logged.contains("connection refused"), "{logged}");
         assert!(
