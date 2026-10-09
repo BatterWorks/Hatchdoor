@@ -1728,9 +1728,11 @@ export function NotePage({
                     onClick={startEditing}
                   >
                     Edit
-                    <span className="shortcut-hint" aria-hidden="true">
-                      E
-                    </span>
+                    {isMobile ? null : (
+                      <span className="shortcut-hint" aria-hidden="true">
+                        E
+                      </span>
+                    )}
                   </UiButton>
                 </div>
               ) : null
