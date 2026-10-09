@@ -4838,7 +4838,13 @@ images (`findMarkdownImages`) go out as `asset_targets` too, decoded, and a
 resolved one is pointed at the asset route, so a root-anchored or bare-name
 `![](path)`, the forms ADR-33's inserts can write, renders; an unresolved
 image keeps its destination. `resolveAssetTargets` is the uncached form the
-editor asks when choosing a `shortest` attachment path — heading/search-hit navigation, Markdown transformations,
+editor asks when choosing a `shortest` attachment path, and
+`resolveNoteTargets` (#544) answers wikilink targets alone from the same
+cache the hook fills, one `resolve-batch` per call, for the live editor's
+links, and `cachedAssetHref` (#544) gives one embed target the href the
+rendered body would draw now, the server's path once the hook's batch has
+filled the cache and the note-relative reading before, for the editor's image
+and PDF widgets — heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the reading view's component map produced by
 `createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
 `NotePage` shows the live editor on a writable Vault unless the browser's
@@ -4860,7 +4866,9 @@ asset and PDF URLs under `/api`, in-page fragments, and external links, where
 handing the click to the browser is what the click means. Following a note
 link therefore no longer lets the browser resolve a `#heading` fragment, so
 `NotePage` makes that jump itself, once per history entry, gated on the body
-having settled onto the note the URL names and on the heading being on screen.
+having settled onto the note the URL names and on the heading being on screen,
+or, while the live editor holds the body, on the heading being one of the
+note's own lines (#544), which the editor then scrolls to.
 That last check runs on every commit rather than on a dependency list: the
 order in which the note's fetch, its wikilink resolution and its render land
 differs between a cold visit and a warm one, and a subset of them named as
@@ -4871,8 +4879,11 @@ renders it as `SavedQueryBlock` (`note-page/SavedQueryBlock.tsx`), which draws
 the table the server computed, inside the Table section's `.table-wrap`, with
 the first `file.name` or `file.basename` cell (else the first cell) linking to
 the row's note. `NotePage` fetches `GET .../notes/{slug}/saved-queries` through
-`useSavedQueries` (`note-page/savedQueries.ts`) only while the editor is closed
-(nothing renders the results while it is open) and only when the note holds a
+`useSavedQueries` (`note-page/savedQueries.ts`) for the reading view and the
+live editor alike (#544: the editor's `base` widget renders `SavedQueryBlock`
+under a `SavedQueryProvider` given the body on disk, so a block being edited
+matches no result until its save lands), not while source mode is open, and
+only when the note holds a
 `base` fence, again whenever its content hash changes or the collection revision
 moves past the one its loaded results were evaluated at, and hands the results down through `SavedQueryProvider`. Each block finds its
 result by its position among the note's `base` fences, cross-checked against
@@ -4993,7 +5004,8 @@ hides only the panel.
 
 **Validation:** note-page unit tests, `NotePage.test.tsx` (saving through every
 Vault condition, read escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
-fragment jump), Markdown/heading/search/state tests,
+fragment jump, in the reading view and from the live editor's wikilinks),
+`wikilinks.hook.test.ts` (`resolveNoteTargets`), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 
@@ -5016,10 +5028,16 @@ fragment jump), Markdown/heading/search/state tests,
 - `frontend/src/lib/writePaths.ts`
 - `frontend/src/components/note-page/live-editor/LiveEditor.tsx`
 - `frontend/src/components/note-page/live-editor/KeyboardBar.tsx`
+- `frontend/src/components/note-page/live-editor/WidgetPortals.tsx`
+- `frontend/src/components/note-page/live-editor/callouts.ts`
 - `frontend/src/components/note-page/live-editor/commands.ts`
+- `frontend/src/components/note-page/live-editor/focusState.ts`
 - `frontend/src/components/note-page/live-editor/imageWidgets.ts`
 - `frontend/src/components/note-page/live-editor/menus.ts`
+- `frontend/src/components/note-page/live-editor/noteLinks.ts`
+- `frontend/src/components/note-page/live-editor/renderedBlocks.tsx`
 - `frontend/src/components/note-page/live-editor/searchHighlight.ts`
+- `frontend/src/components/note-page/live-editor/widgetPortals.ts`
 - `frontend/src/components/note-page/SaveState.tsx`
 - `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
@@ -5043,7 +5061,29 @@ or Escape, exposes `scrollToLine`/`scrollToHit`/`focus`/`blur` through its
 handle, and owns the `[[` completion in the Vault's link style, the `/` menu,
 the desktop-only selection toolbar, the touch keyboard bar, the image widgets
 under their lines, paste/drop attachment uploads and the `?q=` highlight;
-undo is CodeMirror's own, so the page keeps no document history), autosave
+undo is CodeMirror's own, so the page keeps no document history; #544: the
+blocks the reading view renders render here too, from `renderedBlocks.tsx`,
+a state field that replaces a `mermaid` fence, a `base` fence and a `$$`
+or `$` formula with a widget while the caret is off their lines and draws a
+`![[file.pdf]]` preview under its line, and from `callouts.ts`, which gives
+a `> [!kind]` quote the reading view's `.callout-<kind>` accent per line and
+draws the title in place of the marker; both read `focusState.ts`, so a blur
+renders everything the way the inline preview does; the mermaid, saved-query
+and PDF widgets are the reading view's own components, drawn through
+`widgetPortals.ts`'s registry and `WidgetPortals.tsx`'s portals so they keep
+the page's router and saved-query contexts, and every widget is view-only;
+`LiveEditor`'s `resolveNote` prop is now asynchronous, `resolveImageSrc`
+is `resolveAssetSrc`, and a new `assetsResolvedFor` prop, the body the page's
+asset resolution has settled for, redraws every image and PDF widget through
+the resolver when it changes (`imageWidgets.ts`'s `assetsResolved` effect), so
+an embed named from the Vault root resolves as it does in Reading view; the
+wikilink extension skips attachment targets so an embed line is drawn by its
+widget rather than styled as a missing link;
+`noteLinks.ts`'s `createNoteLinkResolver` folds the targets the extension
+asks for in one pass into one request, which `NotePage` points at the
+reading view's `resolveNoteTargets`, so a link resolves by title, alias or
+path as it does in Reading view and a click on `[[Note#Heading]]` opens the
+note at the heading), autosave
 scheduling and save state, and attachment acceptance and insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
@@ -5121,7 +5161,10 @@ vault" banner the hook's own `"error"` status would otherwise show —
 message and carries no instruction either way).
 
 **Consumed dependencies:** shared API/types/UI, router navigation, vault tree
-note candidates, and backend HTTP write endpoints.
+note candidates, backend HTTP write endpoints, and (#544) Note reading and
+rendering's `MermaidDiagram`, `PdfPreview`, `SavedQueryBlock`,
+`resolveNoteTargets` and `cachedAssetHref`, drawn or called as they are and
+never edited here.
 
 **Coordination paths:** `App.tsx`, `NotePage.tsx`, `types.ts`,
 `noteEnhancements.css`, `vite.config.ts` and `src/test/setup.ts` (vitest
@@ -5143,7 +5186,9 @@ formatting instead.
 code-carrying cases), editor, action dialog, upload, draft, path,
 frontmatter, conflict, and autocomplete tests; `sourceMap`,
 `useNoteAutosave`, `attachmentDrop`, `live-editor/LiveEditor`,
-`live-editor/commands`, and `properties` tests;
+`live-editor/commands`, `live-editor/renderedBlocks` (#544: each block kind
+and callout, with the caret off and on), `live-editor/noteLinks`, and
+`properties` tests;
 `useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
 `App.demo-mode.test.tsx` (#152), and full frontend checks.
 

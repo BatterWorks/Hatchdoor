@@ -8,8 +8,8 @@ On a Vault Hatchdoor can write to, a note opens straight into its editor. There 
 
 ## Three views of a note
 
-- **Editing**, the default on a writable Vault. The whole body is one editor: select across paragraphs, cut and paste whole sections, and undo as far back as you like with `Ctrl+Z` (`Cmd+Z` on a Mac).
-- **Reading**, the rendered page. Select **Reading** above the note to switch, and **Editing** to switch back; your browser remembers the choice. Mermaid diagrams, math, saved-query tables, PDFs and other embeds render here; in the editor they show as their source. A read-only Vault and a public demo show this view only.
+- **Editing**, the default on a writable Vault. The whole body is one editor: select across paragraphs, cut and paste whole sections, and undo as far back as you like with `Ctrl+Z` (`Cmd+Z` on a Mac). Mermaid diagrams, math, saved-query tables, PDF embeds and callouts render here too, the way the Reading view draws them, and turn back into their source when your caret lands on them. A saved query shows the rows for the note as it is on disk, so a block you are changing reads as not yet evaluated until it saves.
+- **Reading**, the rendered page. Select **Reading** above the note to switch, and **Editing** to switch back; your browser remembers the choice. A read-only Vault and a public demo show this view only.
 - **Source**, the whole note as Markdown with a Save button. Select **Source** above the note, or press `E`. Use it for a conflict review, or when you want to see the file exactly as it is on disk.
 
 ## Formatting
@@ -27,7 +27,7 @@ Select a word or a phrase and a small toolbar appears over it with bold, italic,
 
 Type `/` at the start of a line for a menu of what a line can be: a heading, a bulleted or numbered list, a to-do, a quote, a callout, a code block, a divider or a table. Keep typing to narrow it, and `Enter` picks.
 
-Type `[[` and part of a note's title to link to it. Pick one with the arrow keys and `Enter`, and Hatchdoor writes the link in the Vault's link style: `[[Note Title]]` in a wikilink Vault, `[Note Title](path/to/Note%20Title.md)` in a Markdown-link Vault. Only notes in the same Vault are offered. Clicking a wikilink in the editor opens that note. [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is worked out.
+Type `[[` and part of a note's title to link to it. Pick one with the arrow keys and `Enter`, and Hatchdoor writes the link in the Vault's link style: `[[Note Title]]` in a wikilink Vault, `[Note Title](path/to/Note%20Title.md)` in a Markdown-link Vault. Only notes in the same Vault are offered. A wikilink in the editor is looked up the way the Reading view looks it up, by title, alias or path, so it reads as resolved or missing the same in both, and clicking it opens that note, at the heading when the link names one. [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is worked out.
 
 Paste or drop an image or another attachment into the editor and Hatchdoor uploads it beside the note and writes the embed on the line after your caret. Images show under the line that embeds them. [[How to import and work with attachments]] covers where files land.
 

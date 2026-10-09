@@ -13,6 +13,7 @@
 import { ensureSyntaxTree } from "@codemirror/language";
 import {
   RangeSetBuilder,
+  StateEffect,
   StateField,
   type EditorState,
   type Extension,
@@ -24,7 +25,19 @@ import {
   type DecorationSet,
 } from "@codemirror/view";
 
-const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i;
+/**
+ * The page learnt where more embeds point (#544): the server's answers for
+ * the note's attachments landed, so every embed is drawn again through the
+ * resolver, which now knows them.
+ */
+export const assetsResolved = StateEffect.define<void>();
+
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)(?:[?#].*)?$/i;
+
+/** Whether an embed target names an image this editor draws. */
+export function isImageTarget(target: string): boolean {
+  return IMAGE_FILE.test(target);
+}
 const WIKI_EMBED = /!\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
 const MARKDOWN_IMAGE = /^!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?/;
 
@@ -108,7 +121,9 @@ export function imageWidgets(resolve: (raw: string) => string): Extension {
   return StateField.define<DecorationSet>({
     create: (state) => imagesIn(state, resolve),
     update: (value, tr) =>
-      tr.docChanged ? imagesIn(tr.state, resolve) : value,
+      tr.docChanged || tr.effects.some((effect) => effect.is(assetsResolved))
+        ? imagesIn(tr.state, resolve)
+        : value,
     provide: (field) => EditorView.decorations.from(field),
   });
 }

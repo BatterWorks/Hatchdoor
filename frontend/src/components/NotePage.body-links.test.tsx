@@ -17,7 +17,12 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function LocationProbe() {
   const location = useLocation();
-  return <div data-testid="pathname">{location.pathname}</div>;
+  return (
+    <>
+      <div data-testid="pathname">{location.pathname}</div>
+      <div data-testid="hash">{location.hash}</div>
+    </>
+  );
 }
 
 const VAULT = "vault-1";
@@ -70,7 +75,7 @@ function mockVault(
   );
 }
 
-function renderApp() {
+function renderApp(overrides: Partial<Parameters<typeof NotePage>[0]> = {}) {
   const props = {
     onActiveNoteChange: vi.fn(),
     onTagSelect: vi.fn(),
@@ -79,6 +84,7 @@ function renderApp() {
     writeEnabled: false,
     editRequestId: 0,
     vaults: [],
+    ...overrides,
   };
   return render(
     <MemoryRouter initialEntries={[`/v/${VAULT}/n/home`]}>
@@ -163,6 +169,42 @@ describe("in-body note links", () => {
     expect(screen.getByTestId("pathname").textContent).toBe(
       `/v/${VAULT}/n/home`,
     );
+  });
+
+  // The live editor asks the same resolver (#544): a target only the server
+  // can place still styles as resolved, and the click lands on the heading.
+  it("resolves a wikilink in the editor through the server and opens the note at its heading", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    mockVault("Jump to [[Other#Section two]].\n", {
+      "Other#Section two": "other",
+    });
+    renderApp({ writeEnabled: true });
+
+    await screen.findByRole("textbox", { name: "Note body" });
+    const link = await waitFor(() => {
+      const widget = document.querySelector(".cm-atomic-wiki-link-resolved");
+      expect(widget).not.toBeNull();
+      return widget as HTMLElement;
+    });
+    expect(link.textContent).toBe("Other");
+    fireEvent.click(link, { button: 0 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pathname").textContent).toBe(
+        `/v/${VAULT}/n/other`,
+      );
+    });
+    expect(screen.getByTestId("hash").textContent).toBe("#section-two");
+    // The jump is the editor's own scroll, and it arms the trailing space the
+    // way a heading jump in the reading view does.
+    await waitFor(() => {
+      expect(
+        document.querySelector(".note-content")?.getAttribute("data-tail"),
+      ).toBe("true");
+    });
   });
 
   // An asset URL is a file the browser fetches, not a route. Handing it to the
