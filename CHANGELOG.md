@@ -64,6 +64,7 @@
 - Hatchdoor now says which Vault is in the way when it refuses a folder for a new or edited Vault. The old message, "Vault path overlaps another connected Vault, including disabled definitions", named nothing, so someone who typed the top of their notes folder into **Add a Vault** could read it as "this folder can never be a Vault". The refusal now names the Vault and says how the two folders relate: the folder is already that Vault, is inside it, or contains it, as in `This folder contains the Vault "Notes". Two Vaults cannot share notes, so choose a folder with no Vault in it.` A disabled Vault is called a disabled Vault, since those are easy to forget, and when the folder contains several Vaults the message names one and counts the others. Agents get the same sentence from `create_vault` and `edit_vault`. The message never includes another Vault's folder path, and the `vault_path_overlap` code, the `409` status and the cases that are refused are unchanged. [#495]
 - A Vault that is reindexing no longer tells agents it cannot be searched. Every reindex of a Vault that was already searchable, including the short one after each saved note, made `list_vaults` and `GET /api/v1/vaults` report `search: "indexing"` and `capabilities.search: false` until it finished, although search kept answering from the previous index the whole time. An agent that checks capabilities before it searches stopped searching for that long and walked the file tree instead. Such a Vault now reports `search: "stale"` and keeps `capabilities.search: true` while it reindexes, with `index_turn: "running"` saying a rebuild is under way. `indexing` now only means a Vault building its first index, with nothing to search yet. In the sidebar such a Vault keeps its note count while it reindexes, where a long reindex used to replace the count with a moving placeholder. [#483]
 - Two pieces of built-in help now say what Hatchdoor does. The help under **Settings** → **Meaning search in demoted layers** said a folder marked with a `.hatchdoor-layer` file stays out of the browser. It only stays out of normal search, and its notes still show in the sidebar, which the help now says. And an agent whose write fails with `write_failed` is now sent to the troubleshooting section "A write fails for some other reason", which says where to look. It used to be sent to a section about one cause that 2.7.0 removed. [#527]
+- On a phone, the Edit button on an open note no longer shows an unexplained `E` in a small pill beside its label. The `E` is the hint for the keyboard shortcut that opens the editor, so it now appears only in the desktop layout. Pressing `e` still opens the editor at every width. [#537]
 
 [#417]: https://github.com/BatterWorks/Hatchdoor/issues/417
 [#418]: https://github.com/BatterWorks/Hatchdoor/issues/418
@@ -114,6 +115,7 @@
 [#528]: https://github.com/BatterWorks/Hatchdoor/issues/528
 [#530]: https://github.com/BatterWorks/Hatchdoor/issues/530
 [#532]: https://github.com/BatterWorks/Hatchdoor/issues/532
+[#537]: https://github.com/BatterWorks/Hatchdoor/issues/537
 
 ## v2.7.0 - 2026-10-02
 

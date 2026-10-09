@@ -1258,6 +1258,23 @@ describe("NotePage body before links (#361)", () => {
 });
 
 describe("NotePage reading chrome (#530)", () => {
+  async function atPhoneWidth(run: () => Promise<void>) {
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("920"),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      await run();
+    } finally {
+      window.matchMedia = original;
+    }
+  }
+
   function mockNote(vaultId: string, resolveBatch: () => Promise<Response>) {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
@@ -1321,16 +1338,7 @@ describe("NotePage reading chrome (#530)", () => {
 
   it("remembers the phone's Properties fold under its own key", async () => {
     const vaultId = "vault-1";
-    const original = window.matchMedia;
-    window.matchMedia = ((query: string) => ({
-      matches: query.includes("920"),
-      media: query,
-      onchange: null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })) as unknown as typeof window.matchMedia;
-    try {
+    await atPhoneWidth(async () => {
       mockNote(vaultId, async () =>
         jsonResponse({ vault_id: vaultId, results: [] }),
       );
@@ -1343,8 +1351,33 @@ describe("NotePage reading chrome (#530)", () => {
       expect(
         window.localStorage.getItem(NOTE_PROPERTIES_COLLAPSED_KEY),
       ).toBeNull();
-    } finally {
-      window.matchMedia = original;
-    }
+    });
+  });
+
+  it("shows the Edit button's shortcut hint on desktop", async () => {
+    const vaultId = "vault-1";
+    mockNote(vaultId, async () =>
+      jsonResponse({ vault_id: vaultId, results: [] }),
+    );
+
+    renderNote(vaultId);
+
+    const edit = await screen.findByRole("button", { name: "Edit" });
+    expect(edit.querySelector(".shortcut-hint")).toHaveTextContent("E");
+  });
+
+  it("leaves the shortcut hint off the Edit button on a phone", async () => {
+    const vaultId = "vault-1";
+    await atPhoneWidth(async () => {
+      mockNote(vaultId, async () =>
+        jsonResponse({ vault_id: vaultId, results: [] }),
+      );
+
+      renderNote(vaultId);
+
+      const edit = await screen.findByRole("button", { name: "Edit" });
+      expect(edit.querySelector(".shortcut-hint")).toBeNull();
+      expect(edit).toHaveTextContent(/^Edit$/);
+    });
   });
 });
