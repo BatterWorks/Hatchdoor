@@ -38,9 +38,11 @@ export function UiToolbar({
 
 /**
  * A Vault declaring itself as a marked path root (#140): the Vault name in
- * hot ink followed by a middot, never a `/`, so it reads as visibly not a
- * folder segment. Inert — a plain span, never a click target — and never
- * elides; callers give the adjacent title or path the shrinking room instead.
+ * muted mono followed by a middot, never a `/`, so it reads as visibly not a
+ * folder segment. Inert — a plain span, never a click target. It takes at
+ * most a share of its row and elides past that (#530): a long Vault name
+ * used to push the note title off the row entirely, and the title is what
+ * the row is for.
  */
 export function VaultPrefix({ name }: { name: string }) {
   return (

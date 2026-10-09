@@ -160,20 +160,26 @@
   z-index: 20;
 }
 
-/* Vault provenance prefix (#140) — a marked path root, never eliding.
-   Sized and weighted from the surrounding row; only color and the middot
-   separator are its own. */
+/* Vault provenance prefix (#140) — a marked path root. Quiet mono in muted
+   ink, so the title beside it carries the row, and capped to a share of the
+   row (#530): a long Vault name used to take the whole row and push the
+   title out of sight. The middot separator is its own. */
 .path-vault {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: baseline;
-  color: var(--hot);
-  font-variation-settings:
-    "wdth" 100,
-    "wght" 500;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: baseline;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-variation-settings: normal;
 }
 
 .path-sep {
   margin-left: 0.3rem;
-  color: var(--hot);
+  color: var(--tertiary);
 }

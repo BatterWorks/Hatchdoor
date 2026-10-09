@@ -9,7 +9,10 @@ import type { ModifiedNote, VaultScope, VaultSummary } from "../types";
 const VISIBLE_LIMIT = 15;
 
 /**
- * Notes that changed on disk, opened from the sidebar rail.
+ * Notes that changed on disk: a folding section at the top of the explorer's
+ * list, in the same shape as Recently viewed (#530). It used to be a panel a
+ * rail toggle opened, which paired a button with a list far from it once the
+ * rail moved to the footer.
  *
  * Deliberately **not** a notification badge yet. The design calls for a count
  * of changes that arrived from outside this browser — MCP agents, git sync,
@@ -31,6 +34,8 @@ export function ChangesPanel({
   missingVaultNames,
   error = null,
   onRetry,
+  collapsed,
+  onToggleCollapsed,
 }: {
   notes: ModifiedNote[];
   onNavigate: () => void;
@@ -45,6 +50,9 @@ export function ChangesPanel({
    * empty "nothing has changed" state it used to collapse into. */
   error?: string | null;
   onRetry?: () => void;
+  /** Folded shows the head alone: its count still says how many changed. */
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
   const visible = notes.slice(0, VISIBLE_LIMIT);
   const overflow = notes.length - visible.length;
@@ -62,8 +70,12 @@ export function ChangesPanel({
       <SideHead
         label="Changed on disk"
         count={error ? undefined : notes.length}
+        collapsible
+        open={!collapsed}
+        controls="explorer-changes-list"
+        onToggle={onToggleCollapsed}
       />
-      {error ? (
+      {collapsed ? null : error ? (
         <StateBlock
           tone="error"
           title="Could Not Load"
@@ -88,7 +100,7 @@ export function ChangesPanel({
         )
       ) : (
         <>
-          <ul className="tree root-tree">
+          <ul id="explorer-changes-list" className="tree root-tree">
             {visible.map((note, index) => (
               <li key={`${note.vault_id}-${note.slug}`} className="note-item">
                 {/* No active-note class: that highlight is canonical in the

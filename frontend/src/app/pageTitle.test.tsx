@@ -3,7 +3,12 @@ import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { VaultId } from "../types";
-import { pageTitle, usePageTitle, type TitledNote } from "./pageTitle";
+import {
+  pageName,
+  pageTitle,
+  usePageTitle,
+  type TitledNote,
+} from "./pageTitle";
 
 const VAULT = "vault-a" as VaultId;
 const OTHER_VAULT = "vault-b" as VaultId;
@@ -142,5 +147,16 @@ describe("usePageTitle", () => {
 
     view.rerender(shell(note("beacon", "Lighthouse")));
     expect(document.title).toBe("Lighthouse · Hatchdoor");
+  });
+});
+
+describe("pageName (#530)", () => {
+  it("names the fixed pages and Home, and nothing on a note route", () => {
+    expect(pageName("/")).toBe("Home");
+    expect(pageName("/stats")).toBe("Stats");
+    expect(pageName("/graph")).toBe("Graph");
+    expect(pageName("/settings")).toBe("Settings");
+    expect(pageName("/v/vault-1/n/rackgate")).toBeNull();
+    expect(pageName("/nowhere")).toBeNull();
   });
 });

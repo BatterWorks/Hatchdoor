@@ -337,7 +337,7 @@ describe("VaultApp when Vault discovery fails (#333)", () => {
       </MemoryRouter>,
     );
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeVisible();
 
     // Offline, then reload: the whole app mounts afresh with no server.
@@ -360,7 +360,7 @@ describe("VaultApp when Vault discovery fails (#333)", () => {
     network.online = true;
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeVisible();
     expect(screen.queryByText("Vaults Unavailable")).not.toBeInTheDocument();
   });

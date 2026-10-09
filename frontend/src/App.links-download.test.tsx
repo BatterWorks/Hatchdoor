@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -396,7 +397,7 @@ describe("App links/download", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Download .md" }),
+      await screen.findByRole("menuitem", { name: "Download .md file" }),
     );
 
     expect(clickSpy).toHaveBeenCalledTimes(1);
@@ -452,7 +453,7 @@ describe("App links/download", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Download .md" }),
+      await screen.findByRole("menuitem", { name: "Download .md file" }),
     );
 
     expect(openSpy).not.toHaveBeenCalled();
@@ -507,7 +508,7 @@ describe("App links/download", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Copy page content" }),
+      await screen.findByRole("menuitem", { name: "Copy note text" }),
     );
 
     await waitFor(() => {
@@ -581,5 +582,98 @@ describe("App links/download", () => {
 
   it("escapes markdown control chars in wikilink labels", () => {
     expect(escapeMarkdownLabel("a]b(c) *x*")).toBe("a\\]b\\(c\\) \\*x\\*");
+  });
+});
+
+describe("App shortcuts and the copied link (#530)", () => {
+  afterEach(cleanup);
+
+  function mockWritableNote() {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return treeEnvelope([{ title: "Home", slug: "home" }]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
+          });
+        }
+        if (url.includes("/notes/home/links")) {
+          return linksResponse();
+        }
+        if (url.includes("/notes/home")) {
+          return noteResponse({ relative_path: "Home", content: "Body" });
+        }
+        if (url.includes("/resolve-batch")) {
+          return resolveBatchResponse([]);
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+  }
+
+  it("copies the note's address without the search query it arrived with", async () => {
+    const clipboardWrite = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    mockWritableNote();
+    render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home?q=body&m=`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Copy note link" }),
+    );
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(1));
+    const copied = String(clipboardWrite.mock.calls[0][0]);
+    expect(copied.endsWith(`/v/${VAULT_ID}/n/home`)).toBe(true);
+    expect(copied).not.toContain("?q=");
+  });
+
+  it("opens the editor on `e`, but not from inside a dialog, and closes the … menu on Escape", async () => {
+    mockWritableNote();
+    render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+
+    const more = screen.getByRole("button", { name: "More actions" });
+    fireEvent.click(more);
+    expect(more).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+
+    // Inside a dialog `e` belongs to the dialog.
+    fireEvent.click(screen.getByRole("button", { name: "New note" }));
+    const dialog = await screen.findByRole("dialog", { name: "Create note" });
+    fireEvent.keyDown(within(dialog).getByLabelText("Note name"), {
+      key: "e",
+    });
+    expect(
+      screen.queryByRole("textbox", { name: "Markdown content" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.keyDown(window, { key: "e" });
+    expect(
+      await screen.findByRole("textbox", { name: "Markdown content" }),
+    ).toBeInTheDocument();
   });
 });

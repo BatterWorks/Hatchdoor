@@ -234,7 +234,7 @@ export function describeScopeSlot(
     if (aggregate.kind === "count") {
       return `${aggregate.count} Vault${aggregate.count === 1 ? "" : "s"}`;
     }
-    return `${aggregate.participating} of ${aggregate.total}`;
+    return `${aggregate.participating} of ${aggregate.total} answering`;
   }
   const vault = vaults.find((candidate) => candidate.vault_id === scope);
   if (!vault) {
