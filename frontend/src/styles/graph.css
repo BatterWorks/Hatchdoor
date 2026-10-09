@@ -283,9 +283,9 @@
   color: var(--muted);
   cursor: pointer;
   transition:
-    border-color 120ms ease,
-    color 120ms ease,
-    background 120ms ease;
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
 }
 
 .graph-filter-toggle.has-active {
@@ -317,7 +317,7 @@
 
 .graph-filter-caret {
   font-size: 0.75rem;
-  transition: transform 180ms ease;
+  transition: transform var(--dur) var(--ease);
   line-height: 1;
 }
 

@@ -111,14 +111,19 @@ export function VaultAggregateSlot({
   if (aggregate.kind === "count") {
     return <span className="side-count">{aggregate.count}</span>;
   }
-  const sentence = `${aggregate.participating} of ${aggregate.total} answering`;
+  const reading = `${aggregate.participating} of ${aggregate.total}`;
   return (
     <span
       className={`vault-slot-shortfall vault-tier-${aggregate.tier}`}
-      title={compact ? sentence : undefined}
-      aria-label={compact ? sentence : undefined}
+      title={compact ? `${reading} answering` : undefined}
     >
-      {compact ? `${aggregate.participating} of ${aggregate.total}` : sentence}
+      {reading}
+      {/* A plain span's aria-label is not reliably read, so the word stays
+          in the text and is only hidden from sight. */}
+      <span className={compact ? "visually-hidden" : undefined}>
+        {" "}
+        answering
+      </span>
     </span>
   );
 }

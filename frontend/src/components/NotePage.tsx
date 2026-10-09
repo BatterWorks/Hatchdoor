@@ -583,9 +583,19 @@ export function NotePage({
     void loadNoteLinks();
   }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
+  // The key moves when the window crosses 920px (a tablet rotating), and the
+  // fold follows the key's own stored answer rather than carrying the other
+  // width's across. Persisting happens on the toggle alone, so the move
+  // itself never writes.
   useEffect(() => {
-    safeSetItem(propertiesCollapsedKey, propertiesCollapsed ? "1" : "0");
-  }, [propertiesCollapsed, propertiesCollapsedKey]);
+    setPropertiesCollapsed(safeGetItem(propertiesCollapsedKey) !== "0");
+  }, [propertiesCollapsedKey]);
+  const togglePropertiesCollapsed = useCallback(() => {
+    setPropertiesCollapsed((prev) => {
+      safeSetItem(propertiesCollapsedKey, prev ? "0" : "1");
+      return !prev;
+    });
+  }, [propertiesCollapsedKey]);
 
   const startEditing = useCallback(() => {
     if (!writeEnabled || !note || isEditing) {
@@ -625,6 +635,11 @@ export function NotePage({
     }
 
     lastEditRequestIdRef.current = editRequestId;
+    // A block open inline keeps its own text until it closes; source mode
+    // opening over it would show the version without that text (#530).
+    if (activeUnitRef.current !== null) {
+      return;
+    }
     startEditing();
   }, [editRequestId, startEditing]);
 
@@ -1726,7 +1741,7 @@ export function NotePage({
             editable={inlineEditingEnabled}
             onChange={handleInlineChange}
             collapsed={propertiesCollapsed}
-            onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
+            onToggleCollapsed={togglePropertiesCollapsed}
             onTagSelect={(tag) => onTagSelect(tag, vaultId)}
           />
         )}

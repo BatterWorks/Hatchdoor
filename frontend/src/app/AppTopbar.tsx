@@ -80,10 +80,8 @@ type TopbarProps = {
   onMoveNote: () => void;
   onArchiveNote: () => void;
   onDeleteNote: () => void;
-  onCycleTheme: () => void;
-  /** Picks a theme by name from the topbar's menu (#530). Without it the
-   * button falls back to the cycle. */
-  onSetTheme?: (theme: Theme) => void;
+  /** Picks a theme by name from the topbar's menu (#530). */
+  onSetTheme: (theme: Theme) => void;
   /** Whether the Help panel is open (#417). */
   helpOpen?: boolean;
   onToggleHelp?: () => void;
@@ -125,7 +123,6 @@ export function AppTopbar({
   onMoveNote,
   onArchiveNote,
   onDeleteNote,
-  onCycleTheme,
   onSetTheme,
   helpOpen = false,
   onToggleHelp = () => {},
@@ -155,11 +152,33 @@ export function AppTopbar({
       }
       setThemeMenuOpen(false);
     };
+    // A menu takes focus when it opens and moves it with the arrows; Escape
+    // gives it back to the button that opened it.
+    const host = themeMenuRef.current;
+    const items = Array.from(
+      host?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? [],
+    );
+    (
+      items.find((item) => item.getAttribute("aria-checked") === "true") ??
+      items[0]
+    )?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         setThemeMenuOpen(false);
-        themeMenuRef.current?.querySelector("button")?.focus();
+        host?.querySelector("button")?.focus();
+        return;
       }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+        return;
+      }
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (index === -1) {
+        return;
+      }
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      items[(index + step + items.length) % items.length]?.focus();
     };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -447,8 +466,8 @@ export function AppTopbar({
               <SearchIcon />
             </button>
           )}
-          {/* A phone's top bar is already full, so there Help is the first
-              item of the "…" menu instead (#417). */}
+          {/* A phone's top bar is already full, so there Help is the last
+              item of the drawer's rail instead (#417, #530). */}
           {!isMobile ? (
             <button
               type="button"
@@ -461,60 +480,45 @@ export function AppTopbar({
               <HelpIcon />
             </button>
           ) : null}
-          {onSetTheme ? (
-            <div
-              className="topbar-menu-host theme-menu-host"
-              ref={themeMenuRef}
-            >
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => setThemeMenuOpen((prev) => !prev)}
-                aria-haspopup="menu"
-                aria-expanded={themeMenuOpen}
-                aria-label={THEME_LABEL[theme]}
-                title={THEME_LABEL[theme]}
-              >
-                {THEME_ICON[theme]}
-              </button>
-              <div
-                className="topbar-menu theme-menu"
-                role="menu"
-                aria-label="Theme"
-                aria-hidden={!themeMenuOpen}
-                data-open={themeMenuOpen}
-              >
-                {THEME_OPTIONS.map((option) => (
-                  <UiButton
-                    key={option.value}
-                    className="close-note theme-menu-item"
-                    role="menuitemradio"
-                    aria-checked={theme === option.value}
-                    onClick={() => {
-                      setThemeMenuOpen(false);
-                      onSetTheme(option.value);
-                    }}
-                  >
-                    {THEME_ICON[option.value]}
-                    <span>{option.label}</span>
-                    {option.hint ? (
-                      <span className="theme-menu-hint">{option.hint}</span>
-                    ) : null}
-                  </UiButton>
-                ))}
-              </div>
-            </div>
-          ) : (
+          <div className="topbar-menu-host theme-menu-host" ref={themeMenuRef}>
             <button
               type="button"
               className="icon-button"
-              onClick={onCycleTheme}
+              onClick={() => setThemeMenuOpen((prev) => !prev)}
+              aria-haspopup="menu"
+              aria-expanded={themeMenuOpen}
               aria-label={THEME_LABEL[theme]}
               title={THEME_LABEL[theme]}
             >
               {THEME_ICON[theme]}
             </button>
-          )}
+            <div
+              className="topbar-menu theme-menu"
+              role="menu"
+              aria-label="Theme"
+              aria-hidden={!themeMenuOpen}
+              data-open={themeMenuOpen}
+            >
+              {THEME_OPTIONS.map((option) => (
+                <UiButton
+                  key={option.value}
+                  className="close-note theme-menu-item"
+                  role="menuitemradio"
+                  aria-checked={theme === option.value}
+                  onClick={() => {
+                    setThemeMenuOpen(false);
+                    onSetTheme(option.value);
+                  }}
+                >
+                  {THEME_ICON[option.value]}
+                  <span>{option.label}</span>
+                  {option.hint ? (
+                    <span className="theme-menu-hint">{option.hint}</span>
+                  ) : null}
+                </UiButton>
+              ))}
+            </div>
+          </div>
           <div className="topbar-menu-host" ref={actionsMenuRef}>
             <button
               ref={actionsTriggerRef}
@@ -677,9 +681,9 @@ export function AppTopbar({
                 onClick={() => setTocSheetOpen((prev) => !prev)}
                 aria-haspopup="dialog"
                 aria-expanded={tocSheetOpen}
-                aria-label={`On this page, ${tocHeadings.length} headings`}
               >
                 <TocIcon />
+                <span className="topbar-toc-label">On this page</span>
                 <span className="topbar-toc-count">{tocHeadings.length}</span>
               </button>
             ) : null}

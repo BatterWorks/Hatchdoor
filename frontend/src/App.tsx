@@ -130,7 +130,7 @@ function VaultWorkspace({
   const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
   usePageTitle(activeNote);
   const isMobile = useIsMobile(920);
-  const { theme, cycleTheme, setTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const help = useHelp();
 
   const [scope, setScope, scopeFallbackNotice] = useVaultScope();
@@ -644,7 +644,14 @@ function VaultWorkspace({
         !isEditableTarget(event.target) &&
         !noteActionDialog &&
         !searchOpen &&
-        !actionsMenuOpen
+        !actionsMenuOpen &&
+        !help.isOpen &&
+        // The scope sheet, the heading sheet and the theme menu hold focus
+        // inside a dialog or menu; `e` there is for them, not the editor.
+        !(
+          event.target instanceof Element &&
+          event.target.closest('[role="dialog"], [role="menu"]')
+        )
       ) {
         event.preventDefault();
         setEditRequestId((prev) => prev + 1);
@@ -677,6 +684,7 @@ function VaultWorkspace({
     searchOpen,
     actionsMenuOpen,
     onNoteRoute,
+    help.isOpen,
   ]);
 
   // The shell's polite scope live region (#146): announces the scope name
@@ -788,9 +796,10 @@ function VaultWorkspace({
     }
     // The address alone: a note reached from search carries `?q=` and `?m=`
     // for its match navigator, which a link handed to someone else should
-    // not replay (#530).
-    await copyText(`${window.location.origin}${window.location.pathname}`);
-  }, [activeNote]);
+    // not replay (#530). The router's own path, so it holds under a memory
+    // router too.
+    await copyText(`${window.location.origin}${location.pathname}`);
+  }, [activeNote, location.pathname]);
   const copyPageContent = useCallback(async () => {
     if (!activeNote) {
       return;
@@ -831,8 +840,11 @@ function VaultWorkspace({
         pageName={pageName(location.pathname)}
         tocHeadings={onNoteRoute ? noteHeadings : []}
         onJumpToHeading={(id) =>
+          // Replace, like the desktop TOC's own jump: a heading pick is not
+          // a page the reader wants Back to return through.
           navigate(
             `${location.pathname}${location.search}#${encodeURIComponent(id)}`,
+            { replace: true },
           )
         }
         vaults={vaults}
@@ -854,7 +866,6 @@ function VaultWorkspace({
         onMoveNote={() => openActionDialog("move")}
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
-        onCycleTheme={cycleTheme}
         onSetTheme={setTheme}
         helpOpen={help.isOpen}
         onToggleHelp={() => (help.isOpen ? help.closeHelp() : help.openHelp())}

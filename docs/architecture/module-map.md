@@ -3890,8 +3890,10 @@ with a note's actions behind the "…" menu. That menu is about the open note
 only: New note and Edit left it for their own buttons, Copy note text and
 Download .md file are the utilities' names, and `Escape` closes it. The theme
 button opens a three-option menu (System, Light, Dark) through `useTheme`'s
-`setTheme`; `cycleTheme` stays for callers without a menu. `e` opens the
-editor on the open note, the key the Edit button shows. The Scope zone starts
+`setTheme`, focusing the current choice and moving with the arrows;
+`cycleTheme` stays for callers without a menu. `e` opens the editor on the
+open note, the key the Edit button shows, unless focus sits in a dialog or
+menu, Help is open, or an inline block is open. The Scope zone starts
 folded (`SCOPE_ZONE_COLLAPSED_KEY` unset reads folded) and its folded head
 shows the compact `N of M` aggregate with the full "answering" sentence as its
 name; every other slot says `N of M answering`. The explorer's rail sits in
@@ -5554,6 +5556,12 @@ empty shell — consumed wherever a partial collection read has nothing usable
 and wherever an exact read fails outright. Its optional `help` node (#423)
 renders on its own line under the description, for the start states' "How
 does this work?" links.
+
+`topbar.css` also carries the shell's own topbar furniture that no feature
+owns (#530): the theme menu (`.theme-menu*`), the phone meta row and its
+"On this page" chip and heading sheet (`.topbar-meta-row`, `.topbar-toc-*`,
+`.toc-sheet-*`). They are the Application shell's, rendered by
+`app/AppTopbar.tsx`, and touch no feature.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected

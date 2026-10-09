@@ -58,23 +58,12 @@
   gap: var(--space-8);
 }
 
-.home-list h2 {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin: 0 0 var(--space-2);
-  font-family: var(--font-display);
-  font-variation-settings:
-    "wdth" 84,
-    "wght" 700;
-  font-size: 0.78rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink);
-}
-
-.home-list h2 .side-count {
-  font-weight: 400;
+/* The list head is the sidebar's own `SideHead`, which carries a 0.7rem
+   bottom margin sized for the tree; a head straight onto a short list
+   wants less, the same trim Recently viewed makes. */
+.home-list .side-head {
+  margin-bottom: 0.35rem;
+  padding: 0;
 }
 
 .home-list ul {

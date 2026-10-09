@@ -628,8 +628,11 @@ describe("ExplorerPane Scope zone", () => {
     );
     // The folded head has no room for the word (#530): the compact reading,
     // with the full sentence as its name.
-    const slot = within(head).getByText("1 of 3");
-    expect(slot).toHaveAttribute("aria-label", "1 of 3 answering");
+    const slot = head.querySelector(".vault-slot-shortfall")!;
+    expect(slot).toHaveTextContent("1 of 3 answering");
+    expect(slot.querySelector(".visually-hidden")).toHaveTextContent(
+      "answering",
+    );
   });
 
   it("clamps the collapsed head's aggregate to the amber tier in demo mode (#152)", () => {

@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 
+import { SideHead } from "../components/Explorer";
 import { UiButton, VaultPrefix } from "../components/ui";
 import { formatWhen } from "../features/settings";
 import type {
@@ -14,6 +15,15 @@ import { scopeName } from "./vaultSlotLogic";
 /** Rows per list. Enough to be a landing, few enough that the two lists sit
  * side by side without a scroll of their own. */
 const HOME_ROWS = 6;
+
+type HomeRow = {
+  key: string;
+  to: string;
+  title: string;
+  path: string;
+  vaultId: VaultId;
+  when: string | null;
+};
 
 /**
  * The landing page with no note open (#530): what changed, what was read,
@@ -41,9 +51,6 @@ export function HomePage({
   onNewNote: () => void;
   onOpenSearch: () => void;
 }) {
-  const vaultNameOf = (vaultId: VaultId) =>
-    vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId;
-  const showVaultPrefix = vaults.length > 1;
   const inScope =
     scope === "all"
       ? vaults
@@ -66,10 +73,30 @@ export function HomePage({
   ]
     .filter(Boolean)
     .join(", ");
-  const changed = modifiedNotes.slice(0, HOME_ROWS);
-  const recent = recentNotes
-    .filter((note) => vaults.some((vault) => vault.vault_id === note.vaultId))
-    .slice(0, HOME_ROWS);
+  // Both lists are read through the browsing scope, like the summary above
+  // them: `modifiedNotes` already is, a viewing history is not.
+  const changed: HomeRow[] = modifiedNotes.map((note) => ({
+    key: `${note.vault_id}-${note.slug}`,
+    to: `/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`,
+    title: note.title,
+    path: note.relative_path,
+    vaultId: note.vault_id,
+    when: formatWhen(Math.round(note.mtime_ns / 1_000_000)),
+  }));
+  const recent: HomeRow[] = recentNotes
+    .filter(
+      (note) =>
+        (scope === "all" || note.vaultId === scope) &&
+        vaults.some((vault) => vault.vault_id === note.vaultId),
+    )
+    .map((note) => ({
+      key: `${note.vaultId}-${note.slug}`,
+      to: `/v/${encodeURIComponent(note.vaultId)}/n/${note.slug}`,
+      title: note.title,
+      path: note.relativePath,
+      vaultId: note.vaultId,
+      when: formatWhen(note.viewedAt),
+    }));
 
   return (
     <div className="home-page">
@@ -95,79 +122,62 @@ export function HomePage({
       </div>
 
       <div className="home-grid">
-        <section className="home-list" aria-labelledby="home-changed">
-          <h2 id="home-changed">
-            Changed on disk
-            <span className="side-rule" aria-hidden="true" />
-            <span className="side-count">
-              {String(changed.length).padStart(2, "0")}
-            </span>
-          </h2>
-          {changed.length === 0 ? (
-            <p className="home-empty">Nothing has changed on disk yet.</p>
-          ) : (
-            <ul>
-              {changed.map((note, index) => (
-                <li key={`${note.vault_id}-${note.slug}`}>
-                  <Link
-                    to={`/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`}
-                    title={`${note.relative_path}.md`}
-                  >
-                    <span className="idx" aria-hidden="true">
-                      {String(index + 1).padStart(3, "0")}
-                    </span>
-                    {showVaultPrefix ? (
-                      <VaultPrefix name={vaultNameOf(note.vault_id)} />
-                    ) : null}
-                    <span className="home-note-title">{note.title}</span>
-                    <span className="home-note-meta">
-                      {formatWhen(Math.round(note.mtime_ns / 1_000_000))}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <section className="home-list" aria-labelledby="home-recent">
-          <h2 id="home-recent">
-            Recently viewed
-            <span className="side-rule" aria-hidden="true" />
-            <span className="side-count">
-              {String(recent.length).padStart(2, "0")}
-            </span>
-          </h2>
-          {recent.length === 0 ? (
-            <p className="home-empty">
-              Notes you open show up here. Pick one from the explorer, or
-              search.
-            </p>
-          ) : (
-            <ul>
-              {recent.map((note, index) => (
-                <li key={`${note.vaultId}-${note.slug}`}>
-                  <Link
-                    to={`/v/${encodeURIComponent(note.vaultId)}/n/${note.slug}`}
-                    title={`${note.relativePath}.md`}
-                  >
-                    <span className="idx" aria-hidden="true">
-                      {String(index + 1).padStart(3, "0")}
-                    </span>
-                    {showVaultPrefix ? (
-                      <VaultPrefix name={vaultNameOf(note.vaultId)} />
-                    ) : null}
-                    <span className="home-note-title">{note.title}</span>
-                    <span className="home-note-meta">
-                      {formatWhen(note.viewedAt)}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <HomeList
+          label="Changed on disk"
+          rows={changed}
+          vaults={vaults}
+          empty="Nothing has changed on disk yet."
+        />
+        <HomeList
+          label="Recently viewed"
+          rows={recent}
+          vaults={vaults}
+          empty="Notes you open show up here. Pick one from the explorer, or search."
+        />
       </div>
     </div>
+  );
+}
+
+/** One of Home's two lists: the sidebar's own section head over the first
+ * rows, the count being the whole list's, not the rows shown. */
+function HomeList({
+  label,
+  rows,
+  vaults,
+  empty,
+}: {
+  label: string;
+  rows: HomeRow[];
+  vaults: VaultSummary[];
+  empty: string;
+}) {
+  const showVaultPrefix = vaults.length > 1;
+  const vaultNameOf = (vaultId: VaultId) =>
+    vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId;
+  return (
+    <section className="home-list" aria-label={label}>
+      <SideHead label={label} count={rows.length} />
+      {rows.length === 0 ? (
+        <p className="home-empty">{empty}</p>
+      ) : (
+        <ul>
+          {rows.slice(0, HOME_ROWS).map((row, index) => (
+            <li key={row.key}>
+              <Link to={row.to} title={`${row.path}.md`}>
+                <span className="idx" aria-hidden="true">
+                  {String(index + 1).padStart(3, "0")}
+                </span>
+                {showVaultPrefix ? (
+                  <VaultPrefix name={vaultNameOf(row.vaultId)} />
+                ) : null}
+                <span className="home-note-title">{row.title}</span>
+                <span className="home-note-meta">{row.when}</span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

@@ -1457,16 +1457,15 @@
     outline: none;
     border-color: var(--hot);
   }
-  .search-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 0.7rem 0 0.55rem;
-    font-family: var(--font-sans);
-    font-size: 0.82rem;
-    color: var(--muted);
-  }
-  .search-toggle input { accent-color: var(--hot); }
+  .search-mode-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0.7rem 0 0.55rem; }
+  .search-mode-label { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .search-mode { display: inline-flex; border: 1px solid var(--rule-strong); }
+  .search-mode button { font-family: var(--font-display); font-variation-settings: "wdth" 92, "wght" 600; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; padding: 0.4rem 0.8rem; border: none; border-right: 1px solid var(--rule); background: var(--paper); color: var(--muted); cursor: pointer; }
+  .search-mode button:last-child { border-right: none; }
+  .search-mode button[aria-pressed="true"] { background: var(--hot); color: var(--bg); }
+  .search-progress { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; padding: 0.55rem 0.8rem; border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn-fg); font-family: var(--font-sans); font-size: 0.84rem; line-height: 1.4; }
+  .search-progress-bar { flex: 0 0 5rem; height: 4px; background: var(--warn-border); }
+  .search-progress-fill { display: block; height: 100%; background: var(--warn-fg); }
 
   /* Facet rail (#119, #144) — the dialog's own Vault filter, never the browsing scope. */
   .search-body { display: flex; align-items: flex-start; gap: 1rem; }
@@ -1589,8 +1588,8 @@
 
   /* Marked path root (#115, implemented by #140). Sized and weighted from the
      surrounding row; only colour and the middot separator are its own. */
-  .path-vault { flex: 0 0 auto; display: inline-flex; align-items: baseline; color: var(--hot); font-variation-settings: "wdth" 100, "wght" 500; }
-  .path-sep { margin-left: 0.3rem; margin-right: 0.3rem; color: var(--hot); }
+  .path-vault { flex: 0 1 auto; min-width: 0; max-width: 42%; display: inline-block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: baseline; color: var(--muted); font-family: var(--font-mono); font-size: 0.72rem; }
+  .path-sep { margin-left: 0.3rem; margin-right: 0.3rem; color: var(--tertiary); }
 
   /* Island caption + enclosure (#143). Canvas furniture — no DOM class backs
      these in the app; this demo approximates the canvas draw with inline SVG. */
@@ -2078,7 +2077,7 @@
       <h2>Sidebar (Explorer)</h2>
       <p class="blurb"><b>Three zones:</b> the Scope zone (#138), the scrolling note navigation, and a footer holding the rail of whole-vault destinations beside the create action (#530). <b>Only the middle scrolls</b> &mdash; scope and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. It sits at the bottom because a row of destinations is a tab bar, and a tab bar belongs where a thumb reaches it; it holds <em>destinations only</em> (Stats, Graph, Settings, and Help on the phone), so nothing it opens appears out of sight at the top of the list. <b>Changed on disk is a folding section</b> at the top of the navigation, in the same shape as Recently viewed and folded by default with its count showing; it was a panel a rail toggle opened, which paired a button with a list far from it once the rail moved. <b>The Scope zone starts folded.</b> Its head already names the scope and its state, and the accordion below lists the same Vaults, so unfolded by default it said everything twice before the first folder. The folded head shows the compact <code>5 of 8</code> aggregate with the full <code>5 of 8 answering</code> sentence as its name; the unfolded rows, the phone row and the sheet say <code>5 of 8 answering</code> in full. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>). One exception, from #150: at a single Vault it stays on screen while first-run scanning or indexing is running, purely to hold that progress reading (<a href="#vault-slot">§27</a>) &mdash; the zone is where progress is reported, so it outlives its own visibility rule for as long as there is progress to report. At zero Vaults it holds its place too, reading <code>All Vaults</code> with no rows beneath it, in neutral ink.</p>
 
-      <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The rail below it stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
+      <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The footer below the list stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
 
       <p class="blurb"><b>Scope rows are set one step tighter than the tree below them:</b> <span class="key">0.82rem</span> against the tree&rsquo;s own size, <span class="key">0.32rem 0.35rem</span> padding, <span class="key">0.5rem</span> gap. The zone is a register of what exists, read once and then ignored; the tree is the thing under the cursor all day. Sizing them alike made the sidebar open with two equal claims on attention. Rows keep <span class="key">--font-display</span> with its <span class="key">wdth</span>/<span class="key">wght</span> axes rather than dropping to the sans face &mdash; a Vault name is a name, and the display face is what names are set in everywhere else in this app.</p>
 
@@ -2263,7 +2262,7 @@
       <div class="doc-section-num">§09</div>
       <h2>In-note enhancements</h2>
       <p class="blurb"><b>Links come after the text</b> (#530), folded under a head set in the sidebar&rsquo;s own §05 grammar &mdash; caret, <code>LINKS</code>, rule, mono count &mdash; above a hairline that closes the body. Backlinks are what a reader consults once they have read, and every outgoing link is already a link in the text above, so the panel that used to sit between the properties and the first sentence was two screens of navigation before any reading. <b>The folded heading strip is a tablet device:</b> it shows only between 921 and 1160px, where the TOC column is gone but the topbar is still the wide one. Below 920 the topbar&rsquo;s meta row carries the headings as an <em>On this page</em> chip (§30) and the strip never renders. Neither Links nor Properties render while the editor is open; the editor carries its own frontmatter form.</p>
-      <p class="blurb">Three optional panels above the body: in-note search nav (when searching inside a note), links panel (back/forward links), and table of contents.</p>
+      <p class="blurb">Three optional pieces around the body: the in-note search nav above it (when searching inside a note), the table of contents beside it, and the links panel after it.</p>
 
       <h3 class="doc-sub">In-note search nav</h3>
       <div class="stage">
@@ -2566,9 +2565,17 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
               <button class="icon-btn" title="Close">✕</button>
             </div>
             <input class="search-input is-focus" placeholder="Search by title, folder, or content…" value="orchard" />
-            <label class="search-toggle">
-              <input type="checkbox" checked /> include note content
-            </label>
+            <div class="search-mode-row">
+              <span class="search-mode-label">Mode</span>
+              <div class="search-mode" role="group" aria-label="Search mode">
+                <button type="button" aria-pressed="false">Semantic</button>
+                <button type="button" aria-pressed="true">Keyword</button>
+              </div>
+            </div>
+            <p class="search-progress" role="status">
+              <span class="search-progress-bar" aria-hidden="true"><span class="search-progress-fill" style="width:41%"></span></span>
+              <span>Semantic search is still indexing, 41% done. Keyword search answers now.</span>
+            </p>
             <ul class="search-results">
               <li><button class="search-result is-hover">
                 <div class="search-main">
@@ -2597,7 +2604,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-toggle</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
+      <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-mode</span><span class="key">.search-progress</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
 
       <h3 class="doc-sub">The dialog&rsquo;s own filter &mdash; never the browsing scope</h3>
       <p class="blurb">The sidebar decides what you are browsing; the dialog decides what you are looking at right now. Selecting a facet (or the phone&rsquo;s <code>Scope</code> field) narrows only the results in view, changes no ranking, and dies the moment the dialog closes. No future surface may adopt either as a scope control (#119).</p>
@@ -2694,13 +2701,22 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <h2>Popover menu</h2>
       <p class="blurb">The topbar &ldquo;more&rdquo; button opens this. On desktop it anchors to the trigger. On mobile it becomes a bottom-sheet (CSS variant in implementation). <b>It is about the open note</b> (#530): rename and move, then the copy and download utilities, then Archive and Delete last. New note and Edit left it, since both have buttons of their own on the page, and <code>Escape</code> closes it like any other popover. <b>The theme button opens the same popover shape</b> with three <code>menuitemradio</code> rows, System, Light and Dark, the current one in hot ink; a three-way cycle on one button could not say what the next click would do.</p>
       <p class="blurb"><b>Rows are borderless.</b> Only the popover carries a border &mdash; a box per row inside a bordered container is the &ldquo;boxes in boxes&rdquo; nesting issue #8 objected to. The border is kept and made transparent rather than removed, so a row does not shift when <code>:active</code> paints it hot. Hover fills with <code>--paper-2</code>. Long menus group with <code>.menu-divider</code> rather than growing into an undifferentiated wall.</p>
-      <div class="stage" style="display:flex; justify-content: center;">
+      <div class="stage" style="display:flex; justify-content: center; gap: 2rem; flex-wrap: wrap;">
         <div class="menu">
-          <button class="ui-btn ghost">Copy current path</button>
-          <button class="ui-btn ghost">Open in editor</button>
+          <button class="ui-btn ghost">Rename note</button>
+          <button class="ui-btn ghost">Move note</button>
           <div class="menu-divider"></div>
-          <button class="ui-btn ghost">Export note</button>
-          <button class="ui-btn ghost">Toggle theme</button>
+          <button class="ui-btn ghost">Copy note text</button>
+          <button class="ui-btn ghost">Download .md file</button>
+          <button class="ui-btn ghost">Copy note link</button>
+          <div class="menu-divider"></div>
+          <button class="ui-btn ghost">Archive note</button>
+          <button class="ui-btn ghost">Delete note</button>
+        </div>
+        <div class="menu" role="menu" aria-label="Theme" style="min-width: 15rem;">
+          <button class="ui-btn ghost" role="menuitemradio" aria-checked="true" style="color: var(--hot); display:flex; gap:0.6rem;">◐ System <span style="margin-left:auto; font-family: var(--font-mono); font-size: 0.62rem; color: var(--muted); text-transform:none; letter-spacing:0;">follows the device</span></button>
+          <button class="ui-btn ghost" role="menuitemradio" aria-checked="false">☼ Light</button>
+          <button class="ui-btn ghost" role="menuitemradio" aria-checked="false">☾ Dark</button>
         </div>
       </div>
       <div class="tag-row"><span class="key">.menu</span><span class="key">.menu .ui-btn</span><span class="key">.menu-divider</span></div>
@@ -3249,9 +3265,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       and scope persists where a path does not. The row carries three things, always in this order:
       the browsing scope's name, a rule, and §27's own count-or-condition slot &mdash; every one of
       them on screen at all times, drawer closed, zero interaction. On a note with headings the row
-      ends with an <b>On this page</b> chip (#530): the <code>toc</code> glyph and the heading count,
-      set off from the scope control by a hairline, which opens a sheet of the headings in this
-      sheet&rsquo;s own shell, rows stepped in by level. At one Vault, where no scope control
+      ends with an <b>On this page</b> chip (#530): the <code>toc</code> glyph, the words and the
+      heading count, set off from the scope control by a hairline, which opens a sheet of the
+      headings in this sheet&rsquo;s own shell, rows stepped in by level. At one Vault, where no scope control
       renders, the row renders for the chip alone. It costs the note no height, which is the point:
       on a phone the body used to start a screen down, under Properties, Links and a folded
       heading list.</p>
@@ -3266,6 +3282,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </button>
         </div>
       </div>
+      <div class="stage" style="max-width: 22rem; padding: 0;">
+        <div style="display:flex; align-items:stretch; border-bottom:1px solid var(--rule); background:var(--paper); padding:0.32rem 0.75rem;">
+          <button class="topbar-scope-trigger" style="display:flex;align-items:center;flex:1 1 auto;min-width:0;background:transparent;border:0;padding:0.12rem 0.2rem;text-align:left;cursor:pointer;">
+            <span class="topbar-scope-name">All Vaults</span>
+            <span class="topbar-scope-rule" aria-hidden="true">/</span>
+            <span class="topbar-scope-slot"><span class="vault-slot-shortfall vault-tier-error">5 of 8 answering</span></span>
+          </button>
+          <button type="button" style="flex:0 0 auto;display:inline-flex;align-items:center;gap:0.35rem;margin-left:0.5rem;padding:0.12rem 0.2rem 0.12rem 0.7rem;border:0;border-left:1px solid var(--rule);background:transparent;color:var(--ink-soft);font-size:1.05rem;line-height:1;cursor:pointer;">
+            ☰ <span style="font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);">On this page</span><span style="font-family:var(--font-mono);font-size:0.66rem;color:var(--ink);">4</span>
+          </button>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.topbar-meta-row</span><span class="key">.topbar-toc-chip</span><span class="key">.toc-sheet</span></div>
 
       <p class="blurb"><b>The slot always describes the browsing scope, never the open note's
       Vault</b> &mdash; a slot that changed subject with the page is a slot nobody could learn. The
@@ -3672,6 +3701,26 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="doc-section-num">§37</div>
       <h2>Home</h2>
       <p class="blurb">The landing page with no note open (#530). It replaced a box that said &ldquo;Select any note from the explorer to start reading&rdquo;, an instruction the explorer beside it already gave. <b>Every figure on it is state the shell holds for the sidebar</b>: the scope&rsquo;s name as a hot mono eyebrow, <code>NOTES</code> in the note title&rsquo;s own size (§07), a one-line summary of how many Vaults and notes the scope holds (the note count only once every Vault in scope has reported one), and New note and Search where the title block&rsquo;s actions go. Below, two lists side by side at desktop width and stacked on the phone: <b>Changed on disk</b> and <b>Recently viewed</b>, six rows each, in the sidebar&rsquo;s §05 grammar &mdash; head with rule and mono count, mono index, the marked path root (§31) where more than one Vault is enabled, the title in the display face, and when, in mono, at the row&rsquo;s end. An empty list says so in one sentence.</p>
+      <div class="stage" style="padding: 1.5rem;">
+        <p style="margin:0 0 0.25rem;font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--hot);">All Vaults</p>
+        <h1 class="ty-title" style="margin:0;">Notes</h1>
+        <p style="margin:0.5rem 0 1.5rem;font-family:var(--font-sans);font-size:0.95rem;color:var(--muted);">3 Vaults, 212 notes</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;">
+          <section>
+            <div class="side-head"><span class="side-label">Changed on disk</span><span class="side-rule"></span><span class="side-count">06</span></div>
+            <ul style="list-style:none;margin:0;padding:0;font-family:var(--font-display);font-size:0.95rem;">
+              <li style="display:flex;gap:0.75rem;align-items:baseline;padding:0.5rem 0;border-bottom:1px solid var(--rule);"><span class="idx">001</span><span class="path-vault">Kitchen<span class="path-sep">&middot;</span></span><span style="flex:1;">Sourdough timing</span><span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);">2 minutes ago</span></li>
+              <li style="display:flex;gap:0.75rem;align-items:baseline;padding:0.5rem 0;border-bottom:1px solid var(--rule);"><span class="idx">002</span><span class="path-vault">Journal<span class="path-sep">&middot;</span></span><span style="flex:1;">Field notes from the orchard</span><span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);">1 hour ago</span></li>
+            </ul>
+          </section>
+          <section>
+            <div class="side-head"><span class="side-label">Recently viewed</span><span class="side-rule"></span><span class="side-count">01</span></div>
+            <ul style="list-style:none;margin:0;padding:0;font-family:var(--font-display);font-size:0.95rem;">
+              <li style="display:flex;gap:0.75rem;align-items:baseline;padding:0.5rem 0;border-bottom:1px solid var(--rule);"><span class="idx">001</span><span class="path-vault">Journal<span class="path-sep">&middot;</span></span><span style="flex:1;">The grafting calendar</span><span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);">just now</span></li>
+            </ul>
+          </section>
+        </div>
+      </div>
       <div class="tag-row"><span class="key">app/HomePage.tsx</span><span class="key">.home-page</span><span class="key">.home-head</span><span class="key">.home-list</span><span class="key">.home-note-title</span><span class="key">.home-note-meta</span></div>
     </section>
 

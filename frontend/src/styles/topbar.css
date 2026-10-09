@@ -436,10 +436,19 @@
   outline-offset: -2px;
 }
 
+.topbar-toc-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .topbar-toc-count {
   font-family: var(--font-mono);
   font-size: 0.66rem;
-  color: var(--muted);
+  color: var(--ink);
 }
 
 .topbar-scope-trigger {

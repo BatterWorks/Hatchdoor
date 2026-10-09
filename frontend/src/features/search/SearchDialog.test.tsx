@@ -632,7 +632,7 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
     });
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Search is still indexing, 42% done. Keyword search already answers.",
+      "Semantic search is still indexing, 42% done. Keyword search answers now; switch to it for exact words.",
     );
     expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
     expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
@@ -642,7 +642,7 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
     renderDialog({ startupStatus: { state: "scanning" } });
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Search is still indexing.",
+      "Search is still scanning your notes. Results fill in as it goes.",
     );
     expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
   });
@@ -657,7 +657,7 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
     });
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Keyword results are complete.",
+      "Keyword search answers now.",
     );
     expect(screen.getByText("One")).toBeVisible();
     expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();

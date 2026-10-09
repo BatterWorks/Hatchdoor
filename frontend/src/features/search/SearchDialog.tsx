@@ -496,42 +496,30 @@ export function SearchDialog({
             semantic mode with nothing to show, "No matching notes" stays
             suppressed below: nothing has been searched yet. */}
         {startupWorkInFlight ? (
-          <p className="search-progress" role="status">
-            <span className="search-progress-bar" aria-hidden="true">
-              <span
-                className="search-progress-fill"
-                style={{ width: `${startupPercent ?? 0}%` }}
-              />
-            </span>
-            <span>
-              {startupPercent === null
-                ? "Search is still indexing."
-                : `Search is still indexing, ${startupPercent}% done.`}{" "}
-              {includeContent
-                ? "Keyword results are complete."
-                : "Keyword search already answers."}
-            </span>
-          </p>
+          <SearchProgress
+            percent={startupPercent}
+            keyword={includeContent}
+            lead={
+              startupStatus?.state === "scanning"
+                ? "Search is still scanning your notes."
+                : startupPercent === null
+                  ? "Semantic search is still indexing."
+                  : `Semantic search is still indexing, ${startupPercent}% done.`
+            }
+          />
         ) : startupDownloading ? (
           // A model download after the gate has stepped aside, most often
           // the one "Retry setup" starts (#339). Semantic search cannot
           // answer until it lands; Keyword still can.
-          <p className="search-progress" role="status">
-            <span className="search-progress-bar" aria-hidden="true">
-              <span
-                className="search-progress-fill"
-                style={{ width: `${startupDownloadPercent ?? 0}%` }}
-              />
-            </span>
-            <span>
-              {startupDownloadPercent === null
+          <SearchProgress
+            percent={startupDownloadPercent}
+            keyword={includeContent}
+            lead={
+              startupDownloadPercent === null
                 ? "Downloading the search model."
-                : `Downloading the search model (${startupDownloadPercent}%).`}{" "}
-              {includeContent
-                ? "Keyword results are complete."
-                : "Keyword search already answers."}
-            </span>
-          </p>
+                : `Downloading the search model (${startupDownloadPercent}%).`
+            }
+          />
         ) : null}
 
         {/* A model that is missing or failed is a genuine failure and keeps
@@ -539,11 +527,11 @@ export function SearchDialog({
             to the same quiet line so it never sits above a live answer. */}
         {startupTermsRequired || startupFailed ? (
           results.length > 0 ? (
-            <p className="search-progress is-warn" role="status">
+            <p className="search-progress" role="status">
               {demoMode
                 ? DEMO_SEARCH_UNAVAILABLE
                 : startupTermsRequired
-                  ? "Semantic search is waiting for a search model to be chosen. Keyword results are complete."
+                  ? "Semantic search is waiting for a search model to be chosen. Keyword search answers now."
                   : "The search model could not be loaded, so only Keyword search answers."}
             </p>
           ) : startupTermsRequired ? (
@@ -784,6 +772,39 @@ export function SearchDialog({
         </div>
       </UiPanel>
     </div>
+  );
+}
+
+/** Work in flight, worded as progress (#530): a bar for the percentage and
+ * one sentence saying which mode already answers. Scanning builds the text
+ * index itself, so only an index past scanning can promise Keyword. */
+function SearchProgress({
+  lead,
+  percent,
+  keyword,
+}: {
+  lead: string;
+  percent: number | null;
+  keyword: boolean;
+}) {
+  const scanning = lead.startsWith("Search is still scanning");
+  return (
+    <p className="search-progress" role="status">
+      <span className="search-progress-bar" aria-hidden="true">
+        <span
+          className="search-progress-fill"
+          style={{ width: `${percent ?? 0}%` }}
+        />
+      </span>
+      <span>
+        {lead}{" "}
+        {scanning
+          ? "Results fill in as it goes."
+          : keyword
+            ? "Keyword search answers now."
+            : "Keyword search answers now; switch to it for exact words."}
+      </span>
+    </p>
   );
 }
 

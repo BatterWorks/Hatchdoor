@@ -1256,3 +1256,95 @@ describe("NotePage body before links (#361)", () => {
     expect(screen.queryByLabelText("Note links")).not.toBeInTheDocument();
   });
 });
+
+describe("NotePage reading chrome (#530)", () => {
+  function mockNote(vaultId: string, resolveBatch: () => Promise<Response>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "---\ntags: [a]\n---\n\n# Home\n\nBody\n\n## Role\n",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return resolveBatch();
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+  }
+
+  it("never flashes the line-mapping notice while wikilinks are still resolving", async () => {
+    const vaultId = "vault-1";
+    mockNote(vaultId, () => new Promise(() => {}));
+    renderNote(vaultId);
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(
+      screen.queryByText(/source and rendered lines don.t line up/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("draws the title once and lists only the headings under it", async () => {
+    const vaultId = "vault-1";
+    mockNote(vaultId, async () =>
+      jsonResponse({ vault_id: vaultId, results: [] }),
+    );
+    renderNote(vaultId);
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: "Role" }),
+      ).toBeVisible(),
+    );
+    const bodyTitle = document.querySelector(".note-body h1");
+    expect(bodyTitle).toHaveAttribute("hidden");
+    const toc = screen.getByRole("navigation", { name: "Table of contents" });
+    expect(toc).toHaveTextContent("Role");
+    expect(toc).not.toHaveTextContent("Home");
+  });
+
+  it("remembers the phone's Properties fold under its own key", async () => {
+    const vaultId = "vault-1";
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("920"),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      mockNote(vaultId, async () =>
+        jsonResponse({ vault_id: vaultId, results: [] }),
+      );
+      renderNote(vaultId);
+      await screen.findByRole("heading", { level: 2, name: "Home" });
+      fireEvent.click(screen.getByRole("button", { name: "Properties" }));
+      expect(
+        window.localStorage.getItem(`${NOTE_PROPERTIES_COLLAPSED_KEY}.mobile`),
+      ).toBe("0");
+      expect(
+        window.localStorage.getItem(NOTE_PROPERTIES_COLLAPSED_KEY),
+      ).toBeNull();
+    } finally {
+      window.matchMedia = original;
+    }
+  });
+});
