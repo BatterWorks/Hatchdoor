@@ -2213,58 +2213,6 @@ fn preserve_existing_vectors(
     Ok(out)
 }
 
-/// Captures log lines the way production formats them (`config::init_logging`
-/// uses the compact formatter without targets), so a test can assert on the
-/// fields an operator would actually see.
-#[cfg(test)]
-pub(super) mod log_capture {
-    use std::io;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone, Default)]
-    pub(in crate::cache) struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedLogs {
-        /// A dispatcher writing here at `level` and above. Set it per thread
-        /// with `tracing::dispatcher::with_default`; the build must carry it
-        /// into any thread it starts itself.
-        pub(in crate::cache) fn dispatch(&self, level: tracing::Level) -> tracing::Dispatch {
-            let sink = self.clone();
-            tracing::Dispatch::new(
-                tracing_subscriber::fmt()
-                    .with_max_level(level)
-                    .with_target(false)
-                    .with_ansi(false)
-                    .compact()
-                    .with_writer(move || sink.clone())
-                    .finish(),
-            )
-        }
-
-        pub(in crate::cache) fn lines(&self) -> Vec<String> {
-            String::from_utf8(self.0.lock().expect("captured logs lock").clone())
-                .expect("UTF-8 log output")
-                .lines()
-                .map(str::to_string)
-                .collect()
-        }
-    }
-
-    impl io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured logs lock")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2921,11 +2869,12 @@ mod chunk_integration_tests {
 
     use super::{
         BuildHandles, BuildOptions, embedding_reuse_hash, estimated_remaining, format_count,
-        format_elapsed, format_eta, format_note_count, indexing_progress_message, log_capture,
+        format_elapsed, format_eta, format_note_count, indexing_progress_message,
         progress_log_delay, start_indexing_heartbeat,
     };
     use crate::cache::SqliteCache;
     use crate::chunk::ChunkOptions;
+    use crate::config::log_capture::CapturedLogs;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
     use crate::vault_registry::VaultId;
@@ -3554,7 +3503,7 @@ mod chunk_integration_tests {
             )
             .expect("note");
         }
-        let logs = log_capture::CapturedLogs::default();
+        let logs = CapturedLogs::default();
         let barrier = Arc::new(std::sync::Barrier::new(2));
 
         let builds: Vec<_> = [(first, first_dir.path()), (second, second_dir.path())]
@@ -3630,7 +3579,7 @@ mod chunk_integration_tests {
             .expect("write non-UTF-8 note");
         let index = VaultIndex::build(dir.path()).expect("index");
         let cache = SqliteCache::in_memory(384).expect("cache");
-        let logs = log_capture::CapturedLogs::default();
+        let logs = CapturedLogs::default();
 
         tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::WARN), || {
             cache
@@ -3663,7 +3612,7 @@ mod chunk_integration_tests {
 
     #[test]
     fn concurrent_heartbeats_each_log_their_own_vault() {
-        let logs = log_capture::CapturedLogs::default();
+        let logs = CapturedLogs::default();
         let heartbeats: Vec<_> = [
             (VaultId::generate().expect("Vault ID"), 4),
             (VaultId::generate().expect("Vault ID"), 7),

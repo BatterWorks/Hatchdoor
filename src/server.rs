@@ -2092,55 +2092,18 @@ mod tests {
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
 
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl CapturedLogs {
-        fn dispatch(&self) -> tracing::Dispatch {
-            let sink = self.clone();
-            tracing::Dispatch::new(
-                tracing_subscriber::fmt()
-                    .with_max_level(tracing::Level::INFO)
-                    .with_target(false)
-                    .with_ansi(false)
-                    .compact()
-                    .with_writer(move || sink.clone())
-                    .finish(),
-            )
-        }
-
-        fn lines(&self) -> Vec<String> {
-            String::from_utf8(self.0.lock().expect("captured logs lock").clone())
-                .expect("UTF-8 log output")
-                .lines()
-                .map(str::to_string)
-                .collect()
-        }
-    }
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured logs lock")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+    use crate::config::log_capture::CapturedLogs;
 
     #[test]
     fn a_model_load_logs_its_start_its_progress_and_its_duration() {
         let logs = CapturedLogs::default();
-        let loaded = tracing::dispatcher::with_default(&logs.dispatch(), || {
-            log_model_load(SelectedModel::Gemma, Duration::from_millis(20), || {
-                std::thread::sleep(Duration::from_millis(150));
-                Ok(7)
-            })
-        });
+        let loaded =
+            tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::INFO), || {
+                log_model_load(SelectedModel::Gemma, Duration::from_millis(20), || {
+                    std::thread::sleep(Duration::from_millis(150));
+                    Ok(7)
+                })
+            });
         assert_eq!(loaded, Ok(7));
 
         let lines = logs.lines();
@@ -2168,7 +2131,7 @@ mod tests {
     fn a_failed_model_load_is_not_logged_as_loaded() {
         let logs = CapturedLogs::default();
         let loaded: Result<(), String> =
-            tracing::dispatcher::with_default(&logs.dispatch(), || {
+            tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::INFO), || {
                 log_model_load(SelectedModel::Nomic, Duration::from_secs(60), || {
                     Err("no such file".to_string())
                 })
@@ -4901,7 +4864,9 @@ mod tests {
         let app = build_router(state, None);
         let logs = CapturedLogs::default();
         let response = {
-            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch());
+            // Debug, so the capture also holds the line every answered request
+            // logs: an empty capture would prove nothing about the levels above.
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch(tracing::Level::DEBUG));
             app.oneshot(
                 Request::builder()
                     .uri("/ready")
@@ -4916,6 +4881,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"not ready");
         let lines = logs.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("finished processing request") && line.contains("503")),
+            "{lines:?}"
+        );
         assert!(
             !lines
                 .iter()
@@ -4934,7 +4905,7 @@ mod tests {
         std::fs::remove_dir_all(&vault_root).expect("remove vault directory");
         let logs = CapturedLogs::default();
         let response = {
-            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch());
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch(tracing::Level::INFO));
             app.oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/vaults/{vault_id}/assets/diagram.png"))
