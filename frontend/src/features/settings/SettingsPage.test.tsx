@@ -482,6 +482,19 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("says a layered folder leaves normal search and stays in the sidebar (#527)", async () => {
+    mockPage();
+    renderSettingsPage();
+    await screen.findByLabelText("Meaning search in demoted layers");
+
+    expect(
+      screen.getByText(
+        /stay out of normal search but still show in the sidebar/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/out of the browser/)).not.toBeInTheDocument();
+  });
+
   it("focuses the reindex confirmation and closes it on Escape", async () => {
     mockPage();
     renderSettingsPage();

@@ -43,6 +43,10 @@ const GIT_FAILING: ErrorDocs = ErrorDocs {
     page: TROUBLESHOOTING,
     heading: Some("git-sync-is-failing"),
 };
+const WRITE_FAILING: ErrorDocs = ErrorDocs {
+    page: TROUBLESHOOTING,
+    heading: Some("a-write-fails-for-some-other-reason"),
+};
 const RECOVERY: ErrorDocs = ErrorDocs {
     page: VAULT_STATES,
     heading: Some("registry-recovery"),
@@ -71,20 +75,8 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
             heading: Some("what-capabilities-actually-come-from"),
         },
     ),
-    (
-        "write_failed",
-        ErrorDocs {
-            page: TROUBLESHOOTING,
-            heading: Some("editing-a-note-fails-but-creating-one-works"),
-        },
-    ),
-    (
-        "write_recovery_required",
-        ErrorDocs {
-            page: TROUBLESHOOTING,
-            heading: Some("a-write-fails-for-some-other-reason"),
-        },
-    ),
+    ("write_failed", WRITE_FAILING),
+    ("write_recovery_required", WRITE_FAILING),
     ("managed_git_authentication_failed", GIT_FAILING),
     ("managed_git_remote_unreachable", GIT_FAILING),
     ("managed_git_install_failed", GIT_FAILING),
@@ -195,6 +187,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// "Editing a note fails but creating one works" covers one cause only,
+    /// which 2.7.0 removed, so it tells an agent whose write just failed that
+    /// the problem is gone (#527).
+    #[test]
+    fn a_failed_write_points_at_the_section_that_says_where_to_look() {
+        assert_eq!(
+            for_code("write_failed"),
+            Some(ErrorDocs {
+                page: "guides/how-to-troubleshoot-common-problems",
+                heading: Some("a-write-fails-for-some-other-reason"),
+            })
+        );
     }
 
     #[test]

@@ -147,7 +147,7 @@ const COPY: Record<
   HATCHDOOR_EMBED_LAYERS: {
     section: "notes",
     label: "Meaning search in demoted layers",
-    help: "Folders marked with a .hatchdoor-layer file stay out of the browser and out of normal search; assistants can still ask for them by name. On, those notes can also be found by meaning. Off, only by exact words, which saves disk space and indexing time.",
+    help: "Folders marked with a .hatchdoor-layer file stay out of normal search but still show in the sidebar; assistants can ask for them by name. On, those notes can also be found by meaning. Off, only by exact words, which saves disk space and indexing time.",
   },
   HATCHDOOR_DEMO_MODE: {
     section: "notes",
