@@ -268,8 +268,7 @@ describe("write mode re-reads keep or drop Edit for the right reasons (#339)", (
     // `demo_mode: false` and no revision arrives: only the refusal itself
     // can prompt the re-read.
     server.refuseWrites = true;
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    fireEvent.click(screen.getByRole("button", { name: "New note" }));
     fireEvent.change(screen.getByLabelText("Note name"), {
       target: { value: "Refused" },
     });
@@ -399,7 +398,7 @@ describe("startup states after the gate has stepped aside (#339)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Notes Explorer" });
+    await screen.findByRole("heading", { level: 1, name: "Notes" });
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     fireEvent.click(await screen.findByRole("button", { name: "Retry setup" }));
 
@@ -456,7 +455,7 @@ describe("unknown routes (#339)", () => {
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Go to notes" }));
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeVisible();
   });
 });

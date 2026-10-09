@@ -21,13 +21,19 @@ import {
   stripBlockIds,
   stripVaultNoteLinks,
 } from "../lib/markdown";
-import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
+import {
+  duplicateTitleHeadingLine,
+  extractMarkdownHeadings,
+  slugifyHeading,
+  type NoteHeading,
+} from "../lib/noteHeadings";
 import {
   frontmatterLineOffset,
   linesMatch,
   placeholderForBlankRange,
   type LineRange,
 } from "../lib/sourceMap";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import { createEditHistory } from "../lib/editHistory";
 import { holdAppReload } from "../lib/reloadGuard";
@@ -148,8 +154,10 @@ function countDocumentLines(content: string): number {
 }
 
 const NOTE_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
+
 export function NotePage({
   onActiveNoteChange,
+  onHeadingsChange,
   onTagSelect,
   propertiesCollapsedStorageKey,
   vaultRevision,
@@ -162,6 +170,9 @@ export function NotePage({
   vaults,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
+  /** The open note's headings as the table of contents lists them (#530),
+   * for the shell's phone "On this page" chip; `[]` when none or no note. */
+  onHeadingsChange?: (headings: NoteHeading[]) => void;
   /** Tags are per-Vault vocabularies, so tapping one hands the search dialog
    * this note's own Vault to pre-select in its filter (#144). */
   onTagSelect: (tag: string, vaultId: VaultId) => void;
@@ -251,9 +262,16 @@ export function NotePage({
   const [activeUnit, setActiveUnit] = useState<string | null>(null);
   const [activeRange, setActiveRange] = useState<LineRange | null>(null);
   const [saving, setSaving] = useState(false);
+  // The phone remembers its own answer (#530): a grid opened once on a wide
+  // screen used to stay open on every phone visit, where it costs the
+  // first screen. Both start folded.
+  const isMobile = useIsMobile(920);
+  const propertiesCollapsedKey = isMobile
+    ? `${propertiesCollapsedStorageKey}.mobile`
+    : propertiesCollapsedStorageKey;
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
-      return safeGetItem(propertiesCollapsedStorageKey) !== "0";
+      return safeGetItem(propertiesCollapsedKey) !== "0";
     },
   );
   // Entering a block on touch is a double tap, which is invisible: the gutter
@@ -566,8 +584,8 @@ export function NotePage({
   }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
   useEffect(() => {
-    safeSetItem(propertiesCollapsedStorageKey, propertiesCollapsed ? "1" : "0");
-  }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
+    safeSetItem(propertiesCollapsedKey, propertiesCollapsed ? "1" : "0");
+  }, [propertiesCollapsed, propertiesCollapsedKey]);
 
   const startEditing = useCallback(() => {
     if (!writeEnabled || !note || isEditing) {
@@ -700,6 +718,26 @@ export function NotePage({
     () => extractMarkdownHeadings(parsed.body),
     [parsed.body],
   );
+  // A note that opens with `# <its own title>` says the title twice (#530):
+  // once in the page's title block and once as its first heading. That
+  // heading stays in the file and in the DOM (line-addressed editing) but is
+  // neither drawn nor listed. Only the first heading qualifies, and only
+  // when nothing but blank lines precede it.
+  const hiddenHeadingLine = useMemo(
+    () => duplicateTitleHeadingLine(parsed.body, tocHeadings, note?.title),
+    [parsed.body, tocHeadings, note?.title],
+  );
+  const visibleHeadings = useMemo(
+    () =>
+      hiddenHeadingLine === undefined
+        ? tocHeadings
+        : tocHeadings.filter((h) => h.sourceLine !== hiddenHeadingLine),
+    [tocHeadings, hiddenHeadingLine],
+  );
+  useEffect(() => {
+    onHeadingsChange?.(note ? visibleHeadings : []);
+  }, [note, visibleHeadings, onHeadingsChange]);
+  useEffect(() => () => onHeadingsChange?.([]), [onHeadingsChange]);
   const rehypePlugins = useMemo(
     () => [rehypeKatex, createSearchHighlightPlugin(searchQuery)],
     [searchQuery],
@@ -756,13 +794,14 @@ export function NotePage({
         vaultId,
         note?.relative_path ?? "",
         headingIdsBySourceLine,
-        { editable: inlineEditingEnabled },
+        { editable: inlineEditingEnabled, hiddenHeadingLine },
       ),
     [
       vaultId,
       note?.relative_path,
       headingIdsBySourceLine,
       inlineEditingEnabled,
+      hiddenHeadingLine,
     ],
   );
 
@@ -1614,7 +1653,10 @@ export function NotePage({
             relativePath={note.relative_path}
           />
         ) : null}
-        {writeEnabled && !isEditing && !lineMappingIntact ? (
+        {/* Not while settling: `markdown` still describes the previous
+            document then, so the mapping is judged against the wrong tree
+            and every plain note flashed this on its first paint (#530). */}
+        {writeEnabled && !isEditing && !settling && !lineMappingIntact ? (
           <p className="note-editor-notice">
             This note&rsquo;s source and rendered lines don&rsquo;t line up, so
             inline editing is off here. Use Edit to open source mode.
@@ -1653,36 +1695,48 @@ export function NotePage({
             }}
           />
         ) : null}
-        <NoteProperties
-          // Sharing the title's line cost the title width, and a long one
-          // wrapped around them.
-          actions={
-            writeEnabled && !isEditing ? (
-              <div className="note-inline-actions">
-                <SaveState
-                  status={autosave.status}
-                  savedAt={autosave.savedAt}
-                />
-                <UiButton
-                  className="close-note note-edit-button"
-                  onClick={startEditing}
-                >
-                  Edit
-                </UiButton>
-              </div>
-            ) : null
-          }
-          properties={parsed.properties}
-          vaultName={vaultName}
-          content={note.content}
-          editable={inlineEditingEnabled}
-          onChange={handleInlineChange}
-          collapsed={propertiesCollapsed}
-          onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
-          onTagSelect={(tag) => onTagSelect(tag, vaultId)}
+        {/* Reading chrome only: the editor carries its own frontmatter form,
+            so the grid above it said everything twice (#530). */}
+        {isEditing ? null : (
+          <NoteProperties
+            // Sharing the title's line cost the title width, and a long one
+            // wrapped around them.
+            actions={
+              writeEnabled ? (
+                <div className="note-inline-actions">
+                  <SaveState
+                    status={autosave.status}
+                    savedAt={autosave.savedAt}
+                  />
+                  <UiButton
+                    className="close-note note-edit-button"
+                    onClick={startEditing}
+                  >
+                    Edit
+                    <span className="shortcut-hint" aria-hidden="true">
+                      E
+                    </span>
+                  </UiButton>
+                </div>
+              ) : null
+            }
+            properties={parsed.properties}
+            vaultName={vaultName}
+            content={note.content}
+            editable={inlineEditingEnabled}
+            onChange={handleInlineChange}
+            collapsed={propertiesCollapsed}
+            onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
+            onTagSelect={(tag) => onTagSelect(tag, vaultId)}
+          />
+        )}
+        {/* Between the desktop breakpoint and the TOC column's own (920 to
+            1160px) the headings fold into this strip; below 920 the shell's
+            scope row carries them as a chip (#530). */}
+        <NoteTocMobile
+          headings={visibleHeadings}
+          onJump={jumpToHeadingWithTail}
         />
-        <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
-        <NoteTocMobile headings={tocHeadings} onJump={jumpToHeadingWithTail} />
         {heldDraftsPresent && !heldDraftsBannerDismissed && !demoMode ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
@@ -1788,9 +1842,18 @@ export function NotePage({
             </div>
           </div>
         )}
+        {/* Links come after the text (#530): backlinks are what a reader
+            consults once they have read, and every outgoing link is already
+            a link in the body above. */}
+        {isEditing ? null : (
+          <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
+        )}
       </article>
 
-      <NoteTocDesktop headings={tocHeadings} onJump={jumpToHeadingWithTail} />
+      <NoteTocDesktop
+        headings={visibleHeadings}
+        onJump={jumpToHeadingWithTail}
+      />
     </div>
   );
 }

@@ -172,7 +172,7 @@ describe("useSearch — partiality (#141)", () => {
   it("names every missing Vault, at eight Vaults", async () => {
     const result = await search(
       EIGHT_VAULTS.map((vault, index) =>
-        participantFor(vault, index < 5 ? "fresh" : "stale"),
+        participantFor(vault, index < 5 ? "fresh" : "unavailable"),
       ),
     );
 

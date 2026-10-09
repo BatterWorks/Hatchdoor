@@ -454,7 +454,7 @@ describe("SettingsPage", () => {
       renderSettingsPage();
       await editAcrossTwoSections();
 
-      fireEvent.click(screen.getByRole("button", { name: "Save uploads" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
       await screen.findByText("Saved");
       expect(sent).toHaveLength(1);
       expect(Object.keys(sent[0])).toEqual(["HATCHDOOR_MAX_ATTACHMENT_BYTES"]);
@@ -488,9 +488,7 @@ describe("SettingsPage", () => {
     fireEvent.click(
       await screen.findByLabelText("Meaning search in demoted layers"),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save notes handling" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     const dialog = await screen.findByRole("dialog", {
       name: "Before this is saved",
@@ -638,7 +636,7 @@ describe("How does this work? links (#423)", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Send a usage report" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save usage report" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     const report = await screen.findByText("The next report");
     const block = report.closest("[data-testid='usage-report']") as HTMLElement;
@@ -657,7 +655,7 @@ describe("How does this work? links (#423)", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Send a usage report" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save usage report" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await screen.findByText("The next report");
     expect(screen.getByTestId("usage-report-last-sent")).toHaveTextContent(

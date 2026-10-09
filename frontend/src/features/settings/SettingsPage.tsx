@@ -6,7 +6,7 @@
  * record in the "Managed outside this page" plaque below it.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
@@ -81,7 +81,8 @@ const SECTIONS = [
     id: "notes",
     number: "01",
     title: "Notes handling",
-    blurb: "How this server indexes the notes its Vaults provide.",
+    blurb:
+      "How this server indexes notes, and who its recorded changes are signed by.",
     manual: CONTEXTUAL_HELP.notesSettings,
   },
   {
@@ -870,7 +871,7 @@ export function SettingsPage({
                     onClick={save}
                     disabled={dirtyKeys.length === 0 || saving}
                   >
-                    {saving ? "Saving…" : `Save ${section.title.toLowerCase()}`}
+                    {saving ? "Saving…" : "Save"}
                   </button>
                 </div>
               )}
@@ -891,51 +892,63 @@ export function SettingsPage({
             ) : null}
 
             <div className="settings-rows" data-empty={editable.length === 0}>
-              {editable.map((setting) => {
+              {editable.map((setting, index) => {
                 const copy = COPY[setting.key];
                 const error = errors[setting.key];
+                // The server-wide commit identity is history, not indexing
+                // (#530): a sub-heading sets the two rows apart.
+                const groupLabel =
+                  setting.key === "HATCHDOOR_GIT_AUTHOR_NAME" ||
+                  (setting.key === "HATCHDOOR_GIT_AUTHOR_EMAIL" &&
+                    editable[index - 1]?.key !== "HATCHDOOR_GIT_AUTHOR_NAME")
+                    ? "History (Git)"
+                    : null;
                 return (
-                  <div
-                    className={`settings-row${error ? " has-error" : ""}`}
-                    key={setting.key}
-                  >
-                    <div>
-                      <div className="settings-row-label">
-                        {copy.label}
-                        {drafts[setting.key] !== undefined ? (
-                          <span
-                            className="settings-dirty"
-                            aria-label="unsaved"
-                          />
+                  <Fragment key={setting.key}>
+                    {groupLabel ? (
+                      <p className="settings-group-label">{groupLabel}</p>
+                    ) : null}
+                    <div className={`settings-row${error ? " has-error" : ""}`}>
+                      <div>
+                        <div className="settings-row-label">
+                          {copy.label}
+                          {drafts[setting.key] !== undefined ? (
+                            <span
+                              className="settings-dirty"
+                              aria-label="unsaved"
+                            />
+                          ) : null}
+                        </div>
+                        <p className="settings-row-help">
+                          {copy.help}
+                          {copy.manual ? (
+                            <>
+                              {" "}
+                              <ContextualHelpLink to={copy.manual} />
+                            </>
+                          ) : null}
+                        </p>
+                        {copy.note ? (
+                          <p className="settings-row-note">{copy.note}</p>
+                        ) : null}
+                        {setting.class === "reindex" ? (
+                          <p className="settings-row-class">
+                            Saving this rebuilds the search index.
+                          </p>
+                        ) : null}
+                        {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
+                          <p className="settings-row-class">
+                            This password also controls who can upload files,
+                            not only who can talk to assistants.
+                          </p>
+                        ) : null}
+                        {error ? (
+                          <p className="settings-error">{error}</p>
                         ) : null}
                       </div>
-                      <p className="settings-row-help">
-                        {copy.help}
-                        {copy.manual ? (
-                          <>
-                            {" "}
-                            <ContextualHelpLink to={copy.manual} />
-                          </>
-                        ) : null}
-                      </p>
-                      {copy.note ? (
-                        <p className="settings-row-note">{copy.note}</p>
-                      ) : null}
-                      {setting.class === "reindex" ? (
-                        <p className="settings-row-class">
-                          Saving this rebuilds the search index.
-                        </p>
-                      ) : null}
-                      {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
-                        <p className="settings-row-class">
-                          This password also controls who can upload files, not
-                          only who can talk to assistants.
-                        </p>
-                      ) : null}
-                      {error ? <p className="settings-error">{error}</p> : null}
+                      <div>{control(setting)}</div>
                     </div>
-                    <div>{control(setting)}</div>
-                  </div>
+                  </Fragment>
                 );
               })}
             </div>

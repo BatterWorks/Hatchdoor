@@ -345,7 +345,32 @@
   }
 }
 
-/* Groups the nine items into mutate / utility / destructive. */
+/* The theme menu (#530): the popover's own rows, each an icon, a name and,
+   for System, what it follows; the current choice in hot ink. */
+.theme-menu {
+  min-width: 15rem;
+}
+
+.topbar-menu .theme-menu-item {
+  gap: 0.6rem;
+}
+
+.theme-menu-item[aria-checked="true"] {
+  color: var(--hot);
+}
+
+.theme-menu-hint {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+/* Groups the items into rename-and-move / utility / destructive. */
 .topbar-menu-divider {
   height: 1px;
   margin: 0.15rem 0;
@@ -365,9 +390,62 @@
   position: relative;
 }
 
+/* The row holds the scope control (or the single Vault's condition, or
+   nothing) and, on a note with headings, the "On this page" chip (#530). */
+.topbar-meta-row {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.topbar-meta-spacer {
+  flex: 1 1 auto;
+}
+
+/* The chip: a glyph and the heading count, set off from the scope control by
+   a hairline. Opens the heading sheet below. */
+.topbar-toc-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: 0.5rem;
+  padding: 0.12rem 0.2rem 0.12rem 0.7rem;
+  border: 0;
+  border-left: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .topbar-toc-chip:hover {
+    background: var(--paper-2);
+    color: var(--ink);
+  }
+}
+
+.topbar-toc-chip[aria-expanded="true"] {
+  color: var(--hot);
+}
+
+.topbar-toc-chip:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+.topbar-toc-count {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
 .topbar-scope-trigger {
   display: flex;
   align-items: center;
+  flex: 1 1 auto;
   width: 100%;
   min-width: 0;
   background: transparent;
@@ -491,4 +569,33 @@
   min-height: 46px;
   padding-left: 1rem;
   padding-right: 1rem;
+}
+
+/* The heading sheet (#530): the scope sheet's own shell and rows, headed by
+   the same label the desktop TOC carries, rows stepped in by heading level. */
+.toc-sheet-title {
+  margin: 0;
+  padding: 0.35rem 1rem 0.3rem;
+  font-family: var(--font-sans);
+  font-size: 0.66rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.toc-sheet-row[data-level="2"] {
+  padding-left: 1.6rem;
+}
+
+.toc-sheet-row[data-level="3"] {
+  padding-left: 2.2rem;
+  color: var(--muted);
+}
+
+.toc-sheet-row[data-level="4"],
+.toc-sheet-row[data-level="5"],
+.toc-sheet-row[data-level="6"] {
+  padding-left: 2.8rem;
+  color: var(--muted);
 }

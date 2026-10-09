@@ -36,8 +36,6 @@ function renderTopbar(
     onCopyPageContent: vi.fn(),
     onCopyNoteLink: vi.fn(),
     onDownloadMarkdown: vi.fn(),
-    onEditNote: vi.fn(),
-    onNewNote: vi.fn(),
     onRenameNote: vi.fn(),
     onMoveNote: vi.fn(),
     onArchiveNote: vi.fn(),
@@ -487,8 +485,8 @@ describe("AppTopbar Help entry (#417)", () => {
     );
   });
 
-  it("moves Help into the … menu on phones, first", () => {
-    const props = renderTopbar({
+  it("keeps Help out of the top bar and the … menu on phones; the drawer's rail carries it (#530)", () => {
+    renderTopbar({
       isMobile: true,
       actionsMenuOpen: true,
       writeEnabled: true,
@@ -496,11 +494,7 @@ describe("AppTopbar Help entry (#417)", () => {
     });
 
     expect(screen.queryByRole("button", { name: "Help" })).toBeNull();
-    const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
-    expect(items[0]).toHaveTextContent("Help");
-    fireEvent.click(items[0]);
-    expect(screen.getByRole("button", { name: "More actions" })).toHaveFocus();
-    expect(props.onCloseActionsMenu).toHaveBeenCalled();
-    expect(props.onToggleHelp).toHaveBeenCalledTimes(1);
+    const items = within(screen.getByRole("menu")).queryAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).not.toContain("Help");
   });
 });

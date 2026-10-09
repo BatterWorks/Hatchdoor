@@ -396,7 +396,7 @@ describe("App links/download", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Download .md" }),
+      await screen.findByRole("menuitem", { name: "Download .md file" }),
     );
 
     expect(clickSpy).toHaveBeenCalledTimes(1);
@@ -452,7 +452,7 @@ describe("App links/download", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Download .md" }),
+      await screen.findByRole("menuitem", { name: "Download .md file" }),
     );
 
     expect(openSpy).not.toHaveBeenCalled();
@@ -507,7 +507,7 @@ describe("App links/download", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Copy page content" }),
+      await screen.findByRole("menuitem", { name: "Copy note text" }),
     );
 
     await waitFor(() => {

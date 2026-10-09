@@ -71,7 +71,7 @@ Hatchdoor also waits before updating itself. A new version installs in the backg
 
 ## Source mode
 
-The **Edit** button next to the note title opens the whole note in a Markdown editor with a Save button. Use it for what block editing cannot do: changing a table's rows or columns, editing display math or raw HTML, and resolving a conflict the **Review** button reports. It is always available, and it can change anything in the note.
+The **Edit** button above the note, or the `E` key, opens the whole note in a Markdown editor with a Save button. Use it for what block editing cannot do: changing a table's rows or columns, editing display math or raw HTML, and resolving a conflict the **Review** button reports. It is always available, and it can change anything in the note.
 
 ### Linking to another note
 

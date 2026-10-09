@@ -251,6 +251,29 @@
   border-top: 1px solid var(--rule);
   padding-top: 1.2rem;
 }
+
+/* Disconnect stands apart from the two routine actions (#530): same row,
+   far edge, so three buttons of equal weight do not read as one set. */
+.settings-vault-actions .settings-btn-danger {
+  margin-left: auto;
+}
+
+/* A sub-heading inside a section (#530), in the explorer's §05 head grammar,
+   for rows that belong together under a section that is about something
+   else: the server's commit identity under Notes handling. */
+.settings-group-label {
+  margin: 1.6rem 0 0;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--rule-strong);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 84,
+    "wght" 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
 .settings-vault-disconnect-note {
   margin: 0.6rem 0 0;
   max-width: 34rem;

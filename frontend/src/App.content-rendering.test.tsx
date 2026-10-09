@@ -524,8 +524,10 @@ Body`,
 
     const input = await screen.findByPlaceholderText("Search notes…");
     expect(input).toHaveValue("#type/reference");
-    const includeContent = screen.getByRole("checkbox");
-    expect(includeContent).toBeChecked();
+    expect(screen.getByRole("button", { name: "Keyword" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
         String(call[0]).includes(

@@ -94,7 +94,7 @@ describe("SearchDialog", () => {
       matchKind: "",
     });
 
-    fireEvent.click(getByRole("checkbox"));
+    fireEvent.click(getByRole("button", { name: "Keyword" }));
     expect(props.onIncludeContentChange).toHaveBeenCalledWith(true);
   });
 });
@@ -339,7 +339,7 @@ describe("SearchDialog's own Vault filter — never the browsing scope (#144)", 
     expect(gamma).toHaveAttribute("aria-disabled", "true");
     const word = gamma.querySelector(".vault-slot-condition");
     expect(word).toHaveTextContent("no answer");
-    expect(word).toHaveClass("vault-tier-error");
+    expect(word).toHaveClass("vault-tier-warn");
 
     fireEvent.click(gamma);
     expect(gamma).not.toHaveClass("is-selected");
@@ -596,7 +596,7 @@ describe("SearchDialog's mobile field strip (#144)", () => {
     });
 
     expect(screen.queryByLabelText("Scope")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Mode")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Mode" })).toBeInTheDocument();
   });
 
   it("keeps the Scope field even when the browsing scope is narrowed", () => {
@@ -610,12 +610,14 @@ describe("SearchDialog's mobile field strip (#144)", () => {
     expect(screen.getByLabelText("Scope")).toBeInTheDocument();
   });
 
-  it("controls the same Mode state as the desktop toggle", () => {
+  it("switches mode through one segmented control at every width (#530)", () => {
     const { props } = renderDialog({ includeContent: false });
 
-    fireEvent.change(screen.getByLabelText("Mode"), {
-      target: { value: "keyword" },
-    });
+    expect(screen.getByRole("button", { name: "Semantic" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Keyword" }));
 
     expect(props.onIncludeContentChange).toHaveBeenCalledExactlyOnceWith(true);
   });
@@ -624,19 +626,52 @@ describe("SearchDialog's mobile field strip (#144)", () => {
 describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
   afterEach(cleanup);
 
-  it("shows a work-in-flight block during a first index, with the current percentage", () => {
+  it("shows a progress line during a first index, with the current percentage, never an error block (#530)", () => {
     renderDialog({
       startupStatus: { state: "indexing", percent: 42 } as never,
     });
 
-    expect(screen.getByText("Could Not Load")).toBeVisible();
-    expect(screen.getByText(/42%/)).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Search is still indexing, 42% done. Keyword search already answers.",
+    );
+    expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
   });
 
-  it("shows a work-in-flight block during scanning with no percentage yet", () => {
+  it("shows the progress line during scanning with no percentage yet", () => {
     renderDialog({ startupStatus: { state: "scanning" } });
 
-    expect(screen.getByText("Could Not Load")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Search is still indexing.",
+    );
+    expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
+  });
+
+  it("keeps Keyword results on screen under the progress line while indexing (#530)", () => {
+    renderDialog({
+      includeContent: true,
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      startupStatus: { state: "indexing", percent: 41 } as never,
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Keyword results are complete.",
+    );
+    expect(screen.getByText("One")).toBeVisible();
+    expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
+  });
+
+  it("lets Keyword say 'No matching notes' while indexing, since its index is complete", () => {
+    renderDialog({
+      includeContent: true,
+      query: "plan",
+      results: [],
+      startupStatus: { state: "indexing", percent: 41 } as never,
+    });
+
+    expect(screen.getByText("No matching notes.")).toBeVisible();
   });
 
   it("keeps the query input enabled and typable during a first index", () => {
@@ -731,16 +766,16 @@ describe("SearchDialog keeps keyboard focus and its filter honest (#334)", () =>
 
     renderDialog({ vaults: [ALPHA], results: [], query: "plan" });
 
-    const checkbox = screen.getByRole("checkbox", { name: /Keyword mode/ });
-    checkbox.focus();
-    fireEvent.keyDown(checkbox, { key: "Tab" });
+    const lastControl = screen.getByRole("button", { name: "Keyword" });
+    lastControl.focus();
+    fireEvent.keyDown(lastControl, { key: "Tab" });
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Close" }),
     );
 
     screen.getByRole("button", { name: "Close" }).focus();
     fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(checkbox);
+    expect(document.activeElement).toBe(lastControl);
   });
 
   it("drops a filter on a Vault that has left the collection since the dialog opened", () => {
@@ -766,5 +801,65 @@ describe("SearchDialog keeps keyboard focus and its filter honest (#334)", () =>
     );
     expect(screen.getByText("One")).toBeInTheDocument();
     expect(screen.queryByText(/No results in/)).not.toBeInTheDocument();
+  });
+});
+
+describe("SearchDialog result rows read cleanly (#530)", () => {
+  afterEach(cleanup);
+
+  const row = (over: Partial<SearchResult>): SearchResult =>
+    resultFor("vault-1", {
+      note_slug: "homelab",
+      note_title: "Homelab",
+      note_path: "30-areas/Homelab",
+      content: "",
+      ...over,
+    });
+
+  it("keeps a numbered folder's path in reading order", () => {
+    renderDialog({ query: "homelab", results: [row({})] });
+
+    const path = document.querySelector(".result-path-text");
+    expect(path).toHaveTextContent("30-areas/Homelab.md");
+  });
+
+  it("strips wikilink brackets, fenced code and frontmatter from the snippet", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({
+          content:
+            "---\ntags: [x]\n---\nThe fleet is in [[Homelab Atlas]] and [[RackGate|the gate]].\n```mermaid\ngraph LR; A-->B\n```\nMore text.",
+        }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet");
+    expect(snippet).toHaveTextContent(
+      "The fleet is in Homelab Atlas and the gate. More text.",
+    );
+    expect(snippet?.textContent).not.toContain("[[");
+    expect(snippet?.textContent).not.toContain("graph LR");
+    expect(snippet?.textContent).not.toContain("tags:");
+  });
+
+  it("omits the heading line when it only repeats the note's title", () => {
+    renderDialog({
+      query: "homelab",
+      results: [
+        row({ heading_path: "Homelab" }),
+        row({
+          chunk_id: 2,
+          note_slug: "atlas",
+          note_title: "Homelab Atlas",
+          heading_path: "Hosts",
+        }),
+      ],
+    });
+
+    const crumbs = Array.from(
+      document.querySelectorAll(".result-breadcrumb"),
+    ).map((el) => el.textContent);
+    expect(crumbs).toEqual(["Hosts"]);
   });
 });

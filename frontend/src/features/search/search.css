@@ -62,23 +62,103 @@
   border-color: var(--hot);
 }
 
-.search-toggle {
-  display: inline-flex;
+/* Mode row — one segmented Semantic / Keyword choice at every width (#530),
+   the same control grammar Settings' Git behaviour uses. */
+.search-mode-row {
+  display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: space-between;
+  gap: 0.75rem;
   margin: 0.7rem 0 0.55rem;
-  font-family: var(--font-sans);
-  font-size: 0.82rem;
+}
+
+.search-mode-label {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
-.search-toggle input {
-  accent-color: var(--hot);
+.search-mode {
+  display: inline-flex;
+  border: 1px solid var(--rule-strong);
 }
 
-/* Phone field strip — Scope beside Mode, using §18's field grammar. Hidden
-   on desktop by default; the 920px breakpoint in responsive.css swaps this
-   for the checkbox above (#119, #144). */
+.search-mode button {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  padding: 0.4rem 0.8rem;
+  border: none;
+  border-right: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.search-mode button:last-child {
+  border-right: none;
+}
+
+.search-mode button[aria-pressed="true"] {
+  background: var(--hot);
+  color: var(--bg);
+}
+
+@media (hover: hover) {
+  .search-mode button:not([aria-pressed="true"]):hover {
+    background: var(--paper-2);
+    color: var(--ink);
+  }
+}
+
+.search-mode button:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+/* Work in flight (#530): a progress line under the controls, in the warn
+   tier's ink and ground, never a block above the results. The bar reads the
+   percentage; the sentence says which mode already answers. */
+.search-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-family: var(--font-sans);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.search-progress-bar {
+  flex: 0 0 5rem;
+  height: 4px;
+  background: var(--warn-border);
+}
+
+.search-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--warn-fg);
+  transition: width var(--dur) var(--ease);
+}
+
+/* Phone field strip — Scope as a field, using §18's field grammar. Hidden
+   on desktop, where the facet rail carries the same filter; the 920px
+   breakpoint in responsive.css shows it (#119, #144). */
 .search-field-strip {
   display: none;
   gap: 0.6rem;
@@ -332,16 +412,19 @@
   color: var(--muted);
 }
 
-/* Provenance (#140) leads this line and never elides; the path takes the
-   loss instead, head-first — the tail (the file itself) is what a reader
-   scanning results needs kept. */
+/* Provenance (#140) leads this line, capped to a share of it (`.path-vault`,
+   ui-common.css); the path takes the rest and elides at its tail. It used
+   to elide head-first through `direction: rtl`, which handed the whole line
+   to the bidi algorithm and turned `30-areas/Homelab.md` into
+   `areas/Homelab.md-30` (#530): a leading number and its hyphen are weak
+   characters, and right-to-left resolution moves them to the other end. */
 .result-path-text {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  direction: rtl;
-  text-align: left;
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 .result-breadcrumb {

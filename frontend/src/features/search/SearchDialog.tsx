@@ -127,18 +127,29 @@ function groupResults(results: SearchResult[]): NoteGroup[] {
 }
 
 function stripMarkdown(raw: string): string {
-  return raw
-    .replace(/^#{1,6}\s+.*/gm, "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/_([^_]+)_/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/^\s*[-*+]\s+/gm, "")
-    .replace(/^\s*\d+\.\s+/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return (
+    raw
+      // Frontmatter at the top of a chunk, and any fenced block whole: a
+      // snippet that showed a Mermaid diagram's source read as noise (#530).
+      // An unterminated fence is cut from its opening to the end.
+      .replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "")
+      .replace(/```[\s\S]*?(?:```|$)/g, "")
+      .replace(/^#{1,6}\s+.*/gm, "")
+      // A wikilink reads by its alias where it has one, else its target.
+      .replace(/!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) =>
+        String(alias ?? target),
+      )
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/__([^_]+)__/g, "$1")
+      .replace(/_([^_]+)_/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/^\s*[-*+]\s+/gm, "")
+      .replace(/^\s*\d+\.\s+/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
 }
 
 function stripSnippet(raw: string): string {
@@ -413,27 +424,43 @@ export function SearchDialog({
           }}
         />
 
-        {/* Desktop: the documented dialog's own Mode toggle, unchanged.
-            Hidden below 920px, where the field strip below carries Mode
-            instead — same filter, same semantics, different form (#119,
-            #144). */}
-        <label className="search-toggle">
-          <input
-            type="checkbox"
-            checked={includeContent}
-            onChange={(event) => onIncludeContentChange(event.target.checked)}
-          />
-          Keyword mode
-        </label>
+        {/* One Mode control at every width (#530): a two-way segmented
+            choice, the same control Settings uses for a Vault's Git
+            behaviour. It replaced a desktop checkbox and a phone select that
+            said the same thing in two shapes. */}
+        <div className="search-mode-row">
+          <span className="search-mode-label" id="search-mode-label">
+            Mode
+          </span>
+          <div
+            className="search-mode"
+            role="group"
+            aria-labelledby="search-mode-label"
+          >
+            <button
+              type="button"
+              aria-pressed={!includeContent}
+              onClick={() => onIncludeContentChange(false)}
+            >
+              Semantic
+            </button>
+            <button
+              type="button"
+              aria-pressed={includeContent}
+              onClick={() => onIncludeContentChange(true)}
+            >
+              Keyword
+            </button>
+          </div>
+        </div>
 
-        {/* Phone: Scope beside Mode, in one field strip under the input
-            (#119, #144). The rail has no room as a column here, so it takes
-            this shape instead — same filter, same semantics. It opens on the
-            browsing scope like the rail does, and like the rail it is the
-            filter from the first change onwards, never the browsing scope
-            itself. */}
-        <div className="search-field-strip">
-          {showVaultFilter ? (
+        {/* Phone: Scope as a field under the input (#119, #144). The rail
+            has no room as a column here, so it takes this shape instead —
+            same filter, same semantics. It opens on the browsing scope like
+            the rail does, and like the rail it is the filter from the first
+            change onwards, never the browsing scope itself. */}
+        {showVaultFilter ? (
+          <div className="search-field-strip">
             <div className="field">
               <label className="field-label" htmlFor="search-scope-field">
                 Scope
@@ -458,61 +485,77 @@ export function SearchDialog({
                 ))}
               </select>
             </div>
-          ) : null}
-          <div className="field">
-            <label className="field-label" htmlFor="search-mode-field">
-              Mode
-            </label>
-            <select
-              id="search-mode-field"
-              className="field-input"
-              value={includeContent ? "keyword" : "semantic"}
-              onChange={(event) =>
-                onIncludeContentChange(event.target.value === "keyword")
-              }
-            >
-              <option value="semantic">Semantic</option>
-              <option value="keyword">Keyword</option>
-            </select>
           </div>
-        </div>
+        ) : null}
 
+        {/* Work in flight is progress, not failure (#530): one quiet line
+            under the controls, never a block that outranks results. The
+            shrunk startup gate (#150) no longer blocks the app for a first
+            index, and Keyword search answers from the text index long
+            before the vectors land, so results and this line coexist. In
+            semantic mode with nothing to show, "No matching notes" stays
+            suppressed below: nothing has been searched yet. */}
         {startupWorkInFlight ? (
-          // The shrunk startup gate (#150) no longer blocks the app for a
-          // first index; this dialog still opens normally and stays typable
-          // — it just can't answer yet, worded as work in flight and
-          // carrying the same percentage the Scope zone shows.
-          <StateBlock
-            title="Could Not Load"
-            description={
-              startupPercent === null
-                ? "Building the search index. Results will appear once it's ready."
-                : `Building the search index (${startupPercent}%). Results will appear once it's ready.`
-            }
-          />
+          <p className="search-progress" role="status">
+            <span className="search-progress-bar" aria-hidden="true">
+              <span
+                className="search-progress-fill"
+                style={{ width: `${startupPercent ?? 0}%` }}
+              />
+            </span>
+            <span>
+              {startupPercent === null
+                ? "Search is still indexing."
+                : `Search is still indexing, ${startupPercent}% done.`}{" "}
+              {includeContent
+                ? "Keyword results are complete."
+                : "Keyword search already answers."}
+            </span>
+          </p>
         ) : startupDownloading ? (
           // A model download after the gate has stepped aside, most often
-          // the one "Retry setup" starts (#339). Search cannot answer until
-          // it lands, and "No matching notes" would be a wrong answer.
-          <StateBlock
-            title="Could Not Load"
-            description={
-              startupDownloadPercent === null
-                ? "Downloading the search model. Results will appear once it's ready."
-                : `Downloading the search model (${startupDownloadPercent}%). Results will appear once it's ready.`
-            }
-          />
-        ) : startupTermsRequired ? (
-          <StateBlock
-            title="Could Not Load"
-            description={
-              demoMode
+          // the one "Retry setup" starts (#339). Semantic search cannot
+          // answer until it lands; Keyword still can.
+          <p className="search-progress" role="status">
+            <span className="search-progress-bar" aria-hidden="true">
+              <span
+                className="search-progress-fill"
+                style={{ width: `${startupDownloadPercent ?? 0}%` }}
+              />
+            </span>
+            <span>
+              {startupDownloadPercent === null
+                ? "Downloading the search model."
+                : `Downloading the search model (${startupDownloadPercent}%).`}{" "}
+              {includeContent
+                ? "Keyword results are complete."
+                : "Keyword search already answers."}
+            </span>
+          </p>
+        ) : null}
+
+        {/* A model that is missing or failed is a genuine failure and keeps
+            its block, unless Keyword results are on screen, where it shrinks
+            to the same quiet line so it never sits above a live answer. */}
+        {startupTermsRequired || startupFailed ? (
+          results.length > 0 ? (
+            <p className="search-progress is-warn" role="status">
+              {demoMode
                 ? DEMO_SEARCH_UNAVAILABLE
-                : "Search is waiting for a search model to be chosen. Reload the page to choose one."
-            }
-          />
-        ) : startupFailed ? (
-          demoMode ? (
+                : startupTermsRequired
+                  ? "Semantic search is waiting for a search model to be chosen. Keyword results are complete."
+                  : "The search model could not be loaded, so only Keyword search answers."}
+            </p>
+          ) : startupTermsRequired ? (
+            <StateBlock
+              title="Could Not Load"
+              description={
+                demoMode
+                  ? DEMO_SEARCH_UNAVAILABLE
+                  : "Search is waiting for a search model to be chosen. Reload the page to choose one."
+              }
+            />
+          ) : demoMode ? (
             <StateBlock
               title="Could Not Load"
               description={DEMO_SEARCH_UNAVAILABLE}
@@ -529,14 +572,19 @@ export function SearchDialog({
               onAction={onRetryModelSetup}
             />
           )
-        ) : (
+        ) : null}
+
+        {startupTermsRequired || startupFailed ? null : (
           <>
             {loading ? <p>Searching…</p> : null}
             {error ? <p className="error">{error}</p> : null}
             {!loading &&
             !error &&
             trimmedQuery.length >= 2 &&
-            results.length === 0 ? (
+            results.length === 0 &&
+            // Semantic search has not answered anything yet while the model
+            // is still arriving; only Keyword can claim "no matches" then.
+            (includeContent || !(startupWorkInFlight || startupDownloading)) ? (
               partial ? (
                 // Nothing usable: the documented error block replaces the
                 // empty state entirely. "No matching notes" would be a lie
@@ -583,7 +631,10 @@ export function SearchDialog({
                 >
                   <span className="search-facet-label">{row.label}</span>
                   {row.count === "no-answer" ? (
-                    <span className="vault-slot-condition vault-tier-error">
+                    // Amber, not red: the sidebar already carries the
+                    // Vault's own condition in its tier; inside a filter the
+                    // word is a fact about this answer, not an alarm (#530).
+                    <span className="vault-slot-condition vault-tier-warn">
                       no answer
                     </span>
                   ) : row.count === "unasked" ? null : (
@@ -655,7 +706,11 @@ export function SearchDialog({
                           )}
                         </span>
                       </div>
-                      {first.heading_path ? (
+                      {/* A chunk under the note's own H1 has a heading path
+                          equal to the title; repeating it said nothing
+                          (#530). */}
+                      {first.heading_path &&
+                      first.heading_path !== group.note_title ? (
                         <div className="result-breadcrumb">
                           {first.heading_path}
                         </div>

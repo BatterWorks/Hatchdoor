@@ -97,18 +97,28 @@ export function VaultAggregateSlot({
   vaults,
   counts,
   demoMode = false,
+  compact = false,
 }: {
   vaults: VaultSummary[];
   counts: Record<VaultId, number | undefined>;
   demoMode?: boolean;
+  /** The folded Scope head's form (#530): `5 of 8` beside the scope name,
+   * which the head has no room to follow with a word; the sentence rides on
+   * the title. Every other place says what the count counts. */
+  compact?: boolean;
 }) {
   const aggregate = deriveVaultAggregate(vaults, counts, demoMode);
   if (aggregate.kind === "count") {
     return <span className="side-count">{aggregate.count}</span>;
   }
+  const sentence = `${aggregate.participating} of ${aggregate.total} answering`;
   return (
-    <span className={`vault-slot-shortfall vault-tier-${aggregate.tier}`}>
-      {aggregate.participating} of {aggregate.total}
+    <span
+      className={`vault-slot-shortfall vault-tier-${aggregate.tier}`}
+      title={compact ? sentence : undefined}
+      aria-label={compact ? sentence : undefined}
+    >
+      {compact ? `${aggregate.participating} of ${aggregate.total}` : sentence}
     </span>
   );
 }

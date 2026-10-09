@@ -10,6 +10,7 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CHANGES_COLLAPSED_KEY } from "./constants";
 import { ExplorerPane } from "./ExplorerPane";
 import { getStoredUnfoldedVault } from "./vaultAccordion";
 import {
@@ -204,6 +205,15 @@ function renderStatefulPane(
   );
 }
 
+/** Unfolds Changed on disk (#530). The fold is remembered in storage, which
+ * outlives a test, so this only clicks when the section is folded. */
+function openChanges() {
+  const head = screen.getByRole("button", { name: /^Changed on disk/ });
+  if (head.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(head);
+  }
+}
+
 describe("ExplorerPane", () => {
   afterEach(cleanup);
 
@@ -218,12 +228,31 @@ describe("ExplorerPane", () => {
       "href",
       "/graph",
     );
-    expect(
-      screen.getByRole("button", { name: "Recently changed notes" }),
-    ).toBeInTheDocument();
     const settings = screen.getByRole("link", { name: "Settings" });
     expect(settings).toHaveAttribute("href", "/settings");
     expect(settings).toHaveClass("explorer-rail-settings");
+    // The rail is destinations only (#530): Changed on disk is a section of
+    // the list, and Help sits here on the phone alone.
+    expect(
+      screen.queryByRole("button", { name: "Recently changed notes" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Help" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("carries Help in the rail on the phone, as its last item (#530)", () => {
+    const onToggleHelp = vi.fn();
+    renderPane({ isMobile: true, onToggleHelp });
+
+    const items = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        ".explorer-footer .explorer-rail .explorer-rail-item",
+      ),
+    );
+    expect(items[items.length - 1]).toHaveAccessibleName("Help");
+    fireEvent.click(items[items.length - 1]);
+    expect(onToggleHelp).toHaveBeenCalledTimes(1);
   });
 
   it("hides the footer create action when write mode is off", () => {
@@ -251,16 +280,21 @@ describe("ExplorerPane", () => {
     expect(active).toHaveLength(1);
   });
 
-  it("opens the changes panel from the rail", () => {
+  it("unfolds Changed on disk from its own head, folded by default (#530)", () => {
+    window.localStorage.removeItem(CHANGES_COLLAPSED_KEY);
     renderPane();
 
+    const region = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
     expect(
-      screen.queryByRole("region", { name: "Recently changed notes" }),
+      within(region).queryByRole("link", { name: "Finance" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Changed on disk/ }),
+    ).toHaveAttribute("aria-expanded", "false");
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Recently changed notes" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /^Changed on disk/ }));
 
     const panel = screen.getByRole("region", {
       name: "Recently changed notes",
@@ -283,9 +317,7 @@ describe("ExplorerPane", () => {
     );
     renderPane({ modifiedNotes });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Recently changed notes" }),
-    );
+    openChanges();
 
     const panel = screen.getByRole("region", {
       name: "Recently changed notes",
@@ -594,7 +626,10 @@ describe("ExplorerPane Scope zone", () => {
     expect(within(head).getByText("All Vaults")).toHaveClass(
       "vault-tier-error",
     );
-    expect(within(head).getByText("1 of 3")).toBeInTheDocument();
+    // The folded head has no room for the word (#530): the compact reading,
+    // with the full sentence as its name.
+    const slot = within(head).getByText("1 of 3");
+    expect(slot).toHaveAttribute("aria-label", "1 of 3 answering");
   });
 
   it("clamps the collapsed head's aggregate to the amber tier in demo mode (#152)", () => {
@@ -722,12 +757,6 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
     },
   ];
 
-  function openChanges() {
-    fireEvent.click(
-      screen.getByRole("button", { name: "Recently changed notes" }),
-    );
-  }
-
   it("shows the Vault prefix on Recently viewed when scope is all and multiple Vaults are enabled", () => {
     renderPane({
       vaults: THREE_VAULTS,
@@ -848,12 +877,6 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
 
 describe("Changed on disk tells the truth about a partial read (#141)", () => {
   afterEach(cleanup);
-
-  function openChanges() {
-    fireEvent.click(
-      screen.getByRole("button", { name: "Recently changed notes" }),
-    );
-  }
 
   it("names only the missing Vaults in a trailing warn-ink line, at three Vaults, without changing ranking", () => {
     const missing = [THREE_VAULTS[2].name];
@@ -1499,9 +1522,7 @@ describe("Changed on disk tells a failed read apart from a quiet one (#334)", ()
       modifiedNotes: [],
       modifiedNotesError: "Request timed out",
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Recently changed notes" }),
-    );
+    openChanges();
 
     const panel = screen.getByRole("region", {
       name: "Recently changed notes",

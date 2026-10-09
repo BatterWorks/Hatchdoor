@@ -1847,6 +1847,7 @@
     <a href="#whats-new">What&rsquo;s new pop-up</a>
     <a href="#folder-picker">Folder picker</a>
     <a href="#first-run">First-run checklist</a>
+    <a href="#home">Home</a>
 
     <h3>Editing</h3>
     <a href="#editing">Inline editing</a>
@@ -2075,7 +2076,7 @@
     <section class="doc-section" id="sidebar">
       <div class="doc-section-num">§05</div>
       <h2>Sidebar (Explorer)</h2>
-      <p class="blurb"><b>Four zones:</b> the Scope zone (#138), a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the third scrolls</b> &mdash; scope, rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>). One exception, from #150: at a single Vault it stays on screen while first-run scanning or indexing is running, purely to hold that progress reading (<a href="#vault-slot">§27</a>) &mdash; the zone is where progress is reported, so it outlives its own visibility rule for as long as there is progress to report. At zero Vaults it holds its place too, reading <code>All Vaults</code> with no rows beneath it, in neutral ink.</p>
+      <p class="blurb"><b>Three zones:</b> the Scope zone (#138), the scrolling note navigation, and a footer holding the rail of whole-vault destinations beside the create action (#530). <b>Only the middle scrolls</b> &mdash; scope and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. It sits at the bottom because a row of destinations is a tab bar, and a tab bar belongs where a thumb reaches it; it holds <em>destinations only</em> (Stats, Graph, Settings, and Help on the phone), so nothing it opens appears out of sight at the top of the list. <b>Changed on disk is a folding section</b> at the top of the navigation, in the same shape as Recently viewed and folded by default with its count showing; it was a panel a rail toggle opened, which paired a button with a list far from it once the rail moved. <b>The Scope zone starts folded.</b> Its head already names the scope and its state, and the accordion below lists the same Vaults, so unfolded by default it said everything twice before the first folder. The folded head shows the compact <code>5 of 8</code> aggregate with the full <code>5 of 8 answering</code> sentence as its name; the unfolded rows, the phone row and the sheet say <code>5 of 8 answering</code> in full. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>). One exception, from #150: at a single Vault it stays on screen while first-run scanning or indexing is running, purely to hold that progress reading (<a href="#vault-slot">§27</a>) &mdash; the zone is where progress is reported, so it outlives its own visibility rule for as long as there is progress to report. At zero Vaults it holds its place too, reading <code>All Vaults</code> with no rows beneath it, in neutral ink.</p>
 
       <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The rail below it stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
 
@@ -2221,6 +2222,7 @@
       <div class="doc-section-num">§07</div>
       <h2>Note title block</h2>
       <p class="blurb">The opening of every note: super-row (pill + date + section), uppercase posterized title with a lowercase orange middle word, italic sans lede.</p>
+      <p class="blurb"><b>The title is said once.</b> A note that opens with <code># Its own title</code> as its first heading keeps that line in the file and in the DOM (line-addressed editing counts on every block being there) but does not draw it, and the tables of contents skip it (#530). Only the first heading can qualify, and only with nothing but blank lines before it: an H1 further down is a section.</p>
       <p class="blurb"><b>The title owns the full measure.</b> Nothing shares its line — the save state and <b>Edit</b> moved down to the Properties rule (<a href="#save-state">§21</a>) precisely so a long title wraps on its own terms.</p>
       <p class="blurb"><b>Trailing scroll space is conditional.</b> A note long enough to scroll keeps a screenful below it, so a heading near its end can still be brought to the top of the pane. A note that does not scroll gets none: a short note that ended two lines in was offering a screenful of nothing to scroll through.</p>
       <div class="stage" style="padding: 2rem 1.5rem;">
@@ -2260,6 +2262,7 @@
     <section class="doc-section" id="enhancements">
       <div class="doc-section-num">§09</div>
       <h2>In-note enhancements</h2>
+      <p class="blurb"><b>Links come after the text</b> (#530), folded under a head set in the sidebar&rsquo;s own §05 grammar &mdash; caret, <code>LINKS</code>, rule, mono count &mdash; above a hairline that closes the body. Backlinks are what a reader consults once they have read, and every outgoing link is already a link in the text above, so the panel that used to sit between the properties and the first sentence was two screens of navigation before any reading. <b>The folded heading strip is a tablet device:</b> it shows only between 921 and 1160px, where the TOC column is gone but the topbar is still the wide one. Below 920 the topbar&rsquo;s meta row carries the headings as an <em>On this page</em> chip (§30) and the strip never renders. Neither Links nor Properties render while the editor is open; the editor carries its own frontmatter form.</p>
       <p class="blurb">Three optional panels above the body: in-note search nav (when searching inside a note), links panel (back/forward links), and table of contents.</p>
 
       <h3 class="doc-sub">In-note search nav</h3>
@@ -2554,7 +2557,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="search">
       <div class="doc-section-num">§17</div>
       <h2>Search dialog</h2>
-      <p class="blurb">Full-screen overlay with dim backdrop. Panel fixed at top center on desktop, full-screen on mobile. Input is large. Toggle for &ldquo;search inside note content&rdquo;. Result rows show title, breadcrumb, kind, and an optional snippet.</p>
+      <p class="blurb">Full-screen overlay with dim backdrop. Panel fixed at top center on desktop, full-screen on mobile. Input is large. Under it, one <b>Mode</b> control at every width (#530): a two-way <code>.search-mode</code> segmented Semantic / Keyword switch, the same grammar as Settings&rsquo; Git behaviour (§32), in place of a checkbox on desktop and a select on the phone. Result rows show title, provenance and path, an optional heading line (omitted when it only repeats the title), and a snippet with wikilink brackets and fenced code stripped. <b>Work in flight is progress, not failure:</b> while the index is still building, a <code>.search-progress</code> line in the warn tier sits under the controls with the percentage and which mode already answers, and Keyword results render beneath it. It is never a block above results; <em>Could not load</em> is kept for a model that is missing or failed, and even that shrinks to the same line once Keyword results are on screen. The path reads left to right and elides at its tail: the head-first <code>direction: rtl</code> form let the bidi algorithm move a numbered folder&rsquo;s digits to the other end.</p>
       <div class="stage" style="padding:0; overflow: hidden;">
         <div class="search-overlay">
           <div class="search-panel">
@@ -2647,16 +2650,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
               <option disabled>Archive (no answer)</option>
             </select>
           </div>
-          <div class="field">
-            <span class="field-label">Mode</span>
-            <select class="field-input">
-              <option>Semantic</option>
-              <option>Keyword</option>
-            </select>
-          </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.search-field-strip</span></div>
+      <div class="tag-row"><span class="key">.search-field-strip</span><span class="key">.search-mode</span><span class="key">.search-progress</span></div>
 
       <p class="blurb">Tapping a <code>#tag</code> opens the dialog with the query filled in and that note&rsquo;s own Vault already selected in the filter &mdash; tags are per-Vault vocabularies, and this is the dialog&rsquo;s own filter doing the pre-filling, not a scope change. Layer folders stay out of both shapes entirely: there is no way to reach a demoted note from the web application (#119).</p>
     </section>
@@ -2696,7 +2692,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="menu">
       <div class="doc-section-num">§19</div>
       <h2>Popover menu</h2>
-      <p class="blurb">The topbar &ldquo;more&rdquo; button opens this. On desktop it anchors to the trigger. On mobile it becomes a bottom-sheet (CSS variant in implementation).</p>
+      <p class="blurb">The topbar &ldquo;more&rdquo; button opens this. On desktop it anchors to the trigger. On mobile it becomes a bottom-sheet (CSS variant in implementation). <b>It is about the open note</b> (#530): rename and move, then the copy and download utilities, then Archive and Delete last. New note and Edit left it, since both have buttons of their own on the page, and <code>Escape</code> closes it like any other popover. <b>The theme button opens the same popover shape</b> with three <code>menuitemradio</code> rows, System, Light and Dark, the current one in hot ink; a three-way cycle on one button could not say what the next click would do.</p>
       <p class="blurb"><b>Rows are borderless.</b> Only the popover carries a border &mdash; a box per row inside a bordered container is the &ldquo;boxes in boxes&rdquo; nesting issue #8 objected to. The border is kept and made transparent rather than removed, so a row does not shift when <code>:active</code> paints it hot. Hover fills with <code>--paper-2</code>. Long menus group with <code>.menu-divider</code> rather than growing into an undifferentiated wall.</p>
       <div class="stage" style="display:flex; justify-content: center;">
         <div class="menu">
@@ -3252,7 +3248,13 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       where it is, the magnifier in row one is the same search entry point the path button used to be,
       and scope persists where a path does not. The row carries three things, always in this order:
       the browsing scope's name, a rule, and §27's own count-or-condition slot &mdash; every one of
-      them on screen at all times, drawer closed, zero interaction.</p>
+      them on screen at all times, drawer closed, zero interaction. On a note with headings the row
+      ends with an <b>On this page</b> chip (#530): the <code>toc</code> glyph and the heading count,
+      set off from the scope control by a hairline, which opens a sheet of the headings in this
+      sheet&rsquo;s own shell, rows stepped in by level. At one Vault, where no scope control
+      renders, the row renders for the chip alone. It costs the note no height, which is the point:
+      on a phone the body used to start a screen down, under Properties, Links and a folded
+      heading list.</p>
 
       <div class="stage" style="max-width: 22rem; padding: 0;">
         <div style="border-bottom:1px solid var(--rule); background:var(--paper); padding:0.32rem 0.75rem;">
@@ -3316,15 +3318,17 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <h2>Marked path root</h2>
       <p class="blurb">On a flattened surface &mdash; search results, recent items, metadata queries
       &mdash; a note says which Vault it came from by declaring a marked path root: the Vault name in
-      hot ink at medium weight, followed by a middot rather than the <code>/</code> a folder path
-      would use, so it reads as visibly not a folder segment. Provenance leads the most specific
+      muted mono, followed by a middot rather than the <code>/</code> a folder path
+      would use, so it reads as visibly not a folder segment. It is quiet on purpose (#530): the
+      title beside it carries the row, and a prefix in hot ink was the loudest thing on every row. Provenance leads the most specific
       location line the surface has: the path line where one exists, the title line where none does.
       It renders on collection surfaces when the set <em>can</em> span (scope is <code>all</code> and
       more than one Vault is enabled), and on exact reads whenever more than one Vault is enabled
       &mdash; a single-Vault instance is byte-identical to an instance that never knew about Vaults.
       The prefix is <strong>inert</strong>, a plain span inside the row's own button or link and never
-      a second click target, and it <strong>never elides</strong>: the folder path takes the loss,
-      eliding head-first (#115, implemented by #140).</p>
+      a second click target. It takes <strong>at most 42% of its row</strong> and elides past that
+      (#530): it used to never elide, and a long Vault name then took the whole row and pushed the
+      title out of sight. The path beside it elides at its tail, left to right.</p>
 
       <div class="stage">
         <div class="vslot-row"><span class="vslot-name"><span class="path-vault">Notes<span class="path-sep">&middot;</span></span>10-topics/finance</span></div>
@@ -3341,6 +3345,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="settings">
       <div class="doc-section-num">§32</div>
       <h2>Settings</h2>
+      <p class="blurb"><b>A section&rsquo;s save button says Save</b> (#530); the section title beside it already names what. <b>A sub-heading inside a section</b>, <code>.settings-group-label</code>, set in §05&rsquo;s head grammar, groups rows that belong together under a section about something else: the server&rsquo;s commit identity under Notes handling reads <code>HISTORY (GIT)</code>. On a Vault&rsquo;s page <b>Disconnect stands apart</b> at the far edge of the action row, so three buttons of equal weight do not read as one set.</p>
       <p class="blurb">The first page-level surface in the system, settled by the Variant B prototype (issue&nbsp;#58). <b>An index of sections on the left, one section at a time on the right.</b> It sits inside <span class="key">.note-pane</span>, which already owns the gutter, so the page adds no outer padding of its own &mdash; only a deep bottom margin so the last row clears the fold.</p>
       <p class="blurb"><b>The index is the collection</b> (issue&nbsp;#120, Variant B). Every Vault is a settings section like any other, listed under a <span class="key">Vaults</span> group above the instance sections under <span class="key">This server</span>. There is no third level: selecting a Vault opens it in the same right-hand pane the other sections use, so a Vault is never a page inside a page. <span class="key">+ Add a Vault</span> is the last row of the collection rather than a link beneath it &mdash; underlined, it made the one row you cannot select the loudest thing in the list.</p>
       <p class="blurb">A Vault row is a name column and a status column, ending in §27&rsquo;s count-or-condition slot. <b>The status hangs from the name&rsquo;s first line</b>, not from the middle of the row: centred, it floated halfway down a wrapped name and the right-hand column read as scattered marks rather than a column. <b>Names wrap in full and are never truncated</b> &mdash; three Vaults called <span class="key">Git &mdash; unreachable remote</span>, <span class="key">Git &mdash; clones cleanly</span> and <span class="key">Git &mdash; auth refused</span> all ellipsise to the same stub, and this index is where you identify a Vault. The column is <span class="key">17rem</span> for the same reason: at 15rem an ordinary name plus a condition pill took three lines.</p>
@@ -3662,6 +3667,14 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">.first-run-actions</span><span class="key">.first-run-name</span><span class="key">.first-run-demo-offer</span><span class="key">.first-run-muted</span><span class="key">.first-run-clients</span><span class="key">.first-run-config</span><span class="key">.first-run-code</span><span class="key">.first-run-wait</span><span class="key">.first-run-pulse</span><span class="key">.first-run-writes</span><span class="key">.first-run-update</span><span class="key">.first-run-update-head</span><span class="key">.first-run-foot</span><span class="key">.first-run-foot-note</span>
       </div>
     </section>
+    <!-- ───────── HOME ───────── -->
+    <section class="doc-section" id="home">
+      <div class="doc-section-num">§37</div>
+      <h2>Home</h2>
+      <p class="blurb">The landing page with no note open (#530). It replaced a box that said &ldquo;Select any note from the explorer to start reading&rdquo;, an instruction the explorer beside it already gave. <b>Every figure on it is state the shell holds for the sidebar</b>: the scope&rsquo;s name as a hot mono eyebrow, <code>NOTES</code> in the note title&rsquo;s own size (§07), a one-line summary of how many Vaults and notes the scope holds (the note count only once every Vault in scope has reported one), and New note and Search where the title block&rsquo;s actions go. Below, two lists side by side at desktop width and stacked on the phone: <b>Changed on disk</b> and <b>Recently viewed</b>, six rows each, in the sidebar&rsquo;s §05 grammar &mdash; head with rule and mono count, mono index, the marked path root (§31) where more than one Vault is enabled, the title in the display face, and when, in mono, at the row&rsquo;s end. An empty list says so in one sentence.</p>
+      <div class="tag-row"><span class="key">app/HomePage.tsx</span><span class="key">.home-page</span><span class="key">.home-head</span><span class="key">.home-list</span><span class="key">.home-note-title</span><span class="key">.home-note-meta</span></div>
+    </section>
+
 
   </main>
 </div>

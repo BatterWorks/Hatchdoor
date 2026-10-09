@@ -31,7 +31,8 @@ import {
   SIDEBAR_WIDTH_KEY,
 } from "./app/constants";
 import { ExplorerPane, type StartupProgress } from "./app/ExplorerPane";
-import { usePageTitle } from "./app/pageTitle";
+import { HomePage } from "./app/HomePage";
+import { pageName, usePageTitle } from "./app/pageTitle";
 import {
   clampSidebarWidth,
   getStoredNumber,
@@ -65,6 +66,7 @@ import { scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import { isDemoReadOnlyError } from "./api/writeApi";
+import type { NoteHeading } from "./lib/noteHeadings";
 import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
 import {
@@ -105,6 +107,8 @@ function VaultWorkspace({
   );
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [activeNote, setActiveNote] = useState<ActiveNoteMeta | null>(null);
+  // The open note's headings, for the phone's "On this page" chip (#530).
+  const [noteHeadings, setNoteHeadings] = useState<NoteHeading[]>([]);
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
@@ -126,7 +130,7 @@ function VaultWorkspace({
   const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
   usePageTitle(activeNote);
   const isMobile = useIsMobile(920);
-  const { theme, cycleTheme } = useTheme();
+  const { theme, cycleTheme, setTheme } = useTheme();
   const help = useHelp();
 
   const [scope, setScope, scopeFallbackNotice] = useVaultScope();
@@ -300,9 +304,11 @@ function VaultWorkspace({
     () => safeGetItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
   );
   // The Scope zone remembers whether it is folded away, same as Recently
-  // viewed; default expanded per the design spec.
+  // viewed. It starts folded (#530): its head already names the scope and
+  // its state, and the accordion below lists the same Vaults, so unfolded by
+  // default it said everything twice before the first folder appeared.
   const [scopeZoneCollapsed, setScopeZoneCollapsed] = useState<boolean>(
-    () => safeGetItem(SCOPE_ZONE_COLLAPSED_KEY) === "1",
+    () => safeGetItem(SCOPE_ZONE_COLLAPSED_KEY) !== "0",
   );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
@@ -619,6 +625,32 @@ function VaultWorkspace({
         return;
       }
 
+      // Escape closes the "…" menu like any other popover (#530); it used
+      // to stay open behind whatever the next key opened.
+      if (event.key === "Escape" && actionsMenuOpen) {
+        setActionsMenuOpen(false);
+        return;
+      }
+
+      // `e` opens the editor on the open note (#530), the key the Edit
+      // button shows. Bare key only, outside any field or open dialog.
+      if (
+        event.key.toLowerCase() === "e" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        writeEnabled &&
+        onNoteRoute &&
+        !isEditableTarget(event.target) &&
+        !noteActionDialog &&
+        !searchOpen &&
+        !actionsMenuOpen
+      ) {
+        event.preventDefault();
+        setEditRequestId((prev) => prev + 1);
+        return;
+      }
+
       if (
         event.key.toLowerCase() === "v" &&
         !event.ctrlKey &&
@@ -644,6 +676,7 @@ function VaultWorkspace({
     noteActionDialog,
     searchOpen,
     actionsMenuOpen,
+    onNoteRoute,
   ]);
 
   // The shell's polite scope live region (#146): announces the scope name
@@ -753,7 +786,10 @@ function VaultWorkspace({
     if (!activeNote) {
       return;
     }
-    await copyText(window.location.href);
+    // The address alone: a note reached from search carries `?q=` and `?m=`
+    // for its match navigator, which a link handed to someone else should
+    // not replay (#530).
+    await copyText(`${window.location.origin}${window.location.pathname}`);
   }, [activeNote]);
   const copyPageContent = useCallback(async () => {
     if (!activeNote) {
@@ -789,7 +825,16 @@ function VaultWorkspace({
       }
     >
       <AppTopbar
-        activeNote={activeNote}
+        // Off the note route the last note is still remembered (for the
+        // landing redirect) but is not what is on screen (#530).
+        activeNote={onNoteRoute ? activeNote : null}
+        pageName={pageName(location.pathname)}
+        tocHeadings={onNoteRoute ? noteHeadings : []}
+        onJumpToHeading={(id) =>
+          navigate(
+            `${location.pathname}${location.search}#${encodeURIComponent(id)}`,
+          )
+        }
         vaults={vaults}
         scope={scope}
         writeEnabled={writeEnabled}
@@ -805,13 +850,12 @@ function VaultWorkspace({
         onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
-        onEditNote={() => setEditRequestId((prev) => prev + 1)}
-        onNewNote={() => openCreateDialog("")}
         onRenameNote={() => openActionDialog("rename")}
         onMoveNote={() => openActionDialog("move")}
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
         onCycleTheme={cycleTheme}
+        onSetTheme={setTheme}
         helpOpen={help.isOpen}
         onToggleHelp={() => (help.isOpen ? help.closeHelp() : help.openHelp())}
         onScopeChange={handleScopeChange}
@@ -915,6 +959,9 @@ function VaultWorkspace({
             safeSetItem(EXPLORER_SCROLL_TOP_KEY, String(current));
           }}
           demoMode={demoMode}
+          onToggleHelp={() =>
+            help.isOpen ? help.closeHelp() : help.openHelp()
+          }
         />
 
         {!isMobile ? (
@@ -998,7 +1045,16 @@ function VaultWorkspace({
                     }
                   />
                 ) : (
-                  <EmptyState />
+                  <HomePage
+                    vaults={vaults}
+                    scope={scope}
+                    noteCounts={vaultNoteCounts}
+                    modifiedNotes={modifiedNotes}
+                    recentNotes={recentNotes}
+                    writeEnabled={writeEnabled}
+                    onNewNote={() => openCreateDialog("")}
+                    onOpenSearch={() => setSearchOpen(true)}
+                  />
                 )
               }
             />
@@ -1066,6 +1122,7 @@ function VaultWorkspace({
                 ) : (
                   <NotePage
                     onActiveNoteChange={setActiveNote}
+                    onHeadingsChange={setNoteHeadings}
                     onTagSelect={openSearchForTag}
                     propertiesCollapsedStorageKey={
                       NOTE_PROPERTIES_COLLAPSED_KEY
@@ -1328,15 +1385,6 @@ function NotFoundState({ onGoHome }: { onGoHome: () => void }) {
       description="Nothing lives at this address. The link may be out of date."
       actionLabel="Go to notes"
       onAction={onGoHome}
-    />
-  );
-}
-
-function EmptyState() {
-  return (
-    <StateBlock
-      title="Notes Explorer"
-      description="Select any note from the explorer to start reading."
     />
   );
 }

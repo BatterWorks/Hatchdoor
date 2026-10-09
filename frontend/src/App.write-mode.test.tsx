@@ -282,8 +282,7 @@ describe("App write mode", () => {
       await screen.findByRole("heading", { level: 2, name: "Home" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit note" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
 
     const textarea = await screen.findByRole("textbox", {
       name: "Markdown content",
@@ -322,8 +321,7 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New note" }));
     // The picker lists folders that exist; this vault has none, so a note in
     // "Projects" is created through the New folder path.
     fireEvent.change(screen.getByLabelText("Folder"), {
@@ -482,8 +480,7 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit note" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
 
     const textarea = await screen.findByRole("textbox", {
       name: "Markdown content",
@@ -545,8 +542,7 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit note" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
 
     expect(
       await screen.findByText(/earlier draft based on a previous version/i),
@@ -634,8 +630,7 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit note" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
 
     fireEvent.change(
       screen.getByRole("textbox", { name: "Markdown content" }),
@@ -668,8 +663,7 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New note" }));
     // The picker only offers folders that exist, so a traversal attempt has to
     // come through the free-text "New folder" path. Client validation must
     // still reject it, and the backend remains authoritative regardless.
