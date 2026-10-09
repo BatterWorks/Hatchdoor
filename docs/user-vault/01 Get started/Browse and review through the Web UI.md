@@ -16,9 +16,9 @@ If it is there and nothing else changed, your agent works the way it should.
 
 ## Move between Vaults
 
-The Vault selector narrows the app to one Vault, or **All Vaults** shows every Vault that is turned on.
+Once you have more than one Vault, the **Scope** section at the top of the sidebar is the Vault selector. It starts folded and names the scope you are in. Select it, or press `V`, to open the list, then pick one Vault to narrow the app to it, or **All Vaults** to show every Vault that is turned on. On a phone the selector is the row under the top bar.
 
-Narrowing to one Vault while you are reading a note takes you with it: the note you last had open in that Vault comes back, the same way reopening Hatchdoor returns you to the note you left. Pick a Vault you have not read anything in yet and you land on the empty start page instead, with that Vault's notes in the sidebar. Choosing **All Vaults**, or switching while you are in Settings, Statistics or the graph, leaves the page you are on alone.
+Narrowing to one Vault while you are reading a note takes you with it: the note you last had open in that Vault comes back, the same way reopening Hatchdoor returns you to the note you left. Pick a Vault you have not read anything in yet and you land on the home page instead, with that Vault's notes in the sidebar. Choosing **All Vaults**, or switching while you are in Settings, Stats or the graph, leaves the page you are on alone.
 
 If the Vault you narrowed to is paused, stops working or is disconnected (from Settings, another tab or an agent), the selector goes back to **All Vaults** by itself and a notice at the top says why.
 

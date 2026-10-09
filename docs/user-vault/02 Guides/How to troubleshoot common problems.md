@@ -75,7 +75,7 @@ If the agent cannot reach the link's address at all, or a download saves a small
 
 ## Model download is stuck or failed
 
-The model downloads from Hugging Face, so this is almost always a network problem between the computer running Hatchdoor and huggingface.co. In the browser, the search panel shows **Could Not Load** with the reason, such as a fetch error for one model file, and a **Retry setup** button. Fix whatever blocked the download, then press **Retry setup**.
+The model downloads from Hugging Face, so this is almost always a network problem between the computer running Hatchdoor and huggingface.co. In the browser, the search panel shows **Could Not Load** with the reason, such as a fetch error for one model file, and a **Retry setup** button. Fix whatever blocked the download, then press **Retry setup**. While Keyword results are on screen, that block shrinks to one line saying the search model could not be loaded, with no button. Clear the search box or switch **Mode** to **Semantic** to get the block and **Retry setup** back.
 
 An agent sees the same through `get_model_setup_status`, and `GET /api/startup-status` reports `"failed"` with the same message. `POST /api/model/retry` starts the download again.
 
@@ -206,7 +206,7 @@ If `next_attempt_at` is more than about a minute in the past, something is wrong
 
 ## Search returns nothing, or not what you expected
 
-In the browser, try **Keyword mode** when you are looking for an exact word, name or ID; search by meaning can rank a note with the exact word below notes that are closer in meaning. For agents, first check that a search is what you want. `search_notes` finds notes by meaning and ranks them. If you want every note with a tag, in a folder or with a frontmatter property, use `query_notes`, which selects without ranking and never comes back empty for want of a good enough match. It also reads every layer, so it can select a demoted note that an ordinary search would not show you. If you want every note that contains an exact string, with a count, use `find_text`: a keyword search ranks notes that hold any one word of the query, so its list is not a list of occurrences.
+In the browser, switch **Mode** to **Keyword** when you are looking for an exact word, name or ID; search by meaning can rank a note with the exact word below notes that are closer in meaning. For agents, first check that a search is what you want. `search_notes` finds notes by meaning and ranks them. If you want every note with a tag, in a folder or with a frontmatter property, use `query_notes`, which selects without ranking and never comes back empty for want of a good enough match. It also reads every layer, so it can select a demoted note that an ordinary search would not show you. If you want every note that contains an exact string, with a count, use `find_text`: a keyword search ranks notes that hold any one word of the query, so its list is not a list of occurrences.
 
 If a search is what you want, remember that search looks only at the **default surface** unless you ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search. [[How to organize a Vault with layers]] explains how to search across layers on purpose. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
 
