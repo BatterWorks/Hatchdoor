@@ -359,6 +359,83 @@ export function useResolvedWikilinks(
 }
 
 /**
+ * Which note each wikilink target in `targets` names, by the server's title,
+ * alias and path rules, the way the reading view resolves them (#544). Shares
+ * the reading view's cache, so toggling between the editor and Reading view
+ * asks nothing twice. A target the server answers with no note is remembered
+ * as missing; one a failed request left unanswered resolves to `null` now and
+ * is asked again next time.
+ */
+export async function resolveNoteTargets(
+  vaultId: VaultId,
+  noteRelativePath: string,
+  targets: string[],
+): Promise<Map<string, ResolvedWikilink | null>> {
+  const unique = [...new Set(targets.filter((target) => target.length > 0))];
+  const { found, missing } = fromCache(resolveCache, unique, (target) =>
+    cacheKey(vaultId, target),
+  );
+  if (missing.length === 0) {
+    return found;
+  }
+  try {
+    const res = await apiFetch(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targets: missing,
+          asset_targets: [],
+          note_path: noteRelativePath,
+        }),
+      },
+    );
+    if (res.ok) {
+      const json = (await res.json()) as VaultResolveBatchResponse;
+      for (const result of json.results) {
+        const resolved = result.slug
+          ? { slug: result.slug, archived: result.archived }
+          : null;
+        found.set(result.target, resolved);
+        resolveCache.set(cacheKey(vaultId, result.target), resolved);
+      }
+    }
+  } catch {
+    // Unanswered targets stay null below.
+  }
+  for (const target of missing) {
+    if (!found.has(target)) {
+      found.set(target, null);
+    }
+  }
+  return found;
+}
+
+/**
+ * The href for one embed target as the reading view would draw it now
+ * (#544): the server's path when `useResolvedWikilinks` has already asked
+ * for it from this note, else the note-relative reading. The live editor's
+ * widgets ask this, and ask again once the hook's batch lands.
+ */
+export function cachedAssetHref(
+  vaultId: VaultId,
+  rawTarget: string,
+  noteRelativePath: string,
+): string {
+  const [pathPart] = splitPathSuffix(rawTarget);
+  const resolved =
+    assetResolveCache.get(pathCacheKey(vaultId, noteRelativePath, pathPart)) ??
+    null;
+  return assetHref(
+    vaultId,
+    rawTarget,
+    noteRelativePath,
+    new Map([[pathPart, resolved]]),
+  );
+}
+
+/**
  * Which file each of `targets` names from the note at `noteRelativePath`, by
  * the server's attachment resolution. Uncached: it is asked once per insert,
  * about a file that may have only just been uploaded.

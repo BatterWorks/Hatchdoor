@@ -56,15 +56,20 @@ import "@atomic-editor/editor/styles.css";
 import type { ExplorerNote } from "../../../types";
 import type { UploadedAttachment } from "../../NoteEditor";
 import { attachmentRejection } from "../attachmentDrop";
+import { callouts } from "./callouts";
 import { markKeymap } from "./commands";
-import { imageWidgets } from "./imageWidgets";
+import { focusTracking } from "./focusState";
+import { assetsResolved, imageWidgets, isImageTarget } from "./imageWidgets";
 import { KeyboardBar } from "./KeyboardBar";
 import { completionMenus, selectionToolbar } from "./menus";
+import { isPdfTarget, renderedBlocks } from "./renderedBlocks";
 import {
   findSearchHits,
   searchHighlight,
   type SearchHit,
 } from "./searchHighlight";
+import { WidgetPortals } from "./WidgetPortals";
+import { createPortalRegistry } from "./widgetPortals";
 
 export type LiveEditorHandle = {
   focus: () => void;
@@ -88,10 +93,22 @@ export type LiveEditorProps = {
   formatNoteLink: (note: ExplorerNote) => string;
   /** A wikilink's target, as written, when it is clicked. */
   onOpenNote: (target: string) => void;
-  /** Where a wikilink points, for the resolved/missing styling; null when unknown. */
-  resolveNote: (target: string) => { label: string; missing: boolean } | null;
-  /** An image path as written, turned into something the browser can load. */
-  resolveImageSrc: (raw: string) => string;
+  /**
+   * Where a wikilink points, for the resolved/missing styling; null when
+   * unknown. Asked once per target as links come into view, so it may go to
+   * the server (#544).
+   */
+  resolveNote: (
+    target: string,
+  ) => Promise<{ label: string; missing: boolean } | null>;
+  /** An attachment path as written, turned into something the browser can load. */
+  resolveAssetSrc: (raw: string) => string;
+  /**
+   * The body the page's asset resolution has settled for. Each change draws
+   * every embed again through `resolveAssetSrc`, which by then knows the
+   * server's answers (#544).
+   */
+  assetsResolvedFor?: string;
   /** Every change, for the idle flush and the draft. */
   onChange: (body: string) => void;
   /** Leaving the editor with changes: the document to save. */
@@ -118,6 +135,9 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
     const applyingExternalRef = useRef(false);
     const hitsRef = useRef<SearchHit[]>([]);
     const highlightRef = useRef(searchHighlight());
+    // The rendered blocks draw the reading view's components into their
+    // widgets through this registry (#544).
+    const portalsRef = useRef(createPortalRegistry());
 
     const reportHits = useCallback((doc: string, query: string) => {
       const hits = findSearchHits(doc, query);
@@ -224,8 +244,12 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
             inlinePreview({ onLinkClick: openExternal }),
             wikiLinks({
               onOpen: openNote,
+              // An attachment embed is drawn by its own widget under the
+              // line; its target is a file, not a note to resolve or open.
+              shouldResolve: (target) =>
+                !isImageTarget(target) && !isPdfTarget(target),
               resolve: async (target) => {
-                const resolved = propsRef.current.resolveNote(target);
+                const resolved = await propsRef.current.resolveNote(target);
                 return resolved
                   ? {
                       target,
@@ -235,7 +259,13 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
                   : null;
               },
             }),
-            imageWidgets((raw) => propsRef.current.resolveImageSrc(raw)),
+            focusTracking,
+            imageWidgets((raw) => propsRef.current.resolveAssetSrc(raw)),
+            renderedBlocks({
+              portals: portalsRef.current,
+              resolveAssetSrc: (raw) => propsRef.current.resolveAssetSrc(raw),
+            }),
+            callouts,
             completionMenus(
               () => propsRef.current.noteCandidates,
               (note) => propsRef.current.formatNoteLink(note),
@@ -349,6 +379,10 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
       reportHits(view.state.doc.toString(), props.searchQuery);
     }, [props.searchQuery, reportHits]);
 
+    useEffect(() => {
+      viewRef.current?.dispatch({ effects: assetsResolved.of() });
+    }, [props.assetsResolvedFor]);
+
     useImperativeHandle(
       ref,
       () => ({
@@ -388,6 +422,7 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
         {/* `atomic-cm-editor` is the class the library's stylesheet keys its
             custom properties and line styling on. */}
         <div ref={hostRef} className="live-editor-host atomic-cm-editor" />
+        <WidgetPortals registry={portalsRef.current} />
         {props.touch && focused ? (
           <KeyboardBar getView={() => viewRef.current} />
         ) : null}

@@ -1248,6 +1248,77 @@
   background: var(--paper);
 }
 
+/* Rendered blocks (#544): a mermaid fence, a `base` fence, `$$` math and a
+   PDF embed, drawn by the reading view's own components in place of their
+   source while the caret is elsewhere. They inherit the note-body rules
+   those components already have; only the host is styled here. */
+.live-editor-block {
+  margin: 0.6rem 0 1rem;
+  font-family: var(--font-serif);
+  font-size: 1.18rem;
+  line-height: 1.62;
+}
+/* The diagram arrives a tick after the host, so the host holds the room
+   first and the lines under the caret do not jump when it lands. */
+.live-editor-mermaid {
+  min-height: 6rem;
+}
+.live-editor-mermaid .mermaid {
+  margin: 0;
+}
+.live-editor-saved-query .table-wrap {
+  margin: 0;
+}
+.live-editor-pdf .pdf-preview {
+  margin: 0;
+}
+.live-editor-math {
+  text-align: center;
+  color: var(--ink);
+}
+.live-editor .cm-line .live-editor-math-inline {
+  color: var(--ink);
+}
+
+/* Callouts (#544): the reading view's accent, by the same `.callout-<kind>`
+   rules, on each line of the quote. The spine replaces the library's
+   blockquote rail and the tint is the reading view's 12% mix. */
+.live-editor .cm-line.live-editor-callout {
+  --callout-accent: var(--muted);
+  border-left: 3px solid var(--callout-accent);
+  background: color-mix(in oklab, var(--callout-accent) 12%, var(--paper));
+  color: var(--ink-soft);
+  padding-left: 0.95rem;
+}
+.live-editor .cm-line.live-editor-callout-title {
+  margin-top: 1.6rem;
+  padding-top: 0.5rem;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
+  font-style: normal;
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  line-height: 2.2;
+  color: var(--callout-accent);
+}
+.live-editor .cm-line.live-editor-callout-body {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.02rem;
+  line-height: 1.55;
+}
+.live-editor .cm-line.live-editor-callout-last {
+  padding-bottom: 0.6rem;
+  margin-bottom: 1.6rem;
+}
+/* A title line that is also the last line still sits off the bottom edge. */
+.live-editor .cm-line.live-editor-callout-title.live-editor-callout-last {
+  padding-bottom: 0.5rem;
+}
+
 /* Search hits, the reading view's mark in editor clothing. */
 .live-editor .search-hit {
   background: var(--highlight);

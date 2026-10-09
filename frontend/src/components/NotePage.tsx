@@ -75,6 +75,10 @@ import {
   LiveEditor,
   type LiveEditorHandle,
 } from "./note-page/live-editor/LiveEditor";
+import {
+  createNoteLinkResolver,
+  wikilinkLabel,
+} from "./note-page/live-editor/noteLinks";
 import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import { SavedQueryProvider } from "./note-page/SavedQueryBlock";
@@ -90,8 +94,9 @@ import {
   SearchHitNavigator,
 } from "./note-page/sections";
 import {
-  resolveAssetHref,
+  cachedAssetHref,
   resolveAssetTargets,
+  resolveNoteTargets,
   useResolvedWikilinks,
 } from "./note-page/wikilinks";
 
@@ -739,10 +744,20 @@ export function NotePage({
   }, [note, onActiveNoteChange, parsed.body, vaultId]);
 
   const renderInput = stripBlockIds(parsed.body);
+  const noteRelativePath = note?.relative_path ?? "";
   const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
     vaultId,
     renderInput,
-    note?.relative_path ?? "",
+    noteRelativePath,
+  );
+  // The live editor's wikilinks, resolved by the server through the reading
+  // view's cache, one request per pass of links coming into view (#544).
+  const resolveNoteLink = useMemo(
+    () =>
+      createNoteLinkResolver((targets) =>
+        resolveNoteTargets(vaultId, noteRelativePath, targets),
+      ),
+    [vaultId, noteRelativePath],
   );
   // While resolution is in flight the rendered tree still describes the
   // previous document, so every block range on screen is stale (D28).
@@ -796,14 +811,15 @@ export function NotePage({
   const liveEditingEnabled = inlineEditingEnabled && !readingView;
   const renderedMarkdown = markdown;
 
-  // Not evaluated while an editor holds the body: the provider that renders
-  // the results is only mounted in the reading branch.
+  // Evaluated for the reading view and the live editor alike, since both
+  // draw the tables (#544); not while source mode holds the body, where the
+  // definition shows as code.
   const savedQueries = useSavedQueries(
     notePath,
     note?.content,
     note?.content_hash,
     vaultRevision,
-    !isEditing && !liveEditingEnabled,
+    !isEditing,
   );
 
   const markdownComponents = useMemo(
@@ -1145,7 +1161,12 @@ export function NotePage({
     if (!hashTarget || settling || lastHashJumpRef.current === hashJumpKey) {
       return;
     }
-    if (!noteBodyRef.current?.querySelector(`#${CSS.escape(hashTarget)}`)) {
+    // In the editor a heading is a line, known from the note's own text;
+    // in the reading view it is an element that has to be on screen.
+    const onScreen = liveEditorRef.current
+      ? headingLinesRef.current.has(hashTarget)
+      : !!noteBodyRef.current?.querySelector(`#${CSS.escape(hashTarget)}`);
+    if (!onScreen) {
       return;
     }
     lastHashJumpRef.current = hashJumpKey;
@@ -1399,31 +1420,34 @@ export function NotePage({
     (candidate) => candidate.vault_id === vaultId,
   );
 
-  // A wikilink in the editor is matched by title or by Vault path, the two
-  // ways Obsidian writes one; the reading view asks the server instead.
-  const findNoteTarget = (target: string): NoteCandidate | undefined => {
-    // The target as written may carry a heading or an alias; the note is
-    // the part before either.
-    const wanted = target
-      .split(/[#|]/, 1)[0]
-      .trim()
-      .replace(/\.md$/i, "")
-      .toLowerCase();
-    return vaultNoteCandidates.find(
-      (candidate) =>
-        candidate.title.toLowerCase() === wanted ||
-        candidate.relativePath.replace(/\.md$/i, "").toLowerCase() === wanted,
-    );
+  // A wikilink in the editor resolves the way the reading view's does (#544):
+  // the server answers by title, alias or path, and the label is the target
+  // without its folders, as the rendered link shows it. An archived note
+  // keeps the path, the way the reading view keeps it.
+  const resolveNoteTarget = async (target: string) => {
+    const hit = await resolveNoteLink(target);
+    return {
+      label: hit ? wikilinkLabel(target, hit.archived === true) : target,
+      missing: !hit,
+    };
   };
-  const resolveNoteTarget = (target: string) => {
-    const found = findNoteTarget(target);
-    return { label: found?.title ?? target, missing: !found };
-  };
-  const openNoteTarget = (target: string) => {
-    const found = findNoteTarget(target);
-    if (found) {
-      navigate(`/v/${encodeURIComponent(vaultId)}/n/${found.slug}`);
+  // Opens the note at the heading when the target names one. A `^block`
+  // reference carries its id as the fragment, the way the reading view's
+  // link does; neither view has a block to scroll to, so it opens at the top.
+  const openNoteTarget = async (target: string) => {
+    const hit = await resolveNoteLink(target);
+    if (!hit) {
+      return;
     }
+    const hashIdx = target.indexOf("#");
+    const caretIdx = target.indexOf("^");
+    const anchor =
+      hashIdx >= 0
+        ? `#${slugifyHeading(target.slice(hashIdx + 1))}`
+        : caretIdx >= 0
+          ? `#${target.slice(caretIdx + 1)}`
+          : "";
+    navigate(`/v/${encodeURIComponent(vaultId)}/n/${hit.slug}${anchor}`);
   };
 
   const formatNoteLink = (candidate: ExplorerNote): string => {
@@ -1628,36 +1652,46 @@ export function NotePage({
           />
         ) : liveEditingEnabled ? (
           <div className="note-body" dir="auto">
-            <LiveEditor
-              key={noteKey}
-              ref={liveEditorRef}
-              value={splitBody(note.content).body}
-              searchQuery={searchQuery}
-              touch={isCoarsePointer()}
-              noteCandidates={vaultNoteCandidates}
-              formatNoteLink={formatNoteLink}
-              resolveNote={resolveNoteTarget}
-              onOpenNote={openNoteTarget}
-              resolveImageSrc={(raw) =>
-                resolveAssetHref(vaultId, raw, note.relative_path)
-              }
-              onChange={handleEditorChange}
-              onCommit={handleEditorCommit}
-              onFocusChange={handleEditorFocusChange}
-              onSearchHits={setEditorSearchHits}
-              onUploadAttachment={handleUploadAttachment}
-              onUploadNotice={(message) => onWriteNotice?.(message)}
-              onUploadError={(uploadError) => {
-                if (onDemoRefusal?.(uploadError)) {
-                  return;
+            {/* The saved-query tables inside the editor's `base` widgets read
+                the results the server evaluated for the note on disk; a
+                block being edited matches none until its save lands. */}
+            <SavedQueryProvider
+              state={savedQueries}
+              vaultId={vaultId}
+              markdown={splitBody(note.content).body}
+            >
+              <LiveEditor
+                key={noteKey}
+                ref={liveEditorRef}
+                value={splitBody(note.content).body}
+                searchQuery={searchQuery}
+                touch={isCoarsePointer()}
+                noteCandidates={vaultNoteCandidates}
+                formatNoteLink={formatNoteLink}
+                resolveNote={resolveNoteTarget}
+                onOpenNote={(target) => void openNoteTarget(target)}
+                resolveAssetSrc={(raw) =>
+                  cachedAssetHref(vaultId, raw, note.relative_path)
                 }
-                onWriteNotice?.(
-                  uploadError instanceof Error
-                    ? uploadError.message
-                    : "Upload failed.",
-                );
-              }}
-            />
+                assetsResolvedFor={resolvedFor}
+                onChange={handleEditorChange}
+                onCommit={handleEditorCommit}
+                onFocusChange={handleEditorFocusChange}
+                onSearchHits={setEditorSearchHits}
+                onUploadAttachment={handleUploadAttachment}
+                onUploadNotice={(message) => onWriteNotice?.(message)}
+                onUploadError={(uploadError) => {
+                  if (onDemoRefusal?.(uploadError)) {
+                    return;
+                  }
+                  onWriteNotice?.(
+                    uploadError instanceof Error
+                      ? uploadError.message
+                      : "Upload failed.",
+                  );
+                }}
+              />
+            </SavedQueryProvider>
           </div>
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
