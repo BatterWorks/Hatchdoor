@@ -5016,28 +5016,22 @@ fragment jump), Markdown/heading/search/state tests,
 - `frontend/src/hooks/useNoteActions.ts`
 - `frontend/src/hooks/useNoteAutosave.ts`
 - `frontend/src/hooks/useWriteMode.ts`
-- `frontend/src/lib/blockOps.ts`
-- `frontend/src/lib/caretMap.ts`
-- `frontend/src/lib/caretPoint.ts`
-- `frontend/src/lib/editHistory.ts`
 - `frontend/src/lib/imageUpload.ts`
-- `frontend/src/lib/linePrefix.ts`
 - `frontend/src/lib/sourceMap.ts`
 - `frontend/src/lib/reloadGuard.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
-- `frontend/src/components/note-page/BlockGap.tsx`
-- `frontend/src/components/note-page/BlockInput.tsx`
-- `frontend/src/components/note-page/EditableBlock.tsx`
-- `frontend/src/components/note-page/InlineEditorProvider.tsx`
-- `frontend/src/components/note-page/blockEditorSetup.ts`
-- `frontend/src/components/note-page/editorFont.ts`
+- `frontend/src/components/note-page/live-editor/LiveEditor.tsx`
+- `frontend/src/components/note-page/live-editor/KeyboardBar.tsx`
+- `frontend/src/components/note-page/live-editor/commands.ts`
+- `frontend/src/components/note-page/live-editor/imageWidgets.ts`
+- `frontend/src/components/note-page/live-editor/menus.ts`
+- `frontend/src/components/note-page/live-editor/searchHighlight.ts`
 - `frontend/src/components/note-page/SaveState.tsx`
 - `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
 - `frontend/src/components/note-page/conflictDiff.ts`
 - `frontend/src/components/note-page/frontmatter.ts`
-- `frontend/src/components/note-page/inlineEditorContext.ts`
 - `frontend/src/components/note-page/linkStyle.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
@@ -5046,15 +5040,18 @@ validation, upload normalization, frontmatter editing, conflict display,
 note-link autocomplete and attachment inserts written in the Vault's link
 style (`linkStyle.ts`, ADR-33: `[[Title]]`/`![[path]]` in a wikilink Vault,
 `[Title](path.md)`/`![](path)` in a Markdown one, with paths encoded as the
-rename rewriter encodes them), inline block editing (the editor
-provider/context, the
-per-block wrapper, the CodeMirror block input and its markdown syntax
-highlighting, click-to-write in the space between blocks, structural block
-operations, document-level undo, which ignores Ctrl/Cmd+Z and Y aimed at an
-editable target outside `.block-input` (#331), autosave scheduling and save
-state), line
-mapping between rendered nodes and file lines, and attachment acceptance and
-insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
+rename rewriter encodes them), the live editor (#540, #541: `live-editor/`
+holds one CodeMirror 6 view over the whole note body in the Obsidian Live
+Preview manner, built on `@atomic-editor/editor`'s inline-preview, table and
+wikilink extensions; `LiveEditor` is uncontrolled and reconciles `value` only
+when it differs from its document, reports every change through `onChange`
+for the idle flush and the draft and the document through `onCommit` on blur
+or Escape, exposes `scrollToLine`/`scrollToHit`/`focus`/`blur` through its
+handle, and owns the `[[` completion in the Vault's link style, the `/` menu,
+the desktop-only selection toolbar, the touch keyboard bar, the image widgets
+under their lines, paste/drop attachment uploads and the `?q=` highlight;
+undo is CodeMirror's own, so the page keeps no document history), autosave
+scheduling and save state, and attachment acceptance and insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
 `UnsavedDrafts.tsx`; ordinary per-note and create drafts
@@ -5086,20 +5083,6 @@ that has already activated.
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding
 `resolvePrimaryVaultId`'s inference for that one dialog session.
-
-`lib/linePrefix.ts`'s `linePrefix` (#286) reads a line's whole invisible
-leading run - its indentation, then any list marker, task box, heading hashes,
-or quote arrows behind it - rather than only a marker and the indent ahead of
-one. Indentation counts with no marker required, so a wrapped list item's
-continuation line (addressed alone under D25a) reports the indent that has no
-rendered counterpart. `caretMap.ts` consumes it directly; its former private
-`invisiblePrefix`, which widened the answer for the caret only, is gone, and the
-two no longer disagree on an indented heading or quote. `note-page/editorFont.ts`'s
-`resolveFont` is the other half of making that hang land: `getComputedStyle().font`
-serializes empty whenever a longhand cannot fold back into the shorthand, which
-the heading fonts do through `font-variation-settings`, so the longhands are
-composed instead. `BlockInput.tsx` hangs nothing for a `code block` unit, whose
-leading spaces are partly rendered.
 
 `hooks/useWriteMode.ts` fails closed in demo mode on the server's word
 (#152): `GET .../write-capabilities` carries the same `demo_guard` layer every
@@ -5136,7 +5119,7 @@ reading and rendering, above); into `NoteEditor.tsx`'s own `uploadEditorFile`
 catch via a new `onDemoRefusal` prop `NotePage.tsx` passes straight through,
 so a demo refusal on an in-editor attachment drop or paste clears the
 editor's own inline `attachmentNotice` rather than showing it there; and into
-the block-editor autosave `save` callback `useNoteAutosave` wraps (`NotePage.tsx`
+the live-editor autosave `save` callback `useNoteAutosave` wraps (`NotePage.tsx`
 sets a local `autosaveDemoRefusal` flag on a hit, rethrows so the hook still
 halts autosave for the rest of this note session the same as any other
 failure, and that flag suppresses only the generic "could not reach the
@@ -5148,24 +5131,26 @@ message and carries no instruction either way).
 note candidates, and backend HTTP write endpoints.
 
 **Coordination paths:** `App.tsx`, `NotePage.tsx`, `types.ts`,
-`noteEnhancements.css`, `features/settings/UnsavedDrafts.tsx` (consumes the
+`noteEnhancements.css`, `vite.config.ts` and `src/test/setup.ts` (vitest
+inlines `@atomic-editor/editor`, whose ESM imports carry no extensions, and
+polyfills the `Range` rects CodeMirror measures with), `features/settings/UnsavedDrafts.tsx` (consumes the
 held-draft model and `openCreateDialog`'s target-Vault override), backend
 `handlers/vault_write.rs`, and `vault/write/**`.
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
 safety; every mutation continues through backend `vault/write` (ADR-03/11);
-**nothing re-serializes a note** — edits replace only the lines a block owns and
-reproduce the file's own line endings; **block operations refuse rather than
-guess** when a range no block owns lies between them, or when the rendered tree
-is still settling behind a wikilink resolve.
+**nothing re-serializes a note** — the editor's document is the file's text,
+the body is put back under the current frontmatter in the file's own line
+ending, and no save ever rewrites what was not typed; **the floating toolbar
+never mounts on a coarse pointer** (#540), where the keyboard bar carries the
+formatting instead.
 
 **Validation:** write API (`writeApi.test.ts`, including the demo_read_only
 code-carrying cases), editor, action dialog, upload, draft, path,
-frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
-`caretMap`, `caretPoint`, `editHistory`, `linePrefix`, `editorFont`,
-`useNoteAutosave`,
-`attachmentDrop`, `inlineEditing`, and `properties` tests;
+frontmatter, conflict, and autocomplete tests; `sourceMap`,
+`useNoteAutosave`, `attachmentDrop`, `live-editor/LiveEditor`,
+`live-editor/commands`, and `properties` tests;
 `useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
 `App.demo-mode.test.tsx` (#152), and full frontend checks.
 

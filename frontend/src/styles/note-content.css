@@ -1147,136 +1147,224 @@
   outline-offset: 1px;
 }
 
-/* ── Inline editing ─────────────────────────────────────────────────────────
-   The affordance is a rule in the left gutter, not a fill or a box. It reuses
-   the device the list bullet already uses, so it reads as "this is a line of
-   your content" rather than as a control, and it costs no horizontal space, so
-   nothing reflows when a block is entered.
-
-   It is drawn with ::after because ::before is already the list marker, and
-   .editable-block is the rendered element itself: wrapping blocks in a div
-   would sit between a ul and its li children and break every marker rule.
-
-   The gutter is borrowed from .note-pane's padding, which is 56px on desktop
-   and 16px on a phone, so the offset is a token rather than a constant. */
-:root {
-  --edit-gutter: 0.75rem;
-  /* The bullet inset on .note-body li. */
-  --li-inset: 1.4rem;
+/* ── Live editor ────────────────────────────────────────────────────────
+   One CodeMirror over the whole note body (#540). The editor inherits the
+   note's typography through the library's custom properties, mapped here
+   onto Forge tokens; nothing below names a colour or a size of its own. */
+.live-editor .atomic-cm-editor,
+[data-theme="light"] .live-editor .atomic-cm-editor,
+[data-theme="dark"] .live-editor .atomic-cm-editor {
+  --atomic-editor-font: var(--font-serif);
+  --atomic-editor-font-mono: var(--font-mono);
+  --atomic-editor-body-size: 1.18rem;
+  --atomic-editor-body-leading: 1.62;
+  --atomic-editor-measure: 100%;
+  --atomic-editor-fg: var(--ink);
+  --atomic-editor-fg-muted: var(--muted);
+  --atomic-editor-fg-faint: var(--tertiary);
+  --atomic-editor-bg: transparent;
+  --atomic-editor-bg-panel: var(--paper);
+  --atomic-editor-bg-surface: var(--paper-2);
+  --atomic-editor-border: var(--rule);
+  --atomic-editor-accent: var(--hot);
+  --atomic-editor-accent-bright: var(--hot);
+  --atomic-editor-accent-soft: var(--hot-soft);
+  --atomic-editor-link: var(--hot);
+  --atomic-editor-link-hover: var(--hot);
+  --atomic-editor-code-bg: var(--code-surface);
+  --atomic-editor-code-rail: var(--code-rule);
+  --atomic-editor-selection-bg: var(--highlight);
+  --atomic-editor-search-bg: var(--highlight);
+  --atomic-editor-search-bg-active: var(--highlight-active);
+  --atomic-editor-radius: var(--radius-none);
+  --atomic-editor-hl-keyword: var(--code-ink);
+  --atomic-editor-hl-string: var(--code-ink-soft);
+  --atomic-editor-hl-number: var(--code-ink);
+  --atomic-editor-hl-comment: var(--code-ink-soft);
+  --atomic-editor-hl-type: var(--code-ink);
+  --atomic-editor-hl-function: var(--code-ink);
+  --atomic-editor-hl-property: var(--code-ink);
+  --atomic-editor-hl-regexp: var(--code-ink);
+  --atomic-editor-hl-escape: var(--code-ink);
+  --atomic-editor-hl-tag: var(--code-ink);
+  --atomic-editor-hl-variable: var(--code-ink);
+  --atomic-editor-hl-operator: var(--code-ink-soft);
+  --atomic-editor-hl-invalid: var(--err-fg);
 }
 
-.note-body .editable-block {
-  position: relative;
-  cursor: text;
-  /* Entry on touch is a double tap, and the viewport does not disable
-     double-tap-to-zoom, so without this iOS zooms the page instead of opening
-     the block. `manipulation` drops double-tap zoom and the legacy click delay
-     while leaving panning and pinch-zoom alone, so scrolling from a paragraph
-     and zooming for legibility both still work. */
-  touch-action: manipulation;
+/* The note pane scrolls, not the editor, so the editor grows with its text. */
+.live-editor .cm-editor {
+  height: auto;
 }
-
-.note-body .editable-block::after {
-  content: "";
-  position: absolute;
-  left: calc(var(--edit-gutter) * -1);
-  top: 0.15em;
-  bottom: 0.15em;
-  width: 1px;
-  background: var(--hot);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease);
+.live-editor .cm-scroller {
+  overflow: visible !important;
 }
-
-.note-body .editable-block:hover::after {
-  opacity: 0.45;
-}
-
-/* The active block: same device at full weight, no ring and no fill, so it
-   does not fight the borders .callout and .table-wrap already carry. */
-.note-body .editable-block.is-active::after {
-  width: 2px;
-  opacity: 1;
-}
-
-/* Touch gets no resting rule. A phone is where reading dominates, and a mark
-   beside every block reads as clutter on a narrow column rather than as an
-   affordance. The rule still appears on the block being edited, which is the
-   only moment it carries information. */
-
-@media (prefers-reduced-motion: reduce) {
-  .note-body .editable-block::after {
-    transition: none;
-  }
-}
-
-.block-input {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+.live-editor .cm-editor.cm-focused {
   outline: none;
-  /* Visible, because the editor inside is pulled left by the width of the
-     line's markdown prefix so the prose stays put when a block is entered.
-     That overhang is the `- ` or `1.` itself: clipping it hides the one thing
-     telling the writer they are still in a list. The editor does its own
-     scrolling, so nothing here needs to. */
-  overflow: visible;
-
-  /* Metrics are inherited from the block being replaced. Transforms are not:
-     h1, h3, h6, callout titles and table headers all uppercase their text, and
-     an editor that inherited that would show the typist a different string
-     than the one being written to the file. */
-  font: inherit;
-  color: inherit;
-  letter-spacing: inherit;
-  text-transform: none;
-  text-indent: 0;
+}
+.live-editor .cm-content {
   caret-color: var(--hot);
+  padding: 0 0 4rem;
+}
+.live-editor .cm-activeLine {
+  background: transparent;
+}
+.live-editor .cm-cursor {
+  border-left-color: var(--hot);
 }
 
-/* A list item's marker is drawn by ::before and the revealed source carries
-   its own "- ", so the drawn marker steps aside while the line is being
-   edited. The input hangs by the marker inset, which puts the typed marker
-   exactly where the drawn one was, so nothing shifts. */
-/* The hang is measured per line by BlockInput, because the typed prefix and
-   the drawn marker it replaces are different widths. */
-
-.note-body li.is-active::before {
-  display: none;
+/* `.note-body img` turns every image into a bordered block with margins, and
+   CodeMirror's caret-positioning buffers around widgets are imgs, so without
+   this every line holding a hidden-syntax widget grows by two image margins. */
+.live-editor img.cm-widgetBuffer {
+  display: inline !important;
+  width: 0 !important;
+  height: 1em !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  vertical-align: text-top !important;
 }
 
-/* A wrapped item's lines sit inside the li's bullet inset (D25a), so their
-   gutter rule has to be pulled back out of it to land in the same column as a
-   whole item's. A task item has no inset, so it needs no correction. */
-.note-body .li-line::after {
-  left: calc((var(--edit-gutter) + var(--li-inset)) * -1);
+/* Headings in the note's own faces, as the reading view draws them. */
+.live-editor .cm-line.cm-atomic-h1 {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
+  letter-spacing: -0.012em;
+}
+.live-editor .cm-line.cm-atomic-h2 {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 500;
+}
+.live-editor .cm-line.cm-atomic-h3,
+.live-editor .cm-line.cm-atomic-h4 {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
 }
 
-.note-body li.task-list-item .li-line::after {
-  left: calc(var(--edit-gutter) * -1);
+/* An image drawn under the line that embeds it. */
+.live-editor-image {
+  margin: 0.6rem 0 1rem;
+}
+.live-editor-image img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--rule);
+  background: var(--paper);
 }
 
-/* Only an item's first line reveals the `- ` or `1.` marker, so only that line
-   replaces the drawn one. A continuation line reveals its indent and leaves the
-   bullet where it is. */
-.note-body li:has(> .li-line:first-child.is-active)::before {
-  display: none;
+/* Search hits, the reading view's mark in editor clothing. */
+.live-editor .search-hit {
+  background: var(--highlight);
+  color: var(--ink);
 }
 
-/* The click target for the space between blocks. It reaches past the last one
-   so the run-out at the end of a note is clickable too, which is where writing
-   usually continues. 4rem rather than the full pane height: enough to land in
-   without turning a click well below a short note into an edit, and without
-   leaving dead space under every note. */
-.note-body .block-gap {
-  padding-bottom: 4rem;
-  cursor: text;
+/* The floating toolbar over a selection (desktop only). Ink on paper
+   inverted, like the topbar menu, so it reads as a control over the text. */
+.live-editor-toolbar {
+  display: inline-flex;
+  gap: 0.1rem;
+  padding: 0.2rem;
+  background: var(--ink);
+  color: var(--bg);
+  box-shadow: var(--shadow-float);
+  border-radius: var(--radius-none);
+  font-family: var(--font-sans);
+}
+.live-editor-toolbar button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  min-width: 1.9rem;
+  height: 1.9rem;
+  padding: 0 0.4rem;
+  cursor: pointer;
+}
+.live-editor-toolbar button:hover {
+  background: var(--ink-soft);
+  color: var(--hot);
+}
+.cm-tooltip:has(> .live-editor-toolbar) {
+  border: 0;
+  background: transparent;
+}
+
+/* The `/` menu and `[[` completion, in the search dialog's idiom. */
+.live-editor .cm-tooltip.cm-tooltip-autocomplete {
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+.live-editor .cm-tooltip-autocomplete ul li {
+  padding: 0.35rem 0.7rem;
+}
+.live-editor .cm-tooltip-autocomplete ul li[aria-selected] {
+  background: var(--hot-soft);
+  color: var(--ink);
+}
+.live-editor .cm-completionDetail {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-style: normal;
+  margin-left: 0.8rem;
+}
+
+/* The bar above a phone's keyboard. Lifted by the editor to clear iOS's
+   overlaid keyboard; the safe-area inset covers the home indicator. */
+.live-editor-keyboard-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.35rem 0.5rem;
+  padding-bottom: calc(0.35rem + env(safe-area-inset-bottom));
+  background: var(--paper);
+  border-top: 1px solid var(--rule);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  font-family: var(--font-sans);
+}
+.live-editor-keyboard-bar button {
+  appearance: none;
+  flex: 0 0 auto;
+  min-width: 2.6rem;
+  height: 2.4rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 1.05rem;
+  border-radius: var(--radius-none);
+}
+.live-editor-keyboard-bar button:active {
+  background: var(--paper-2);
+}
+.live-editor-keyboard-gap {
+  flex: 0 0 1px;
+  height: 1.4rem;
+  background: var(--rule);
+  margin: 0 0.3rem;
+}
+.live-editor-keyboard-done {
+  margin-left: auto;
+  color: var(--hot);
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .note-inline-actions {
@@ -1286,26 +1374,6 @@
 
 .note-inline-actions .close-note {
   white-space: nowrap;
-}
-
-/* A table row's cells stay in the flow while it is edited, so the columns keep
-   their widths, and the input is laid over the row instead of replacing it. */
-.note-body tr.editable-block.is-active {
-  position: relative;
-}
-
-.note-body .block-input-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  padding: 0 0.7rem;
-  background: var(--paper);
-}
-
-.note-body .block-input-overlay .block-input {
-  font-family: var(--font-mono);
-  font-size: 0.82rem;
 }
 
 .save-state {

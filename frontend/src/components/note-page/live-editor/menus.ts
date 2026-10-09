@@ -1,0 +1,217 @@
+// The three pop-ups the editor shows: the `/` menu at the start of a line,
+// `[[` completion over the Vault's note titles, and the floating toolbar over
+// a selection. The first two are one CodeMirror completion source each; the
+// toolbar is a tooltip the selection drives.
+
+import {
+  autocompletion,
+  completionKeymap,
+  type Completion,
+  type CompletionContext,
+  type CompletionResult,
+} from "@codemirror/autocomplete";
+import {
+  EditorState,
+  Prec,
+  StateField,
+  type Extension,
+} from "@codemirror/state";
+import {
+  EditorView,
+  keymap,
+  showTooltip,
+  type Tooltip,
+} from "@codemirror/view";
+
+import type { ExplorerNote } from "../../../types";
+import { insertLink, wrapSelection } from "./commands";
+
+/* ── `/` menu ─────────────────────────────────────────────────────────── */
+
+type SlashCommand = {
+  label: string;
+  detail: string;
+  /** A line prefix the command sets, or */
+  prefix?: string;
+  /** a whole block it inserts in place of the line. */
+  block?: string;
+  /** Caret offset into `block`; end of it when absent. */
+  caret?: number;
+};
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  { label: "Text", detail: "plain paragraph", prefix: "" },
+  { label: "Heading 1", detail: "#", prefix: "# " },
+  { label: "Heading 2", detail: "##", prefix: "## " },
+  { label: "Heading 3", detail: "###", prefix: "### " },
+  { label: "Bulleted list", detail: "-", prefix: "- " },
+  { label: "Numbered list", detail: "1.", prefix: "1. " },
+  { label: "To-do", detail: "- [ ]", prefix: "- [ ] " },
+  { label: "Quote", detail: ">", prefix: "> " },
+  { label: "Callout", detail: "> [!note]", prefix: "> [!note] " },
+  { label: "Code block", detail: "```", block: "```\n\n```", caret: 4 },
+  { label: "Divider", detail: "---", block: "---\n" },
+  {
+    label: "Table",
+    detail: "3 columns",
+    block: "| Column | Column | Column |\n| --- | --- | --- |\n|  |  |  |\n",
+    caret: 2,
+  },
+];
+
+function slashSource(context: CompletionContext): CompletionResult | null {
+  const line = context.state.doc.lineAt(context.pos);
+  const before = line.text.slice(0, context.pos - line.from);
+  // Only a slash that opens the line is a command; one inside prose is text.
+  if (!/^\s*\/[\w ]*$/.test(before)) {
+    return null;
+  }
+  const slashAt = line.from + before.indexOf("/");
+  return {
+    // The text CodeMirror filters on starts after the slash.
+    from: slashAt + 1,
+    to: context.pos,
+    filter: true,
+    validFor: /^[\w ]*$/,
+    options: SLASH_COMMANDS.map((command, index) => ({
+      label: command.label,
+      detail: command.detail,
+      type: "keyword",
+      // Keep the written order rather than the alphabetical one.
+      boost: -index,
+      apply: (view: EditorView, _c: Completion, _from: number, to: number) => {
+        const insert = command.block ?? command.prefix ?? "";
+        view.dispatch({
+          changes: { from: line.from, to, insert },
+          selection: { anchor: line.from + (command.caret ?? insert.length) },
+          userEvent: "input",
+        });
+      },
+    })),
+  };
+}
+
+/* ── `[[` completion ──────────────────────────────────────────────────── */
+
+/**
+ * Typing `[[` offers the Vault's note titles. Choosing one writes the link in
+ * the Vault's own style through `formatNoteLink` (ADR-33), replacing the
+ * brackets typed so far and the closing pair the bracket closer added.
+ */
+function wikiSource(
+  candidates: () => ExplorerNote[],
+  formatNoteLink: (note: ExplorerNote) => string,
+) {
+  return (context: CompletionContext): CompletionResult | null => {
+    const match = context.matchBefore(/\[\[([^\]]*)$/);
+    if (!match) {
+      return null;
+    }
+    const query = match.text.slice(2).toLowerCase();
+    const options = candidates()
+      .filter((note) => note.title.toLowerCase().includes(query))
+      .slice(0, 12)
+      .map((note) => ({
+        label: note.title,
+        type: "text",
+        apply: (view: EditorView) => {
+          const closing = view.state.sliceDoc(context.pos, context.pos + 2);
+          const to = closing === "]]" ? context.pos + 2 : context.pos;
+          const insert = formatNoteLink(note);
+          view.dispatch({
+            changes: { from: match.from, to, insert },
+            selection: { anchor: match.from + insert.length },
+            userEvent: "input",
+          });
+        },
+      }));
+    return { from: match.from + 2, to: context.pos, options, filter: false };
+  };
+}
+
+export function completionMenus(
+  candidates: () => ExplorerNote[],
+  formatNoteLink: (note: ExplorerNote) => string,
+): Extension {
+  return [
+    autocompletion({
+      activateOnTyping: true,
+      icons: false,
+      // The list-continuation keymap binds Enter ahead of the completion's,
+      // so the completion keys go in at the top instead.
+      defaultKeymap: false,
+      override: [slashSource, wikiSource(candidates, formatNoteLink)],
+    }),
+    Prec.highest(keymap.of(completionKeymap)),
+  ];
+}
+
+/* ── Floating toolbar ─────────────────────────────────────────────────── */
+
+const TOOLBAR_ITEMS: Array<{
+  label: string;
+  title: string;
+  run: (view: EditorView) => boolean;
+}> = [
+  { label: "B", title: "Bold (Ctrl+B)", run: (v) => wrapSelection(v, "**") },
+  { label: "I", title: "Italic (Ctrl+I)", run: (v) => wrapSelection(v, "*") },
+  { label: "S", title: "Strikethrough", run: (v) => wrapSelection(v, "~~") },
+  { label: "<>", title: "Code (Ctrl+E)", run: (v) => wrapSelection(v, "`") },
+  { label: "==", title: "Highlight", run: (v) => wrapSelection(v, "==") },
+  { label: "Link", title: "Link (Ctrl+K)", run: insertLink },
+];
+
+function selectionTooltip(state: EditorState): Tooltip | null {
+  const range = state.selection.main;
+  if (range.empty) {
+    return null;
+  }
+  // A selection across lines is usually a cut or a move, not a format.
+  if (
+    state.doc.lineAt(range.from).number !== state.doc.lineAt(range.to).number
+  ) {
+    return null;
+  }
+  return {
+    pos: range.from,
+    end: range.to,
+    above: true,
+    strictSide: true,
+    arrow: false,
+    create: (view) => {
+      const dom = document.createElement("div");
+      dom.className = "live-editor-toolbar";
+      dom.setAttribute("role", "toolbar");
+      dom.setAttribute("aria-label", "Formatting");
+      for (const item of TOOLBAR_ITEMS) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = item.label;
+        button.title = item.title;
+        button.setAttribute("aria-label", item.title);
+        // mousedown, so the click does not first collapse the selection.
+        button.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          item.run(view);
+        });
+        dom.appendChild(button);
+      }
+      return { dom };
+    },
+  };
+}
+
+/**
+ * Desktop only (#540): on touch the OS draws its own Cut/Copy/Paste callout
+ * in the same spot, and the keyboard bar carries the formatting instead.
+ */
+export const selectionToolbar: Extension = StateField.define<Tooltip | null>({
+  create: selectionTooltip,
+  update(value, tr) {
+    if (!tr.docChanged && !tr.selection) {
+      return value;
+    }
+    return selectionTooltip(tr.state);
+  },
+  provide: (field) => showTooltip.from(field),
+});
