@@ -10,6 +10,7 @@ use serde::Serialize;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use crate::cache::parse::fts_query_terms;
+use crate::chunk::is_fence_marker;
 use crate::vault_registry::VaultId;
 
 use super::SearchResponseMode;
@@ -34,7 +35,7 @@ pub struct CompactSearchResult {
     pub layer: Option<String>,
     /// At most 200 characters. For a `#tag` query it is the line
     /// `Matched tag: #<tag>`. Otherwise it is copied verbatim from the
-    /// matched chunk: centred on the first matched query word in a keyword
+    /// matched chunk, fenced code blocks left out: centred on the first matched query word in a keyword
     /// hit, the start of the chunk in any other. `…` marks each side where
     /// text was dropped.
     pub snippet: String,
@@ -160,7 +161,25 @@ fn first_match(chars: &[(usize, char)], phrases: &[Vec<String>]) -> Option<(usiz
     })
 }
 
-/// At most [`SNIPPET_CHARS`] characters of `content`, copied verbatim.
+/// `content` without its fenced blocks, marker lines included, so a chunk
+/// that is nothing but code leaves nothing. An opening marker with no closing
+/// one fences the rest of the chunk. The blank lines a dropped block leaves
+/// behind are closed up to one.
+fn without_fenced_blocks(content: &str) -> String {
+    let mut prose = String::with_capacity(content.len());
+    let mut fenced = false;
+    for line in content.split_inclusive('\n') {
+        if is_fence_marker(line) {
+            fenced = !fenced;
+        } else if !fenced && !(line.trim().is_empty() && prose.ends_with("\n\n")) {
+            prose.push_str(line);
+        }
+    }
+    prose
+}
+
+/// At most [`SNIPPET_CHARS`] characters of the prose in `content`, copied
+/// verbatim. Fenced blocks are left out (#532): see [`without_fenced_blocks`].
 ///
 /// With a phrase that occurs in the chunk, the window is centred on its first
 /// occurrence; otherwise it is the start of the chunk. A cut lands on
@@ -169,7 +188,8 @@ fn first_match(chars: &[(usize, char)], phrases: &[Vec<String>]) -> Option<(usiz
 /// without spaces, a very long URL) is cut between characters instead, never
 /// inside a character or between an emoji and its joiners.
 fn snippet(content: &str, phrases: &[Vec<String>]) -> String {
-    let text = content.trim();
+    let prose = without_fenced_blocks(content);
+    let text = prose.trim();
     let chars = text.char_indices().collect::<Vec<_>>();
     let total = chars.len();
     if total <= SNIPPET_CHARS {
@@ -296,6 +316,34 @@ mod tests {
             snippet("# Home\n\nA short note.", &[]),
             "# Home\n\nA short note."
         );
+    }
+
+    #[test]
+    fn a_fenced_block_is_left_out_of_the_snippet() {
+        let chunk = "An index of the fleet.\n\n```mermaid\ngraph LR; Net --> Gate\n```\n\nOne row per host.";
+        assert_eq!(
+            snippet(chunk, &[]),
+            "An index of the fleet.\n\nOne row per host."
+        );
+        // A word that occurs only in the code does not pull the code back in.
+        let long = format!(
+            "{}\n```\nneedle\n```\n{}",
+            words("alpha", 60),
+            words("omega", 60)
+        );
+        let found = snippet(&long, &query_phrases("needle"));
+        assert!(!found.contains("needle") && !found.contains('`'), "{found}");
+        assert!(found.starts_with("alpha"), "{found}");
+    }
+
+    #[test]
+    fn an_unclosed_fence_hides_the_rest_of_the_chunk() {
+        assert_eq!(snippet("Intro.\n```sh\nls -la\n", &[]), "Intro.");
+    }
+
+    #[test]
+    fn a_chunk_of_nothing_but_code_has_an_empty_snippet() {
+        assert_eq!(snippet("```sh\nls -la\n```", &[]), "");
     }
 
     #[test]

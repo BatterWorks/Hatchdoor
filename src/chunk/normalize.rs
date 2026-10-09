@@ -44,6 +44,52 @@ pub struct Normalized {
     /// `#!/usr/bin/env bash` shebang or `#` comment inside a fence is mistaken
     /// for an ATX heading.
     pub fenced: Vec<std::ops::Range<usize>>,
+    /// The opening marker line of each range in `fenced`, in the same order,
+    /// without its indentation or line ending (for example "```mermaid"). An
+    /// empty block still has an entry here, so the two stay in step.
+    pub openers: Vec<String>,
+}
+
+/// Whether `line` opens or closes a fenced block: three backticks after any
+/// indentation. The one rule both chunking and a reader of
+/// `Chunk::stored_content` use, so they cannot drift apart.
+pub fn is_fence_marker(line: &str) -> bool {
+    line.trim_start().starts_with("```")
+}
+
+/// `text[start..end]` with a fence marker line put back around every part of
+/// it that lies inside a fenced block. A block cut by either end of the slice
+/// is closed and reopened, so the result always holds whole blocks. The
+/// opening marker is three backticks and the block's info string, the closing
+/// one three backticks, whatever length of run the note used.
+pub fn restore_fences(normalized: &Normalized, start: usize, end: usize) -> String {
+    let text = &normalized.text;
+    let mut out = String::with_capacity(end - start);
+    let mut cursor = start;
+    for (range, opener) in normalized.fenced.iter().zip(&normalized.openers) {
+        let (from, to) = (range.start.max(start), range.end.min(end));
+        if from >= to || text[from..to].trim().is_empty() {
+            continue;
+        }
+        out.push_str(&text[cursor..from]);
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```");
+        out.push_str(opener.trim_start_matches('`'));
+        out.push('\n');
+        out.push_str(&text[from..to]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```");
+        if to < end {
+            out.push('\n');
+        }
+        cursor = to;
+    }
+    out.push_str(&text[cursor..end]);
+    out
 }
 
 /// Returns true if `pos` (a byte offset into `Normalized::text`) lies inside a
@@ -57,14 +103,18 @@ pub fn in_fenced(fenced: &[std::ops::Range<usize>], pos: usize) -> bool {
 pub fn strip_code_fences(content: &str) -> Normalized {
     let mut out = String::with_capacity(content.len());
     let mut fenced = Vec::new();
+    let mut openers = Vec::new();
     // `Some(start)` while inside a fence; `start` is the offset in `out` of the
     // first content byte after the opening marker.
     let mut fence_start: Option<usize> = None;
     for line in content.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
+        if is_fence_marker(line) {
             match fence_start.take() {
                 Some(start) => fenced.push(start..out.len()),
-                None => fence_start = Some(out.len()),
+                None => {
+                    fence_start = Some(out.len());
+                    openers.push(line.trim().to_string());
+                }
             }
             continue;
         }
@@ -74,7 +124,11 @@ pub fn strip_code_fences(content: &str) -> Normalized {
         // Unterminated fence: treat the remainder as fenced.
         fenced.push(start..out.len());
     }
-    Normalized { text: out, fenced }
+    Normalized {
+        text: out,
+        fenced,
+        openers,
+    }
 }
 
 #[allow(dead_code)]
@@ -192,6 +246,37 @@ mod tests {
             &result.fenced,
             result.text.find("fn foo").unwrap()
         ));
+    }
+
+    #[test]
+    fn restore_fences_puts_the_markers_back_with_the_info_string() {
+        let input = "before\n```rust\nfn foo() {}\n```\nafter";
+        let normalized = strip_code_fences(input);
+        let restored = restore_fences(&normalized, 0, normalized.text.len());
+        assert_eq!(restored, input);
+    }
+
+    #[test]
+    fn restore_fences_closes_and_reopens_a_block_cut_by_the_slice() {
+        let normalized = strip_code_fences("intro\n````mermaid\none\ntwo\n````\noutro");
+        let cut = normalized.text.find("two").unwrap();
+        assert_eq!(
+            restore_fences(&normalized, 0, cut),
+            "intro\n```mermaid\none\n```"
+        );
+        assert_eq!(
+            restore_fences(&normalized, cut, normalized.text.len()),
+            "```mermaid\ntwo\n```\noutro"
+        );
+    }
+
+    #[test]
+    fn restore_fences_closes_an_unterminated_block_and_skips_an_empty_one() {
+        let normalized = strip_code_fences("a\n```\n```\nb\n```sh\nls");
+        assert_eq!(
+            restore_fences(&normalized, 0, normalized.text.len()),
+            "a\nb\n```sh\nls\n```"
+        );
     }
 
     #[test]

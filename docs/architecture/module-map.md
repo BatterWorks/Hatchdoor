@@ -2395,6 +2395,7 @@ and embedder identity/dimensions.
 
 **Invariants:**
 
+- A chunk row's `content` holds `Chunk::stored_content`, the text with fence marker lines, and the keyword index is built from that column; vectors and `content_hash` come from `Chunk::content`, the text without them (#532). The `chunk_stored_text` metadata key names the shape of the stored text. A build that finds a different value, or none, sends every note through the write path once, which re-chunks it and reuses its vectors by hash, so a change to the stored shape costs no embedding and no schema bump.
 - SQLite is rebuildable and never authoritative (ADR-01).
 - Keep embedded SQLite, FTS5, sqlite-vec, WAL, one writer, and pooled
   query-only reads (ADR-06).
@@ -2460,18 +2461,19 @@ changes require search and application-state tests too.
 - `src/chunk/chunker.rs`
 - `src/chunk/normalize.rs`
 
-**Public contract:** `Chunk`, `ChunkOptions`, `NoteChunking`, `chunk_note`, and
+**Public contract:** `Chunk`, `ChunkOptions`, `NoteChunking`, `chunk_note`, `is_fence_marker`, and
 normalization behavior re-exported by `src/chunk/mod.rs`.
+A `Chunk` carries two texts (#532). `content` is what is embedded and hashed: fence marker lines removed, code kept. `stored_content` is what the cache stores and a search hit returns: `content` with a marker line back around each run of code: three backticks, the opening one with the block's info string. A block that a chunk boundary cuts is closed at the end of one chunk and reopened at the start of the next, so each `stored_content` holds whole blocks.
 
 **Consumed dependencies:** Markdown text and tokenizer-aware splitting.
 
-**Consumers:** cache population and evaluation/index microbench tooling.
+**Consumers:** cache population, evaluation/index microbench tooling, and Runtime Search's compact snippet (`is_fence_marker` only).
 
 **Coordination paths:** cache population, embedder token limits, and evaluation
 baselines.
 
 **Invariants:** chunk boundaries and contextual text changes alter every
-embedding and therefore require deliberate evaluation, not only unit tests.
+embedding and therefore require deliberate evaluation, not only unit tests. `stored_content` is outside that rule only while `content` stays byte for byte what it was; a change to it needs a new `CHUNK_STORED_TEXT_SHAPE` value in `src/cache/populate.rs`, which re-chunks existing indexes once and reuses their vectors.
 
 **Validation:** `cargo test chunk`, cache population tests, and relevant eval
 commands when retrieval behavior may change.
@@ -2507,7 +2509,7 @@ and assemble helpers, and its request/result/response types are retired.
 
 **Consumed dependencies:** `SqliteCache`, its published Vault snapshot/cache
 query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
-scope/envelope, vault metadata/types, and `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet).
+scope/envelope, vault metadata/types, `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet), and `chunk::is_fence_marker` (read by `compact.rs` to leave fenced blocks out of one).
 
 **Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
 `VaultSearchCore::search`, full hits only), MCP search tools (which also consume `compact::CompactSearchResponse`), offline evaluation runners,
@@ -2561,7 +2563,7 @@ and future Vault-scoped MCP adapters.
   costs an embedding on a query whose Vaults turn out not to participate, and
   reports an unhealthy embedder ahead of a bad layer name or an unavailable
   single Vault, both of which need the pinned generation to detect.
-- Outside a tag response, a compact snippet is a verbatim slice of the chunk. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes); in a semantic response, or when no word is found, it is the start of the chunk. A tag response has no matched chunk: its hit content is the line `Matched tag: #<tag>`, and the snippet is that line. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
+- Outside a tag response, a compact snippet is a verbatim slice of the chunk's prose: fenced blocks are dropped first, marker lines included, found by `chunk::is_fence_marker`, the rule chunking itself uses (#532), and the blank lines a dropped block leaves are closed up to one. A chunk with no prose has an empty snippet. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes); in a semantic response, or when no word is found, it is the start of the chunk. A tag response has no matched chunk: its hit content is the line `Matched tag: #<tag>`, and the snippet is that line. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
 - A structure-only frontend Search pilot must not modify these paths.
 
 **Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
