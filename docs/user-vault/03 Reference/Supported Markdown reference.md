@@ -147,7 +147,7 @@ Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refre
 
 ## Markdown links to notes
 
-A plain Markdown link whose target is a `.md` file is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the Links panel, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
+A plain Markdown link whose target is a `.md` file is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
 
 - Relative to the note: `[the launch plan](../20-projects/Beacon%20Launch.md)`
 - From the Vault root: `[the launch plan](/20-projects/Beacon%20Launch.md)`
