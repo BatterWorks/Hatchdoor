@@ -69,6 +69,7 @@
 - A Vault that is reindexing no longer tells agents it cannot be searched. Every reindex of a Vault that was already searchable, including the short one after each saved note, made `list_vaults` and `GET /api/v1/vaults` report `search: "indexing"` and `capabilities.search: false` until it finished, although search kept answering from the previous index the whole time. An agent that checks capabilities before it searches stopped searching for that long and walked the file tree instead. Such a Vault now reports `search: "stale"` and keeps `capabilities.search: true` while it reindexes, with `index_turn: "running"` saying a rebuild is under way. `indexing` now only means a Vault building its first index, with nothing to search yet. In the sidebar such a Vault keeps its note count while it reindexes, where a long reindex used to replace the count with a moving placeholder. [#483]
 - Two pieces of built-in help now say what Hatchdoor does. The help under **Settings** → **Meaning search in demoted layers** said a folder marked with a `.hatchdoor-layer` file stays out of the browser. It only stays out of normal search, and its notes still show in the sidebar, which the help now says. And an agent whose write fails with `write_failed` is now sent to the troubleshooting section "A write fails for some other reason", which says where to look. It used to be sent to a section about one cause that 2.7.0 removed. [#527]
 - On a phone, the Edit button on an open note no longer shows an unexplained `E` in a small pill beside its label. The `E` is the hint for the keyboard shortcut that opens the editor, so it now appears only in the desktop layout. Pressing `e` still opens the editor at every width. [#537]
+- Bullet lists in a note are indented again. In the Reading view the dash of every plain bullet was drawn on top of the first letter of its text, at every depth, on phones and desktops alike, because the indent had been lost when the old block editor was removed. Bullets are back to their indent, with the dash clear of the text. Numbered lists, task lists and lists in the live editor were not affected and have not changed. [#547]
 
 [#417]: https://github.com/BatterWorks/Hatchdoor/issues/417
 [#418]: https://github.com/BatterWorks/Hatchdoor/issues/418
@@ -123,6 +124,7 @@
 [#541]: https://github.com/BatterWorks/Hatchdoor/issues/541
 [#542]: https://github.com/BatterWorks/Hatchdoor/issues/542
 [#544]: https://github.com/BatterWorks/Hatchdoor/issues/544
+[#547]: https://github.com/BatterWorks/Hatchdoor/issues/547
 
 ## v2.7.0 - 2026-10-02
 

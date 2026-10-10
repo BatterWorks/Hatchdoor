@@ -196,4 +196,17 @@ describe("client audit launch contracts", () => {
       /@media\s*\(hover:\s*hover\)\s*{[^}]*\.ui-button:hover,\s*\.close-note:hover/s,
     );
   });
+
+  // The bullet inset used to be declared on `:root` in a stylesheet section
+  // that belonged to something else, and went when that section did (#547).
+  // A plain bullet then padded by an undefined property, which is zero, and
+  // its dash landed on the text.
+  it("declares the bullet list inset beside the list rules that read it", () => {
+    expect(noteContentCss).toMatch(
+      /\.note-body ul li,\s*\.note-body ol li\s*{[^}]*padding-left:\s*var\(--li-inset\)/s,
+    );
+    expect(noteContentCss).toMatch(
+      /\.note-body ul\s*{[^}]*--li-inset:\s*1\.4rem/s,
+    );
+  });
 });
