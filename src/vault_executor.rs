@@ -716,7 +716,8 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
     // for minutes: holding the guard across it parked every write behind the
     // turn until the caller's transport gave up on a write that had already
     // landed (issue #223). The turn retakes the guard to publish, and reports
-    // the generation stale if a mutation landed while it was released.
+    // the generation stale if a write or a pulling sync landed while it was
+    // released. A Git turn that only held the guard does not count (#549).
     #[cfg(test)]
     notify_index_mutation_lock_attempt(vault_id);
     let (read_guard, read_phase_generation) = control_block
@@ -822,12 +823,13 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                                     .set_search_status(VaultSearchStatus::Ready, None);
                             }
                             let freshness = if mutated {
-                                // A write landed while this turn was
-                                // embedding, so what is about to be published
-                                // is already behind the Markdown. Search keeps
-                                // answering from it; the label is what stops it
-                                // claiming to be current. The watcher has
-                                // already armed the catch-up turn.
+                                // A write or a pulling sync landed while this
+                                // turn was embedding, so what is about to be
+                                // published is already behind the Markdown.
+                                // Search keeps answering from it; the label is
+                                // what stops it claiming to be current. The
+                                // catch-up turn is armed by the watcher for a
+                                // write and by the sync for its own pull.
                                 VaultSnapshotFreshness::Stale
                             } else {
                                 VaultSnapshotFreshness::Fresh
@@ -893,8 +895,8 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
             // A generation published stale reports itself stale here too, which
             // is exactly what `retained_snapshot_search_status` would derive
             // from the same row after a restart. `Stale` still grants the
-            // search capability, so the Vault keeps answering; the watcher's
-            // change intent has already armed the turn that makes it `Ready`.
+            // search capability, so the Vault keeps answering; the turn that
+            // makes it `Ready` is armed by whatever rewrote the Markdown.
             let status = if published_stale.load(Ordering::Acquire) {
                 VaultSearchStatus::Stale
             } else {
@@ -1140,8 +1142,39 @@ where
         }
     };
 
-    let result = run_planned_turn(&control_block, managed_git, vault_id, plan).await;
+    let result = run_planned_turn(&control_block, managed_git, vault_id, plan, |result| {
+        sync_rewrote_markdown(coordinator, vault_id, result)
+    })
+    .await;
     finish_git_turn(&control_block, coordinator, managed_git, vault_id, result)
+}
+
+/// Whether a finished sync counts as having rewritten the Vault's Markdown
+/// under a concurrent Index turn. Asked under the mutation lock, so that
+/// Index turn cannot publish between this answer and the advance it causes.
+///
+/// A sync that pulled did, and `finish_git_turn` answers every success with
+/// an Index request while the Vault is active and its files are readable,
+/// which is the catch-up turn the advance owes. A sync that found nothing, or
+/// only committed and pushed, left every note as the Index turn read it.
+///
+/// A failed sync cannot say. A merge can land before its push is refused, and
+/// the error carries no trace of it. Nothing queues an Index turn after a
+/// failure, so one is requested here, and only while an Index turn is already
+/// admitted: that is the only turn the advance can reach, and without one a
+/// failing remote would reindex the Vault on every retry. With none admitted
+/// the generation stays put, and a note such a sync did rewrite reaches the
+/// index through the watcher, as an edit made outside Hatchdoor does (#549).
+fn sync_rewrote_markdown(
+    coordinator: &VaultWorkCoordinator,
+    vault_id: VaultId,
+    result: &Result<ManagedGitOutcome, VaultWorkError>,
+) -> bool {
+    match result {
+        Ok(ManagedGitOutcome::Pulled) => true,
+        Ok(ManagedGitOutcome::UpToDate | ManagedGitOutcome::Synchronized) => false,
+        Err(_) => coordinator.request_rerun_if_admitted(vault_id, VaultWorkKind::Index),
+    }
 }
 
 /// Run one already-planned Git or commit turn: obtain the checkout lease if
@@ -1149,11 +1182,18 @@ where
 /// run the blocking `git2` work off the async runtime, and hand the lease
 /// back. Publication is the caller's, because a Git turn and a commit turn
 /// conclude different things from the same result.
+///
+/// `rewrote_markdown` reads the finished work's result, still under the
+/// mutation lock, and answers whether it rewrote the Vault's working-tree
+/// Markdown. Only then does the turn advance the mutation generation an
+/// overlapping Index turn compares, and the caller owes the Index turn that
+/// catches up (#549).
 async fn run_planned_turn<T: Send + 'static>(
     control_block: &VaultControlBlock,
     managed_git: &ManagedGitScheduler,
     vault_id: VaultId,
     plan: GitTurnPlan<T>,
+    rewrote_markdown: impl FnOnce(&Result<T, VaultWorkError>) -> bool,
 ) -> Result<T, VaultWorkError> {
     // Obtain this Vault's checkout lease — reused from a previous turn if
     // `ManagedGitScheduler` is already holding one, or freshly acquired
@@ -1181,7 +1221,8 @@ async fn run_planned_turn<T: Send + 'static>(
     // acquires (`handlers::vault_write`/`mcp::tools::write`'s own
     // `acquire_mutation`) across this turn's blocking `git2` work (issue
     // #96's reopening defect 2): without it, a write could land mid-merge,
-    // or this turn's checkout/reset could stomp a write mid-flight.
+    // or this turn's checkout/reset could stomp a write mid-flight. Taken
+    // without the generation advance a write makes; see `rewrote_markdown`.
     // Acquired *after* the checkout lease so a lease-acquisition failure
     // above never blocks on it; the two locks are always acquired in this
     // same order for the same Vault, and nothing else in this codebase ever
@@ -1197,7 +1238,7 @@ async fn run_planned_turn<T: Send + 'static>(
     // substantially larger change than issue #96's fix warranted on its own.
     let mut mutation_guard = None;
     if plan.holds_mutation_lock {
-        match control_block.acquire_mutation().await {
+        match control_block.acquire_mutation_for_git_turn().await {
             Ok(guard) => mutation_guard = Some(guard),
             Err(error) => return Err(managed_git_mutation_error(error)),
         }
@@ -1217,6 +1258,11 @@ async fn run_planned_turn<T: Send + 'static>(
         }
     })
     .await;
+    if let (Some(guard), Ok((result, _))) = (&mutation_guard, &finished)
+        && rewrote_markdown(result)
+    {
+        control_block.record_markdown_rewrite(guard);
+    }
     drop(mutation_guard);
     let (result, lease) = match finished {
         Ok((result, lease)) => (result, lease),
@@ -1274,7 +1320,9 @@ pub(crate) async fn dispatch_commit_turn(
     ) else {
         return Ok(());
     };
-    let result = run_planned_turn(&control_block, managed_git, vault_id, plan).await;
+    // A commit stages and commits what is already on disk. It moves `HEAD`
+    // and never writes the working tree, so no Index turn is behind it.
+    let result = run_planned_turn(&control_block, managed_git, vault_id, plan, |_| false).await;
     finish_commit_turn(&control_block, commit_cooldown, vault_id, result)
 }
 
@@ -1333,7 +1381,9 @@ pub(crate) async fn dispatch_recovery_turn(
         Ok(None) => return Ok(()),
         Err(error) => return finish_recovery_turn(&control_block, vault_id, Err(error.into())),
     };
-    let result = run_planned_turn(&control_block, managed_git, vault_id, plan)
+    // Publishing commits pending drift and pushes one branch. Like a commit
+    // turn it leaves the working tree as it found it.
+    let result = run_planned_turn(&control_block, managed_git, vault_id, plan, |_| false)
         .await
         .unwrap_or_else(|error| Err(error.into()));
     finish_recovery_turn(&control_block, vault_id, result)

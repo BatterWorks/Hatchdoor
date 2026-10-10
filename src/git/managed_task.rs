@@ -134,7 +134,27 @@ impl std::fmt::Debug for ManagedGitTurnConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagedGitOutcome {
     UpToDate,
+    /// The turn committed or pushed, and left the working tree as it was.
     Synchronized,
+    /// The turn brought the remote's commits into the working tree, whatever
+    /// else it did. Kept apart from `Synchronized` because this is the one
+    /// outcome that rewrites notes under a concurrent Index turn (#549).
+    Pulled,
+}
+
+impl From<ManagedSyncOutcome> for ManagedGitOutcome {
+    fn from(outcome: ManagedSyncOutcome) -> Self {
+        match outcome {
+            ManagedSyncOutcome::UpToDate => Self::UpToDate,
+            ManagedSyncOutcome::PullOnlyFastForwarded
+            | ManagedSyncOutcome::TwoWaySynchronized {
+                integrated: true, ..
+            } => Self::Pulled,
+            ManagedSyncOutcome::TwoWaySynchronized {
+                integrated: false, ..
+            } => Self::Synchronized,
+        }
+    }
 }
 
 /// Run one acquire-or-reuse-then-synchronize turn for a managed-Git Vault.
@@ -197,11 +217,7 @@ pub fn run_managed_git_turn(
     };
     let outcome =
         synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
-    Ok(match outcome {
-        ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
-        ManagedSyncOutcome::PullOnlyFastForwarded
-        | ManagedSyncOutcome::TwoWaySynchronized { .. } => ManagedGitOutcome::Synchronized,
-    })
+    Ok(outcome.into())
 }
 
 /// Run one commit-only turn for a managed-Git Vault: commit whatever changed
@@ -306,11 +322,9 @@ fn commit_mode_error() -> VaultWorkError {
 fn commit_outcome(
     result: Result<ManagedSyncOutcome, ManagedSyncError>,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
-    match result.map_err(classify_sync_error)? {
-        ManagedSyncOutcome::UpToDate => Ok(ManagedGitOutcome::UpToDate),
-        ManagedSyncOutcome::PullOnlyFastForwarded
-        | ManagedSyncOutcome::TwoWaySynchronized { .. } => Ok(ManagedGitOutcome::Synchronized),
-    }
+    result
+        .map(ManagedGitOutcome::from)
+        .map_err(classify_sync_error)
 }
 
 /// Run one remote-sync turn for an `ExistingGit` Vault in `PullOnly` or
@@ -403,11 +417,7 @@ pub fn run_existing_git_remote_turn(
     };
     let outcome =
         synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
-    Ok(match outcome {
-        ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
-        ManagedSyncOutcome::PullOnlyFastForwarded
-        | ManagedSyncOutcome::TwoWaySynchronized { .. } => ManagedGitOutcome::Synchronized,
-    })
+    Ok(outcome.into())
 }
 
 /// Why a recovery-branch publish published nothing, with the branch it was
@@ -1255,7 +1265,9 @@ fn remembered_record(
         completed_at,
         outcome: match result {
             Ok(ManagedGitOutcome::UpToDate) => GitTurnOutcome::UpToDate,
-            Ok(ManagedGitOutcome::Synchronized) => GitTurnOutcome::Synchronized,
+            Ok(ManagedGitOutcome::Synchronized | ManagedGitOutcome::Pulled) => {
+                GitTurnOutcome::Synchronized
+            }
             Err(error) => GitTurnOutcome::Failed {
                 code: error.code().to_string(),
                 message: error.message().to_string(),
