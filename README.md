@@ -40,7 +40,7 @@ under close human review, with tests and a documented safety model.
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc">
     <img src="assets/screenshots/hero-light.png" width="900"
-      alt="Hatchdoor browsing a note: vault explorer on the left, rendered Markdown with wikilinks in the centre, and an on-this-page outline on the right">
+      alt="Hatchdoor editing a note: vault explorer on the left, the live editor in the centre with its formatting toolbar over a selected phrase, and an on-this-page outline on the right">
   </a>
 </p>
 
@@ -76,7 +76,7 @@ under close human review, with tests and a documented safety model.
 - A web UI for browsing folders and Markdown notes.
 - Native multi-vault: one instance serves several vaults, each with its own
   source, git sync, and agent scope.
-- Clean note URLs at `/n/:slug`.
+- Clean note URLs at `/v/<vault-id>/n/<slug>`.
 - Obsidian-style wikilinks for `[[Note]]`, `[[Folder/Note]]`, and
   `[[Note|Alias]]`, and Markdown links to `.md` files, both kept up to date
   through renames and moves. New links follow each vault's own link style.
@@ -86,13 +86,23 @@ under close human review, with tests and a documented safety model.
   frontmatter, images, attachments, and broken-link styling.
 - Keyword search and semantic search.
 - Recent notes, backlinks, outbound links, stats, and graph views.
-- Browser write support when the vault mount is writable.
+- A live editor in the browser when the vault mount is writable: the note opens
+  ready to type in, Markdown syntax shows only on the line you are on, and
+  edits save by themselves. It works the way Obsidian's Live Preview does.
 - Attachment uploads, local asset serving, and inline previews for linked PDF
   vault assets.
 - A first-class MCP server so AI agents can read, search, create, edit, and link
   notes with the same safety as the UI, rename or delete a tag across a whole
   vault in one checked operation, and move attachments of any size through
   short-lived download and upload links.
+- Agent reads sized for a context window: compact search hits, an outline of a
+  long note and just the sections asked for, and an exact-string search that
+  counts every occurrence.
+- A setup checklist on a fresh install that goes from an empty instance to an
+  agent searching your notes, with a folder picker in place of container paths.
+- The manual built into the app: Help beside whatever you are doing, the same
+  pages for agents through `read_docs` and `search_docs`, and as plain Markdown
+  at `/docs/` on every instance.
 - Optional automatic git commits and pushes for Hatchdoor writes, with sync
   conflicts resolved on your Git host through a recovery branch.
 - PWA assets and service worker caching for common read paths.
@@ -188,13 +198,21 @@ workstreams and where each one stands.
 
 ## Quick Start With Docker
 
+Have an AI agent with a terminal, such as Claude Code or Codex? Give it this
+one line and it installs Hatchdoor for you, asking a few questions first:
+
+```text
+Read https://hatchdoor.battercloud.cc/docs/deploy.md and install Hatchdoor for me.
+```
+
+To do it by hand, follow the steps below.
+
 ### 1. Requirements
 
 You need:
 
 - Docker and Docker Compose (Podman and `podman compose` also work)
-- A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
-  starter vault
+- A Markdown vault folder, or an empty folder if you want to start from nothing
 
 ### 2. Create Your Config
 
@@ -204,8 +222,7 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-The defaults create a starter vault beside the Compose file. To use an existing
-vault, uncomment its host path in `.env`:
+The defaults mount an empty `vault` folder beside the Compose file. To use an existing vault, uncomment its host path in `.env`:
 
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
@@ -259,18 +276,23 @@ browser prompt.
 
 Hatchdoor images include no model weights. On first launch, before it
 downloads anything, Hatchdoor asks you to pick one: **Gemma** (multilingual,
-the default, requires accepting its terms) or **Nomic Embed Text v1.5**
+recommended, requires accepting its terms) or **Nomic Embed Text v1.5**
 (English-only, no terms to accept). Either way the model and its acceptance
 receipt stay in `HOST_MODELS_PATH` and persist across restarts; Hatchdoor
 never sends vault content anywhere. Vault features stay unavailable until
 setup finishes.
+
+A fresh install has no Vaults. Once the model is ready it opens on the **Set up
+Hatchdoor** checklist: add your notes folder as a Vault, connect your agent, and
+try a search. The **?** button in the top bar opens Help, the manual for the
+version you are running.
 
 ### 5. Container Image And Paths
 
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.7.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.8.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -296,8 +318,9 @@ Hatchdoor is designed around a simple rule: your Markdown vault is the source of
 truth.
 
 - Markdown files live in each Vault's own folder, as recorded in the Vault
-  registry. `VAULT_PATH` is not that location: it is read once on a first start
-  to seed the registry with a first local Vault, and ignored from then on.
+  registry. `VAULT_PATH` is not that location: it is the folder Hatchdoor can
+  see, and nothing in it becomes a Vault until you add one. A fresh install
+  starts with no Vaults.
 - Vault identities and source definitions live in `/data/state/vaults.json`.
   A Vault's Git HTTPS credential is stored there too, so the file is created
   with `0600` permissions on Unix and belongs in a backup you treat as secret.
@@ -316,16 +339,13 @@ truth.
 - Versioning is off by default; it can keep local Git history or safely sync an
   existing remote.
 
-Upgrading an existing single-Vault deployment requires persistent
-`/data/state`; see the [legacy single-Vault upgrade
-guide](docs/migrations/legacy-single-vault.md) for detection, recovery, and
-rollback constraints.
+A single-Vault deployment from 2.4.x or earlier cannot upgrade to this version
+directly: upgrade it to a 2.5.0 to 2.7.x release first, which moves its Vault
+into the registry. Hatchdoor refuses to start on such an install rather than
+opening it empty. See the [legacy single-Vault upgrade
+guide](docs/migrations/legacy-single-vault.md).
 
-If the folder `VAULT_PATH` points at contains no Markdown files, Hatchdoor
-creates a small starter vault there (a lightweight PARA-style structure with
-onboarding notes) before the first index build. Existing vaults are never
-seeded or modified. The starter notes are ordinary Markdown you can edit, move,
-or delete like any other.
+Hatchdoor never writes example notes into a Vault folder. An empty folder opens as an empty Vault until you add Markdown files to it.
 
 For write access: browser writes, MCP writes, attachment uploads, and git sync
 all require the vault mount, cache directory, and state directory to be
@@ -363,6 +383,15 @@ Two defaults worth knowing before you deploy:
   public browsing. It has no rate limiting of its own (search embeds every
   query, note downloads bundle attachments in memory), so put a
   rate-limiting reverse proxy in front before exposing it publicly.
+
+One optional setting is left out of `.env.example` on purpose:
+`HATCHDOOR_USAGE_REPORT_ENABLED`. It is telemetry, and it is off unless you
+turn it on, in **Settings** under **Usage report** or by setting it to `true`
+in `.env`. On, Hatchdoor sends its maintainer one small report a day of how
+the install is set up, and nothing about your notes, to decide which platforms
+to test and which parts of Hatchdoor people rely on. [Usage report
+reference](https://docs-hatchdoor.battercloud.cc/v/bef3df28-8c2e-4722-89ad-bd4d0bcb3def/n/usage-report-reference)
+lists every field.
 
 Every deployment variable, every live Settings-editable value, layer and
 exclusion rules, and how the search index and cache work are documented in
@@ -426,12 +455,9 @@ Run the backend:
 cargo run
 ```
 
-By default, local source runs bind to `127.0.0.1:42824` and seed their first
-Vault from `./vault`. Point that first start at a real vault with:
-
-```bash
-VAULT_PATH=/path/to/notes cargo run
-```
+By default, local source runs bind to `127.0.0.1:42824` and start with no
+Vaults. Add one in Settings, or with `POST /api/v1/vaults`. For a ready-made
+set of development Vaults, use `just dev-start` instead (see `AGENTS.md`).
 
 For frontend dev mode:
 
@@ -455,13 +481,9 @@ Set `HATCHDOOR_WEB_BEARER_TOKEN`, bind to `127.0.0.1`, or enable
 `HATCHDOOR_DEMO_MODE=true` for a read-only public demo. This is intentional: a
 non-loopback bind can expose your vault to the network.
 
-### The app starts with a starter vault
+### The app opens with no Vaults, or your notes folder is not in the list
 
-Hatchdoor seeds starter notes only on a first start, and only when the folder
-`VAULT_PATH` points at holds no Markdown files. If you expected an existing
-vault, this almost always means the container mounted an empty directory:
-double-check `HOST_VAULT_PATH` in `.env` isn't a typo or a stale Docker volume
-shadowing the mount.
+A fresh install has no Vaults until you add one: choose **Add your notes** on the setup checklist, or **Settings** → **Add a Vault**. If the folder list is empty or your folder is missing from it, the container almost always mounted an empty directory. Check that `HOST_VAULT_PATH` in `.env` is not a typo and that no stale Docker volume shadows the mount.
 
 For write permission issues, MCP `401`/`403`, git sync problems, and more, see
 [How to troubleshoot common
@@ -508,7 +530,13 @@ npm run build
 
 - [User documentation](https://docs-hatchdoor.battercloud.cc): setup, configuration,
   and day-to-day usage guides for running Hatchdoor, hosted in a Hatchdoor
-  vault itself.
+  vault itself. Its source is [`docs/user-vault`](docs/user-vault), and every
+  install carries the same pages for its own version, in Help and at `/docs/`.
+- [Live demo](https://hatchdoor.battercloud.cc): a public, read-only instance
+  with four example vaults.
+- [Changelog](CHANGELOG.md) and
+  [releases](https://github.com/BatterWorks/Hatchdoor/releases): what changed in
+  each version.
 - [Documentation index](docs/README.md): architecture, collaboration, roadmap,
   research, maintenance, and historical records.
 - [Product roadmap](docs/roadmap/product-roadmap.md): draft overall product direction

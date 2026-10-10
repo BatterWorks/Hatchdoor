@@ -8,11 +8,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::Extension;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
+use tower_http::classify::{
+    ClassifiedResponse, ClassifyResponse, MakeClassifier, NeverClassifyEos,
+    ServerErrorsFailureClass,
+};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{error, info, warn};
@@ -27,12 +31,13 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::GitConfig;
 use crate::handlers::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
-    disable_vault_handler, disconnect_vault_handler, download_transfer_handler, edit_vault_handler,
-    enable_vault_handler, generate_mcp_token_handler, get_settings_handler, health_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, create_folder_handler, create_vault_handler,
+    demo_read_only_response, disable_vault_handler, disconnect_vault_handler, docs_router,
+    download_transfer_handler, edit_vault_handler, enable_vault_handler,
+    generate_mcp_token_handler, get_settings_handler, health_handler, list_folders_handler,
     list_vaults_handler, patch_settings_handler, publish_recovery_branch_handler,
     refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    spa_index_handler, spa_not_found_handler, start_with_no_vaults_handler, sync_vault_handler,
+    spa_index_handler, spa_not_found_handler, spa_note_handler, sync_vault_handler,
     upload_transfer_handler, vault_collection_events_handler, vault_scope_graph_handler,
     vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
     vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
@@ -43,13 +48,14 @@ use crate::handlers::{
     vault_scoped_resolve_batch_handler, vault_scoped_resolve_handler,
     vault_scoped_stats_detail_handler, vault_scoped_update_note_handler,
     vault_scoped_upload_attachment_handler, vault_scoped_write_capabilities_handler,
+    whats_new_handler,
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
 use crate::vault_executor::VaultWorkExecutor;
-use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
+use crate::vault_migration::prepare_registry;
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
 use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
 #[cfg(test)]
@@ -113,10 +119,10 @@ pub fn check_web_auth_posture(
 /// `legacy_git_configured` is `HATCHDOOR_GIT_SYNC_ENABLED` resolving to a
 /// mode. Since #185 that setting drives nothing at runtime, so this is no
 /// longer the refusal that keeps a demo read-only — the registry check in
-/// [`check_demo_mode_registry_posture`] is. It is kept because the operator's
-/// `.env` and Hatchdoor's behaviour disagreeing is worth stopping over, and
-/// because the setting is still live input to the first-boot legacy import,
-/// which would register the Vault it names.
+/// [`check_demo_mode_registry_posture`] is. It is kept because the setting is
+/// still in the settings schema and can still be set in the environment, and
+/// the operator's `.env` and Hatchdoor's behaviour disagreeing is worth
+/// stopping over.
 pub fn check_demo_mode_posture(
     demo_mode: bool,
     mcp_enabled: bool,
@@ -140,42 +146,36 @@ pub fn check_demo_mode_posture(
     Ok(())
 }
 
-/// Refuse to start while per-Vault settings are still set in the environment.
-/// Once the registry owns them, an environment value is silently ignored: the
-/// operator's `.env` and Hatchdoor's actual behavior disagree, and every later
-/// change made in Settings looks overridden by a file that no longer has any
-/// effect. Stopping is the only unambiguous signal.
+/// Name per-Vault settings still set in the environment. Each Vault keeps its
+/// own settings in the registry, so an environment value is ignored: the
+/// operator's `.env` and Hatchdoor's actual behaviour disagree, and a change
+/// made in Settings looks overridden by a line that has no effect.
 ///
 /// `VAULT_PATH` is deliberately absent: Compose sets it on every deployment as
-/// the container's vault mount, so refusing on it would refuse every start.
-fn check_legacy_environment_posture(ignored_environment_keys: &[String]) -> Result<(), String> {
+/// the container's Vault mount, the root the folder picker lists.
+fn legacy_environment_warning(environment_keys: &[String]) -> Option<String> {
     use crate::config::{LegacyVaultEnvironmentKeyKind, legacy_vault_environment_key_kind};
 
-    let migrated: Vec<&str> = ignored_environment_keys
-        .iter()
-        .map(String::as_str)
-        .filter(|key| {
-            legacy_vault_environment_key_kind(key) == Some(LegacyVaultEnvironmentKeyKind::Migrated)
-        })
-        .collect();
-    let retired = ignored_environment_keys
-        .iter()
-        .filter(|key| {
-            legacy_vault_environment_key_kind(key) == Some(LegacyVaultEnvironmentKeyKind::Retired)
-        })
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    if migrated.is_empty() && retired.is_empty() {
-        return Ok(());
+    let named = |kind| {
+        environment_keys
+            .iter()
+            .map(String::as_str)
+            .filter(|key| legacy_vault_environment_key_kind(key) == Some(kind))
+            .collect::<Vec<_>>()
+    };
+    let per_vault = named(LegacyVaultEnvironmentKeyKind::Migrated);
+    let retired = named(LegacyVaultEnvironmentKeyKind::Retired);
+    if per_vault.is_empty() && retired.is_empty() {
+        return None;
     }
 
     let mut message = String::new();
-    if !migrated.is_empty() {
+    if !per_vault.is_empty() {
         message.push_str(&format!(
-            "Hatchdoor has taken these settings over from your .env and stores them itself now: {}. \
-             Remove them from your .env and start Hatchdoor again. To change them from now on, use \
-             Settings, or the edit_vault MCP tool.",
-            migrated.join(", ")
+            "These variables in your .env have no effect, because each Vault keeps its own \
+             settings in Hatchdoor: {}. Remove them from your .env, and change a Vault's \
+             settings in Settings or with the edit_vault MCP tool.",
+            per_vault.join(", ")
         ));
     }
     if !retired.is_empty() {
@@ -187,7 +187,7 @@ fn check_legacy_environment_posture(ignored_environment_keys: &[String]) -> Resu
             retired.join(", ")
         ));
     }
-    Err(message)
+    Some(message)
 }
 
 /// `check_demo_mode_posture` above only inspects the legacy single-vault Git
@@ -257,11 +257,16 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // token/origin, binds its live snapshot, and reapplies the method-aware
     // limit before collecting a request.
     let mcp_body_limit = McpConfig::maximum_request_body_limit();
+    // ADR-45: added to each group below before its web-token layer, so the
+    // token check runs first.
+    let web_activity =
+        axum::middleware::from_fn_with_state(state.usage_report.clone(), record_web_activity);
 
     let model_setup = Router::new()
         .route("/api/model/accept-gemma", post(accept_gemma_handler))
         .route("/api/model/decline-gemma", post(decline_gemma_handler))
-        .route("/api/model/retry", post(retry_model_setup_handler));
+        .route("/api/model/retry", post(retry_model_setup_handler))
+        .layer(web_activity.clone());
     let model_setup = match web_bearer_token.clone() {
         Some(token) => model_setup.layer(axum::middleware::from_fn_with_state(
             WebToken(token),
@@ -296,7 +301,8 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/settings/mcp-token/reveal",
                 post(reveal_mcp_token_handler),
             )
-            .layer(Extension(web_bearer_token.clone()));
+            .layer(Extension(web_bearer_token.clone()))
+            .layer(web_activity.clone());
         match web_bearer_token.clone() {
             Some(token) => settings.layer(axum::middleware::from_fn_with_state(
                 WebToken(token),
@@ -350,10 +356,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/events",
                 get(vault_collection_events_handler),
-            )
-            .route(
-                "/api/v1/vaults/start-with-no-vaults",
-                post(start_with_no_vaults_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}",
@@ -474,7 +476,8 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/search",
                 get(vault_scope_search_handler),
-            );
+            )
+            .layer(web_activity.clone());
         // #109: demo mode publishes every enabled Vault's reads
         // unauthenticated even when this instance also has
         // `HATCHDOOR_WEB_BEARER_TOKEN` configured. Gating the whole group
@@ -572,23 +575,67 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )
         .layer(Extension(mcp_transport.limiter()));
 
+    // ADR-41: the folders under the Vault mount, for the folder picker, and
+    // ADR-44: the one new, empty folder a person may make there. An operator
+    // surface, so demo mode refuses both with `demo_read_only` before the
+    // token check could answer, and otherwise they sit behind the web token
+    // like the rest of the API.
+    let folders = Router::new()
+        .route(
+            "/api/v1/folders",
+            get(list_folders_handler).post(create_folder_handler),
+        )
+        .layer(web_activity.clone());
+    let folders = match web_bearer_token.clone() {
+        _ if state.demo_mode => folders.layer(demo_guard.clone()),
+        Some(token) => folders.layer(axum::middleware::from_fn_with_state(
+            WebToken(token),
+            require_web_token,
+        )),
+        None => folders,
+    };
+
+    // ADR-42: the version record and the release highlights since the last
+    // version. The answer names the running version, so it sits behind the
+    // web token, and demo mode refuses it like the folder listing (ADR-38
+    // decision 6).
+    let whats_new = Router::new()
+        .route("/api/v1/whats-new", get(whats_new_handler))
+        .layer(web_activity);
+    let whats_new = match web_bearer_token.clone() {
+        _ if state.demo_mode => whats_new.layer(demo_guard.clone()),
+        Some(token) => whats_new.layer(axum::middleware::from_fn_with_state(
+            WebToken(token),
+            require_web_token,
+        )),
+        None => whats_new,
+    };
+
+    // ADR-38: the bundled manual as public plain Markdown and `llms.txt`.
+    // Outside every auth layer and mounted in demo mode too, like `/health`;
+    // the web token only decides whether private pages are served.
+    let docs = docs_router(web_bearer_token.clone());
+
     Router::new()
         .route("/health", get(health_handler))
-        .route("/ready", get(readiness_handler))
+        .route(READINESS_PATH, get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
+        .merge(docs)
         .merge(model_setup)
         .merge(settings)
         .merge(vaults_v1)
         .merge(vault_assets)
         .merge(vault_attachment)
         .merge(transfers)
+        .merge(folders)
+        .merge(whats_new)
         .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
         // when multiple Vaults contain the same slug. The legacy slug-only
         // `/n/{slug}` route is retired in #101 along with the rest of the
         // unscoped API — frontend consumption of this route is #67.
-        .route("/v/{vault_id}/n/{slug}", get(spa_index_handler))
+        .route("/v/{vault_id}/n/{slug}", get(spa_note_handler))
         .route("/stats", get(spa_index_handler))
         .route("/graph", get(spa_index_handler))
         .route("/settings", get(spa_index_handler))
@@ -605,9 +652,12 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         // An address no route or built file matches still loads the app, which
         // renders its own not-found state (#302); the reserved prefixes keep a
         // bare 404.
-        .fallback_service(ServeDir::new("frontend/dist").fallback(get(spa_not_found_handler)))
+        .fallback_service(
+            ServeDir::new("frontend/dist")
+                .fallback(get(spa_not_found_handler).with_state(state.clone())),
+        )
         .layer(
-            TraceLayer::new_for_http()
+            TraceLayer::new(MakeFailureClassifier)
                 // Custom span so the URI logged never contains the raw web token
                 // that `<img>`/download URLs may carry as ?access_token=..., nor
                 // a transfer link's ?signature=...
@@ -621,11 +671,57 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 })
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            reject_startup_recovery_mutation,
-        ))
         .with_state(state)
+}
+
+const READINESS_PATH: &str = "/ready";
+
+/// Which responses the trace layer logs as failed, at `ERROR`: every 5xx
+/// except the readiness probe's `503`. An installing agent polls `/ready`
+/// until it answers `200`, so that answer is expected during startup (#472).
+#[derive(Clone, Copy)]
+struct MakeFailureClassifier;
+
+impl MakeClassifier for MakeFailureClassifier {
+    type Classifier = FailureClassifier;
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn make_classifier<B>(&self, request: &axum::http::Request<B>) -> Self::Classifier {
+        FailureClassifier {
+            readiness_probe: request.uri().path() == READINESS_PATH,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FailureClassifier {
+    readiness_probe: bool,
+}
+
+impl ClassifyResponse for FailureClassifier {
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn classify_response<B>(
+        self,
+        response: &axum::http::Response<B>,
+    ) -> ClassifiedResponse<Self::FailureClass, Self::ClassifyEos> {
+        let status = response.status();
+        let expected = self.readiness_probe && status == StatusCode::SERVICE_UNAVAILABLE;
+        if status.is_server_error() && !expected {
+            ClassifiedResponse::Ready(Err(ServerErrorsFailureClass::StatusCode(status)))
+        } else {
+            ClassifiedResponse::Ready(Ok(()))
+        }
+    }
+
+    fn classify_error<E>(self, error: &E) -> Self::FailureClass
+    where
+        E: std::fmt::Display + 'static,
+    {
+        ServerErrorsFailureClass::Error(error.to_string())
+    }
 }
 
 /// The request URI as the trace span records it: the path, and the query with
@@ -636,47 +732,6 @@ fn traced_uri(uri: &axum::http::Uri) -> String {
         Some(query) => format!("{}?{}", uri.path(), crate::auth::redact_query_token(query)),
         None => uri.path().to_string(),
     }
-}
-
-/// Environment-cleanup recovery keeps liveness and read-only explanation
-/// surfaces reachable, but it is not an alternate operating mode. Refuse all
-/// state-changing HTTP requests until the operator removes the named keys
-/// and restarts, regardless of which inner router would otherwise own them.
-///
-/// `/mcp` is exempt (#327). Streamable HTTP MCP sends the handshake, the
-/// discovery and list calls, and every read tool as a POST, so a method-based
-/// guard would kill the whole surface with a body its JSON-RPC framing cannot
-/// parse. The MCP tool dispatcher applies the same refusal per tool instead,
-/// as a structured `legacy_environment_cleanup_required` tool error
-/// (`mcp::tools::environment_cleanup_refusal`), and the transport's own auth
-/// and Origin checks still run first.
-async fn reject_startup_recovery_mutation(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let is_exempt = matches!(
-        *request.method(),
-        Method::GET | Method::HEAD | Method::OPTIONS
-    ) || request.uri().path() == "/mcp";
-    let recovery = state
-        .legacy_migration_recovery
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    if !is_exempt
-        && let Some(recovery) = recovery
-        && !recovery.can_start_with_no_vaults()
-    {
-        return crate::handlers::vaults::VaultApiError::new(
-            "legacy_environment_cleanup_required",
-            recovery.message(),
-            None,
-            false,
-        )
-        .respond(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    next.run(request).await
 }
 
 async fn startup_status_handler(State(state): State<AppState>) -> Response {
@@ -799,9 +854,14 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) -> b
     true
 }
 
+/// The name the startup status gives the model being downloaded or loaded.
+fn startup_model_name(selected: SelectedModel) -> &'static str {
+    selected.id().unwrap_or("search model")
+}
+
 fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
     let tracker = state.startup.clone();
-    let model_name = selected.id().unwrap_or("search model");
+    let model_name = startup_model_name(selected);
     tracker.set_downloading(model_name, None, None);
     info!(
         model = model_name,
@@ -830,22 +890,32 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                         };
                         model_setup.fetch_gemma_at_pinned_revision(progress)?;
                     }
-                    match selected {
-                        SelectedModel::Gemma => Ok(Arc::new(
-                            FastembedEmbedder::embedding_gemma_300m_q4_in(model_dir.clone())?,
-                        )),
-                        SelectedModel::Nomic => Ok(Arc::new(FastembedEmbedder::nomic_v1_5_in(
-                            model_dir.clone(),
-                        )?)),
-                        SelectedModel::TermsRequired => {
-                            Err("model terms have not been accepted".to_string())
-                        }
-                    }
+                    // The load covers recording the files' digests, which
+                    // reads every model file again and is as slow as the load
+                    // itself on a slow share.
+                    log_model_load(
+                        selected,
+                        MODEL_STILL_LOADING_EVERY,
+                        || -> Result<Arc<dyn Embedder>, String> {
+                            let embedder: Arc<dyn Embedder> = match selected {
+                                SelectedModel::Gemma => {
+                                    Arc::new(FastembedEmbedder::embedding_gemma_300m_q4_in(
+                                        model_dir.clone(),
+                                    )?)
+                                }
+                                SelectedModel::Nomic => {
+                                    Arc::new(FastembedEmbedder::nomic_v1_5_in(model_dir.clone())?)
+                                }
+                                SelectedModel::TermsRequired => {
+                                    return Err("model terms have not been accepted".to_string());
+                                }
+                            };
+                            model_setup.record_integrity(selected)?;
+                            Ok(embedder)
+                        },
+                    )
                 })();
-                match loaded.and_then(|embedder| {
-                    model_setup.record_integrity(selected)?;
-                    Ok(embedder)
-                }) {
+                match loaded {
                     Ok(embedder) => {
                         runtime.set(embedder, selected == SelectedModel::Gemma);
                         return Ok(());
@@ -865,20 +935,7 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
         .await;
 
         match load_result {
-            Ok(Ok(())) => {
-                // Lifecycle reconstruction may have queued Index work before
-                // the shared embedder finished loading. Re-request every
-                // active Vault through the same coalescing FIFO now that its
-                // candidate snapshots can be built.
-                for vault_id in state.vaults.active_vault_ids() {
-                    state.vault_work.request(vault_id, VaultWorkKind::Index);
-                }
-                // The Vault collection owns indexing now. Its Index turn
-                // publishes a structure-only generation before embedding, so
-                // browsing becomes available without a second, legacy
-                // single-Vault build contending for the same SQLite writer.
-                tracker.set_scanning();
-            }
+            Ok(Ok(())) => finish_model_setup(&state),
             Ok(Err(error)) => {
                 state.model_setup_started.store(false, Ordering::Release);
                 tracker.set_model_setup_failed();
@@ -891,6 +948,88 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
             }
         }
     });
+}
+
+/// How often a load that has not finished says so. A load takes seconds on a
+/// local disk and can take many minutes on a slow share (#469), where silence
+/// reads as a hang.
+const MODEL_STILL_LOADING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one model load with a log line when it starts, one every
+/// `still_loading_every` while it runs, and one with the duration when it
+/// succeeds. `still_loading_every` is a parameter so a test need not wait. A failed load is left to the caller, which logs the error.
+fn log_model_load<T>(
+    selected: SelectedModel,
+    still_loading_every: std::time::Duration,
+    load: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let model_name = startup_model_name(selected);
+    if selected == SelectedModel::Gemma {
+        info!(model = model_name, "Search model downloaded, loading it");
+    } else {
+        // FastEmbed fetches Nomic inside the same call that loads it.
+        info!(
+            model = model_name,
+            "Loading search model, after downloading it if it is not on disk yet"
+        );
+    }
+    let started = std::time::Instant::now();
+    let elapsed = || format!("{:.1}s", started.elapsed().as_secs_f64());
+    // The reporting thread starts with no subscriber of its own when the
+    // caller set one per thread, so it is carried across.
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let loaded = std::thread::scope(|scope| {
+        let (dispatch, elapsed) = (&dispatch, &elapsed);
+        scope.spawn(move || {
+            let _dispatch = tracing::dispatcher::set_default(dispatch);
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                done_rx.recv_timeout(still_loading_every)
+            {
+                info!(
+                    model = model_name,
+                    elapsed = elapsed(),
+                    "Search model is still loading"
+                );
+            }
+        });
+        // Owned by this closure so that a panicking load still drops it and
+        // lets the reporting thread end.
+        let _done = done_tx;
+        load()
+    });
+    if loaded.is_ok() {
+        info!(
+            model = model_name,
+            elapsed = elapsed(),
+            "Search model loaded"
+        );
+    }
+    loaded
+}
+
+/// What a loaded search model hands over to: the Vault collection's indexing,
+/// and startup readiness when nothing is left to index.
+fn finish_model_setup(state: &AppState) {
+    // Lifecycle reconstruction may have queued Index work before the shared
+    // embedder finished loading. Re-request every active Vault through the
+    // same coalescing FIFO now that its candidate snapshots can be built.
+    for vault_id in state.vaults.active_vault_ids() {
+        state.vault_work.request(vault_id, VaultWorkKind::Index);
+    }
+    // The Vault collection owns indexing now. Its Index turn publishes a
+    // structure-only generation before embedding, so browsing becomes
+    // available without a second, legacy single-Vault build contending for
+    // the same SQLite writer.
+    state.startup.set_scanning();
+    // With no active Vault no Index turn follows to settle startup, so it is
+    // asked here (#453).
+    crate::vault_executor::settle_startup(
+        &state.startup,
+        &state.vaults,
+        &state.vault_registry,
+        &state.model_setup_started,
+    );
 }
 
 async fn reject_demo_model_setup(
@@ -921,6 +1060,44 @@ async fn reject_demo_mutation(
         return demo_read_only_response();
     }
     next.run(request).await
+}
+
+/// ADR-45: note that a web request arrived, for the usage report's
+/// `web_active_7d`. Layered inside the web-token check of each route group
+/// that check protects, so it sees a request only once it has been let in,
+/// and sees it just the same on an install with no token. It keeps the day
+/// and nothing about the request, and does nothing while the report is off.
+async fn record_web_activity(
+    State(usage_report): State<Arc<crate::usage_report::UsageReport>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if usage_report.observe_web_request(std::time::SystemTime::now()) {
+        tokio::task::spawn_blocking(move || usage_report.save());
+    }
+    next.run(request).await
+}
+
+/// An install counts as existing when a Vault registry or stored settings are
+/// already on disk; with neither, this is a fresh install. Read before startup
+/// can write a registry (ADR-40 decision 6).
+fn is_existing_install(registry_path: &std::path::Path, settings_path: &std::path::Path) -> bool {
+    registry_path.exists() || settings_path.exists()
+}
+
+/// Record this start in the instance state and return the version record.
+fn record_instance_start(
+    store: &crate::instance_state::InstanceStateStore,
+    existing_install: bool,
+) -> crate::instance_state::VersionRecord {
+    let record = store.record_start(&crate::config::version_string(), existing_install);
+    info!(
+        current = %record.current,
+        previous = record.previous.as_deref().unwrap_or("none"),
+        fresh_install = record.fresh_install.as_deref().unwrap_or("no"),
+        "Instance version record"
+    );
+    record
 }
 
 pub async fn run_server() {
@@ -998,9 +1175,6 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    // Migration may persist the registry and discard a recognized legacy
-    // cache, so run it only after startup security/configuration refusals and
-    // before opening SQLite.
     // The registry fences its own state directory off Vault roots; the cache
     // directory and the settings file's directory are instance state too, so
     // no Vault may contain or sit inside them either (#325).
@@ -1018,91 +1192,43 @@ pub async fn run_server() {
                 }
             }),
     );
-    let legacy_vault_path = match &config.vault_source {
-        VaultSource::Local { vault_path } => vault_path.clone(),
-    };
-    let migration = migrate_legacy_vault(
-        &vault_registry,
-        &runtime_config,
-        LegacyMigrationInput {
-            vault_path: legacy_vault_path,
-            cache_db_path: config.cache_db_path.clone(),
-            environment: std::env::vars().collect(),
-        },
-    )
-    .unwrap_or_else(|error| {
-        error!("Legacy Vault migration failed: {error}");
-        std::process::exit(1);
-    });
-    let (registry_state, legacy_migration_recovery) = match migration {
-        LegacyMigrationOutcome::NoLegacyDeployment => (
-            vault_registry.load().unwrap_or_else(|error| {
-                error!("Vault registry startup failed: {error}");
-                std::process::exit(1);
-            }),
-            None,
-        ),
-        LegacyMigrationOutcome::ExistingRegistry {
-            state,
-            ignored_environment_keys,
-        } => {
-            let recovery = check_legacy_environment_posture(&ignored_environment_keys)
-                .err()
-                .map(crate::vault_migration::LegacyMigrationRecovery::environment_cleanup);
-            if let Some(recovery) = &recovery {
-                warn!(
-                    code = recovery.code(),
-                    message = recovery.message(),
-                    "Legacy environment cleanup requires an operator restart"
-                );
-            }
-            (state, recovery)
-        }
-        LegacyMigrationOutcome::Imported {
-            snapshot,
-            vault_id,
-            cleanup_warnings,
-            ignored_environment_keys,
-        } => {
-            info!(%vault_id, "Imported legacy deployment into the Vault registry");
-            for warning in cleanup_warnings {
-                warn!("{warning}");
-            }
-            let recovery = check_legacy_environment_posture(&ignored_environment_keys)
-                .err()
-                .map(|message| {
-                    crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(format!(
-                        "Your Vault was imported successfully. {message}"
-                    ))
-                });
-            if let Some(recovery) = &recovery {
-                warn!(
-                    code = recovery.code(),
-                    message = recovery.message(),
-                    "Imported Vault is waiting for legacy environment cleanup and restart"
-                );
-            }
-            (VaultRegistryState::Ready(snapshot), recovery)
-        }
-        LegacyMigrationOutcome::Recovery {
-            recovery,
-            ignored_environment_keys,
-        } => {
-            warn!(
-                code = recovery.code(),
-                message = recovery.message(),
-                keys = ?ignored_environment_keys,
-                "Legacy Vault migration requires operator recovery"
-            );
-            (
-                vault_registry.load().unwrap_or_else(|error| {
-                    error!("Vault registry startup failed: {error}");
-                    std::process::exit(1);
-                }),
-                Some(recovery),
-            )
-        }
-    };
+    // The registry step below may write an empty registry, so it runs only
+    // after the security and configuration refusals above.
+    // ADR-40 decision 6: whether this install existed is read before anything
+    // below can write a registry, so a registry or settings file on disk still
+    // means an install that existed before this start.
+    let existing_install = is_existing_install(vault_registry.path(), &settings_path);
+    // ADR-40: a start with no registry writes an empty one, whatever
+    // `VAULT_PATH` holds; an install from 2.4.x or earlier refuses instead,
+    // before this start is recorded, so a refusal writes nothing.
+    let registry_state =
+        prepare_registry(&vault_registry, &runtime_config).unwrap_or_else(|error| {
+            error!("Vault registry startup failed: {error}");
+            std::process::exit(1);
+        });
+    let instance_state =
+        crate::instance_state::InstanceStateStore::beside_registry(vault_registry.path());
+    let instance_versions = Arc::new(record_instance_start(&instance_state, existing_install));
+    // One store for every section, so their writes share its lock (#426).
+    let agent_connections = Arc::new(crate::instance_state::AgentConnectionLog::load(
+        instance_state.clone(),
+    ));
+    // ADR-45: the usage report's install ID exists only while its setting is
+    // on. The setting can change through the environment at a restart, so
+    // the section is brought in line here as well as after a settings save.
+    let usage_report = Arc::new(crate::usage_report::UsageReport::new(
+        instance_state.clone(),
+        runtime_config.clone(),
+        config.demo_mode,
+    ));
+    usage_report.reconcile();
+    let environment_keys = std::env::vars()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    if let Some(message) = legacy_environment_warning(&environment_keys) {
+        warn!("{message}");
+    }
 
     if let VaultRegistryState::Ready(snapshot) = &registry_state
         && let Err(message) = check_demo_mode_registry_posture(config.demo_mode, snapshot)
@@ -1110,8 +1236,6 @@ pub async fn run_server() {
         error!("{message}");
         std::process::exit(1);
     }
-
-    let startup_recovery_active = legacy_migration_recovery.is_some();
 
     let sqlite = Arc::new(
         SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
@@ -1168,32 +1292,27 @@ pub async fn run_server() {
             ),
         ),
     ));
-    match (&registry_state, legacy_migration_recovery.as_ref()) {
-        (_, Some(recovery)) => warn!(
-            code = recovery.code(),
-            "Startup recovery is active; no Vault runtimes were activated"
-        ),
-        (VaultRegistryState::Ready(snapshot), None) => {
+    match &registry_state {
+        VaultRegistryState::Ready(snapshot) => {
             vaults
                 .reconcile_and_reconstruct(&vault_registry, snapshot, &vault_work, &managed_git)
                 .await
         }
-        (VaultRegistryState::Recovery(recovery), None) => warn!(
+        VaultRegistryState::Recovery(recovery) => warn!(
             message = recovery.message(),
             "Vault registry requires operator recovery; no Vault runtimes were activated"
         ),
     }
     let runtime = VaultRuntime::new(config.vault_source.clone());
     let startup = StartupTracker::new(runtime);
-    if startup_recovery_active {
-        startup.runtime().set_unavailable(
-            "startup_recovery_required",
-            "Startup recovery is required before Vaults can be activated",
-        );
-    } else if selected_model == SelectedModel::TermsRequired {
+    if selected_model == SelectedModel::TermsRequired {
         startup.set_terms_required();
     } else {
-        startup.set_scanning();
+        // A selected model is not set up until it has loaded, which
+        // `spawn_model_startup` below starts. Reading as set up before then
+        // would let an instance with nothing to index settle `Ready` without
+        // a search model (#453).
+        startup.set_downloading(startup_model_name(selected_model), None, None);
     }
     let commit_cooldown = Arc::new(crate::git::CommitCooldown::new());
     let shutdown_vaults = vaults.clone();
@@ -1203,7 +1322,6 @@ pub async fn run_server() {
         vault_work: vault_work.clone(),
         managed_git: managed_git.clone(),
         commit_cooldown: commit_cooldown.clone(),
-        legacy_migration_recovery: Arc::new(std::sync::RwLock::new(legacy_migration_recovery)),
         startup_sqlite: sqlite.clone(),
         mcp_tools_changed,
         embedder,
@@ -1215,6 +1333,12 @@ pub async fn run_server() {
         runtime_config,
         startup,
         transfer_links: Default::default(),
+        vault_mount_root: match &config.vault_source {
+            VaultSource::Local { vault_path } => vault_path.clone(),
+        },
+        instance_versions,
+        agent_connections,
+        usage_report,
         shutdown: Default::default(),
     };
 
@@ -1261,6 +1385,15 @@ pub async fn run_server() {
             }
         }
     });
+    // Startup readiness is also asked when the collection changes: the last
+    // Vault still in its first index can leave the active set (#453).
+    let startup_settle_task =
+        tokio::spawn(crate::vault_executor::settle_startup_on_collection_changes(
+            state.startup.clone(),
+            state.vaults.clone(),
+            state.vault_registry.clone(),
+            state.model_setup_started.clone(),
+        ));
     let watcher_index_task = watcher_changes.map(|mut changes| {
         let watcher_work = vault_work.clone();
         let watcher_vaults = state.vaults.clone();
@@ -1276,6 +1409,26 @@ pub async fn run_server() {
     });
     let scheduler_tick_task =
         crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
+    // ADR-39: the opt-in daily check for a newer release. The task reads the
+    // setting on every tick, so it runs whenever the setting is on; a demo
+    // instance never starts it.
+    let update_check_task = (!config.demo_mode).then(|| {
+        crate::update_check::spawn(
+            crate::update_check::UpdateChecker::new(
+                state.runtime_config.clone(),
+                instance_state,
+                crate::update_check::github_latest_release(),
+            ),
+            state.shutdown.clone(),
+        )
+    });
+    // ADR-45: the opt-in daily usage report. Like the update check, the task
+    // reads the setting on every tick and a demo instance never starts it.
+    let usage_report_task = crate::usage_report::spawn(
+        crate::usage_report::Reporter::new(state.clone(), crate::usage_report::collector()),
+        config.demo_mode,
+        state.shutdown.clone(),
+    );
     // Lets a Vault whose commit failed resume committing on its own once its
     // cooldown elapses, instead of waiting for the operator's next save.
     let commit_cooldown_tick_task = crate::git::spawn_commit_cooldown_tick(
@@ -1310,7 +1463,7 @@ pub async fn run_server() {
     // Startup deliberately spawns no watcher of its own: audit findings
     // C01-F02/C01-F03 were detached replacement watchers accumulating from
     // exactly that, with no handle to cancel.
-    if !startup_recovery_active && selected_model != SelectedModel::TermsRequired {
+    if selected_model != SelectedModel::TermsRequired {
         spawn_model_startup(state.clone(), selected_model);
     }
 
@@ -1327,6 +1480,13 @@ pub async fn run_server() {
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
     commit_cooldown_tick_task.abort();
+    startup_settle_task.abort();
+    if let Some(task) = update_check_task {
+        task.abort();
+    }
+    if let Some(task) = usage_report_task {
+        task.abort();
+    }
     if let Some(task) = watcher_index_task {
         task.abort();
     }
@@ -1416,21 +1576,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compose_vault_path_alone_never_refuses_a_start() {
-        // Every Compose deployment sets VAULT_PATH; refusing on it would
-        // refuse every one of them.
-        check_legacy_environment_posture(&["VAULT_PATH".to_string()])
-            .expect("VAULT_PATH is not a per-Vault setting");
+    fn compose_vault_path_alone_is_never_warned_about() {
+        // Every Compose deployment sets VAULT_PATH, as the root the folder
+        // picker lists; warning on it would warn on every one of them.
+        assert_eq!(
+            legacy_environment_warning(&["VAULT_PATH".to_string()]),
+            None
+        );
     }
 
     #[test]
-    fn a_settled_registry_refuses_to_start_beside_stale_per_vault_variables() {
-        let message = check_legacy_environment_posture(&[
+    fn per_vault_variables_left_in_the_environment_are_named() {
+        let message = legacy_environment_warning(&[
             "VAULT_PATH".to_string(),
             "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
             "HATCHDOOR_EXCLUDE".to_string(),
         ])
-        .expect_err("stale per-Vault variables refuse the start");
+        .expect("stale per-Vault variables are named");
         assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
         assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
         assert!(!message.contains("VAULT_PATH"), "{message}");
@@ -1438,15 +1600,11 @@ mod tests {
     }
 
     #[test]
-    fn a_retired_debounce_variable_is_named_as_obsolete_rather_than_migrated() {
-        let message =
-            check_legacy_environment_posture(&["HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string()])
-                .expect_err("an obsolete variable still has to go");
-        assert!(
-            message.contains("no longer does anything"),
-            "a retired setting must not be described as taken over: {message}"
-        );
-        assert!(!message.contains("taken these settings over"), "{message}");
+    fn a_retired_debounce_variable_is_named_as_obsolete() {
+        let message = legacy_environment_warning(&["HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string()])
+            .expect("an obsolete variable still has to go");
+        assert!(message.contains("no longer does anything"), "{message}");
+        assert!(!message.contains("each Vault keeps its own"), "{message}");
     }
 
     #[tokio::test]
@@ -1926,12 +2084,64 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use std::time::Duration;
+
     use tempfile::TempDir;
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
+
+    use crate::config::log_capture::CapturedLogs;
+
+    #[test]
+    fn a_model_load_logs_its_start_its_progress_and_its_duration() {
+        let logs = CapturedLogs::default();
+        let loaded =
+            tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::INFO), || {
+                log_model_load(SelectedModel::Gemma, Duration::from_millis(20), || {
+                    std::thread::sleep(Duration::from_millis(150));
+                    Ok(7)
+                })
+            });
+        assert_eq!(loaded, Ok(7));
+
+        let lines = logs.lines();
+        assert!(lines.iter().all(|line| line.contains("INFO")), "{lines:?}");
+        assert!(
+            lines[0].contains("Search model downloaded, loading it")
+                && lines[0].contains("EmbeddingGemma 300M Q4"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1..lines.len() - 1]
+                .iter()
+                .any(|line| line.contains("Search model is still loading")
+                    && line.contains("elapsed")),
+            "{lines:?}"
+        );
+        let last = lines.last().expect("a loaded line");
+        assert!(
+            last.contains("Search model loaded") && last.contains("elapsed"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_model_load_is_not_logged_as_loaded() {
+        let logs = CapturedLogs::default();
+        let loaded: Result<(), String> =
+            tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::INFO), || {
+                log_model_load(SelectedModel::Nomic, Duration::from_secs(60), || {
+                    Err("no such file".to_string())
+                })
+            });
+        assert_eq!(loaded, Err("no such file".to_string()));
+
+        let lines = logs.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("Loading search model"), "{lines:?}");
+    }
 
     fn app_for_tests() -> (Router, TempDir) {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -1988,7 +2198,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
@@ -2000,6 +2209,10 @@ mod tests {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: tmp.path().join("mount"),
+            instance_versions: Default::default(),
+            agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -2072,7 +2285,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
@@ -2084,6 +2296,10 @@ mod tests {
             runtime_config,
             startup: StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
+            agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
 
@@ -4132,105 +4348,6 @@ mod tests {
             .expect("initialize issues Mcp-Session-Id")
     }
 
-    /// #327: environment-cleanup recovery used to refuse every POST, so the
-    /// whole MCP surface, handshake included, answered with a bare 503 body
-    /// no JSON-RPC client can parse. `/mcp` now reaches the dispatcher, which
-    /// serves the reads and refuses each state-changing tool with the same
-    /// structured code the HTTP API uses.
-    #[tokio::test]
-    async fn environment_cleanup_recovery_answers_mcp_in_json_rpc_with_a_structured_code() {
-        let (_unused_app, _tmp, state) = app_for_tests_with_state();
-        state
-            .runtime_config
-            .save([
-                ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
-                (
-                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
-                    "true".to_string(),
-                ),
-                (
-                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
-                    "mcp-secret".to_string(),
-                ),
-            ])
-            .expect("configure write-enabled MCP");
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") = Some(
-            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
-                "Remove HATCHDOOR_EXCLUDE and restart.",
-            ),
-        );
-        let app = build_router(state, None);
-
-        // The handshake is a POST and must still succeed.
-        initialize_mcp_session(&app, "mcp-secret").await;
-
-        // Discovery explains the recovery.
-        let listed = mcp_tool_call(&app, "mcp-secret", "list_vaults", serde_json::json!({})).await;
-        assert_eq!(listed["result"]["isError"], false, "{listed}");
-        assert_eq!(
-            listed["result"]["structuredContent"]["legacy_migration_recovery"]["code"],
-            "legacy_environment_cleanup_required"
-        );
-
-        // Every state-changing tool is refused with the structured code.
-        let vault_id = crate::vault_registry::VaultId::generate()
-            .expect("generate Vault id")
-            .to_string();
-        for (name, arguments) in [
-            (
-                "create_vault",
-                serde_json::json!({"name": "New", "source": {"kind": "local", "path": "/tmp/x"}}),
-            ),
-            (
-                "create_note",
-                serde_json::json!({"vault_id": vault_id, "relative_path": "A.md", "content": "x"}),
-            ),
-            ("accept_gemma_terms", serde_json::json!({})),
-        ] {
-            let refused = mcp_tool_call(&app, "mcp-secret", name, arguments).await;
-            assert!(refused.get("error").is_none(), "{name}: {refused}");
-            assert_eq!(refused["result"]["isError"], true, "{name}: {refused}");
-            assert_eq!(
-                refused["result"]["structuredContent"]["code"],
-                "legacy_environment_cleanup_required",
-                "{name}: {refused}"
-            );
-        }
-
-        // A batch's write items are refused the same way, item by item.
-        let batch = mcp_tool_call(
-            &app,
-            "mcp-secret",
-            "batch",
-            serde_json::json!({"operations": [{"op": "create_note", "arguments": {
-                "vault_id": vault_id, "relative_path": "A.md", "content": "x"
-            }}]}),
-        )
-        .await;
-        assert_eq!(
-            batch["result"]["structuredContent"]["items"][0]["error"]["code"],
-            "legacy_environment_cleanup_required",
-            "{batch}"
-        );
-
-        // Non-MCP mutations keep the HTTP refusal.
-        let http = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(http.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
     #[tokio::test]
     async fn mcp_route_accepts_an_authenticated_write_request_above_axums_default_limit() {
         // Axum's default request-body limit is 2 MiB. A valid write-enabled MCP
@@ -4343,6 +4460,105 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// ADR-38: the public manual routes answer without a token on an
+    /// instance that has one, and serve the bundled manual and nothing else:
+    /// no Vault name or path, no setting, no token.
+    #[tokio::test]
+    async fn public_manual_routes_answer_without_a_token_and_reveal_nothing_of_the_instance() {
+        let web_token = "docs-route-web-token";
+        let mcp_token = "docs-route-mcp-token";
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from(web_token)),
+            Some(mcp_token.to_string()),
+            true,
+        );
+        let vault_root = tmp.path().join("zanzibar-private-notes");
+        create_vault_with_files_using_token(
+            &app,
+            "Zanzibar Private Notes",
+            &vault_root,
+            &[("Qwyzzle.md", "# Qwyzzle\n\nThe git launch plan.\n")],
+            0,
+            Some(web_token),
+        )
+        .await;
+
+        let secrets = [
+            "Zanzibar".to_string(),
+            vault_root.to_string_lossy().into_owned(),
+            tmp.path().to_string_lossy().into_owned(),
+            web_token.to_string(),
+            mcp_token.to_string(),
+            "Qwyzzle".to_string(),
+        ];
+        for uri in [
+            "/llms.txt",
+            "/docs/index.md",
+            "/docs/deploy.md",
+            "/docs/home.md",
+            "/docs/concepts/the-security-model.md",
+            "/docs/search?q=git",
+            "/docs/search?q=zanzibar%20qwyzzle",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body = String::from_utf8_lossy(&body);
+            for secret in &secrets {
+                assert!(!body.contains(secret.as_str()), "{uri} reveals {secret}");
+            }
+        }
+
+        // The Vault routes beside them still want the token.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn public_manual_routes_answer_in_demo_mode() {
+        for web_token in [None, Some(Arc::from("demo-web-token"))] {
+            let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(web_token, true);
+            for uri in [
+                "/llms.txt",
+                "/docs/index.md",
+                "/docs/deploy.md",
+                "/docs/search?q=git",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -4639,6 +4855,189 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ready_probe_answered_not_ready_logs_no_error_or_warning() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state.startup.set_scanning();
+        let app = build_router(state, None);
+        let logs = CapturedLogs::default();
+        let response = {
+            // Debug, so the capture also holds the line every answered request
+            // logs: an empty capture would prove nothing about the levels above.
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch(tracing::Level::DEBUG));
+            app.oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"not ready");
+        let lines = logs.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("finished processing request") && line.contains("503")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("ERROR") || line.contains("WARN")),
+            "{lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_probe_exemption_leaves_other_server_errors_logged_as_errors() {
+        // The same status the readiness probe answers with, from a route that
+        // is not the probe: a Vault whose directory has gone missing.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("materializing");
+        let vault_id = create_vault_with_files(&app, "Materializing", &vault_root, &[], 0).await;
+        std::fs::remove_dir_all(&vault_root).expect("remove vault directory");
+        let logs = CapturedLogs::default();
+        let response = {
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch(tracing::Level::INFO));
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/assets/diagram.png"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let lines = logs.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("ERROR") && line.contains("503")),
+            "{lines:?}"
+        );
+    }
+
+    async fn ready_status(state: &AppState) -> StatusCode {
+        build_router(state.clone(), None)
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn startup_state(state: &AppState) -> String {
+        let response = build_router(state.clone(), None)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/startup-status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        payload["state"].as_str().expect("state").to_string()
+    }
+
+    /// A fresh install has no Vaults (ADR-40), so no Index turn follows model
+    /// setup. `/ready` turns 200 when the model has loaded (#453).
+    #[tokio::test]
+    async fn ready_endpoint_turns_ready_after_model_setup_with_no_vaults() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state.startup.set_terms_required();
+        assert_eq!(ready_status(&state).await, StatusCode::SERVICE_UNAVAILABLE);
+        state
+            .startup
+            .set_downloading("EmbeddingGemma 300M Q4", None, None);
+        assert_eq!(ready_status(&state).await, StatusCode::SERVICE_UNAVAILABLE);
+
+        finish_model_setup(&state);
+
+        assert_eq!(ready_status(&state).await, StatusCode::OK);
+        assert_eq!(startup_state(&state).await, "ready");
+        assert!(
+            !state.model_setup_started.load(Ordering::Acquire),
+            "the model-setup claim is released, as it is when a Vault's first index settles"
+        );
+    }
+
+    /// The first Vault added after readiness does not take the instance back
+    /// out of it: `/ready` stays 200 while that Vault indexes (#453, #326).
+    #[tokio::test]
+    async fn ready_endpoint_stays_ready_when_the_first_vault_is_added() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        state.startup.set_downloading("search model", None, None);
+        finish_model_setup(&state);
+        assert_eq!(ready_status(&state).await, StatusCode::OK);
+
+        let vault_id = create_vault_with_files(
+            &app,
+            "First",
+            &tmp.path().join("first"),
+            &[("One.md", "# One\n\nfirst note")],
+            0,
+        )
+        .await;
+        assert_eq!(state.vaults.active_vault_ids().len(), 1);
+        assert_eq!(
+            ready_status(&state).await,
+            StatusCode::OK,
+            "{vault_id} has not indexed yet, and the instance is still ready"
+        );
+
+        // Its first Index turn, run the way the dispatch loop runs it.
+        let executor = VaultWorkExecutor::from_state(&state);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.run_next(|request| executor.run(request)),
+        )
+        .await
+        .expect("the new Vault's Index turn is queued")
+        .expect("Index turn");
+        executor.publish_outcome(&outcome);
+        outcome.result.expect("Index turn succeeds");
+
+        assert_eq!(ready_status(&state).await, StatusCode::OK);
+        assert_eq!(startup_state(&state).await, "ready");
+    }
+
+    /// A registry that needs operator recovery activates no Vault and can
+    /// serve nothing: `/ready` keeps answering 503 after the model loads, so
+    /// a waiting script does not carry on (#453).
+    #[tokio::test]
+    async fn ready_endpoint_stays_not_ready_while_the_registry_needs_recovery() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        let registry_path = state.vault_registry.path().to_path_buf();
+        std::fs::create_dir_all(registry_path.parent().expect("state directory"))
+            .expect("create state directory");
+        std::fs::write(&registry_path, "not a registry").expect("write a corrupt registry");
+        assert!(matches!(
+            state.vault_registry.load().expect("load registry"),
+            VaultRegistryState::Recovery(_)
+        ));
+        state.startup.set_downloading("search model", None, None);
+
+        finish_model_setup(&state);
+
+        assert_eq!(ready_status(&state).await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(startup_state(&state).await, "scanning");
     }
 
     /// Once the collection has settled, a later Index turn's progress is one
@@ -5160,9 +5559,8 @@ mod tests {
     }
 
     /// #185 deleted the instance-wide Git lane, so the legacy
-    /// `HATCHDOOR_GIT_SYNC_ENABLED` key is a first-boot import input with no
-    /// runtime reader. Saving it still persists (the legacy importer reads
-    /// it) but must no longer ask for a consequence confirmation and must no
+    /// `HATCHDOOR_GIT_SYNC_ENABLED` key has no runtime reader. Saving it still
+    /// persists (it stays in the settings schema) but must no longer ask for a consequence confirmation and must no
     /// longer create a repository as a side effect of a settings save.
     #[tokio::test]
     async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
@@ -5523,6 +5921,60 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(!vault_root.join("Attachments/limited.png").exists());
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_note_read_carries_frontmatter_metadata() {
+        // The mapping proof that the HTTP read serialises the metadata the
+        // read core fills (#521); the three cases are asserted at the core.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &tmp.path().join("notes"),
+            &[
+                (
+                    "Home.md",
+                    "---\ntags: [Project/Active]\naliases: [Base]\ndue: 2026-09-01\n---\n# Home\n",
+                ),
+                ("Plain.md", "# Plain\n"),
+                ("Broken.md", "---\ntags: [unclosed\n---\n# Broken\n"),
+            ],
+            0,
+        )
+        .await;
+        let read = async |slug: &str| {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/notes/{slug}"))
+                        .method("GET")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        };
+
+        assert_eq!(
+            read("home").await["note"]["metadata"],
+            serde_json::json!({
+                "tags": ["project/active"],
+                "aliases": ["Base"],
+                "properties": {"due": "2026-09-01"},
+            })
+        );
+        assert_eq!(
+            read("plain").await["note"]["metadata"],
+            serde_json::json!({"tags": [], "aliases": [], "properties": {}})
+        );
+        assert_eq!(
+            read("broken").await["note"]["metadata"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]
@@ -7791,50 +8243,14 @@ mod tests {
         assert_eq!(body["demo_mode"], true);
     }
 
+    /// #427 removed the legacy import's recovery: discovery no longer carries
+    /// its field, and the confirmed Start with no Vaults route is gone.
     #[tokio::test]
-    async fn vaults_v1_discovery_reports_legacy_migration_recovery_distinctly_from_registry_recovery()
-     {
-        // #150: an unreadable registry file and a failed legacy import look
-        // different to the browser, even though the registry itself loads
-        // fine (empty, revision 0) in the legacy-migration-recovery case.
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["registry_revision"], 0);
-        assert_eq!(body["vaults"], serde_json::json!([]));
-        assert!(body["recovery"].is_null());
-        assert_eq!(
-            body["legacy_migration_recovery"]["code"],
-            "legacy_migration_required"
-        );
-        assert_eq!(
-            body["legacy_migration_recovery"]["message"],
-            "legacy Vault path is not a readable directory"
-        );
-    }
-
-    #[tokio::test]
-    async fn vaults_v1_discovery_omits_legacy_migration_recovery_when_absent() {
+    async fn vaults_v1_discovery_has_no_legacy_migration_recovery() {
         let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults")
@@ -7844,14 +8260,9 @@ mod tests {
             .await
             .expect("response");
         let body = json_body(response).await;
-        assert!(body["legacy_migration_recovery"].is_null());
-    }
+        assert!(body.get("legacy_migration_recovery").is_none(), "{body}");
 
-    #[tokio::test]
-    async fn start_with_no_vaults_requires_a_pending_recovery() {
-        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
-
-        let response = app
+        let removed = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults/start-with-no-vaults")
@@ -7862,169 +8273,14 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "legacy_migration_recovery_not_pending");
-    }
-
-    #[tokio::test]
-    async fn environment_cleanup_recovery_hides_vaults_and_refuses_mutations() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") = Some(
-            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
-                "Remove HATCHDOOR_EXCLUDE and restart.",
+        assert!(
+            matches!(
+                removed.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
             ),
+            "{}",
+            removed.status()
         );
-
-        let discovery = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let body = json_body(discovery).await;
-        assert_eq!(body["vaults"], serde_json::json!([]));
-        assert_eq!(
-            body["legacy_migration_recovery"]["code"],
-            "legacy_environment_cleanup_required"
-        );
-
-        let mutation = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(mutation.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            json_body(mutation).await["code"],
-            "legacy_environment_cleanup_required"
-        );
-    }
-
-    #[tokio::test]
-    async fn start_with_no_vaults_requires_explicit_confirmation() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":false}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "confirmation_required");
-        // Refused, not silently discarded: the recovery flag survives.
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn start_with_no_vaults_confirmed_writes_an_empty_registry_and_clears_recovery() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["registry_revision"], 1);
-        assert!(body["vault"].is_null());
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_none()
-        );
-
-        // Discovery now reads back the ordinary, no-longer-pending state.
-        let discovery = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let body = json_body(discovery).await;
-        assert!(body["recovery"].is_null());
-        assert!(body["legacy_migration_recovery"].is_null());
-        assert_eq!(body["vaults"], serde_json::json!([]));
-    }
-
-    #[tokio::test]
-    async fn start_with_no_vaults_is_refused_in_demo_mode() {
-        let (app, _tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "legacy Vault path is not a readable directory",
-            ));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults/start-with-no-vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"confirm":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "demo_read_only");
     }
 
     #[tokio::test]
@@ -9413,6 +9669,320 @@ mod tests {
         }
     }
 
+    /// The built page, stood in for `frontend/dist/index.html` so the link
+    /// preview tests (#512) do not depend on an untracked build artifact.
+    const BUILT_PAGE: &str = "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>Hatchdoor</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n  </body>\n</html>\n";
+
+    const GENERAL_DESCRIPTION_TAG: &str = "<meta name=\"description\" content=\"Self-host your Obsidian vaults: a web UI for you, MCP for your AI agents. No Obsidian, no plugins required.\" />";
+
+    /// A router over one enabled Vault and one disabled one, both registered
+    /// directly because a demo instance refuses Vault creation. Returns the
+    /// two Vault IDs, enabled first.
+    async fn app_with_link_preview_vaults(
+        web_bearer_token: Option<Arc<str>>,
+        demo_mode: bool,
+    ) -> (Router, TempDir, AppState, String, String) {
+        crate::handlers::serve_test_index(BUILT_PAGE);
+        let (app, tmp, state) =
+            app_for_tests_with_web_auth_and_demo_mode(web_bearer_token, demo_mode);
+        let public = tmp.path().join("public");
+        std::fs::create_dir_all(public.join("sources")).expect("create layer directory");
+        for (relative_path, contents) in [
+            (
+                "Beacon Launch.md",
+                "---\ntags: [project]\n---\n# Beacon Launch\n\nThe **launch** plan for [[Beacon|the beacon]], run with `just launch`.\n\nA second paragraph.\n",
+            ),
+            (
+                "Described.md",
+                "---\ndescription: A summary the author wrote.\n---\nBody prose that loses to the property.\n",
+            ),
+            ("Diagram.md", "```mermaid\ngraph TD\n  A --> B\n```\n"),
+            (
+                "Rock & \"Roll\" <b>.md",
+                "---\ndescription: 'Say \"hi\" &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; <b>now</b>'\n---\n",
+            ),
+            ("sources/.hatchdoor-layer", "sources"),
+            (
+                "sources/Clipping.md",
+                "A demoted clipping nobody browses.\n",
+            ),
+        ] {
+            std::fs::write(public.join(relative_path), contents).expect("write fixture file");
+        }
+        let private = tmp.path().join("private");
+        std::fs::create_dir_all(&private).expect("create disabled vault");
+        std::fs::write(private.join("Secret Plan.md"), "Nobody may read this.\n")
+            .expect("write disabled note");
+
+        let ids = register_vaults_directly(
+            &state,
+            &[
+                ("Public", public.as_path(), true),
+                ("Private", private.as_path(), false),
+            ],
+        )
+        .await;
+        (app, tmp, state, ids[0].to_string(), ids[1].to_string())
+    }
+
+    async fn get_page(app: &Router, uri: &str) -> (StatusCode, String) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    // A link preview must never be built from these.
+                    .header("host", "attacker.example")
+                    .header("x-forwarded-host", "forwarded.example")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn set_public_url(state: &AppState, value: &str) {
+        state
+            .runtime_config
+            .save([("HATCHDOOR_PUBLIC_URL".to_string(), value.to_string())])
+            .expect("save public address");
+    }
+
+    #[tokio::test]
+    async fn demo_note_address_previews_the_note_at_the_public_address() {
+        let (app, _tmp, state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+        set_public_url(&state, "https://demo.example.com/");
+
+        let (status, page) = get_page(&app, &format!("/v/{vault_id}/n/beacon-launch")).await;
+        assert_eq!(status, StatusCode::OK);
+        let description = "The launch plan for the beacon, run with just launch.";
+        for tag in [
+            "<title>Beacon Launch · Hatchdoor</title>".to_string(),
+            format!("<meta name=\"description\" content=\"{description}\" />"),
+            "<meta property=\"og:title\" content=\"Beacon Launch\" />".to_string(),
+            format!("<meta property=\"og:description\" content=\"{description}\" />"),
+            "<meta property=\"og:type\" content=\"article\" />".to_string(),
+            "<meta property=\"og:site_name\" content=\"Hatchdoor\" />".to_string(),
+            format!(
+                "<meta property=\"og:url\" content=\"https://demo.example.com/v/{vault_id}/n/beacon-launch\" />"
+            ),
+            "<meta property=\"og:image\" content=\"https://demo.example.com/link-preview.png\" />"
+                .to_string(),
+            "<meta property=\"og:image:width\" content=\"1200\" />".to_string(),
+            "<meta property=\"og:image:height\" content=\"630\" />".to_string(),
+            "<meta name=\"twitter:card\" content=\"summary_large_image\" />".to_string(),
+        ] {
+            assert!(page.contains(&tag), "{tag} missing from {page}");
+        }
+        assert!(page.contains("<div id=\"root\"></div>"));
+        assert!(!page.contains(".example\"") && !page.contains("attacker"));
+
+        // The setting applies live: clearing it drops the two absolute tags.
+        set_public_url(&state, "");
+        let (_, page) = get_page(&app, &format!("/v/{vault_id}/n/beacon-launch")).await;
+        assert!(page.contains("<meta property=\"og:title\" content=\"Beacon Launch\" />"));
+        assert!(!page.contains("og:image") && !page.contains("og:url"));
+    }
+
+    #[tokio::test]
+    async fn demo_note_description_prefers_the_property_and_falls_back_to_the_general_one() {
+        let (app, _tmp, _state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+
+        let (_, described) = get_page(&app, &format!("/v/{vault_id}/n/described")).await;
+        assert!(described.contains(
+            "<meta property=\"og:description\" content=\"A summary the author wrote.\" />"
+        ));
+        assert!(!described.contains("Body prose"));
+
+        let (_, diagram) = get_page(&app, &format!("/v/{vault_id}/n/diagram")).await;
+        assert!(diagram.contains("<meta property=\"og:title\" content=\"Diagram\" />"));
+        assert!(diagram.contains(GENERAL_DESCRIPTION_TAG));
+        assert!(!diagram.contains("graph TD"));
+    }
+
+    #[tokio::test]
+    async fn demo_preview_without_a_public_address_names_no_host() {
+        let (app, _tmp, _state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+        for uri in [
+            format!("/v/{vault_id}/n/beacon-launch"),
+            "/graph".to_string(),
+        ] {
+            let (status, page) = get_page(&app, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(page.contains("<meta property=\"og:title\""), "{uri}");
+            assert!(page.contains("<meta property=\"og:description\""), "{uri}");
+            assert!(page.contains("<meta name=\"twitter:card\" content=\"summary\" />"));
+            for absent in [
+                "og:image",
+                "og:url",
+                "attacker.example",
+                "forwarded.example",
+                "http",
+            ] {
+                assert!(
+                    !page.contains(absent),
+                    "{uri} must not carry {absent}: {page}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_general_pages_carry_the_general_wording() {
+        let (app, _tmp, state, _, _) = app_with_link_preview_vaults(None, true).await;
+        set_public_url(&state, "https://demo.example.com");
+        for (uri, status, title) in [
+            ("/", StatusCode::OK, "Hatchdoor"),
+            ("/graph", StatusCode::OK, "Graph · Hatchdoor"),
+            ("/stats", StatusCode::OK, "Stats · Hatchdoor"),
+            ("/settings", StatusCode::OK, "Settings · Hatchdoor"),
+            ("/nope", StatusCode::NOT_FOUND, "Hatchdoor"),
+        ] {
+            let (answered, page) = get_page(&app, uri).await;
+            assert_eq!(answered, status, "{uri}");
+            assert!(
+                page.contains(&format!("<title>{title}</title>")),
+                "{uri}: {page}"
+            );
+            assert!(page.contains(GENERAL_DESCRIPTION_TAG), "{uri}");
+            assert!(page.contains("<meta property=\"og:title\" content=\"Hatchdoor\" />"));
+            assert!(page.contains("<meta property=\"og:type\" content=\"website\" />"));
+            assert!(page.contains(&format!(
+                "<meta property=\"og:url\" content=\"https://demo.example.com{uri}\" />"
+            )));
+        }
+        // A reserved prefix still gets its bare 404, preview or not.
+        assert_eq!(
+            get_page(&app, "/api/nope").await,
+            (StatusCode::NOT_FOUND, String::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn demo_preview_names_nothing_the_demo_read_refuses() {
+        let (app, _tmp, _state, vault_id, disabled_vault_id) =
+            app_with_link_preview_vaults(None, true).await;
+        for uri in [
+            format!("/v/{vault_id}/n/no-such-note"),
+            // A note on a demoted layer, which the demo does not serve.
+            format!("/v/{vault_id}/n/clipping"),
+            format!("/v/{disabled_vault_id}/n/secret-plan"),
+            "/v/00000000-0000-4000-8000-000000000000/n/beacon-launch".to_string(),
+            "/v/not-a-vault-id/n/beacon-launch".to_string(),
+            format!("/v/{vault_id}/n/%FF"),
+        ] {
+            let (status, page) = get_page(&app, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(page.contains("<title>Hatchdoor</title>"), "{uri}: {page}");
+            assert!(page.contains(GENERAL_DESCRIPTION_TAG), "{uri}");
+            assert!(page.contains("<meta property=\"og:type\" content=\"website\" />"));
+            for withheld in [
+                "Clipping",
+                "clipping nobody",
+                "Secret",
+                "Nobody may",
+                "Private",
+            ] {
+                assert!(!page.contains(withheld), "{uri} leaked {withheld}: {page}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_preview_escapes_a_hostile_title_and_description() {
+        let (app, _tmp, _state, vault_id, _) = app_with_link_preview_vaults(None, true).await;
+        let slug = crate::vault::slugify("Rock & \"Roll\" <b>");
+        let (status, page) = get_page(
+            &app,
+            &format!("/v/{vault_id}/n/{}", slug.replace(' ', "%20")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            page.contains("<title>Rock &amp; &quot;Roll&quot; &lt;b&gt; · Hatchdoor</title>"),
+            "{page}"
+        );
+        assert!(page.contains(
+            "<meta property=\"og:title\" content=\"Rock &amp; &quot;Roll&quot; &lt;b&gt;\" />"
+        ));
+        assert!(page.contains(
+            "content=\"Say &quot;hi&quot; &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; now\" />"
+        ));
+        assert_eq!(page.matches("</title>").count(), 1);
+        assert!(!page.contains("<script") && !page.contains("<b>"));
+    }
+
+    #[tokio::test]
+    async fn outside_demo_mode_the_page_is_the_built_file_byte_for_byte() {
+        for web_bearer_token in [None, Some(Arc::<str>::from("secret"))] {
+            let (app, _tmp, state, vault_id, _) =
+                app_with_link_preview_vaults(web_bearer_token.clone(), false).await;
+            set_public_url(&state, "https://notes.example.com");
+            for (uri, status) in [
+                ("/".to_string(), StatusCode::OK),
+                ("/graph".to_string(), StatusCode::OK),
+                ("/stats".to_string(), StatusCode::OK),
+                ("/settings".to_string(), StatusCode::OK),
+                (format!("/v/{vault_id}/n/beacon-launch"), StatusCode::OK),
+                (format!("/v/{vault_id}/n/no-such-note"), StatusCode::OK),
+                ("/nope".to_string(), StatusCode::NOT_FOUND),
+            ] {
+                assert_eq!(
+                    get_page(&app, &uri).await,
+                    (status, BUILT_PAGE.to_string()),
+                    "{uri} with token {web_bearer_token:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_link_preview_picture_is_1200_by_630_and_small_enough_for_chat_apps() {
+        let picture = std::fs::read("frontend/public/link-preview.png").expect("picture");
+        assert_eq!(&picture[..8], b"\x89PNG\r\n\x1a\n");
+        // The IHDR chunk opens every PNG: width then height, big-endian.
+        let dimension = |at: usize| u32::from_be_bytes(picture[at..at + 4].try_into().unwrap());
+        assert_eq!((dimension(16), dimension(20)), (1200, 630));
+        assert!(picture.len() < 300 * 1024, "{} bytes", picture.len());
+    }
+
+    #[tokio::test]
+    async fn the_link_preview_picture_needs_no_token() {
+        // A chat app's fetcher holds no token. Whether the file is there to
+        // serve depends on `frontend/dist` (see the canonical Note URL test
+        // above), so an unbuilt frontend pins only that no token was asked for.
+        let built = std::path::Path::new("frontend/dist/link-preview.png").exists();
+        for demo_mode in [true, false] {
+            let web_bearer_token = (!demo_mode).then(|| Arc::<str>::from("secret"));
+            let (app, _tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_bearer_token, demo_mode);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/link-preview.png")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let expected = if built {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(response.status(), expected, "demo mode {demo_mode}");
+            if built {
+                assert_eq!(response.headers()["content-type"], "image/png");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn reserved_prefixes_keep_their_bare_404() {
         // The API, Vault asset and health prefixes are never answered with the
@@ -9431,5 +10001,482 @@ mod tests {
                 "{uri} must not be answered with the app shell, got {body:?}"
             );
         }
+    }
+
+    fn folders_request(query: &str, token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder().uri(format!("/api/v1/folders{query}"));
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn folders_lists_the_vault_mount_behind_the_web_token() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let mount = tmp.path().join("mount");
+        std::fs::create_dir_all(mount.join("Notes/Sub")).expect("mkdir");
+        std::fs::write(mount.join("Notes/a.md"), "# a\n").expect("write");
+        std::fs::create_dir_all(mount.join(".git")).expect("mkdir");
+
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(folders_request("", token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(folders_request("", Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["root_found"], true);
+        assert_eq!(body["root"], mount.to_str().expect("utf-8 mount"));
+        assert_eq!(body["path"], "");
+        assert_eq!(
+            body["folders"],
+            serde_json::json!([{
+                "name": "Notes",
+                "path": "Notes",
+                "markdown": {"count": 1, "at_least": false},
+                "vault": null,
+                "has_subfolders": true,
+            }])
+        );
+        assert_eq!(body["skipped_invalid_names"], 0);
+
+        let nested = app
+            .clone()
+            .oneshot(folders_request("?path=Notes", Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(nested.status(), StatusCode::OK);
+        assert_eq!(json_body(nested).await["folders"][0]["path"], "Notes/Sub");
+
+        for (query, status, code) in [
+            (
+                "?path=../..",
+                StatusCode::BAD_REQUEST,
+                "folder_outside_root",
+            ),
+            ("?path=Missing", StatusCode::NOT_FOUND, "folder_not_found"),
+            ("?path=.git", StatusCode::NOT_FOUND, "folder_not_found"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(folders_request(query, Some("web-secret")))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status, "{query}");
+            assert_eq!(json_body(response).await["code"], code, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn folders_answers_a_missing_mount_with_an_empty_listing() {
+        let (app, _tmp, _state) = app_for_tests_with_state();
+        let response = app
+            .oneshot(folders_request("", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["root_found"], false);
+        assert_eq!(body["folders"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn folders_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            std::fs::create_dir_all(tmp.path().join("mount/Notes")).expect("mkdir");
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(folders_request("", token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+        }
+    }
+
+    fn create_folder_request(body: serde_json::Value, token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/folders")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(body.to_string())).expect("request")
+    }
+
+    #[tokio::test]
+    async fn folders_creates_one_folder_behind_the_web_token() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let mount = tmp.path().join("mount");
+        std::fs::create_dir_all(mount.join("Notes")).expect("mkdir");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, mount.join("Link")).expect("symlink");
+        let body = serde_json::json!({"parent": "Notes", "name": "Journal"});
+
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(create_folder_request(body.clone(), token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+        assert!(!mount.join("Notes/Journal").exists());
+
+        let response = app
+            .clone()
+            .oneshot(create_folder_request(body.clone(), Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({
+                "name": "Journal",
+                "path": "Notes/Journal",
+                "markdown": {"count": 0, "at_least": false},
+                "vault": null,
+                "has_subfolders": false,
+            })
+        );
+        assert!(mount.join("Notes/Journal").is_dir());
+        assert_eq!(
+            std::fs::read_dir(mount.join("Notes/Journal"))
+                .expect("read")
+                .count(),
+            0
+        );
+
+        // The parent defaults to the mount itself.
+        let top = app
+            .clone()
+            .oneshot(create_folder_request(
+                serde_json::json!({"name": "Top"}),
+                Some("web-secret"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(top.status(), StatusCode::CREATED);
+        assert_eq!(json_body(top).await["path"], "Top");
+
+        for (body, status, code) in [
+            (body, StatusCode::CONFLICT, "folder_name_taken"),
+            (
+                serde_json::json!({"parent": "", "name": "a/b"}),
+                StatusCode::BAD_REQUEST,
+                "folder_name_invalid",
+            ),
+            (
+                serde_json::json!({"parent": "..", "name": "Out"}),
+                StatusCode::BAD_REQUEST,
+                "folder_outside_root",
+            ),
+            (
+                serde_json::json!({"parent": "Missing", "name": "New"}),
+                StatusCode::NOT_FOUND,
+                "folder_parent_not_found",
+            ),
+            (
+                serde_json::json!({"parent": "Link", "name": "New"}),
+                StatusCode::NOT_FOUND,
+                "folder_parent_not_found",
+            ),
+            (
+                serde_json::json!({"name": "New", "recursive": true}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request_body",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(create_folder_request(body.clone(), Some("web-secret")))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status, "{body}");
+            assert_eq!(json_body(response).await["code"], code, "{body}");
+        }
+        assert!(!tmp.path().join("Out").exists());
+        assert!(!outside.join("New").exists());
+    }
+
+    #[tokio::test]
+    async fn folders_creation_answers_a_missing_mount_without_making_it() {
+        let (app, tmp, _state) = app_for_tests_with_state();
+        let response = app
+            .oneshot(create_folder_request(
+                serde_json::json!({"name": "New"}),
+                None,
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(response).await["code"], "folder_mount_not_found");
+        assert!(!tmp.path().join("mount").exists());
+    }
+
+    #[tokio::test]
+    async fn folders_creation_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            std::fs::create_dir_all(tmp.path().join("mount")).expect("mkdir");
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(create_folder_request(
+                        serde_json::json!({"name": "New"}),
+                        token,
+                    ))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+            assert!(!tmp.path().join("mount/New").exists());
+        }
+    }
+
+    fn whats_new_request(token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder().uri("/api/v1/whats-new");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn whats_new_reports_the_version_record_behind_the_web_token() {
+        let (_app, _tmp, mut state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.8.0".into(),
+            previous: Some("2.7.0".into()),
+            fresh_install: None,
+        });
+        let app = build_router(state, Some(Arc::from("web-secret")));
+
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(whats_new_request(token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+
+        let response = app
+            .oneshot(whats_new_request(Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = json_body(response).await;
+        assert_eq!(body["version"], crate::config::version_string());
+        assert_eq!(body["previous_version"], "2.7.0");
+        assert_eq!(body["fresh_install"], false);
+        assert!(body["releases"].is_array());
+    }
+
+    #[tokio::test]
+    async fn whats_new_on_a_fresh_install_lists_no_release() {
+        let (_app, _tmp, mut state) = app_for_tests_with_state();
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.8.0".into(),
+            previous: None,
+            fresh_install: Some("2.8.0".into()),
+        });
+        let response = build_router(state, None)
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["previous_version"], serde_json::Value::Null);
+        assert_eq!(body["fresh_install"], true);
+        assert_eq!(body["releases"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn whats_new_after_upgrading_a_fresh_install_is_no_longer_fresh() {
+        let (_app, _tmp, mut state) = app_for_tests_with_state();
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.9.0".into(),
+            previous: Some("2.8.0".into()),
+            fresh_install: Some("2.8.0".into()),
+        });
+        let response = build_router(state, None)
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+        let body = json_body(response).await;
+        assert_eq!(body["previous_version"], "2.8.0");
+        assert_eq!(body["fresh_install"], false);
+    }
+
+    #[tokio::test]
+    async fn whats_new_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, _tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(whats_new_request(token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+        }
+    }
+
+    #[test]
+    fn a_start_with_a_registry_or_settings_on_disk_is_an_upgrade() {
+        let running =
+            crate::instance_state::base_version(&crate::config::version_string()).to_string();
+        for existing in [None, Some("vaults.json"), Some("settings.json")] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let registry = directory.path().join("vaults.json");
+            let settings = directory.path().join("settings.json");
+            if let Some(file) = existing {
+                std::fs::write(directory.path().join(file), "{}").expect("write");
+            }
+            let store = crate::instance_state::InstanceStateStore::beside_registry(&registry);
+            let record = record_instance_start(&store, is_existing_install(&registry, &settings));
+            assert_eq!(record.current, running);
+            match existing {
+                None => {
+                    assert_eq!(record.previous, None);
+                    assert_eq!(record.fresh_install.as_deref(), Some(running.as_str()));
+                }
+                Some(_) => {
+                    // A 2.7.0 build has no earlier version to point at.
+                    let expected = (running != "2.7.0").then_some("2.7.0");
+                    assert_eq!(record.previous.as_deref(), expected);
+                    assert_eq!(record.fresh_install, None);
+                }
+            }
+        }
+    }
+
+    /// A state whose usage report is on and kept in `tmp`, plus the store
+    /// its record is written to.
+    fn state_with_the_usage_report_on(
+        mut state: AppState,
+        tmp: &TempDir,
+    ) -> (AppState, crate::instance_state::InstanceStateStore) {
+        let store =
+            crate::instance_state::InstanceStateStore::new(tmp.path().join("state/instance.json"));
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "true".to_string(),
+            )])
+            .expect("turn the usage report on");
+        state.usage_report = Arc::new(crate::usage_report::UsageReport::new(
+            store.clone(),
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        (state, store)
+    }
+
+    /// The day the usage report last saw a web request, once the save the
+    /// middleware started has landed.
+    async fn recorded_web_day(store: &crate::instance_state::InstanceStateStore) -> Option<String> {
+        for _ in 0..200 {
+            let section = store.section::<serde_json::Value>("usage_report");
+            if let Some(day) = section
+                .as_ref()
+                .and_then(|section| section["web_seen"].as_str())
+            {
+                return Some(day.to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn a_web_request_let_in_by_the_token_counts_as_web_activity() {
+        let (_app, tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let (state, store) = state_with_the_usage_report_on(state, &tmp);
+        let app = build_router(state, Some(Arc::from("web-secret")));
+
+        // Neither a public route nor a refused request is web activity.
+        let health = Request::builder().uri("/health").body(Body::empty());
+        app.clone()
+            .oneshot(health.expect("request"))
+            .await
+            .expect("response");
+        let refused = app
+            .clone()
+            .oneshot(whats_new_request(Some("wrong")))
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let section = store.section::<serde_json::Value>("usage_report");
+        assert_eq!(
+            section.expect("the install ID")["web_seen"],
+            serde_json::Value::Null
+        );
+
+        let response = app
+            .oneshot(whats_new_request(Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let recorded = recorded_web_day(&store)
+            .await
+            .expect("web activity recorded");
+        // The request and this line can fall either side of midnight UTC.
+        assert!(recorded <= today && recorded.len() == 10, "{recorded}");
+    }
+
+    #[tokio::test]
+    async fn a_web_request_counts_as_web_activity_on_an_install_with_no_token() {
+        let (_app, tmp, state) = app_for_tests_with_state();
+        let (state, store) = state_with_the_usage_report_on(state, &tmp);
+
+        let response = build_router(state, None)
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(recorded_web_day(&store).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_web_request_is_not_recorded_while_the_usage_report_is_off() {
+        let (app, tmp, _state) = app_for_tests_with_state();
+
+        let response = app
+            .oneshot(whats_new_request(None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!tmp.path().join("state/instance.json").exists());
     }
 }

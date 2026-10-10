@@ -1,7 +1,6 @@
-// Attachment handling shared by the note editor and the note body drop target.
+// Attachment handling shared by the source editor and the live editor.
 
 import { normalizeImageForUpload } from "../../lib/imageUpload";
-import { detectLineEnding } from "../../lib/sourceMap";
 import type { AttachmentOutcome } from "../../types";
 import {
   encodeLinkPath,
@@ -25,14 +24,18 @@ export const ATTACHMENT_EXTENSIONS = [
   "pdf",
 ] as const;
 
-// Mirrors DEFAULT_MAX_ATTACHMENT_BYTES in src/mcp/config.rs. The server stays
-// authoritative; this only buys a useful message instead of a failed request.
-export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
-
 /**
  * Why this file cannot be attached, or null if it can.
+ *
+ * `maxBytes` is the server's configured upload limit (`fetchAttachmentMaxBytes`),
+ * or null when the browser could not learn it. The server stays authoritative;
+ * the size check only buys a useful message instead of a failed request, so
+ * with no known limit the file is sent and the server answers.
  */
-export function attachmentRejection(file: File): string | null {
+export function attachmentRejection(
+  file: File,
+  maxBytes: number | null,
+): string | null {
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   const hasExtension = file.name.includes(".");
 
@@ -43,13 +46,28 @@ export function attachmentRejection(file: File): string | null {
     return "Hatchdoor accepts images and PDFs.";
   }
 
-  if (file.size > ATTACHMENT_MAX_BYTES) {
+  if (maxBytes !== null && file.size > maxBytes) {
     return `That file is ${formatMegabytes(file.size)}. The limit is ${formatMegabytes(
-      ATTACHMENT_MAX_BYTES,
+      maxBytes,
     )}.`;
   }
 
   return null;
+}
+
+/**
+ * `attachmentRejection` against the server's current limit. The limit is read
+ * only once the extension has passed, so a file Hatchdoor never accepts is
+ * refused without a request.
+ */
+export async function attachmentRejectionAtCurrentLimit(
+  file: File,
+  readMaxBytes: () => Promise<number | null>,
+): Promise<string | null> {
+  return (
+    attachmentRejection(file, null) ??
+    attachmentRejection(file, await readMaxBytes())
+  );
 }
 
 function formatMegabytes(bytes: number): string {
@@ -181,68 +199,4 @@ export async function attachmentEmbedText(
     (candidate) => resolved.get(candidate) === upload.vaultPath,
   );
   return `![](${encodeLinkPath(path)})`;
-}
-
-export type DropBlock = {
-  startLine: number;
-  endLine: number;
-  top: number;
-  bottom: number;
-};
-
-/**
- * The line to insert a dropped attachment after, from the drop's Y coordinate.
- *
- * Blocks are ordered by line range rather than by the order they were
- * collected: with remark-gfm a footnote definition renders inside a generated
- * section at the end of the document while carrying the source position of
- * wherever it was written, so DOM order and source order genuinely diverge.
- */
-export function insertionLineForDrop(blocks: DropBlock[], y: number): number {
-  if (blocks.length === 0) {
-    return 0;
-  }
-
-  const ordered = [...blocks].sort((a, b) => a.startLine - b.startLine);
-  const landedOn = ordered.find((block) => y >= block.top && y <= block.bottom);
-  if (landedOn) {
-    return landedOn.endLine;
-  }
-
-  const above = ordered.filter((block) => block.bottom < y).pop();
-  return above ? above.endLine : 0;
-}
-
-/**
- * `content` with an embed inserted as its own block after `line`, kept apart by
- * blank lines so it does not join the paragraph above or below it. `embed` is
- * the text to insert, in the Vault's link style; it defaults to the wikilink
- * embed of `embedPath`.
- */
-export function insertEmbedAt(
-  content: string,
-  line: number,
-  embedPath: string,
-  embed = `![[${embedPath}]]`,
-): string {
-  const ending = detectLineEnding(content);
-  const lines = content.split(/\r?\n/);
-
-  const before = lines.slice(0, line);
-  const after = lines.slice(line);
-  // Only pad where there is not already a blank line, or dropping between two
-  // paragraphs leaves a widening gap behind.
-  const padBefore =
-    before.length > 0 && before[before.length - 1].trim() !== "";
-  const padAfter = after.length > 0 && after[0].trim() !== "";
-
-  const next = [
-    ...before,
-    ...(padBefore ? [""] : []),
-    embed,
-    ...(padAfter ? [""] : []),
-    ...after,
-  ];
-
-  return next.join(ending);
 }

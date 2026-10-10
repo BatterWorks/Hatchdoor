@@ -18,10 +18,12 @@ import {
 import {
   BarChartIcon,
   Graph3Icon,
-  InboxIcon,
+  HelpIcon,
   SettingsIcon,
 } from "../components/icons";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
+import { CHANGES_COLLAPSED_KEY } from "./constants";
+import { safeGetItem, safeSetItem } from "../lib/storage";
 import { describeMissingVaults } from "../lib/vaultParticipants";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
 import {
@@ -255,6 +257,7 @@ function ScopeZone({
                 vaults={vaults}
                 counts={noteCounts}
                 demoMode={demoMode}
+                compact
               />
             )}
           </>
@@ -436,18 +439,20 @@ function VaultAccordion({
 }
 
 /**
- * Whole-vault destinations plus the changes panel. Lives inside the sidebar
- * rather than the topbar on purpose: the topbar's four mobile slots are the
- * hard constraint, and the rail sits inside the drawer, outside that budget.
+ * Whole-vault destinations. Lives inside the sidebar rather than the topbar
+ * on purpose: the topbar's four mobile slots are the hard constraint, and the
+ * rail sits inside the drawer, outside that budget. It sits in the footer
+ * beside New note (#530), where a row of destinations belongs and where a
+ * thumb reaches it; it holds destinations only, so nothing it opens appears
+ * out of sight at the top of the list. On the phone Help is its last item,
+ * since the phone's top bar has no slot for it (#417).
  */
 function ExplorerRail({
-  changesOpen,
-  onToggleChanges,
   settingsEnabled,
+  onToggleHelp,
 }: {
-  changesOpen: boolean;
-  onToggleChanges: () => void;
   settingsEnabled?: boolean;
+  onToggleHelp?: () => void;
 }) {
   return (
     <div className="explorer-rail">
@@ -471,18 +476,6 @@ function ExplorerRail({
       >
         <Graph3Icon />
       </NavLink>
-      <button
-        type="button"
-        className="explorer-rail-item"
-        data-open={changesOpen}
-        aria-expanded={changesOpen}
-        aria-controls="explorer-changes-panel"
-        aria-label="Recently changed notes"
-        title="Recently changed notes"
-        onClick={onToggleChanges}
-      >
-        <InboxIcon />
-      </button>
       {settingsEnabled ? (
         <NavLink
           className={({ isActive }) =>
@@ -494,6 +487,17 @@ function ExplorerRail({
         >
           <SettingsIcon />
         </NavLink>
+      ) : null}
+      {onToggleHelp ? (
+        <button
+          type="button"
+          className="explorer-rail-item"
+          aria-label="Help"
+          title="Help"
+          onClick={onToggleHelp}
+        >
+          <HelpIcon />
+        </button>
       ) : null}
     </div>
   );
@@ -540,6 +544,9 @@ type ExplorerPaneProps = {
   startupProgress?: StartupProgress;
   /** Clamps every condition slot to the amber tier (#152). */
   demoMode?: boolean;
+  /** Given below 920px only (#530): the phone's top bar has no Help slot, so
+   * the rail carries it as its last item. */
+  onToggleHelp?: () => void;
 };
 
 export function ExplorerPane({
@@ -580,11 +587,21 @@ export function ExplorerPane({
   onRestoreScopeFocus,
   startupProgress,
   demoMode = false,
+  onToggleHelp,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
-  // invitation to move feature state into it.
-  const [changesOpen, setChangesOpen] = useState(false);
+  // invitation to move feature state into it. Changed on disk starts folded
+  // and remembers its fold the way Recently viewed does (#530).
+  const [changesCollapsed, setChangesCollapsed] = useState<boolean>(
+    () => safeGetItem(CHANGES_COLLAPSED_KEY) !== "0",
+  );
+  const toggleChangesCollapsed = () => {
+    setChangesCollapsed((prev) => {
+      safeSetItem(CHANGES_COLLAPSED_KEY, prev ? "0" : "1");
+      return !prev;
+    });
+  };
 
   // The accordion's unfolded Vault (#142). Narrowing scope always sets it to
   // the Vault just left, so widening restores that Vault — resolved eagerly
@@ -728,13 +745,7 @@ export function ExplorerPane({
           demoMode={demoMode}
         />
       )}
-      <ExplorerRail
-        changesOpen={changesOpen}
-        onToggleChanges={() => setChangesOpen((prev) => !prev)}
-        settingsEnabled={settingsEnabled}
-      />
-
-      {/* Only this middle zone scrolls; rail and footer stay put. */}
+      {/* Only this middle zone scrolls; the Scope zone and footer stay put. */}
       <div
         className="explorer-nav"
         ref={explorerScrollRef as RefObject<HTMLDivElement | null>}
@@ -742,18 +753,18 @@ export function ExplorerPane({
           onScrollTopChange(event.currentTarget.scrollTop);
         }}
       >
-        {changesOpen ? (
-          <ChangesPanel
-            notes={modifiedNotes}
-            onNavigate={onCloseDrawer}
-            vaults={vaults}
-            scope={scope}
-            partial={modifiedNotesPartial}
-            missingVaultNames={modifiedNotesMissingVaults}
-            error={modifiedNotesError}
-            onRetry={onRetryModifiedNotes}
-          />
-        ) : null}
+        <ChangesPanel
+          notes={modifiedNotes}
+          onNavigate={onCloseDrawer}
+          vaults={vaults}
+          scope={scope}
+          partial={modifiedNotesPartial}
+          missingVaultNames={modifiedNotesMissingVaults}
+          error={modifiedNotesError}
+          onRetry={onRetryModifiedNotes}
+          collapsed={changesCollapsed}
+          onToggleCollapsed={toggleChangesCollapsed}
+        />
 
         <RecentNotesList
           notes={recentNotes}
@@ -846,18 +857,23 @@ export function ExplorerPane({
         ) : null}
       </div>
 
-      {/* One action only. A footer with three things in it becomes the next
-          grab-bag, which is what this redesign was fixing. */}
-      {writeEnabled ? (
-        <div className="explorer-footer">
+      {/* The rail's destinations and the one create action (#530). Nothing
+          here opens anything inside the list above, so the footer never
+          points at something it cannot see. */}
+      <div className="explorer-footer">
+        <ExplorerRail
+          settingsEnabled={settingsEnabled}
+          onToggleHelp={isMobile ? onToggleHelp : undefined}
+        />
+        {writeEnabled ? (
           <UiButton
             className="close-note explorer-new-note"
             onClick={() => onCreateNoteInFolder("")}
           >
             New note
           </UiButton>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </aside>
   );
 }

@@ -4,17 +4,17 @@ tags: [type/reference, topic/markdown]
 
 # Supported Markdown reference
 
-A dictionary of the Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` file — this page shows what that file can contain and how Hatchdoor displays it.
+The Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` file, and this page lists what that file can contain and how Hatchdoor displays it. To see every feature rendered on one page, open [[Markdown feature showcase]].
 
 ## Inline formatting
 
 Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, `inline code`, and links such as <https://example.com>.
 
-Raw HTML is not part of the supported Markdown contract. Keep notes portable by using Markdown syntax where possible.
+Raw HTML is not supported. Use Markdown syntax so a note reads the same in other apps.
 
 ## Headings
 
-`#` through `######` produce heading levels 1 through 6. Headings receive generated IDs, which is what makes a heading wikilink (below) and the table of contents work.
+`#` through `######` produce heading levels 1 through 6. Each heading gets an ID, which a heading wikilink and the table of contents use.
 
 Those IDs, and the address a note itself answers to in the URL, are built the same way. An accent folds into the letter it sits on, so `## Café` is addressed as `cafe` and `## Straße` as `strasse`, while a heading in Cyrillic, Greek, Devanagari or a CJK script keeps its own letters rather than being spelled out in ASCII. Punctuation and symbols are dropped. Renaming a note to add or remove an accent leaves its address alone. A note whose name already carried one moved address when this rule landed, so a link to that note saved outside Hatchdoor may need updating.
 
@@ -31,7 +31,7 @@ Unordered lists (`-`), ordered lists (`1.`), and nested lists at any depth are a
 | Callout | `> [!note]` |
 ```
 
-Tables scroll horizontally on small screens rather than breaking layout.
+A table wider than the note's column scrolls sideways inside its frame, on any screen.
 
 ## Blockquotes and callouts
 
@@ -45,7 +45,7 @@ A plain blockquote (`>`) is an ordinary quoted excerpt. A callout is a blockquot
 > A warning callout with a custom title.
 ```
 
-Supported types: `note`, `info`, `tip`, `warning`, `danger`, `success`, `question`, `example`, `summary`, `abstract`, and likely others — the type controls the icon and color, not the rendering mechanism. Add `+` after the type to make it collapsible and start open, or `-` to start closed: `> [!summary]+`.
+Supported types: `note`, `info`, `tip`, `warning`, `danger`, `success`, `question`, `example`, `summary` and `abstract`, plus the other names Obsidian accepts, such as `tldr`, `hint`, `important`, `caution`, `bug`, `failure` and `faq`. The type sets the icon and the colour and nothing else. Add `+` after the type to make it collapsible and start open, or `-` to start closed: `> [!summary]+`.
 
 ## Code blocks
 
@@ -117,7 +117,7 @@ Three things only change how the rows would be drawn, so Hatchdoor draws the tab
 
 A block that is fine but matches no note shows **No matches.** and says it checked every note in the Vault, so it cannot be confused with a broken one. Click a column heading to sort that table by it: once for ascending, again for descending, a third time for the original order. The sort is only on your screen. It is not written into the note and a reload forgets it, the way Obsidian treats sorting. See [[How to troubleshoot common problems]] for the other messages a saved query can show.
 
-An HTML comment of the form `<!-- hatchdoor-query: name -->` on the line before the block, with nothing but blank lines between them, gives the saved query a name. The name is lowercase letters, digits and hyphens and must be unique within the note. It is never shown on the page. A name that is not usable, or that two blocks share, gets a note under the table and the rows still appear, since a name never changes which rows qualify. A marker with no block after it gets a note where it sits. The marker sits outside the block on purpose, so the block stays exactly what Obsidian expects to read.
+An HTML comment of the form `<!-- hatchdoor-query: name -->` on the line before the block, with nothing but blank lines between them, gives the saved query a name. The name is lowercase letters, digits and hyphens and must be unique within the note. It is never shown on the page. A name that is not usable, or that two blocks share, gets a note under the table and the rows still appear, since a name never changes which rows qualify. A marker with no block after it gets a note where it sits. The marker sits outside the block so that Obsidian reads the block unchanged.
 
 An agent connected over MCP reads the same rows as data. `get_note` lists a note's saved queries by name, and `evaluate_saved_query` returns one query's rows. The name is how an agent picks a saved query when a note holds more than one. See [[MCP tools reference#Reading a note's saved queries]].
 
@@ -133,21 +133,21 @@ Local Markdown image syntax works as expected:
 ![Alt text](image-file-name.jpg)
 ```
 
-Store an image near the note that references it, and use safe filenames — lowercase ASCII letters, numbers, and hyphens. The path is read the way a Markdown note link's is (below): a leading `/` starts at the Vault root, a bare filename is found anywhere in the Vault, and a space can be written as `%20`. A Markdown link to a local PDF is marked as a document and opens in a new tab: `[Open the report](report.pdf)`. The same attachment can instead be embedded inline, with page controls, using Obsidian's embed syntax: `![[report.pdf]]`.
+Store an image near the note that references it, and give it a safe filename: lowercase ASCII letters, numbers and hyphens. The path is read the way a Markdown note link's is: a leading `/` starts at the Vault root, a bare filename is found anywhere in the Vault, and a space can be written as `%20`. A Markdown link to a local PDF is marked as a document and opens in a new tab: `[Open the report](report.pdf)`. The same attachment can instead be embedded inline, with page controls, using Obsidian's embed syntax: `![[report.pdf]]`.
 
 ## Wikilinks
 
 Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Five forms:
 
 - Plain: `[[Connect your agent]]` → [[Connect your agent]]
-- Aliased: `[[Connect your agent|connect an agent]]` — displays custom text
+- Aliased: `[[Connect your agent|connect an agent]]` shows the text after the `|`.
 - Aliased inside a table cell: `[[Connect your agent\|connect an agent]]`. A bare `|` would end the cell, so the alias pipe is written escaped. Hatchdoor reads that backslash as syntax rather than as part of the note's name, so the link resolves, shows up in backlinks, and is rewritten by a rename like any other.
-- Heading-scoped: `[[Connect your agent#Configure your MCP client]]` — links straight to a heading
-- A wikilink to a note that doesn't exist yet still renders — it just has nowhere to go until that note is created: `[[This Note Does Not Exist Yet]]`
+- Heading-scoped: `[[Connect your agent#Configure your MCP client]]` opens the note at that heading.
+- To a note that does not exist yet: `[[This Note Does Not Exist Yet]]` still renders, and leads nowhere until that note is created.
 
 ## Markdown links to notes
 
-A plain Markdown link whose target is a `.md` file is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the Links panel, the graph and statistics exactly as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
+A plain Markdown link whose target is a `.md` file is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
 
 - Relative to the note: `[the launch plan](../20-projects/Beacon%20Launch.md)`
 - From the Vault root: `[the launch plan](/20-projects/Beacon%20Launch.md)`
@@ -168,7 +168,7 @@ A Vault has one link style, wikilinks or Markdown links, and every link Hatchdoo
 - If the Vault has Obsidian's settings file, `.obsidian/app.json`, its **Use `[[Wikilinks]]`** switch decides. Obsidian stores the switch turned off as `"useMarkdownLinks": true`. With the switch on, the key missing, or a file Hatchdoor cannot read, the Vault uses wikilinks, as Obsidian does.
 - Otherwise Hatchdoor counts the note links and attachment embeds already in the Vault, and the form most of them use wins. No links at all, or an exact tie, means wikilinks.
 
-In a wikilink Vault, Hatchdoor inserts `[[Note Title]]` and `![[path/to/file.png]]`, exactly as it always has. In a Markdown-link Vault it inserts `[Note Title](path/to/Note%20Title.md)` and `![](path/to/file.png)`. The link text is the note's title, with any `[`, `]`, `` ` `` or `\` escaped.
+In a wikilink Vault, Hatchdoor inserts `[[Note Title]]` and `![[path/to/file.png]]`. In a Markdown-link Vault it inserts `[Note Title](path/to/Note%20Title.md)` and `![](path/to/file.png)`. The link text is the note's title, with any `[`, `]`, `` ` `` or `\` escaped.
 
 The path in a Markdown link has one of three forms. With Obsidian's settings file, its **New link format** setting picks it (`newLinkFormat` in the file, **Shortest path when possible** when the key is missing). Without one, Hatchdoor writes relative paths.
 
@@ -182,7 +182,7 @@ Paths are escaped the way a rename rewrites them. Change the switch in Obsidian 
 
 ## Horizontal rule
 
-Three hyphens (`---`) on their own line renders a horizontal rule, useful for dividing a long note into sections. (It's also frontmatter's delimiter — see below — so this only renders as a rule when it isn't at the very top of the file.)
+Three hyphens (`---`) on a line of their own draw a horizontal rule, which divides a long note into sections. At the very top of a file the same three hyphens open the frontmatter block instead.
 
 ## Frontmatter
 
@@ -195,7 +195,7 @@ status: current
 ---
 ```
 
-Hatchdoor parses frontmatter and can show properties (tags, aliases, and arbitrary key/value pairs) separately from the note body, without them cluttering the rendered text.
+Hatchdoor reads the block and shows its properties, such as tags, aliases and any other key with its value, above the note body and apart from its text.
 
 ## Tags
 
@@ -217,4 +217,4 @@ An agent renaming a tag across the Vault with `rename_tag` goes by these same ru
 
 ---
 
-Related: [[MCP tools reference]] · [[HTTP API reference]]
+Related: [[Markdown feature showcase]] · [[MCP tools reference]] · [[HTTP API reference]]

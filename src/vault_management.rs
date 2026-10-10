@@ -9,8 +9,7 @@
 //! answer from one collection snapshot — is domain behaviour, not transport
 //! shaping, so it belongs here alongside the authenticated and demo
 //! projections of a Vault, the credential-replacement Git retry rule, the
-//! manual sync/retry/refresh controls, the confirmed start-with-no-Vaults
-//! recovery, and the collection wire types.
+//! manual sync/retry/refresh controls, and the collection wire types.
 //!
 //! Failures leave here as the transport-neutral [`VaultOperationError`] from
 //! #184, exactly as the Vault read and mutation cores report theirs (ADR-19).
@@ -146,21 +145,6 @@ impl From<&VaultRegistryRecovery> for RegistryRecoveryInfo {
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
-pub struct LegacyMigrationRecoveryInfo {
-    pub code: String,
-    pub message: String,
-}
-
-impl From<&crate::vault_migration::LegacyMigrationRecovery> for LegacyMigrationRecoveryInfo {
-    fn from(recovery: &crate::vault_migration::LegacyMigrationRecovery) -> Self {
-        Self {
-            code: recovery.code().to_string(),
-            message: recovery.message().to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultDiscoveryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_revision: Option<u64>,
@@ -171,12 +155,6 @@ pub struct VaultDiscoveryResponse {
     pub vaults: Vec<VaultSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RegistryRecoveryInfo>,
-    /// Present only when the registry itself is fine (empty, revision 0) but
-    /// safe automatic legacy import could not prove the deployment and needs
-    /// operator recovery (#150). Distinct from `recovery` above: that one
-    /// means the persisted registry file itself is unreadable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_migration_recovery: Option<LegacyMigrationRecoveryInfo>,
     /// Instance-wide publication posture: `true` only under
     /// `HATCHDOOR_DEMO_MODE`. Always serialized (never omitted) so the
     /// browser can tell "not a demo" from "did not say".
@@ -329,19 +307,15 @@ pub(crate) fn parse_vault_id(raw: &str) -> Result<VaultId, VaultOperationError> 
 pub(crate) const MANAGEMENT_ERROR_CODES: &[&str] = &[
     "invalid_vault_id",
     "invalid_vault_definition",
-    "confirmation_required",
     "vault_not_found",
     "duplicate_vault_name",
     "vault_path_overlap",
     "identity_change_requires_disabled",
     "identity_change_requires_confirmation",
     "registry_revision_conflict",
-    "legacy_migration_recovery_not_pending",
     "vault_disabled",
     "capability_unavailable",
     "vault_registry_recovery_required",
-    "legacy_environment_cleanup_required",
-    "legacy_migration_required",
     "vault_unavailable",
     "registry_revision_exhausted",
     "internal_error",
@@ -374,7 +348,7 @@ fn definition_error(error: VaultDefinitionError, vault_id: Option<VaultId>) -> V
         // malformed input — the same request would succeed against a
         // different existing registry state.
         VaultDefinitionError::DuplicateName => "duplicate_vault_name",
-        VaultDefinitionError::PathOverlap => "vault_path_overlap",
+        VaultDefinitionError::PathOverlap(_) => "vault_path_overlap",
         VaultDefinitionError::IdentityChangeRequiresDisabled => "identity_change_requires_disabled",
         VaultDefinitionError::IdentityChangeRequiresConfirmation => {
             "identity_change_requires_confirmation"
@@ -586,9 +560,8 @@ fn vault_summary_for(
 /// [`crate::vault_read::VaultReadCore`] and
 /// [`crate::vault_mutation::VaultMutationCore`]; it borrows the composed
 /// runtime because a definition change touches the registry, the live
-/// collection runtime, the work coordinator, the managed-Git scheduler, and
-/// the pending legacy-import recovery flag together, and reconciling them in
-/// that order within one call is the behaviour this module exists to own.
+/// collection runtime, the work coordinator, and the managed-Git scheduler
+/// together, and reconciling them in that order within one call is the behaviour this module exists to own.
 pub struct VaultCollectionManagement<'a> {
     state: &'a AppState,
 }
@@ -613,48 +586,36 @@ impl<'a> VaultCollectionManagement<'a> {
             Ok(VaultRegistryState::Ready(registry_snapshot)) => {
                 let collection_snapshot = self.state.vaults.snapshot();
                 let demo_mode = self.state.demo_mode;
-                let legacy_migration_recovery = self
-                    .state
-                    .legacy_migration_recovery
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .as_ref()
-                    .map(LegacyMigrationRecoveryInfo::from);
-                let vaults = if legacy_migration_recovery.is_some() {
-                    Vec::new()
-                } else {
-                    registry_snapshot
-                        .definitions()
-                        .filter(|definition| !demo_mode || definition.enabled())
-                        .map(|definition| {
-                            let runtime_snapshot = collection_snapshot
-                                .vaults
-                                .get(&definition.vault_id())
-                                .cloned()
-                                .unwrap_or_else(|| unreconciled_snapshot(&definition));
-                            if demo_mode {
-                                public_vault_summary(&definition, &runtime_snapshot)
-                            } else {
-                                let mut summary = vault_summary(
-                                    &definition,
-                                    &runtime_snapshot,
-                                    self.state.managed_git.polling_clock(definition.vault_id()),
-                                );
-                                if let Some(style) = self.link_style(definition.vault_id()) {
-                                    summary.link_style = Some(style.style);
-                                    summary.link_path_form = Some(style.path_form);
-                                }
-                                summary
+                let vaults = registry_snapshot
+                    .definitions()
+                    .filter(|definition| !demo_mode || definition.enabled())
+                    .map(|definition| {
+                        let runtime_snapshot = collection_snapshot
+                            .vaults
+                            .get(&definition.vault_id())
+                            .cloned()
+                            .unwrap_or_else(|| unreconciled_snapshot(&definition));
+                        if demo_mode {
+                            public_vault_summary(&definition, &runtime_snapshot)
+                        } else {
+                            let mut summary = vault_summary(
+                                &definition,
+                                &runtime_snapshot,
+                                self.state.managed_git.polling_clock(definition.vault_id()),
+                            );
+                            if let Some(style) = self.link_style(definition.vault_id()) {
+                                summary.link_style = Some(style.style);
+                                summary.link_path_form = Some(style.path_form);
                             }
-                        })
-                        .collect()
-                };
+                            summary
+                        }
+                    })
+                    .collect();
                 Ok(VaultDiscoveryResponse {
                     registry_revision: Some(registry_snapshot.revision()),
                     collection_revision: collection_snapshot.collection_revision,
                     vaults,
                     recovery: None,
-                    legacy_migration_recovery,
                     demo_mode,
                 })
             }
@@ -663,7 +624,6 @@ impl<'a> VaultCollectionManagement<'a> {
                 collection_revision: 0,
                 vaults: Vec::new(),
                 recovery: Some(RegistryRecoveryInfo::from(&recovery)),
-                legacy_migration_recovery: None,
                 demo_mode: self.state.demo_mode,
             }),
             Err(error) => Err(internal_error(error.to_string(), None)),
@@ -686,7 +646,7 @@ impl<'a> VaultCollectionManagement<'a> {
         })
     }
 
-    /// Create a new Vault definition, seeding it when it qualifies.
+    /// Create a new Vault definition.
     pub async fn create(
         &self,
         request: CreateVaultRequest,
@@ -700,25 +660,6 @@ impl<'a> VaultCollectionManagement<'a> {
         // reaches this diff) — a future change to that CAS contract would
         // need to preserve this guarantee or expose the generated ID
         // directly.
-        //
-        // Refused while startup recovery is pending (#325): a created Vault
-        // would give the registry real state that `start_with_no_vaults`
-        // (which always commits from revision 0) could never clear the flag
-        // over, and discovery would keep hiding it behind that flag.
-        if let Some(recovery) = self
-            .state
-            .legacy_migration_recovery
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-        {
-            return Err(VaultOperationError::new(
-                recovery.code(),
-                recovery.message(),
-                None,
-                false,
-            ));
-        }
         let before_ids: BTreeSet<VaultId> = match self.state.vault_registry.load() {
             Ok(VaultRegistryState::Ready(snapshot)) => snapshot.vault_ids().collect(),
             Ok(VaultRegistryState::Recovery(recovery)) => return Err(recovery_error(&recovery)),
@@ -741,15 +682,6 @@ impl<'a> VaultCollectionManagement<'a> {
             .map_err(|error| registry_error(error, None))?;
 
         let vault_id = snapshot.vault_ids().find(|id| !before_ids.contains(id));
-        // Seed from the *committed* definition, not the request: the registry
-        // canonicalizes the path and normalizes the exclude patterns, and the
-        // emptiness decision has to be made against what was actually stored.
-        // Runs before `reconcile_after_commit` activates the Vault and queues
-        // its first Index turn, so the starter notes are in that first index
-        // rather than arriving later as a watcher event.
-        if let Some(definition) = vault_id.and_then(|vault_id| snapshot.definition(vault_id)) {
-            seed_new_vault_or_log(&definition);
-        }
         self.reconcile_after_commit(&snapshot)
             .await
             .map_err(|error| internal_error(error, vault_id))?;
@@ -970,74 +902,6 @@ impl<'a> VaultCollectionManagement<'a> {
         )
     }
 
-    /// The confirmed recovery action offered only when a failed legacy import
-    /// left `AppState`'s `legacy_migration_recovery` set (#150). Writes an
-    /// ordinary empty, revision-1 registry and clears that recovery flag;
-    /// unreachable (and left untouched) once the registry already holds real
-    /// state, since `start_with_no_vaults` always commits from revision 0.
-    pub async fn start_with_no_vaults(
-        &self,
-        confirm: bool,
-    ) -> Result<VaultMutationResponse, VaultOperationError> {
-        let recovery = self
-            .state
-            .legacy_migration_recovery
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let Some(recovery) = recovery else {
-            return Err(VaultOperationError::new(
-                "legacy_migration_recovery_not_pending",
-                "There is no failed legacy import waiting for recovery.",
-                None,
-                false,
-            ));
-        };
-        if !recovery.can_start_with_no_vaults() {
-            return Err(VaultOperationError::new(
-                "legacy_environment_cleanup_required",
-                recovery.message(),
-                None,
-                false,
-            ));
-        }
-
-        let snapshot =
-            crate::vault_migration::start_with_no_vaults(&self.state.vault_registry, confirm)
-                .map_err(|error| match error {
-                    crate::vault_migration::LegacyMigrationError::ConfirmationRequired => {
-                        VaultOperationError::new(
-                            "confirmation_required",
-                            "Starting with no Vaults requires confirm: true.",
-                            None,
-                            false,
-                        )
-                    }
-                    crate::vault_migration::LegacyMigrationError::Registry(error) => {
-                        registry_error(error, None)
-                    }
-                    crate::vault_migration::LegacyMigrationError::Storage(detail) => {
-                        internal_error(detail, None)
-                    }
-                })?;
-
-        // Reconciles like every other registry-mutating operation here, even
-        // though the transition is empty-registry to empty-registry today: it
-        // keeps `state.vaults`'s own collection revision (and its
-        // `/api/v1/vaults/events` SSE publication) from silently lagging the
-        // registry commit, matching what a future consumer of this collection
-        // revision expects.
-        self.reconcile_after_commit(&snapshot)
-            .await
-            .map_err(|error| internal_error(error, None))?;
-        *self
-            .state
-            .legacy_migration_recovery
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        Ok(self.mutation_response(&snapshot, None))
-    }
-
     /// The collection-revision channel the HTTP adapter's SSE route publishes
     /// from. It lives here because ADR-19 forbids an adapter reaching past a
     /// core into the runtime; the `Event` framing, keep-alive, and stream
@@ -1178,30 +1042,6 @@ fn schedule_response(
     }
 }
 
-/// Seed a newly created Vault, logging rather than failing the call when that
-/// does not work out.
-///
-/// Which Vaults qualify is `vault::seed_new_vault`'s decision, shared with the
-/// legacy import path so the rule cannot drift between the two ways a Vault
-/// definition comes into existence. All this adds is the operator-facing log
-/// line: the Vault is already committed to the registry by the time this runs,
-/// and refusing the whole creation because the welcome notes could not be
-/// written would be a worse outcome than an empty Vault.
-fn seed_new_vault_or_log(definition: &VaultDefinition) {
-    match crate::vault::seed_new_vault(definition.source(), definition.exclude_patterns()) {
-        Ok(true) => tracing::info!(
-            vault_id = %definition.vault_id(),
-            "Seeded new Vault with Hatchdoor starter notes"
-        ),
-        Ok(false) => {}
-        Err(error) => error!(
-            vault_id = %definition.vault_id(),
-            %error,
-            "could not seed the new Vault with starter notes"
-        ),
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::app_state::AppState;
@@ -1242,7 +1082,6 @@ pub(crate) mod test_support {
             vault_work,
             managed_git,
             commit_cooldown: std::sync::Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: std::sync::Arc::new(
                 SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
@@ -1258,6 +1097,10 @@ pub(crate) mod test_support {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
+            agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
         (state, worker, directory)
@@ -1633,121 +1476,6 @@ mod tests {
             named(&demo.vaults, "Offline").capabilities,
             VaultCapabilities::default(),
             "a demo offers no retry for a Vault a visitor cannot retry"
-        );
-    }
-
-    /// #150's recovery action, asserted where it now lives: it requires a
-    /// pending failed import and an explicit confirmation, and clears the
-    /// flag once the empty registry is committed and reconciled.
-    #[tokio::test]
-    async fn start_with_no_vaults_requires_a_pending_import_and_an_explicit_confirmation() {
-        let (state, _worker, _directory) = test_state();
-
-        let not_pending = VaultCollectionManagement::new(&state)
-            .start_with_no_vaults(true)
-            .await
-            .expect_err("no failed import is pending");
-        assert_eq!(not_pending.code, "legacy_migration_recovery_not_pending");
-
-        // A pending import that still needs the operator to clean their
-        // environment cannot be resolved by starting empty at all.
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") = Some(
-            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
-                "remove the legacy environment variables first",
-            ),
-        );
-        let needs_cleanup = VaultCollectionManagement::new(&state)
-            .start_with_no_vaults(true)
-            .await
-            .expect_err("the environment still needs cleaning");
-        assert_eq!(needs_cleanup.code, "legacy_environment_cleanup_required");
-
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") =
-            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
-                "automatic import could not prove the legacy deployment",
-            ));
-
-        let unconfirmed = VaultCollectionManagement::new(&state)
-            .start_with_no_vaults(false)
-            .await
-            .expect_err("a bare call is not enough");
-        assert_eq!(unconfirmed.code, "confirmation_required");
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_some(),
-            "a refused recovery must leave the flag pending"
-        );
-
-        let response = VaultCollectionManagement::new(&state)
-            .start_with_no_vaults(true)
-            .await
-            .expect("confirmed recovery");
-        assert_eq!(response.registry_revision, 1);
-        assert!(response.vault.is_none());
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_none(),
-            "a successful recovery must clear the pending flag"
-        );
-
-        // Discovery stops withholding the collection once the flag is clear.
-        let discovery = VaultCollectionManagement::new(&state)
-            .list()
-            .expect("discovery");
-        assert!(discovery.legacy_migration_recovery.is_none());
-        assert_eq!(discovery.registry_revision, Some(1));
-    }
-
-    /// #325: a Vault created while a failed legacy import awaits recovery gave
-    /// the registry real state that `start_with_no_vaults` (always committing
-    /// from revision 0) could never clear the flag over, while discovery kept
-    /// hiding the Vault behind that flag. Creation is refused instead, with
-    /// the pending recovery's own code, and the registry stays untouched.
-    #[tokio::test]
-    async fn create_is_refused_while_legacy_migration_recovery_is_pending() {
-        let (state, _worker, directory) = test_state();
-        let vault_path = directory.path().join("notes");
-        std::fs::create_dir(&vault_path).expect("vault dir");
-        *state
-            .legacy_migration_recovery
-            .write()
-            .expect("recovery lock") = Some(
-            crate::vault_migration::LegacyMigrationRecovery::for_test("legacy import failed"),
-        );
-
-        let refused = VaultCollectionManagement::new(&state)
-            .create(create_request(
-                "Notes",
-                VaultSource::Local { path: vault_path },
-            ))
-            .await
-            .expect_err("creation must wait for the recovery decision");
-        assert_eq!(refused.code, "legacy_migration_required");
-        assert_eq!(ready_snapshot(&state).revision(), 0);
-
-        // The recovery action still works afterwards: the flag is not wedged.
-        VaultCollectionManagement::new(&state)
-            .start_with_no_vaults(true)
-            .await
-            .expect("start with no Vaults");
-        assert!(
-            state
-                .legacy_migration_recovery
-                .read()
-                .expect("recovery lock")
-                .is_none()
         );
     }
 
@@ -2267,11 +1995,10 @@ mod tests {
         );
     }
 
-    /// The starter Vault is a documented first-run behaviour: a brand-new
-    /// `Local` Vault pointed at an empty directory opens on the welcome notes
-    /// rather than on nothing at all.
+    /// Hatchdoor never writes into the operator's folder on its own: a brand
+    /// new `Local` Vault pointed at an empty directory stays empty (ADR-40).
     #[tokio::test]
-    async fn creating_a_local_vault_on_an_empty_directory_seeds_the_starter_vault() {
+    async fn creating_a_local_vault_on_an_empty_directory_writes_no_files() {
         let (state, _worker, directory) = test_state();
         let path = directory.path().join("fresh-notes");
         std::fs::create_dir_all(&path).expect("vault dir");
@@ -2284,136 +2011,16 @@ mod tests {
             .await
             .expect("create the Vault");
 
+        let entries: Vec<_> = std::fs::read_dir(&path)
+            .expect("read the Vault directory")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect();
         assert!(
-            path.join("README.md").is_file(),
-            "an empty new Local Vault must receive the starter notes"
-        );
-
-        // "before its first Index turn": that turn is still sitting in the
-        // coordinator, unrun, with the starter notes already on disk — so the
-        // index it builds will contain them rather than discovering them later
-        // through a watcher event.
-        let vault_id = ready_snapshot(&state)
-            .vault_ids()
-            .next()
-            .expect("one Vault");
-        assert!(
-            state.vault_work.has_work(vault_id, VaultWorkKind::Index),
-            "the Vault's first Index turn must still be pending when seeding has finished"
+            entries.is_empty(),
+            "creating a Vault must not write into its folder, found {entries:?}"
         );
     }
 
-    /// Seeding must never touch a directory that already holds the operator's
-    /// own Markdown, and a Vault whose notes were all deleted is never
-    /// re-seeded: only creation seeds, and creation happens once.
-    #[tokio::test]
-    async fn creating_a_local_vault_on_a_directory_with_markdown_does_not_seed() {
-        let (state, _worker, directory) = test_state();
-        let path = directory.path().join("existing-notes");
-        std::fs::create_dir_all(&path).expect("vault dir");
-        std::fs::write(path.join("Home.md"), "home").expect("write note");
-
-        VaultCollectionManagement::new(&state)
-            .create(create_request(
-                "Existing notes",
-                VaultSource::Local { path: path.clone() },
-            ))
-            .await
-            .expect("create the Vault");
-
-        assert!(
-            !path.join("README.md").exists(),
-            "a Vault that already holds Markdown must be left exactly as it was"
-        );
-        assert_eq!(
-            std::fs::read_to_string(path.join("Home.md")).expect("existing note"),
-            "home"
-        );
-    }
-
-    /// A trashed note is not content: the emptiness decision uses the Vault's
-    /// own exclude matcher, which excludes the trash folders by default, so a
-    /// directory holding only trash still gets the starter Vault.
-    #[tokio::test]
-    async fn a_directory_holding_only_trashed_notes_is_still_seeded() {
-        let (state, _worker, directory) = test_state();
-        let path = directory.path().join("trash-only");
-        std::fs::create_dir_all(path.join(".hatchdoor-trash")).expect("trash dir");
-        std::fs::write(path.join(".hatchdoor-trash/Gone.md"), "gone").expect("write trashed note");
-
-        VaultCollectionManagement::new(&state)
-            .create(create_request(
-                "Trash only",
-                VaultSource::Local { path: path.clone() },
-            ))
-            .await
-            .expect("create the Vault");
-
-        assert!(
-            path.join("README.md").is_file(),
-            "the trash folder does not count as Vault content"
-        );
-    }
-
-    /// Writing starter notes into a Git working tree would manufacture a
-    /// commit the operator never asked for, so a Git-backed source is never
-    /// seeded whatever its directory holds.
-    #[tokio::test]
-    async fn creating_a_git_backed_vault_never_seeds() {
-        let (state, _worker, directory) = test_state();
-        let path = directory.path().join("cloned-notes");
-        std::fs::create_dir_all(&path).expect("vault dir");
-
-        VaultCollectionManagement::new(&state)
-            .create(create_request(
-                "Cloned notes",
-                managed_git_source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
-            ))
-            .await
-            .expect("create the Vault");
-
-        assert!(
-            !path.join("README.md").exists(),
-            "a Git-backed Vault's content belongs to its repository"
-        );
-    }
-
-    /// Disabling and re-enabling an emptied Vault must not resurrect the
-    /// starter notes: only creation seeds.
-    #[tokio::test]
-    async fn re_enabling_an_emptied_vault_does_not_re_seed_it() {
-        let (state, _worker, directory) = test_state();
-        let path = directory.path().join("emptied-notes");
-        std::fs::create_dir_all(&path).expect("vault dir");
-        std::fs::write(path.join("Home.md"), "home").expect("write note");
-
-        VaultCollectionManagement::new(&state)
-            .create(create_request(
-                "Emptied notes",
-                VaultSource::Local { path: path.clone() },
-            ))
-            .await
-            .expect("create the Vault");
-        let snapshot = ready_snapshot(&state);
-        let vault_id = snapshot.vault_ids().next().expect("one Vault");
-
-        // The operator deletes every note, then cycles the Vault.
-        std::fs::remove_file(path.join("Home.md")).expect("delete the only note");
-        VaultCollectionManagement::new(&state)
-            .set_enabled(vault_id, snapshot.revision(), false)
-            .await
-            .expect("disable the Vault");
-        let after_disable = ready_snapshot(&state);
-        VaultCollectionManagement::new(&state)
-            .set_enabled(vault_id, after_disable.revision(), true)
-            .await
-            .expect("re-enable the Vault");
-
-        assert!(
-            !path.join("README.md").exists(),
-            "an intentionally emptied Vault must never be re-seeded"
-        );
-    }
     /// Closes the observability half of the durable-schedule change: a
     /// managed-Git Vault's summary must say when it last completed a Git turn
     /// and when its next one is due. Without these, the only way to answer

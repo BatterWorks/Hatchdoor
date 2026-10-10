@@ -7,7 +7,8 @@
 // let a branch that moved a user-facing surface reach `development` without
 // someone having looked. It reports which surfaces the branch touched, which
 // notes in `docs/user-vault` claim to document them, and whether those notes
-// moved in the same range.
+// moved in the same range. One entry on that reading list lives outside the
+// vault: the Docker Hub overview, which repeats the install steps.
 //
 // Run it, read the notes it names, fix what drifted, then re-run with
 // `--acknowledge` to record that the review happened. Acknowledging without
@@ -36,6 +37,10 @@ const GET_STARTED = `${VAULT_ROOT}/01 Get started`;
 const GUIDES = `${VAULT_ROOT}/02 Guides`;
 const REFERENCE = `${VAULT_ROOT}/03 Reference`;
 const CONCEPTS = `${VAULT_ROOT}/04 Concepts`;
+
+// Published to Docker Hub by the release hook. Not a manual note, but it
+// repeats the install steps, so it sits on the reading list like one.
+const DOCKER_HUB_OVERVIEW = "docs/maintenance/docker-hub/overview.md";
 
 // Each surface names the source paths that produce a user-facing behaviour and
 // the notes that describe it. A changed file may match several surfaces; that
@@ -206,12 +211,6 @@ const SURFACES = [
     ],
   },
   {
-    id: "starter-content",
-    label: "Starter Vault content seeded on first run",
-    paths: ["src/vault/seed.rs", "docs/starter-vault/"],
-    notes: [`${GET_STARTED}/Connect your first Vault.md`],
-  },
-  {
     id: "startup",
     label: "Startup, readiness, and note reads",
     paths: [
@@ -226,6 +225,26 @@ const SURFACES = [
     ],
   },
   {
+    id: "bundled-manual",
+    label: "The manual bundled into the binary and its MCP tools",
+    // ADR-38: the pages themselves ship, so their names, titles and links
+    // reach agents through read_docs and search_docs.
+    paths: ["src/docs_bundle.rs"],
+    notes: [`${REFERENCE}/MCP tools reference.md`],
+  },
+  {
+    id: "usage-report",
+    label: "The opt-in usage report (telemetry)",
+    // ADR-45: the manual page lists every field the report carries, so a
+    // change to the report is a change to what operators were told.
+    paths: ["src/usage_report.rs"],
+    notes: [
+      `${REFERENCE}/Usage report reference.md`,
+      `${REFERENCE}/Settings and environment variables reference.md`,
+      `${CONCEPTS}/The security model.md`,
+    ],
+  },
+  {
     id: "deployment",
     label: "Deployment and packaging",
     paths: ["Dockerfile", "docker-compose.yml", ".env.example"],
@@ -234,6 +253,20 @@ const SURFACES = [
       `${GUIDES}/How to deploy Hatchdoor with an agent.md`,
       `${GET_STARTED}/Understand where your data lives.md`,
     ],
+  },
+  {
+    id: "docker-hub-overview",
+    label: "The quick start the Docker Hub overview repeats",
+    // #486: the overview went stale for ten weeks because nothing named it.
+    // The install guide is a path here, not a note: the overview's quick
+    // start is a short copy of it, so an edit to the guide can outdate it.
+    paths: [
+      "Dockerfile",
+      "docker-compose.yml",
+      ".env.example",
+      `${GET_STARTED}/Install Hatchdoor with Docker Compose.md`,
+    ],
+    notes: [DOCKER_HUB_OVERVIEW],
   },
 ];
 
@@ -251,7 +284,7 @@ const SHIPPED_PATHS = [
   "Dockerfile",
   "docker-compose.yml",
   ".env.example",
-  "docs/starter-vault/",
+  "docs/user-vault/",
 ];
 
 // Test code sits inside the shipped trees but never ships.
@@ -515,9 +548,6 @@ const mergeBase = mergeBaseResult.stdout.trim();
 
 const files = changedPaths(mergeBase);
 const surfaces = touchedSurfaces(files);
-const changedNotes = new Set(
-  files.filter((file) => file.startsWith(`${VAULT_ROOT}/`)),
-);
 
 const shipped = shippedChanges(files);
 const changelogEdited = files.includes(CHANGELOG);
@@ -602,7 +632,7 @@ console.error("\nNOTES THAT DOCUMENT THEM");
 for (const [note, reasons] of [...notesToReview].sort(([left], [right]) =>
   left.localeCompare(right),
 )) {
-  const state = changedNotes.has(note) ? "edited on this branch" : "UNTOUCHED";
+  const state = files.includes(note) ? "edited on this branch" : "UNTOUCHED";
   console.error(`  ${note}  (${state})`);
   console.error(`    covers: ${[...new Set(reasons)].join("; ")}`);
 }

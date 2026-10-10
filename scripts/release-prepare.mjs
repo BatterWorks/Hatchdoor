@@ -7,8 +7,9 @@
 //
 // The first run cuts `docs/release-v<version>` off `development`, sets the
 // version in the four version files, dates the changelog's Unreleased
-// section, runs the mechanical checks, and opens the version-bump pull
-// request into `development`, carrying the judgment checklist, beside a draft
+// section, drafts the release's What's new highlights from it, runs the
+// mechanical checks, and opens the version-bump pull request into
+// `development`, carrying the judgment checklist, beside a draft
 // GitHub Release made from the changelog section. The review happens on that
 // pull request, so a fix it needs is committed to the bump branch; a run while
 // the pull request is open tests and pushes such a commit. Once the bump has
@@ -25,9 +26,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  MAX_HIGHLIGHTS,
+  MIN_HIGHLIGHTS,
   VERSION_FILES,
+  WHATS_NEW_PAGE,
+  addWhatsNewSection,
   compareVersions,
+  draftHighlights,
   hasEntries,
+  highlightProblems,
   latestReleaseVersion,
   parseVersion,
   releaseHeadingPrefix,
@@ -39,6 +46,7 @@ import {
   undefinedReferences,
   unreleasedSection,
   versionDisagreements,
+  whatsNewSection,
 } from "./release-common.mjs";
 
 const repositoryRoot = path.resolve(
@@ -101,6 +109,19 @@ function today() {
 
 async function readRepositoryFile(file) {
   return readFile(path.join(repositoryRoot, file), "utf8");
+}
+
+// The What's new page, or a refusal when it is missing: the bump drafts the
+// release's highlights into it (ADR-42).
+async function readWhatsNew() {
+  try {
+    return await readRepositoryFile(WHATS_NEW_PAGE);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      refuse("highlights", `${WHATS_NEW_PAGE} is missing.`);
+    }
+    throw error;
+  }
 }
 
 async function readVersionFiles() {
@@ -241,7 +262,8 @@ async function applyBump(version) {
   if (releaseSection(changelog, version)) {
     return;
   }
-  if (!unreleasedSection(changelog)) {
+  const unreleased = unreleasedSection(changelog);
+  if (!unreleased) {
     refuse(
       "changelog",
       `CHANGELOG.md has neither "## Unreleased" nor a "${releaseHeadingPrefix(version)}" section.`,
@@ -260,22 +282,37 @@ async function applyBump(version) {
       await writeFile(path.join(repositoryRoot, file), bumped[file]);
     }
   }
+  const date = today();
   await writeFile(
     path.join(repositoryRoot, "CHANGELOG.md"),
-    renameUnreleased(changelog, version, today()),
+    renameUnreleased(changelog, version, date),
   );
+  // A section already written for this version, by hand before the bump, is
+  // kept as it is.
+  const whatsNew = await readWhatsNew();
+  if (!whatsNewSection(whatsNew, version)) {
+    await writeFile(
+      path.join(repositoryRoot, WHATS_NEW_PAGE),
+      addWhatsNewSection(
+        whatsNew,
+        version,
+        date,
+        draftHighlights(unreleased.body),
+      ),
+    );
+  }
 
   if (git("status", "--porcelain") === "") {
     return;
   }
-  git("add", "--", ...VERSION_FILES, "CHANGELOG.md");
+  git("add", "--", ...VERSION_FILES, "CHANGELOG.md", WHATS_NEW_PAGE);
   git(
     "commit",
     "--quiet",
     "-m",
     `docs: prepare the v${version} release`,
     "-m",
-    `Sets the version to ${version} in ${VERSION_FILES.join(", ")}, and dates the changelog's Unreleased section as v${version}. Made by \`just release-prepare ${version}\`.`,
+    `Sets the version to ${version} in ${VERSION_FILES.join(", ")}, dates the changelog's Unreleased section as v${version}, and drafts the release's highlights in ${WHATS_NEW_PAGE}. Made by \`just release-prepare ${version}\`.`,
   );
   console.log(`Committed the version bump to ${version}.`);
 }
@@ -305,6 +342,21 @@ async function checkBump(version, branch) {
     refuse(
       "changelog links",
       `the v${version} section references ${missing.join(", ")} with no link definition. Add a "[#N]: <url>" line for each above the first release heading.`,
+    );
+  }
+
+  const highlights = whatsNewSection(await readWhatsNew(), version);
+  if (!highlights) {
+    refuse(
+      "highlights",
+      `${WHATS_NEW_PAGE} has no "${releaseHeadingPrefix(version)}" section. Add one with ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} plain lines on ${branch}, commit it, and run this again.`,
+    );
+  }
+  const problems = highlightProblems(highlights.body);
+  if (problems.length > 0) {
+    refuse(
+      "highlights",
+      `the v${version} section of ${WHATS_NEW_PAGE} cannot ship: ${problems.join(" ")} Rewrite it on ${branch} as ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} plain lines, each one sentence a beginner can act on, action-needed lines first and starting with "**Action needed:**". Commit it and run this again.`,
     );
   }
 
@@ -365,9 +417,9 @@ function pushBranch(branch) {
 }
 
 function bumpPullRequestBody(version, branch, freshness) {
-  return `Sets the version to ${version} in ${VERSION_FILES.map((file) => `\`${file}\``).join(", ")}, and renames the changelog's \`## Unreleased\` section to \`## v${version} - <date>\`.
+  return `Sets the version to ${version} in ${VERSION_FILES.map((file) => `\`${file}\``).join(", ")}, renames the changelog's \`## Unreleased\` section to \`## v${version} - <date>\`, and adds the release's highlights to \`${WHATS_NEW_PAGE}\`.
 
-The version files agree, every \`[#N]\` in the section has a link definition, and \`just check-full\` passed on this branch.
+The version files agree, every \`[#N]\` in the section has a link definition, the highlights have ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} lines with action-needed lines first, and \`just check-full\` passed on this branch.
 
 The release is reviewed here, before this merges. Commit any fix the review needs to \`${branch}\` and run \`just release-prepare ${version}\` again, which tests and pushes it, so the fix ships in this release. \`just release-publish ${version}\` refuses while any box below is unticked. Tick each box only after doing the check it names. Publishing waits for the maintainer to approve the release title and notes.
 
@@ -438,7 +490,7 @@ async function prepareBump(version, branch, bump, release) {
     await readRepositoryFile("CHANGELOG.md"),
   );
   console.log(`
-Next: work through the checklist on ${pullUrl}. Commit any fix the review needs to ${branch} and run \`just release-prepare ${version}\` again to test and push it. Draft the release title and notes on ${releaseUrl}. Once every box is ticked, merge the pull request into ${DEVELOPMENT} and run \`just release-prepare ${version}\` again to open the release pull request.`);
+Next: work through the checklist on ${pullUrl}. Commit any fix the review needs to ${branch} and run \`just release-prepare ${version}\` again to test and push it. Draft the release title and notes on ${releaseUrl}; the maintainer approves them together with the v${version} highlights in ${WHATS_NEW_PAGE}. Once every box is ticked, merge the pull request into ${DEVELOPMENT} and run \`just release-prepare ${version}\` again to open the release pull request.`);
 }
 
 // `just docs-freshness main` judges the checkout, so it runs on the bump

@@ -5,9 +5,8 @@
 //! ([`crate::vault_management`]), and turn the typed response or the
 //! structured error into a status code and a JSON body. The registry commit,
 //! the runtime reconciliation through the foreground mutation boundary, the
-//! authenticated and demo projections, the starter-Vault seeding, the
-//! credential-replacement Git retry, the manual sync/retry/refresh controls,
-//! and the confirmed start-with-no-Vaults recovery all live there, shared with
+//! authenticated and demo projections, the credential-replacement Git retry, and
+//! the manual sync/retry/refresh controls all live there, shared with
 //! the MCP management tools, which no longer proxy these handlers (ADR-19).
 //!
 //! Two things stay here because they are transport and have no MCP
@@ -68,14 +67,6 @@ pub(crate) use crate::vault_management::parse_vault_id;
 #[derive(Debug, Deserialize)]
 pub struct RevisionQuery {
     pub expected_registry_revision: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct StartWithNoVaultsRequest {
-    /// The one-shot confirmation flag: a bare POST is not enough (#150),
-    /// mirroring `vault_migration::start_with_no_vaults`'s own
-    /// `confirmed` gate rather than duplicating it here.
-    pub confirm: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,9 +138,7 @@ pub(crate) fn demo_read_only_response() -> Response {
 /// logs an `internal_error` itself, so nothing here re-reports it.
 fn management_error_response(error: VaultOperationError) -> Response {
     let status = match error.code.as_str() {
-        "invalid_vault_id" | "invalid_vault_definition" | "confirmation_required" => {
-            StatusCode::BAD_REQUEST
-        }
+        "invalid_vault_id" | "invalid_vault_definition" => StatusCode::BAD_REQUEST,
         "vault_not_found" => StatusCode::NOT_FOUND,
         // Every conflict below depends on registry state rather than on the
         // shape of this request in isolation.
@@ -158,14 +147,10 @@ fn management_error_response(error: VaultOperationError) -> Response {
         | "identity_change_requires_disabled"
         | "identity_change_requires_confirmation"
         | "registry_revision_conflict"
-        | "legacy_migration_recovery_not_pending"
         | "vault_disabled"
         | "capability_unavailable" => StatusCode::CONFLICT,
         // Retry-after-operator-action, or retry-after-the-runtime-settles.
-        "vault_registry_recovery_required"
-        | "legacy_environment_cleanup_required"
-        | "legacy_migration_required"
-        | "vault_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        "vault_registry_recovery_required" | "vault_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         // `internal_error` and `registry_revision_exhausted`.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -198,26 +183,6 @@ pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
         Err(join_error) => {
             internal_error_response(format!("background task panicked: {join_error}"), None)
         }
-    }
-}
-
-/// `POST /api/v1/vaults/start-with-no-vaults` — the confirmed recovery action
-/// offered only when a failed legacy import left `AppState`'s
-/// `legacy_migration_recovery` set (#150).
-pub async fn start_with_no_vaults_handler(
-    State(state): State<AppState>,
-    request: Result<Json<StartWithNoVaultsRequest>, JsonRejection>,
-) -> Response {
-    let request = match request {
-        Ok(Json(request)) => request,
-        Err(error) => return json_rejection_response(error),
-    };
-    match VaultCollectionManagement::new(&state)
-        .start_with_no_vaults(request.confirm)
-        .await
-    {
-        Ok(response) => mutation_response(StatusCode::OK, response),
-        Err(error) => management_error_response(error),
     }
 }
 
@@ -458,7 +423,6 @@ mod tests {
         let expected: Vec<(&str, StatusCode)> = vec![
             ("invalid_vault_id", StatusCode::BAD_REQUEST),
             ("invalid_vault_definition", StatusCode::BAD_REQUEST),
-            ("confirmation_required", StatusCode::BAD_REQUEST),
             ("vault_not_found", StatusCode::NOT_FOUND),
             ("duplicate_vault_name", StatusCode::CONFLICT),
             ("vault_path_overlap", StatusCode::CONFLICT),
@@ -468,21 +432,12 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             ("registry_revision_conflict", StatusCode::CONFLICT),
-            (
-                "legacy_migration_recovery_not_pending",
-                StatusCode::CONFLICT,
-            ),
             ("vault_disabled", StatusCode::CONFLICT),
             ("capability_unavailable", StatusCode::CONFLICT),
             (
                 "vault_registry_recovery_required",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
-            (
-                "legacy_environment_cleanup_required",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            ("legacy_migration_required", StatusCode::SERVICE_UNAVAILABLE),
             ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
             (
                 "registry_revision_exhausted",
@@ -579,6 +534,52 @@ mod tests {
             })
             .await
             .expect("create the Vault");
+    }
+
+    /// The code, the `409` and the `retryable` flag are what a client
+    /// branches on; the message names the colliding Vault without giving
+    /// away its folder (#495).
+    #[tokio::test]
+    async fn an_overlapping_folder_is_refused_with_409_and_names_the_vault() {
+        let (state, _worker, directory) = test_state();
+        let root = directory.path().join("vaults");
+        let existing = root.join("healthy");
+        std::fs::create_dir_all(&existing).expect("vault dir");
+        create_local_vault(&state, "Healthy", existing).await;
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 1,
+                name: "Everything".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: root },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("refusal body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("refusal JSON");
+        assert_eq!(body["code"], "vault_path_overlap");
+        assert_eq!(body["retryable"], false);
+        assert!(body.get("vault_id").is_none());
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("contains the Vault \"Healthy\""),
+            "{message}"
+        );
+        assert!(
+            !message.contains(directory.path().to_str().expect("UTF-8 temp path")),
+            "{message}"
+        );
+        assert_eq!(listed_vaults(&state).await.len(), 1);
     }
 
     async fn listed_vaults(state: &AppState) -> Vec<serde_json::Value> {

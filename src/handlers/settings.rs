@@ -23,6 +23,17 @@ pub const MAX_IN_MEMORY_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Serialize)]
 pub struct SettingsResponse {
     pub settings: Vec<SettingResponse>,
+    /// The last MCP client that called a tool, or `None` when no agent has
+    /// connected yet (#426). Read-only: no setting changes it.
+    pub last_agent: Option<crate::instance_state::AgentConnection>,
+    /// The opt-in check for a newer release (ADR-39): whether it is on, when
+    /// it last ran, and the release the update banner offers, if any.
+    /// Read-only; `HATCHDOOR_UPDATE_CHECK_ENABLED` above turns it on.
+    pub update_check: crate::update_check::UpdateCheckStatus,
+    /// The opt-in usage report (ADR-45): whether it is on, the install ID
+    /// while it is, and the exact report the next send would carry.
+    /// Read-only; `HATCHDOOR_USAGE_REPORT_ENABLED` above turns it on.
+    pub usage_report: crate::usage_report::UsageReportStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,10 +155,14 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_PUBLIC_URL", "instant", "text"),
     ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "instant", "number"),
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
+    ("HATCHDOOR_UPDATE_CHECK_ENABLED", "instant", "switch"),
+    ("HATCHDOOR_USAGE_REPORT_ENABLED", "instant", "switch"),
     // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
-    // the schema as first-boot import inputs: #185 deleted the instance-wide
-    // lane whose behaviour they drove, and `vault_migration.rs` consumes them
-    // until #82 closes. Two startup checks still parse them — the demo-mode
+    // the schema although #185 deleted the instance-wide lane whose behaviour
+    // they drove and #427 removed the import that consumed them; startup
+    // still purges the retired Git-lane keys from stored settings and refuses
+    // an install that stores any of them without a registry
+    // (`vault_migration.rs`). Two startup checks still parse them — the demo-mode
     // posture refusal and `HATCHDOOR_EXCLUDE`'s pattern validation, both in
     // `server.rs` — but nothing reads them per operation. The two author keys
     // are the exception: the collection lane's Git turns read them per turn as
@@ -162,10 +177,27 @@ const SETTINGS: &[(&str, &str, &str)] = &[
 ];
 
 pub async fn get_settings_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.runtime_snapshot();
     Json(settings_response(
-        &state.runtime_snapshot(),
+        &snapshot,
         state.demo_mode,
+        state.agent_connections.latest(),
+        update_check_status(&state, &snapshot),
+        crate::usage_report::status(&state, &snapshot).await,
     ))
+}
+
+/// Read from the instance state file beside the registry, where the update
+/// check writes it.
+fn update_check_status(
+    state: &AppState,
+    snapshot: &ConfigSnapshot,
+) -> crate::update_check::UpdateCheckStatus {
+    crate::update_check::status(
+        snapshot,
+        &crate::instance_state::InstanceStateStore::beside_registry(state.vault_registry.path()),
+        &crate::config::version_string(),
+    )
 }
 
 /// A viewer who already authenticated with the web bearer token gains no new
@@ -251,8 +283,8 @@ pub async fn patch_settings_handler(
 
     // Every save takes one path. The instance-wide versioning-task lifecycle
     // this handler used to run for a `HATCHDOOR_GIT_*` change is gone with the
-    // legacy single-Vault lane (issue #185); those keys are first-boot import
-    // inputs now, except `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, which the
+    // legacy single-Vault lane (issue #185); nothing reads those keys per
+    // operation now, except `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, which the
     // collection lane's Git turns read per turn and therefore need no restart
     // and no lifecycle work here.
     let result = state
@@ -261,7 +293,7 @@ pub async fn patch_settings_handler(
             decide_patch(snapshot, &request)
         });
     match result {
-        Ok((plan, saved)) => finish_patch(&state, plan, &saved),
+        Ok((plan, saved)) => finish_patch(&state, plan, &saved).await,
         Err(refusal) => refusal.into_response(),
     }
 }
@@ -294,7 +326,7 @@ fn decide_patch(
 
 /// The tail every successful save shares: request the work the save implies
 /// and build the response.
-fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Response {
+async fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Response {
     if plan.reindex_changed {
         // One Index turn per active Vault through the shared work coordinator,
         // rather than the legacy instance-wide rebuild. Each Vault reports
@@ -307,7 +339,17 @@ fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Re
         // MCP sessions to re-list. Failure only means nobody is subscribed.
         let _ = state.mcp_tools_changed.send(());
     }
-    Json(settings_response(saved, state.demo_mode)).into_response()
+    // The usage report's install ID follows its setting (ADR-45): created
+    // when the save turns the report on, cleared when it turns it off.
+    state.usage_report.reconcile();
+    Json(settings_response(
+        saved,
+        state.demo_mode,
+        state.agent_connections.latest(),
+        update_check_status(state, saved),
+        crate::usage_report::status(state, saved).await,
+    ))
+    .into_response()
 }
 
 fn validation_response(errors: Vec<FieldError>) -> Response {
@@ -369,7 +411,13 @@ fn is_reindex_setting_changed(snapshot: &ConfigSnapshot, key: &str, value: &str)
     })
 }
 
-fn settings_response(snapshot: &ConfigSnapshot, demo_mode: bool) -> SettingsResponse {
+fn settings_response(
+    snapshot: &ConfigSnapshot,
+    demo_mode: bool,
+    last_agent: Option<crate::instance_state::AgentConnection>,
+    update_check: crate::update_check::UpdateCheckStatus,
+    usage_report: crate::usage_report::UsageReportStatus,
+) -> SettingsResponse {
     let mut settings: Vec<SettingResponse> = SETTINGS
         .iter()
         .filter_map(|&(key, class, kind)| {
@@ -414,7 +462,12 @@ fn settings_response(snapshot: &ConfigSnapshot, demo_mode: bool) -> SettingsResp
         kind: "switch",
     });
 
-    SettingsResponse { settings }
+    SettingsResponse {
+        settings,
+        last_agent,
+        update_check,
+        usage_report,
+    }
 }
 
 fn validate_updates(
@@ -528,7 +581,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: std::sync::Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
@@ -544,6 +596,10 @@ mod tests {
             runtime_config: RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
+            agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
         (state, worker, directory)
@@ -783,7 +839,13 @@ mod tests {
         )
         .expect("runtime config")
         .snapshot();
-        let response = settings_response(&snapshot, false);
+        let response = settings_response(
+            &snapshot,
+            false,
+            None,
+            Default::default(),
+            Default::default(),
+        );
         let archive = response
             .settings
             .iter()
@@ -803,7 +865,13 @@ mod tests {
     #[test]
     fn demo_mode_is_reported_as_locked_for_a_reason_distinct_from_environment_and_branch() {
         let snapshot = RuntimeConfig::for_tests().snapshot();
-        let response = settings_response(&snapshot, true);
+        let response = settings_response(
+            &snapshot,
+            true,
+            None,
+            Default::default(),
+            Default::default(),
+        );
         let demo = response
             .settings
             .iter()
@@ -813,6 +881,292 @@ mod tests {
         assert_ne!(demo.locked, Some("environment"));
         assert_ne!(demo.locked, Some("never"));
         assert_eq!(demo.value.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn the_last_agent_is_reported_or_null_when_none_has_connected() {
+        let snapshot = RuntimeConfig::for_tests().snapshot();
+        let none = serde_json::to_value(settings_response(
+            &snapshot,
+            false,
+            None,
+            Default::default(),
+            Default::default(),
+        ))
+        .unwrap();
+        assert_eq!(none["last_agent"], serde_json::Value::Null);
+
+        let agent = crate::instance_state::AgentConnection {
+            name: "Claude Code".into(),
+            connected_at: "2026-10-03T09:00:00Z".into(),
+        };
+        let some = serde_json::to_value(settings_response(
+            &snapshot,
+            false,
+            Some(agent),
+            Default::default(),
+            Default::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            some["last_agent"],
+            serde_json::json!({"name": "Claude Code", "connected_at": "2026-10-03T09:00:00Z"})
+        );
+    }
+
+    #[tokio::test]
+    async fn the_update_check_is_a_switch_and_its_status_is_read_beside_the_registry() {
+        let (state, _worker, _directory) = test_state();
+        let store =
+            crate::instance_state::InstanceStateStore::beside_registry(state.vault_registry.path());
+        store
+            .write_section(
+                "update_check",
+                &serde_json::json!({
+                    "checked_at": "2026-10-03T09:00:00Z",
+                    "latest": {
+                        "version": "99.0.0",
+                        "release_url": "https://github.com/BatterWorks/Hatchdoor/releases/tag/v99.0.0"
+                    }
+                }),
+            )
+            .unwrap();
+        let read = |state: AppState| async move {
+            let response = get_settings_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let off = read(state.clone()).await;
+        assert_eq!(
+            off["update_check"],
+            serde_json::json!({
+                "enabled": false,
+                "checked_at": "2026-10-03T09:00:00Z",
+                "update_available": null
+            }),
+            "nothing is offered while the check is off"
+        );
+        let setting = off["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|setting| setting["key"] == "HATCHDOOR_UPDATE_CHECK_ENABLED")
+            .expect("the setting is editable from Settings (ADR-14)");
+        assert_eq!(setting["kind"], "switch");
+        assert_eq!(setting["value"], "false");
+
+        assert!(
+            validate_updates(
+                &state.runtime_snapshot(),
+                &BTreeMap::from([("HATCHDOOR_UPDATE_CHECK_ENABLED".into(), "true".into())]),
+            )
+            .is_empty()
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_UPDATE_CHECK_ENABLED".to_string(),
+                "true".to_string(),
+            )])
+            .unwrap();
+        let on = read(state).await;
+        assert_eq!(on["update_check"]["enabled"], true);
+        assert_eq!(on["update_check"]["update_available"]["version"], "99.0.0");
+    }
+
+    #[tokio::test]
+    async fn the_usage_report_is_a_switch_and_settings_shows_the_exact_report_on_and_off() {
+        let (mut state, _worker, directory) = test_state();
+        add_local_vault(&state, "notes", true).await;
+        state.usage_report = Arc::new(crate::usage_report::UsageReport::new(
+            crate::instance_state::InstanceStateStore::beside_registry(state.vault_registry.path()),
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        let body = |response: Response| async move {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let save = |state: AppState, value: &'static str| async move {
+            let request = PatchSettingsRequest {
+                updates: BTreeMap::from([(
+                    "HATCHDOOR_USAGE_REPORT_ENABLED".to_string(),
+                    value.to_string(),
+                )]),
+                confirm: Vec::new(),
+            };
+            patch_settings_handler(State(state), Ok(Json(request))).await
+        };
+        let report = |settings: &serde_json::Value| {
+            serde_json::from_str::<serde_json::Value>(
+                settings["usage_report"]["report"].as_str().unwrap(),
+            )
+            .unwrap()
+        };
+
+        let off = body(
+            get_settings_handler(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await;
+        let setting = off["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|setting| setting["key"] == "HATCHDOOR_USAGE_REPORT_ENABLED")
+            .expect("the setting is editable from Settings (ADR-14)");
+        assert_eq!(setting["kind"], "switch");
+        assert_eq!(setting["value"], "false");
+        assert_eq!(setting["locked"], serde_json::Value::Null);
+        assert_eq!(off["usage_report"]["enabled"], false);
+        assert_eq!(off["usage_report"]["install_id"], serde_json::Value::Null);
+        let shown = report(&off);
+        assert_eq!(
+            shown["payload"]["id"],
+            crate::usage_report::INSTALL_ID_PLACEHOLDER
+        );
+        assert_eq!(shown["payload"]["data"]["schema"], 1);
+        assert_eq!(shown["payload"]["data"]["vaults"], "1");
+        assert_eq!(shown["payload"]["data"]["git_sync"], "none");
+        assert_eq!(shown["payload"]["data"]["search_model"], "none");
+        assert_eq!(shown["payload"]["data"]["mcp_enabled"], false);
+
+        // On without a restart: the save's own response already carries the ID.
+        let on = body(save(state.clone(), "true").await).await;
+        assert_eq!(on["usage_report"]["enabled"], true);
+        let id = on["usage_report"]["install_id"]
+            .as_str()
+            .expect("an install ID once the report is on")
+            .to_string();
+        assert_eq!(report(&on)["payload"]["id"], id.as_str());
+        assert_eq!(
+            on["usage_report"]["last_sent_at"],
+            serde_json::Value::Null,
+            "on, and nothing sent yet"
+        );
+        // The job's send, with the request itself replaced (#478).
+        let mut reporter =
+            crate::usage_report::Reporter::new(state.clone(), Arc::new(|_request| Ok(())));
+        let sent_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        assert!(reporter.tick(sent_at).await);
+        let sent = body(
+            get_settings_handler(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(sent["usage_report"]["last_sent_at"], "2027-01-15T08:00:00Z");
+        assert_eq!(
+            state.usage_report.install_id().as_deref(),
+            Some(id.as_str())
+        );
+
+        let off_again = body(save(state.clone(), "false").await).await;
+        assert_eq!(
+            off_again["usage_report"]["install_id"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            report(&off_again)["payload"]["id"],
+            crate::usage_report::INSTALL_ID_PLACEHOLDER
+        );
+        assert_eq!(
+            off_again["usage_report"]["last_sent_at"],
+            serde_json::Value::Null
+        );
+        let state_file = std::fs::read_to_string(directory.path().join("state/instance.json"))
+            .unwrap_or_default();
+        assert!(!state_file.contains("usage_report"), "{state_file}");
+        assert!(!state_file.contains(&id), "{state_file}");
+    }
+
+    #[tokio::test]
+    async fn an_install_id_that_could_not_be_saved_is_not_shown() {
+        let (mut state, _worker, directory) = test_state();
+        // A file where the report's state directory should be: the ID cannot
+        // be saved, so it must not reach the response or the report.
+        std::fs::write(directory.path().join("blocked"), b"in the way").unwrap();
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_USAGE_REPORT_ENABLED".to_string(),
+                "true".to_string(),
+            )])
+            .unwrap();
+        state.usage_report = Arc::new(crate::usage_report::UsageReport::new(
+            crate::instance_state::InstanceStateStore::new(
+                directory.path().join("blocked/instance.json"),
+            ),
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+
+        let response = get_settings_handler(State(state)).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let settings = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+
+        assert_eq!(settings["usage_report"]["enabled"], true);
+        assert_eq!(
+            settings["usage_report"]["install_id"],
+            serde_json::Value::Null
+        );
+        let report = serde_json::from_str::<serde_json::Value>(
+            settings["usage_report"]["report"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            report["payload"]["id"],
+            crate::usage_report::INSTALL_ID_PLACEHOLDER
+        );
+    }
+
+    #[test]
+    fn a_usage_report_setting_from_the_environment_is_locked() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = RuntimeConfig::load(
+            directory.path().join("settings.json"),
+            crate::runtime_config::Environment::from_values([(
+                "HATCHDOOR_USAGE_REPORT_ENABLED".to_string(),
+                "true".to_string(),
+            )]),
+            crate::runtime_config::live_settings_defaults(),
+        )
+        .unwrap();
+        let listed = settings_response(
+            &config.snapshot(),
+            false,
+            None,
+            Default::default(),
+            Default::default(),
+        );
+        let setting = listed
+            .settings
+            .iter()
+            .find(|setting| setting.key == "HATCHDOOR_USAGE_REPORT_ENABLED")
+            .unwrap();
+        assert_eq!(setting.locked, Some("environment"));
+        assert_eq!(setting.value.as_deref(), Some("true"));
+        assert_eq!(
+            validate_updates(
+                &config.snapshot(),
+                &BTreeMap::from([("HATCHDOOR_USAGE_REPORT_ENABLED".into(), "false".into())]),
+            )
+            .len(),
+            1,
+            "a pinned setting cannot be saved over"
+        );
     }
 
     #[test]
@@ -858,7 +1212,13 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].key.as_deref(), Some("HATCHDOOR_PUBLIC_URL"));
 
-        let listed = settings_response(&config.snapshot(), false);
+        let listed = settings_response(
+            &config.snapshot(),
+            false,
+            None,
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             listed
                 .settings

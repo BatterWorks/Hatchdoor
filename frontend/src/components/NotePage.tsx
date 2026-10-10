@@ -21,17 +21,17 @@ import {
   stripBlockIds,
   stripVaultNoteLinks,
 } from "../lib/markdown";
-import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
 import {
-  frontmatterLineOffset,
-  linesMatch,
-  placeholderForBlankRange,
-  type LineRange,
-} from "../lib/sourceMap";
+  duplicateTitleHeadingLine,
+  extractMarkdownHeadings,
+  slugifyHeading,
+  type NoteHeading,
+} from "../lib/noteHeadings";
+import { detectLineEnding, frontmatterLineOffset } from "../lib/sourceMap";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
-import { createEditHistory } from "../lib/editHistory";
 import { holdAppReload } from "../lib/reloadGuard";
-import { isEditableTarget, safeGetItem, safeSetItem } from "../lib/storage";
+import { safeGetItem, safeSetItem } from "../lib/storage";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -67,15 +67,18 @@ import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { SaveState } from "./note-page/SaveState";
 import {
   attachmentEmbedText,
-  attachmentRejection,
-  insertEmbedAt,
-  insertionLineForDrop,
   uploadNoteAttachment,
   type NoteAttachmentUpload,
 } from "./note-page/attachmentDrop";
-import { BlockGap } from "./note-page/BlockGap";
-import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
+import {
+  LiveEditor,
+  type LiveEditorHandle,
+} from "./note-page/live-editor/LiveEditor";
+import {
+  createNoteLinkResolver,
+  wikilinkLabel,
+} from "./note-page/live-editor/noteLinks";
 import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import { SavedQueryProvider } from "./note-page/SavedQueryBlock";
@@ -91,11 +94,14 @@ import {
   SearchHitNavigator,
 } from "./note-page/sections";
 import {
+  cachedAssetHref,
   resolveAssetTargets,
+  resolveNoteTargets,
   useResolvedWikilinks,
 } from "./note-page/wikilinks";
 
-const TOUCH_EDIT_HINT_KEY = "hatchdoor.touchEditHintSeen";
+/** The browser remembers whether notes open rendered or in the editor. */
+const READING_VIEW_KEY = "hatchdoor.noteReadingView";
 
 /**
  * Trailing debounce on the localStorage draft write (#330). A draft written per
@@ -125,12 +131,32 @@ type DraftTarget = {
 };
 
 /**
- * Whether the primary pointer cannot hover, which is what makes the double tap
- * the entry gesture and the hint worth showing. Guarded because jsdom and older
- * WebKit do not implement matchMedia.
+ * Whether the primary pointer cannot hover, which is what puts the editor's
+ * formatting in a bar above the keyboard rather than in a floating toolbar
+ * (#540). Guarded because jsdom and older WebKit do not implement matchMedia.
  */
 function isCoarsePointer(): boolean {
   return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+}
+
+/**
+ * The note split into the lines before the body (the frontmatter block, when
+ * there is one) and the body with `\n` endings, which is what the editor
+ * holds. `compose` puts an edited body back under the current frontmatter in
+ * the file's own line ending, so a CRLF note stays CRLF (ADR-22).
+ */
+function splitBody(content: string): { body: string; offset: number } {
+  const offset = frontmatterLineOffset(content);
+  return {
+    body: content.split(/\r?\n/).slice(offset).join("\n"),
+    offset,
+  };
+}
+
+function composeContent(current: string, body: string): string {
+  const ending = detectLineEnding(current);
+  const head = current.split(/\r?\n/).slice(0, frontmatterLineOffset(current));
+  return [...head, ...body.split("\n")].join(ending);
 }
 
 /** Flattens the wire response's per-link `vault_id` (always the note's own —
@@ -143,13 +169,11 @@ function unwrapLinks(wire: VaultQualifiedLinks): NoteLinks {
   };
 }
 
-function countDocumentLines(content: string): number {
-  return content.split(/\r?\n/).length;
-}
-
 const NOTE_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
+
 export function NotePage({
   onActiveNoteChange,
+  onHeadingsChange,
   onTagSelect,
   propertiesCollapsedStorageKey,
   vaultRevision,
@@ -162,6 +186,9 @@ export function NotePage({
   vaults,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
+  /** The open note's headings as the table of contents lists them (#530),
+   * for the shell's phone "On this page" chip; `[]` when none or no note. */
+  onHeadingsChange?: (headings: NoteHeading[]) => void;
   /** Tags are per-Vault vocabularies, so tapping one hands the search dialog
    * this note's own Vault to pre-select in its filter (#144). */
   onTagSelect: (tag: string, vaultId: VaultId) => void;
@@ -248,21 +275,34 @@ export function NotePage({
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [inlineDirty, setInlineDirty] = useState(false);
-  const [activeUnit, setActiveUnit] = useState<string | null>(null);
-  const [activeRange, setActiveRange] = useState<LineRange | null>(null);
+  // The live editor has focus: text may be sitting in it that no save has
+  // seen yet, which is what the revision guard and the reload hold watch.
+  const [editorFocused, setEditorFocused] = useState(false);
+  const liveEditorRef = useRef<LiveEditorHandle | null>(null);
+  // Rendered page instead of the editor, remembered per browser (#541).
+  const [readingView, setReadingView] = useState<boolean>(
+    () => safeGetItem(READING_VIEW_KEY) === "1",
+  );
+  const toggleReadingView = useCallback(() => {
+    setReadingView((prev) => {
+      safeSetItem(READING_VIEW_KEY, prev ? "0" : "1");
+      return !prev;
+    });
+  }, []);
+  const [editorSearchHits, setEditorSearchHits] = useState(0);
   const [saving, setSaving] = useState(false);
+  // The phone remembers its own answer (#530): a grid opened once on a wide
+  // screen used to stay open on every phone visit, where it costs the
+  // first screen. Both start folded.
+  const isMobile = useIsMobile(920);
+  const propertiesCollapsedKey = isMobile
+    ? `${propertiesCollapsedStorageKey}.mobile`
+    : propertiesCollapsedStorageKey;
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
-      return safeGetItem(propertiesCollapsedStorageKey) !== "0";
+      return safeGetItem(propertiesCollapsedKey) !== "0";
     },
   );
-  // Entering a block on touch is a double tap, which is invisible: the gutter
-  // rule signals "something is here" without saying what gesture reaches it.
-  // Shown once per install, on coarse pointers only, and retired as soon as the
-  // gesture has demonstrably been learned.
-  const [touchEditHintSeen, setTouchEditHintSeen] = useState<boolean>(() => {
-    return safeGetItem(TOUCH_EDIT_HINT_KEY) === "1";
-  });
   // Pre-#137 drafts recovered into Settings (#151): named here, not silently
   // acted on. Dismissing is per view, not persisted — it returns on every
   // load until the last held draft is dealt with.
@@ -290,14 +330,14 @@ export function NotePage({
   // the open note was already read at, not a change to it.
   const lastHandledRevisionRef = useRef<number | null>(null);
   const autosaveStatusRef = useRef<string>("idle");
-  const activeUnitRef = useRef<string | null>(null);
+  const editorFocusedRef = useRef(false);
   const latestContentRef = useRef("");
   currentNoteKeyRef.current = noteKey;
 
   // Draft persistence (#330). One writer serves both write surfaces: source
-  // mode's textarea and the inline block editor, including text still sitting
-  // in an open block, which until now existed nowhere but React state and died
-  // with the tab.
+  // mode's textarea and the live editor, including text still sitting in the
+  // editor, which until now existed nowhere but React state and died with the
+  // tab.
   //
   // In source mode the draft is based on the hash the editor saves against; in
   // inline mode autosave keeps moving that hash forward and reports each new
@@ -542,7 +582,7 @@ export function NotePage({
     // by the next bump once things are quiet.
     if (
       inlineDirty ||
-      activeUnitRef.current !== null ||
+      editorFocusedRef.current ||
       autosaveStatusRef.current === "saving"
     ) {
       // Unless no write of ours can be in flight at all. `inlineDirty` is only
@@ -565,9 +605,19 @@ export function NotePage({
     void loadNoteLinks();
   }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
+  // The key moves when the window crosses 920px (a tablet rotating), and the
+  // fold follows the key's own stored answer rather than carrying the other
+  // width's across. Persisting happens on the toggle alone, so the move
+  // itself never writes.
   useEffect(() => {
-    safeSetItem(propertiesCollapsedStorageKey, propertiesCollapsed ? "1" : "0");
-  }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
+    setPropertiesCollapsed(safeGetItem(propertiesCollapsedKey) !== "0");
+  }, [propertiesCollapsedKey]);
+  const togglePropertiesCollapsed = useCallback(() => {
+    setPropertiesCollapsed((prev) => {
+      safeSetItem(propertiesCollapsedKey, prev ? "0" : "1");
+      return !prev;
+    });
+  }, [propertiesCollapsedKey]);
 
   const startEditing = useCallback(() => {
     if (!writeEnabled || !note || isEditing) {
@@ -607,6 +657,11 @@ export function NotePage({
     }
 
     lastEditRequestIdRef.current = editRequestId;
+    // The live editor keeps its own text until it loses focus; source mode
+    // opening over it would show the version without that text (#530).
+    if (editorFocusedRef.current) {
+      return;
+    }
     startEditing();
   }, [editRequestId, startEditing]);
 
@@ -658,9 +713,18 @@ export function NotePage({
   }, [note?.slug]);
 
   // The space has to be in the DOM before the scroll, or the jump clamps short.
+  // In the editor a heading is a line, not an element, so the editor scrolls.
+  const headingLinesRef = useRef(new Map<string, number>());
   const jumpToHeadingWithTail = useCallback((id: string) => {
     setTailArmed(true);
-    window.requestAnimationFrame(() => jumpToHeading(id));
+    window.requestAnimationFrame(() => {
+      const line = headingLinesRef.current.get(id);
+      if (liveEditorRef.current && line !== undefined) {
+        liveEditorRef.current.scrollToLine(line);
+      } else {
+        jumpToHeading(id);
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -680,10 +744,20 @@ export function NotePage({
   }, [note, onActiveNoteChange, parsed.body, vaultId]);
 
   const renderInput = stripBlockIds(parsed.body);
+  const noteRelativePath = note?.relative_path ?? "";
   const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
     vaultId,
     renderInput,
-    note?.relative_path ?? "",
+    noteRelativePath,
+  );
+  // The live editor's wikilinks, resolved by the server through the reading
+  // view's cache, one request per pass of links coming into view (#544).
+  const resolveNoteLink = useMemo(
+    () =>
+      createNoteLinkResolver((targets) =>
+        resolveNoteTargets(vaultId, noteRelativePath, targets),
+      ),
+    [vaultId, noteRelativePath],
   );
   // While resolution is in flight the rendered tree still describes the
   // previous document, so every block range on screen is stale (D28).
@@ -700,6 +774,29 @@ export function NotePage({
     () => extractMarkdownHeadings(parsed.body),
     [parsed.body],
   );
+  headingLinesRef.current = new Map(
+    tocHeadings.map(({ id, sourceLine }) => [id, sourceLine]),
+  );
+  // A note that opens with `# <its own title>` says the title twice (#530):
+  // once in the page's title block and once as its first heading. That
+  // heading stays in the file and in the DOM (line-addressed editing) but is
+  // neither drawn nor listed. Only the first heading qualifies, and only
+  // when nothing but blank lines precede it.
+  const hiddenHeadingLine = useMemo(
+    () => duplicateTitleHeadingLine(parsed.body, tocHeadings, note?.title),
+    [parsed.body, tocHeadings, note?.title],
+  );
+  const visibleHeadings = useMemo(
+    () =>
+      hiddenHeadingLine === undefined
+        ? tocHeadings
+        : tocHeadings.filter((h) => h.sourceLine !== hiddenHeadingLine),
+    [tocHeadings, hiddenHeadingLine],
+  );
+  useEffect(() => {
+    onHeadingsChange?.(note ? visibleHeadings : []);
+  }, [note, visibleHeadings, onHeadingsChange]);
+  useEffect(() => () => onHeadingsChange?.([]), [onHeadingsChange]);
   const rehypePlugins = useMemo(
     () => [rehypeKatex, createSearchHighlightPlugin(searchQuery)],
     [searchQuery],
@@ -708,40 +805,15 @@ export function NotePage({
     () => new Map(tocHeadings.map(({ sourceLine, id }) => [sourceLine, id])),
     [tocHeadings],
   );
-  // blockRange addresses blocks by line number, so inline editing is only safe
-  // while the rendered body has exactly one line per source line. If a
-  // transform ever collapses lines, editing would write to the wrong place and
-  // confirm the hash, so the feature turns itself off for that note instead.
-  const lineMappingIntact = useMemo(
-    () => linesMatch(parsed.body, markdown),
-    [parsed.body, markdown],
-  );
-  const inlineEditingEnabled =
-    writeEnabled && !isEditing && lineMappingIntact && !!note;
+  // Properties and the live editor both save through autosave; the editor
+  // itself is the body unless the reader asked for the rendered page.
+  const inlineEditingEnabled = writeEnabled && !isEditing && !!note;
+  const liveEditingEnabled = inlineEditingEnabled && !readingView;
+  const renderedMarkdown = markdown;
 
-  // Applied after wikilink resolution rather than before it: the resolver is
-  // keyed on its input, so editing that input would mark the tree as settling
-  // and disable editing for exactly as long as the caret sat on a blank line.
-  //
-  // The range arrives in file coordinates, and this is the body, so the
-  // frontmatter offset comes back off.
-  const frontmatterOffset = frontmatterLineOffset(note?.content ?? "");
-  const renderedMarkdown = useMemo(
-    () =>
-      placeholderForBlankRange(
-        markdown,
-        activeRange
-          ? {
-              startLine: activeRange.startLine - frontmatterOffset,
-              endLine: activeRange.endLine - frontmatterOffset,
-            }
-          : null,
-      ),
-    [markdown, activeRange, frontmatterOffset],
-  );
-
-  // Not evaluated while the editor is open: the provider that renders the
-  // results is only mounted in the reading branch.
+  // Evaluated for the reading view and the live editor alike, since both
+  // draw the tables (#544); not while source mode holds the body, where the
+  // definition shows as code.
   const savedQueries = useSavedQueries(
     notePath,
     note?.content,
@@ -756,51 +828,32 @@ export function NotePage({
         vaultId,
         note?.relative_path ?? "",
         headingIdsBySourceLine,
-        { editable: inlineEditingEnabled },
+        { hiddenHeadingLine },
       ),
-    [
-      vaultId,
-      note?.relative_path,
-      headingIdsBySourceLine,
-      inlineEditingEnabled,
-    ],
+    [vaultId, note?.relative_path, headingIdsBySourceLine, hiddenHeadingLine],
   );
 
   const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
-  // Stable per note: a ref an effect depends on cannot be reassigned, and the
-  // history object mutates internally rather than being swapped out.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const history = useMemo(() => createEditHistory(""), [noteKey]);
 
-  const dismissTouchEditHint = useCallback(() => {
-    setTouchEditHintSeen((seen) => {
-      if (!seen) {
-        safeSetItem(TOUCH_EDIT_HINT_KEY, "1");
-      }
-      return true;
-    });
-  }, []);
+  // The document differs from the one on disk, from this keystroke on. Read
+  // by the revision guard, which must not refetch over unsaved text, and by
+  // the reload hold.
+  const markDirty = () => {
+    if (note && !inlineDirty) {
+      setEditBaseHash(note.content_hash);
+      setInlineDirty(true);
+    }
+  };
 
   const handleInlineChange = (nextContent: string) => {
     if (!note) {
       return;
     }
-    // Readable before React re-renders. A block committed inside an async
-    // handler has to be visible to the rest of that handler, which still holds
-    // the document this render closed over.
+    // Readable before React re-renders. A commit made inside an async handler
+    // has to be visible to the rest of that handler, which still holds the
+    // document this render closed over.
     latestContentRef.current = nextContent;
-    // An edit landed, so the gesture has been learned and the hint has done its
-    // job. Retiring it here rather than on entry means an accidental double tap
-    // does not count as having taught anything.
-    dismissTouchEditHint();
-    history.record(nextContent, Date.now());
-    // Moving between units always ends a run, so undo steps line up with
-    // blocks rather than with arbitrary pauses.
-    history.breakRun();
-    if (!inlineDirty) {
-      setEditBaseHash(note.content_hash);
-      setInlineDirty(true);
-    }
+    markDirty();
     // The user has moved past the restored document, so replaying it would
     // write back text they have already edited.
     setRestoredCommit(null);
@@ -891,41 +944,23 @@ export function NotePage({
   // Hold off the service worker's own reload while an edit is in the air
   // (#330). A nightly build activates and reloads the page with no prompt, and
   // the trigger for pulling it — coming back to the tab — is exactly the
-  // moment an open block is sitting there unsaved. The draft now survives
-  // that reload, but not causing it is better than recovering from it.
-  // The hold is released the moment the save lands, the block closes, or this
-  // note is left. The source editor holds for as long as it is open: its text
+  // moment the editor is sitting there with unsaved text. The draft now
+  // survives that reload, but not causing it is better than recovering from
+  // it. The hold is released the moment the save lands, the editor loses
+  // focus, or this note is left. The source editor holds for as long as it is open: its text
   // reaches the draft on a debounce, so a reload mid-typing still costs the
   // last few keystrokes (#332).
   const reloadHeld =
     writeEnabled &&
     (isEditing ||
       inlineDirty ||
-      activeUnit !== null ||
+      editorFocused ||
       autosave.status === "saving" ||
       saving);
   useEffect(() => {
     holdAppReload(`note:${noteKey}`, reloadHeld);
     return () => holdAppReload(`note:${noteKey}`, false);
   }, [noteKey, reloadHeld]);
-
-  // Seed once per note. Without this, undo before the first edit would restore
-  // the empty string the history was constructed with and blank the note.
-  const seededSlugRef = useRef<string | null>(null);
-  //
-  // Only from this note's own read: seeded from the previous note, still on
-  // screen for the render where the route changed, the first undo here wrote
-  // that note's whole text over this one (#331).
-  useEffect(() => {
-    if (
-      note &&
-      noteLoadedForRef.current === noteKey &&
-      seededSlugRef.current !== noteKey
-    ) {
-      seededSlugRef.current = noteKey;
-      history.reset(note.content);
-    }
-  }, [note, noteKey, history]);
 
   useEffect(() => {
     latestContentRef.current = note?.content ?? "";
@@ -960,14 +995,12 @@ export function NotePage({
     }
     if (stored.baseContentHash !== note.content_hash) {
       setRecoveredDraftNotice(
-        "An unsaved edit to this note is being held, but the note has changed since. Use Edit to review it against the current version.",
+        "An unsaved edit to this note is being held, but the note has changed since. Use Source to review it against the current version.",
       );
       return;
     }
 
     latestContentRef.current = stored.content;
-    history.record(stored.content, Date.now());
-    history.breakRun();
     setEditBaseHash(stored.baseContentHash);
     setInlineDirty(true);
     setDraftContent(stored.content);
@@ -980,15 +1013,7 @@ export function NotePage({
     // the write would be swallowed. Handed to the effect below, which fires as
     // soon as autosave can actually take it.
     setRestoredCommit(stored.content);
-  }, [
-    history,
-    isEditing,
-    location.search,
-    note,
-    noteKey,
-    vaultId,
-    writeEnabled,
-  ]);
+  }, [isEditing, location.search, note, noteKey, vaultId, writeEnabled]);
 
   // Finish the interrupted write once autosave is in a position to make it. A
   // restored edit that never gets this far is not lost: the draft it came from
@@ -1001,87 +1026,28 @@ export function NotePage({
     autosaveRef.current?.commit(restoredCommit);
   }, [restoredCommit, inlineEditingEnabled]);
 
-  const [externalChange, setExternalChange] = useState(0);
-
-  const applyHistory = useCallback(
-    (next: string | null) => {
-      if (next === null) {
-        return;
-      }
-      // The open block, if any, is seeded from the pre-undo document.
-      setExternalChange((n) => n + 1);
-      latestContentRef.current = next;
-      setNote((prev) => (prev ? { ...prev, content: next } : prev));
-      setDraftContent(next);
-      setInlineDirty(true);
-      // The user has moved past any restored document, the same as typing.
-      setRestoredCommit(null);
-      // Undo is a document change like the other two, so it takes the same
-      // draft write before the commit (#330). Without it a commit the vault
-      // refuses leaves the draft holding the pre-undo text, and the page going
-      // away then restores the edit the user had just undone.
-      scheduleDraftWrite(next);
-      autosaveRef.current?.commit(next);
-    },
-    [scheduleDraftWrite],
-  );
-
-  useEffect(() => {
-    if (!inlineEditingEnabled) {
-      return;
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      const meta = event.metaKey || event.ctrlKey;
-      if (!meta || event.isComposing) {
-        return;
-      }
-      const key = event.key.toLowerCase();
-      const isUndo = key === "z" && !event.shiftKey;
-      const isRedo = (key === "z" && event.shiftKey) || key === "y";
-      if (!isUndo && !isRedo) {
-        return;
-      }
-      // The listener is on window, and the page stays mounted under the search
-      // dialog, the note-action dialogs and the property fields, all of which
-      // are text fields with an undo of their own (#331). Answering there
-      // rewound the whole note and autosaved it. The document stack is only
-      // for the note body and the block open in it.
-      const target = event.target;
-      if (
-        isEditableTarget(target) &&
-        !(target instanceof Element && target.closest(".block-input"))
-      ) {
-        return;
-      }
-      // Always prevented: mixing our stack with the browser's native textarea
-      // undo produces behaviour neither of them can explain.
-      event.preventDefault();
-      applyHistory((isUndo ? history.undo() : history.redo())?.content ?? null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [inlineEditingEnabled, applyHistory, history]);
-
-  // Text sitting in an open block has no other home in React state, so it is
+  // Text typed into the live editor has no other home in React state, so it is
   // flushed to the vault after an idle pause and on the way out of the page
-  // rather than waiting for blur — and written to the local draft on the same
+  // rather than waiting for blur, and written to the local draft on the same
   // schedule, which is what survives the vault refusing it (#330).
   const handleInProgressChange = (nextContent: string) => {
     scheduleDraftWrite(nextContent);
     autosaveRef.current?.touch(nextContent);
   };
 
-  const handleActiveRangeChange = useCallback(
-    (range: { startLine: number; endLine: number } | null) => {
-      const key = range ? `${range.startLine}:${range.endLine}` : null;
-      activeUnitRef.current = key;
-      setActiveUnit(key);
-      setActiveRange(range);
-    },
-    [],
-  );
-
-  const [dropActive, setDropActive] = useState(false);
+  // The editor holds the body alone; the frontmatter above it is whatever the
+  // properties grid has made of it since.
+  const handleEditorChange = (body: string) => {
+    markDirty();
+    handleInProgressChange(composeContent(latestContentRef.current, body));
+  };
+  const handleEditorCommit = (body: string) => {
+    handleInlineChange(composeContent(latestContentRef.current, body));
+  };
+  const handleEditorFocusChange = useCallback((focused: boolean) => {
+    editorFocusedRef.current = focused;
+    setEditorFocused(focused);
+  }, []);
 
   // What autocomplete and the attachment inserts write follows the Vault's
   // link style (ADR-33). The style is read from the Vault and can change in
@@ -1099,97 +1065,6 @@ export function NotePage({
       noteRelativePath,
       (targets) => resolveAssetTargets(vaultId, noteRelativePath, targets),
     );
-  };
-
-  const handleBodyDrop = async (event: React.DragEvent<HTMLDivElement>) => {
-    setDropActive(false);
-    if (!inlineEditingEnabled || !note) {
-      return;
-    }
-    const file = event.dataTransfer.files[0];
-    if (!file) {
-      return;
-    }
-    event.preventDefault();
-
-    const rejection = attachmentRejection(file);
-    if (rejection) {
-      onWriteNotice?.(rejection);
-      return;
-    }
-
-    // Where it lands is decided before the upload, so the insertion point is
-    // the one the user aimed at rather than wherever the page has scrolled to
-    // by the time the request comes back. It is read before the open block is
-    // committed below, while the DOM and the document still describe the same
-    // text: the commit changes the document at once, but the line numbers on
-    // the blocks only after the next render.
-    const blocks = Array.from(
-      event.currentTarget.querySelectorAll<HTMLElement>(".editable-block"),
-    )
-      .map((el) => {
-        const rect = el.getBoundingClientRect();
-        return { el, top: rect.top, bottom: rect.bottom };
-      })
-      .flatMap(({ el, top, bottom }) => {
-        const start = Number(el.dataset.startLine);
-        const end = Number(el.dataset.endLine);
-        return Number.isFinite(start) && Number.isFinite(end)
-          ? [{ startLine: start, endLine: end, top, bottom }]
-          : [];
-      });
-    let line = insertionLineForDrop(blocks, event.clientY);
-
-    // An open block holds its text nowhere else, and its commit rewrites the
-    // whole document from the copy it was seeded with. A drop does not move
-    // focus, so left open it would commit after the write below and overwrite
-    // it, dropping the embed and orphaning the file that was just uploaded.
-    // Blurring commits it synchronously, so everything after this works from
-    // one document rather than two.
-    const focused = document.activeElement;
-    if (
-      focused instanceof HTMLElement &&
-      event.currentTarget.contains(focused)
-    ) {
-      const committedRange = activeRange;
-      const linesBefore = countDocumentLines(latestContentRef.current);
-      focused.blur();
-      // The commit need not keep the block's line count: a code block or a
-      // table row takes a plain newline, and so does a multi-line paste into
-      // any block. Everything after the block moves by the difference, and a
-      // drop aimed below it has to move with it (#331).
-      const delta = countDocumentLines(latestContentRef.current) - linesBefore;
-      if (committedRange && line >= committedRange.endLine) {
-        line += delta;
-      }
-    }
-
-    try {
-      const refreshing = refreshVaultCollection();
-      const result = await uploadNoteAttachment(
-        file,
-        note.relative_path,
-        (uploadFile, targetRelativePath) =>
-          uploadAttachment(vaultId, uploadFile, targetRelativePath),
-      );
-      const embed = await embedForUpload(
-        result,
-        note.relative_path,
-        refreshing,
-      );
-      // Not note.content: that is the document this render closed over, and a
-      // block committed above has already moved past it.
-      handleInlineChange(
-        insertEmbedAt(latestContentRef.current, line, result.embedPath, embed),
-      );
-    } catch (uploadError) {
-      if (onDemoRefusal?.(uploadError)) {
-        return;
-      }
-      onWriteNotice?.(
-        uploadError instanceof Error ? uploadError.message : "Upload failed.",
-      );
-    }
   };
 
   const reviewConflict = () => {
@@ -1232,13 +1107,10 @@ export function NotePage({
     return () => {
       searchHitsRef.current = [];
     };
-    // activeUnit is a dependency because entering a block removes its marks:
-    // without recounting, SearchHitNavigator's indices silently shift.
-  }, [markdown, note?.slug, searchQuery, matchHeading, activeUnit]);
+  }, [markdown, note?.slug, searchQuery, matchHeading]);
 
-  // Jumping to the first hit is a landing gesture, so it is deliberately not
-  // tied to activeUnit the way the recount above is. Entering a block changes
-  // the active unit, and scrolling on that would throw the reader back to the
+  // Jumping to the first hit is a landing gesture: it runs once per arrival,
+  // never again on a later recount, which would throw the reader back to the
   // top of the note the moment they clicked something near the bottom.
   //
   // Runs after the recount effect, which is what fills searchHitsRef: layout
@@ -1289,7 +1161,12 @@ export function NotePage({
     if (!hashTarget || settling || lastHashJumpRef.current === hashJumpKey) {
       return;
     }
-    if (!noteBodyRef.current?.querySelector(`#${CSS.escape(hashTarget)}`)) {
+    // In the editor a heading is a line, known from the note's own text;
+    // in the reading view it is an element that has to be on screen.
+    const onScreen = liveEditorRef.current
+      ? headingLinesRef.current.has(hashTarget)
+      : !!noteBodyRef.current?.querySelector(`#${CSS.escape(hashTarget)}`);
+    if (!onScreen) {
       return;
     }
     lastHashJumpRef.current = hashJumpKey;
@@ -1543,6 +1420,36 @@ export function NotePage({
     (candidate) => candidate.vault_id === vaultId,
   );
 
+  // A wikilink in the editor resolves the way the reading view's does (#544):
+  // the server answers by title, alias or path, and the label is the target
+  // without its folders, as the rendered link shows it. An archived note
+  // keeps the path, the way the reading view keeps it.
+  const resolveNoteTarget = async (target: string) => {
+    const hit = await resolveNoteLink(target);
+    return {
+      label: hit ? wikilinkLabel(target, hit.archived === true) : target,
+      missing: !hit,
+    };
+  };
+  // Opens the note at the heading when the target names one. A `^block`
+  // reference carries its id as the fragment, the way the reading view's
+  // link does; neither view has a block to scroll to, so it opens at the top.
+  const openNoteTarget = async (target: string) => {
+    const hit = await resolveNoteLink(target);
+    if (!hit) {
+      return;
+    }
+    const hashIdx = target.indexOf("#");
+    const caretIdx = target.indexOf("^");
+    const anchor =
+      hashIdx >= 0
+        ? `#${slugifyHeading(target.slice(hashIdx + 1))}`
+        : caretIdx >= 0
+          ? `#${target.slice(caretIdx + 1)}`
+          : "";
+    navigate(`/v/${encodeURIComponent(vaultId)}/n/${hit.slug}${anchor}`);
+  };
+
   const formatNoteLink = (candidate: ExplorerNote): string => {
     const target = vaultNoteCandidates.find(
       (vaultNote) => vaultNote.slug === candidate.slug,
@@ -1591,7 +1498,7 @@ export function NotePage({
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               This note changed on disk while your edit was waiting to save.
-              Open Edit to compare the two before writing over it.
+              Open Source to compare the two before writing over it.
             </div>
           </div>
         ) : null}
@@ -1614,37 +1521,16 @@ export function NotePage({
             relativePath={note.relative_path}
           />
         ) : null}
-        {writeEnabled && !isEditing && !lineMappingIntact ? (
-          <p className="note-editor-notice">
-            This note&rsquo;s source and rendered lines don&rsquo;t line up, so
-            inline editing is off here. Use Edit to open source mode.
-          </p>
-        ) : null}
-        {inlineEditingEnabled && !touchEditHintSeen && isCoarsePointer() ? (
-          // The same shell the write notice uses, so the × is a device already
-          // established here. A notice that is silently its own dismiss target
-          // has no affordance at all on touch, where there is no cursor to
-          // change.
-          <div className="write-notice touch-edit-hint" role="status">
-            <div className="write-notice-messages">
-              Double-tap a line to edit it.
-            </div>
-            <button
-              type="button"
-              className="write-notice-dismiss"
-              aria-label="Dismiss hint"
-              onClick={dismissTouchEditHint}
-            >
-              ×
-            </button>
-          </div>
-        ) : null}
-        {searchHitCount > 0 ? (
+        {(liveEditingEnabled ? editorSearchHits : searchHitCount) > 0 ? (
           <SearchHitNavigator
-            totalHits={searchHitCount}
+            totalHits={liveEditingEnabled ? editorSearchHits : searchHitCount}
             activeHit={activeSearchHit}
             onSelect={(nextIndex) => {
               setActiveSearchHit(nextIndex);
+              if (liveEditingEnabled) {
+                liveEditorRef.current?.scrollToHit(nextIndex);
+                return;
+              }
               const target = searchHitsRef.current[nextIndex];
               scrollElementIntoView(target, {
                 block: "center",
@@ -1653,36 +1539,57 @@ export function NotePage({
             }}
           />
         ) : null}
-        <NoteProperties
-          // Sharing the title's line cost the title width, and a long one
-          // wrapped around them.
-          actions={
-            writeEnabled && !isEditing ? (
-              <div className="note-inline-actions">
-                <SaveState
-                  status={autosave.status}
-                  savedAt={autosave.savedAt}
-                />
-                <UiButton
-                  className="close-note note-edit-button"
-                  onClick={startEditing}
-                >
-                  Edit
-                </UiButton>
-              </div>
-            ) : null
-          }
-          properties={parsed.properties}
-          vaultName={vaultName}
-          content={note.content}
-          editable={inlineEditingEnabled}
-          onChange={handleInlineChange}
-          collapsed={propertiesCollapsed}
-          onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
-          onTagSelect={(tag) => onTagSelect(tag, vaultId)}
+        {/* Reading chrome only: the editor carries its own frontmatter form,
+            so the grid above it said everything twice (#530). */}
+        {isEditing ? null : (
+          <NoteProperties
+            // Sharing the title's line cost the title width, and a long one
+            // wrapped around them.
+            actions={
+              writeEnabled ? (
+                <div className="note-inline-actions">
+                  <SaveState
+                    status={autosave.status}
+                    savedAt={autosave.savedAt}
+                  />
+                  <UiButton
+                    className="close-note note-view-toggle"
+                    aria-pressed={readingView}
+                    onClick={toggleReadingView}
+                  >
+                    {readingView ? "Editing" : "Reading"}
+                  </UiButton>
+                  <UiButton
+                    className="close-note note-edit-button"
+                    onClick={startEditing}
+                  >
+                    Source
+                    {isMobile ? null : (
+                      <span className="shortcut-hint" aria-hidden="true">
+                        E
+                      </span>
+                    )}
+                  </UiButton>
+                </div>
+              ) : null
+            }
+            properties={parsed.properties}
+            vaultName={vaultName}
+            content={note.content}
+            editable={inlineEditingEnabled}
+            onChange={handleInlineChange}
+            collapsed={propertiesCollapsed}
+            onToggleCollapsed={togglePropertiesCollapsed}
+            onTagSelect={(tag) => onTagSelect(tag, vaultId)}
+          />
+        )}
+        {/* Between the desktop breakpoint and the TOC column's own (920 to
+            1160px) the headings fold into this strip; below 920 the shell's
+            scope row carries them as a chip (#530). */}
+        <NoteTocMobile
+          headings={visibleHeadings}
+          onJump={jumpToHeadingWithTail}
         />
-        <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
-        <NoteTocMobile headings={tocHeadings} onJump={jumpToHeadingWithTail} />
         {heldDraftsPresent && !heldDraftsBannerDismissed && !demoMode ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
@@ -1743,54 +1650,78 @@ export function NotePage({
               />
             )}
           />
+        ) : liveEditingEnabled ? (
+          <div className="note-body" dir="auto">
+            {/* The saved-query tables inside the editor's `base` widgets read
+                the results the server evaluated for the note on disk; a
+                block being edited matches none until its save lands. */}
+            <SavedQueryProvider
+              state={savedQueries}
+              vaultId={vaultId}
+              markdown={splitBody(note.content).body}
+            >
+              <LiveEditor
+                key={noteKey}
+                ref={liveEditorRef}
+                value={splitBody(note.content).body}
+                searchQuery={searchQuery}
+                touch={isCoarsePointer()}
+                noteCandidates={vaultNoteCandidates}
+                formatNoteLink={formatNoteLink}
+                resolveNote={resolveNoteTarget}
+                onOpenNote={(target) => void openNoteTarget(target)}
+                resolveAssetSrc={(raw) =>
+                  cachedAssetHref(vaultId, raw, note.relative_path)
+                }
+                assetsResolvedFor={resolvedFor}
+                onChange={handleEditorChange}
+                onCommit={handleEditorCommit}
+                onFocusChange={handleEditorFocusChange}
+                onSearchHits={setEditorSearchHits}
+                onUploadAttachment={handleUploadAttachment}
+                onUploadNotice={(message) => onWriteNotice?.(message)}
+                onUploadError={(uploadError) => {
+                  if (onDemoRefusal?.(uploadError)) {
+                    return;
+                  }
+                  onWriteNotice?.(
+                    uploadError instanceof Error
+                      ? uploadError.message
+                      : "Upload failed.",
+                  );
+                }}
+              />
+            </SavedQueryProvider>
+          </div>
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
-            <div
-              className={`note-body-drop${dropActive ? " drag-active" : ""}`}
-              onDragOver={(event) => {
-                if (
-                  inlineEditingEnabled &&
-                  event.dataTransfer.types.includes("Files")
-                ) {
-                  event.preventDefault();
-                  setDropActive(true);
-                }
-              }}
-              onDragLeave={() => setDropActive(false)}
-              onDrop={(event) => void handleBodyDrop(event)}
+            <SavedQueryProvider
+              state={savedQueries}
+              vaultId={vaultId}
+              markdown={renderedMarkdown}
             >
-              <InlineEditorProvider
-                content={note.content}
-                frontmatterOffset={frontmatterLineOffset(note.content)}
-                writeEnabled={inlineEditingEnabled}
-                settling={settling}
-                externalChangeSignal={externalChange}
-                onChange={handleInlineChange}
-                onInProgressChange={handleInProgressChange}
-                onActiveRangeChange={handleActiveRangeChange}
+              <ReactMarkdown
+                remarkPlugins={NOTE_REMARK_PLUGINS}
+                rehypePlugins={rehypePlugins}
+                components={markdownComponents}
               >
-                <BlockGap>
-                  <SavedQueryProvider
-                    state={savedQueries}
-                    vaultId={vaultId}
-                    markdown={renderedMarkdown}
-                  >
-                    <ReactMarkdown
-                      remarkPlugins={NOTE_REMARK_PLUGINS}
-                      rehypePlugins={rehypePlugins}
-                      components={markdownComponents}
-                    >
-                      {renderedMarkdown}
-                    </ReactMarkdown>
-                  </SavedQueryProvider>
-                </BlockGap>
-              </InlineEditorProvider>
-            </div>
+                {renderedMarkdown}
+              </ReactMarkdown>
+            </SavedQueryProvider>
           </div>
+        )}
+        {/* Links come after the text (#530): backlinks are what a reader
+            consults once they have read, and every outgoing link is already
+            a link in the body above. */}
+        {isEditing ? null : (
+          <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
         )}
       </article>
 
-      <NoteTocDesktop headings={tocHeadings} onJump={jumpToHeadingWithTail} />
+      <NoteTocDesktop
+        headings={visibleHeadings}
+        onJump={jumpToHeadingWithTail}
+      />
     </div>
   );
 }

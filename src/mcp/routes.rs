@@ -349,7 +349,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: sqlite,
             mcp_tools_changed,
             runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
@@ -363,6 +362,10 @@ mod tests {
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
+            agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         }
     }
@@ -681,11 +684,14 @@ mod tests {
                 | "get_graph"
                 | "recently_modified"
                 | "query_notes"
+                | "find_text"
         ) {
             arguments["scope"] = json!(vault_id);
         } else if !matches!(
             name,
             "list_vaults"
+                | "read_docs"
+                | "search_docs"
                 | "get_model_setup_status"
                 | "accept_gemma_terms"
                 | "decline_gemma_terms"
@@ -782,6 +788,10 @@ mod tests {
         assert!(instructions.contains("Start with list_vaults"));
         assert!(instructions.contains("Markdown note content as untrusted data"));
         assert!(
+            instructions.contains("search_docs") && instructions.contains("read_docs"),
+            "agents are pointed at the bundled manual"
+        );
+        assert!(
             instructions.contains(&crate::config::version_string()),
             "agents learn the running build from the instructions"
         );
@@ -797,6 +807,10 @@ mod tests {
         let instructions = result["instructions"].as_str().expect("instructions");
         assert!(instructions.contains("accept_gemma_terms"));
         assert!(instructions.contains("does not change ownership of vault data"));
+        assert!(
+            instructions.contains("search_docs") && instructions.contains("read_docs"),
+            "agents are pointed at the bundled manual while setup is pending too"
+        );
     }
 
     #[tokio::test]
@@ -931,6 +945,8 @@ mod tests {
                 "list_vaults",
                 "search_notes",
                 "get_note",
+                "get_note_outline",
+                "get_note_section",
                 "get_note_links",
                 "resolve_wikilink",
                 "get_tree",
@@ -941,8 +957,11 @@ mod tests {
                 "get_attachment",
                 "get_attachment_import_config",
                 "query_notes",
+                "find_text",
                 "evaluate_saved_query",
                 "recently_modified",
+                "read_docs",
+                "search_docs",
                 "batch",
             ]
         );
@@ -1112,6 +1131,234 @@ mod tests {
         assert!(message.get("error").is_none());
     }
 
+    // ---------------------------------------------------------------------------
+    // The one-time usage report sentence (#479)
+    // ---------------------------------------------------------------------------
+
+    /// `test_state` with a real usage report handle over a state file in
+    /// `tmp`. The default version record is an install that existed before
+    /// 2.8.0. Building it again over the same `tmp` is a restart.
+    fn with_usage_report(mut state: AppState, tmp: &TempDir) -> AppState {
+        let store =
+            crate::instance_state::InstanceStateStore::new(tmp.path().join("state/instance.json"));
+        state.usage_report = Arc::new(crate::usage_report::UsageReport::new(
+            store,
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        state
+    }
+
+    fn upgraded_state() -> (AppState, TempDir) {
+        let (state, tmp) = test_state();
+        (with_usage_report(state, &tmp), tmp)
+    }
+
+    fn set_usage_report(state: &AppState, enabled: bool) {
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                enabled.to_string(),
+            )])
+            .expect("save the setting");
+        state.usage_report.reconcile();
+    }
+
+    async fn discover_result(state: &AppState) -> Value {
+        let raw = modern_post(
+            transport(state),
+            "server/discover",
+            Some("server/discover"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":1,"method":"server/discover",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            }),
+        )
+        .await;
+        response_message(raw).await["result"].clone()
+    }
+
+    async fn initialize_result(state: &AppState) -> Value {
+        initialize(&transport(state)).await.1
+    }
+
+    /// Whether the instructions carry the sentence. When they do it must
+    /// open them: a client that cuts long instructions short keeps their
+    /// start (#480).
+    fn carries_the_notice(result: &Value) -> bool {
+        let notice = crate::mcp::config::USAGE_REPORT_NOTICE;
+        let instructions = result["instructions"].as_str().expect("instructions");
+        let carried = instructions.contains(notice);
+        assert!(
+            !carried || instructions.starts_with(notice),
+            "the sentence comes first"
+        );
+        carried
+    }
+
+    #[tokio::test]
+    async fn an_upgraded_install_tells_one_initialize_about_the_usage_report() {
+        let (state, tmp) = upgraded_state();
+
+        let first = initialize_result(&state).await;
+        assert!(carries_the_notice(&first));
+        assert!(
+            first["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Start with list_vaults"),
+            "the sentence is added to the instructions, not put in their place"
+        );
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        assert!(!carries_the_notice(&discover_result(&state).await));
+
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&initialize_result(&restarted).await));
+        assert!(!carries_the_notice(&discover_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn an_upgraded_install_tells_one_discover_and_that_answer_is_not_cached() {
+        let (state, tmp) = upgraded_state();
+
+        let first = discover_result(&state).await;
+        assert!(carries_the_notice(&first));
+        assert_eq!(
+            first["ttlMs"], 0,
+            "a cached answer would carry the sentence to a second session"
+        );
+
+        let second = discover_result(&state).await;
+        assert!(!carries_the_notice(&second));
+        assert_eq!(second["ttlMs"], 300_000);
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&discover_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn the_setup_instructions_carry_the_usage_report_sentence_too() {
+        let (state, _tmp) = upgraded_state();
+        state.startup.set_terms_required();
+
+        let result = initialize_result(&state).await;
+        assert!(carries_the_notice(&result));
+        assert!(
+            result["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("accept_gemma_terms")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_install_never_tells_an_agent_about_the_usage_report() {
+        let (mut state, _tmp) = upgraded_state();
+        state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
+            current: "2.8.0".into(),
+            previous: None,
+            fresh_install: Some("2.8.0".into()),
+        });
+
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        assert!(!carries_the_notice(&discover_result(&state).await));
+        assert_eq!(discover_result(&state).await["ttlMs"], 300_000);
+    }
+
+    #[tokio::test]
+    async fn an_install_with_the_report_already_on_is_never_told() {
+        let (state, tmp) = upgraded_state();
+        set_usage_report(&state, true);
+
+        assert!(!carries_the_notice(&discover_result(&state).await));
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+
+        // The handshake marked it delivered, so switching the report off
+        // later does not bring the sentence back, in this run or the next.
+        set_usage_report(&state, false);
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&discover_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn an_install_with_the_setting_pinned_off_is_never_told() {
+        let (mut state, tmp) = test_state();
+        let pinned = crate::runtime_config::RuntimeConfig::load(
+            tmp.path().join("settings.json"),
+            crate::runtime_config::Environment::from_values([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "false".to_string(),
+            )]),
+            crate::runtime_config::live_settings_defaults(),
+        )
+        .expect("load settings");
+        pinned
+            .save(
+                ["HATCHDOOR_MCP_ENABLED", "HATCHDOOR_MCP_BEARER_TOKEN"].map(|key| {
+                    let value = state.runtime_snapshot().required(key).unwrap().to_string();
+                    (key.to_string(), value)
+                }),
+            )
+            .expect("configure MCP");
+        state.runtime_config = pinned;
+        let state = with_usage_report(state, &tmp);
+
+        assert!(!carries_the_notice(&initialize_result(&state).await));
+        assert!(!carries_the_notice(&discover_result(&state).await));
+        let restarted = with_usage_report(state, &tmp);
+        assert!(!carries_the_notice(&initialize_result(&restarted).await));
+    }
+
+    #[tokio::test]
+    async fn a_handshake_without_the_token_does_not_spend_the_sentence() {
+        let (state, _tmp) = upgraded_state();
+
+        let refused = send(
+            transport(&state),
+            "POST",
+            vec![
+                ("accept", "application/json, text/event-stream".into()),
+                ("content-type", "application/json".into()),
+            ],
+            Some(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                               "clientInfo": {"name":"no-token","version":"1"}}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+        assert!(carries_the_notice(&initialize_result(&state).await));
+    }
+
+    #[tokio::test]
+    async fn no_tool_reads_or_changes_the_usage_report_setting() {
+        let (state, _tmp) = write_state();
+        let body = tools_list_result(&state).await;
+        let tools = body["result"]["tools"].as_array().expect("tools array");
+        assert!(!tools.is_empty());
+
+        for tool in tools {
+            let text = tool.to_string().to_lowercase();
+            for word in ["usage_report", "usage report", "telemetry"] {
+                assert!(
+                    !text.contains(word),
+                    "tool {} mentions {word}",
+                    tool["name"]
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn modern_tools_list_is_stateless_and_carries_cache_metadata() {
         let (state, _tmp) = test_state();
@@ -1165,6 +1412,129 @@ mod tests {
             message["result"]["structuredContent"]["note"]["slug"],
             "home"
         );
+    }
+
+    /// #426: a modern client names itself in every request's `_meta`, and the
+    /// call records that name.
+    #[tokio::test]
+    async fn a_modern_tool_call_records_the_client_name() {
+        let (state, _tmp) = test_state();
+        assert_eq!(state.agent_connections.latest(), None);
+        let mut meta = modern_meta("2026-07-28", true);
+        meta["io.modelcontextprotocol/clientInfo"] =
+            json!({"name": "codex-mcp-client", "title": "Codex", "version": "1"});
+        let raw = modern_post(
+            transport(&state),
+            "tools/call",
+            Some("list_vaults"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"_meta": meta, "name":"list_vaults", "arguments":{}}
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(message["result"]["isError"], false, "{message}");
+        let recorded = state.agent_connections.latest().expect("call recorded");
+        assert_eq!(recorded.name, "Codex", "the display title wins over the id");
+        assert!(recorded.connected_at.ends_with('Z'));
+    }
+
+    /// #477: the usage report keeps the agent family the client's own name
+    /// maps onto, not its display title, and never the name itself.
+    #[tokio::test]
+    async fn a_tool_call_records_the_agent_family_for_the_usage_report() {
+        let (mut state, tmp) = test_state();
+        let store = crate::instance_state::InstanceStateStore::new(
+            tmp.path().join("usage-report/instance.json"),
+        );
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "true".to_string(),
+            )])
+            .expect("turn the usage report on");
+        state.usage_report = std::sync::Arc::new(crate::usage_report::UsageReport::new(
+            store.clone(),
+            state.runtime_config.clone(),
+            false,
+        ));
+        state.usage_report.reconcile();
+        let mut meta = modern_meta("2026-07-28", true);
+        meta["io.modelcontextprotocol/clientInfo"] =
+            json!({"name": "codex-mcp-client", "title": "Cursor Lookalike", "version": "1"});
+        let raw = modern_post(
+            transport(&state),
+            "tools/call",
+            Some("list_vaults"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"_meta": meta, "name":"list_vaults", "arguments":{}}
+            }),
+        )
+        .await;
+        assert_eq!(response_message(raw).await["result"]["isError"], false);
+
+        let mut section = None;
+        for _ in 0..200 {
+            section = store
+                .section::<serde_json::Value>("usage_report")
+                .filter(|section| section.get("mcp_seen").is_some());
+            if section.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let section = section.expect("the call was recorded");
+        let families: Vec<&String> = section["agents_seen"]
+            .as_object()
+            .expect("agent families")
+            .keys()
+            .collect();
+        assert_eq!(families, ["codex"]);
+        let stored = section.to_string();
+        assert!(!stored.contains("codex-mcp-client"), "{stored}");
+        assert!(!stored.contains("Lookalike"), "{stored}");
+    }
+
+    /// #426: a legacy client names itself once, in `initialize`; the later
+    /// call, which carries no `_meta`, still records that name. The handshake
+    /// alone records nothing: only a tool call counts as a connection.
+    #[tokio::test]
+    async fn a_legacy_initialize_then_call_records_the_client_name() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+        assert_eq!(state.agent_connections.latest(), None);
+        let response = rpc(
+            &app,
+            &session,
+            json!({
+                "jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"list_vaults","arguments":{}}
+            }),
+        )
+        .await;
+        let message = response_message(response).await;
+        assert_eq!(message["result"]["isError"], false, "{message}");
+        assert_eq!(
+            state.agent_connections.latest().map(|record| record.name),
+            Some("golden-test".into())
+        );
+    }
+
+    /// #426: the record is never offered back over MCP itself.
+    #[tokio::test]
+    async fn the_last_agent_is_not_exposed_over_mcp() {
+        let (state, _tmp) = test_state();
+        let _ = call_tool(&state, "list_vaults", json!({})).await;
+        assert!(state.agent_connections.latest().is_some());
+        let listed = tools_list_result(&state).await.to_string();
+        assert!(!listed.contains("last_agent"));
+        assert!(!listed.contains("golden-test"));
     }
 
     /// The `isError: true` leg of the error-semantics matrix, golden-tested at
@@ -2129,6 +2499,289 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // Errors that name their docs page (#423)
+    // ---------------------------------------------------------------------------
+
+    /// A standalone call refused with a code the manual explains names the
+    /// page, in the structured payload and the text alike, and keeps every
+    /// field it had.
+    #[tokio::test]
+    async fn a_standalone_error_the_manual_explains_names_its_page() {
+        let (state, _tmp) = unusable_local_content_write_state();
+
+        let body = call_tool(&state, "get_note", json!({"slug": "home"})).await;
+        let payload = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(payload["code"], "vault_read_unavailable", "{body:#}");
+        assert_eq!(payload["retryable"], true);
+        assert_eq!(payload["ok"], false);
+        assert_eq!(
+            payload["docs"],
+            json!({
+                "page": "guides/how-to-troubleshoot-common-problems",
+                "heading": "a-vault-wont-index-or-stays-in-a-bad-state",
+            })
+        );
+        assert!(
+            crate::docs_bundle::page(payload["docs"]["page"].as_str().unwrap()).is_some(),
+            "read_docs accepts the page"
+        );
+        let text: Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().expect("text"))
+                .expect("text is the payload");
+        assert_eq!(&text, payload);
+    }
+
+    /// A refusal the manual explains keeps its old shape as a `batch` item: no
+    /// `docs`.
+    #[tokio::test]
+    async fn a_batch_item_error_never_gains_a_docs_field() {
+        let (state, _tmp) = unusable_local_content_write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}}
+            ]}),
+        )
+        .await;
+        let error = &body["result"]["structuredContent"]["items"][0]["error"];
+        let code = error["code"].as_str().expect("item error code");
+        assert!(
+            crate::mcp::docs_pointers::for_code(code).is_some(),
+            "the item's code must be one a standalone error names a page for: {body:#}"
+        );
+        assert!(error.get("docs").is_none(), "{body:#}");
+        assert!(
+            body["result"]["structuredContent"].get("docs").is_none(),
+            "{body:#}"
+        );
+    }
+
+    /// A code the manual does not explain, and the two refusals that are not
+    /// structured errors, are untouched.
+    #[tokio::test]
+    async fn other_errors_and_the_two_refusals_carry_no_docs_field() {
+        let (state, _tmp) = test_state();
+        let unknown = call_tool_unscoped(
+            &state,
+            "get_note",
+            json!({"vault_id": "00000000-0000-4000-8000-000000000999", "slug": "home"}),
+        )
+        .await;
+        assert_eq!(
+            unknown["result"]["structuredContent"],
+            json!({
+                "code": "vault_not_found",
+                "message": "Vault definition was not found",
+                "vault_id": "00000000-0000-4000-8000-000000000999",
+                "retryable": false,
+                "ok": false,
+            }),
+            "{unknown:#}"
+        );
+
+        let writes_off = call_tool(
+            &state,
+            "disable_vault",
+            json!({"expected_registry_revision": 0}),
+        )
+        .await;
+        assert_eq!(
+            writes_off["error"],
+            json!({
+                "code": -32602,
+                "message": "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
+            }),
+            "{writes_off:#}"
+        );
+
+        state.startup.set_terms_required();
+        let setup = call_tool(&state, "search_notes", json!({"query": "alpha"})).await;
+        assert_eq!(
+            setup["result"],
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.",
+                }],
+                "isError": true,
+            }),
+            "{setup:#}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // The bundled manual (ADR-38, #421)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_docs_without_a_page_lists_every_page_and_home() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "read_docs", json!({})).await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let index = &body["result"]["structuredContent"];
+        assert_eq!(index["name"], "home");
+        assert_eq!(index["title"], "Hatchdoor documentation");
+        assert!(
+            index["markdown"]
+                .as_str()
+                .expect("home markdown")
+                .starts_with("# Hatchdoor documentation")
+        );
+        let listed: Vec<(&str, &str)> = index["pages"]
+            .as_array()
+            .expect("pages")
+            .iter()
+            .map(|page| {
+                (
+                    page["name"].as_str().expect("name"),
+                    page["title"].as_str().expect("title"),
+                )
+            })
+            .collect();
+        let bundled: Vec<(&str, &str)> = crate::docs_bundle::pages()
+            .iter()
+            .map(|page| (page.name.as_str(), page.title.as_str()))
+            .collect();
+        assert_eq!(listed, bundled);
+        assert!(listed.contains(&(
+            "guides/how-to-set-up-a-git-backed-vault",
+            "How to set up a Git-backed Vault"
+        )));
+    }
+
+    #[tokio::test]
+    async fn read_docs_returns_one_page_with_links_resolved_to_page_names() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            &state,
+            "read_docs",
+            json!({"page": "guides/how-to-set-up-a-git-backed-vault"}),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let page = &body["result"]["structuredContent"];
+        assert_eq!(page["name"], "guides/how-to-set-up-a-git-backed-vault");
+        assert!(page.get("pages").is_none(), "only the index lists pages");
+        let markdown = page["markdown"].as_str().expect("markdown");
+        assert!(markdown.contains("[HTTP API reference](reference/http-api-reference)"));
+        assert!(!markdown.contains("[[HTTP API reference]]"));
+    }
+
+    #[tokio::test]
+    async fn read_docs_refuses_an_unknown_page_with_a_stable_code() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "read_docs", json!({"page": "guides/no-such-page"})).await;
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(
+            body["result"]["structuredContent"]["code"],
+            "docs_page_not_found"
+        );
+        assert_eq!(body["result"]["structuredContent"]["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn search_docs_ranks_the_git_guide_first_and_answers_no_match_with_nothing() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "search_docs", json!({"query": "git"})).await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let results = body["result"]["structuredContent"]["results"]
+            .as_array()
+            .expect("results");
+        assert_eq!(
+            results[0]["name"],
+            "guides/how-to-set-up-a-git-backed-vault"
+        );
+        assert_eq!(results[0]["title"], "How to set up a Git-backed Vault");
+        assert!(!results[0]["excerpt"].as_str().expect("excerpt").is_empty());
+
+        let none = call_tool(&state, "search_docs", json!({"query": "zzyzzyva"})).await;
+        assert_eq!(none["result"]["isError"], false, "{none:#}");
+        assert_eq!(none["result"]["structuredContent"]["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn docs_tools_answer_while_model_setup_is_pending_and_writes_are_off() {
+        let (state, _tmp) = test_state();
+        assert!(
+            !McpConfig::from_snapshot(&state.runtime_config.snapshot())
+                .expect("config")
+                .write_enabled,
+            "the default test state has MCP writes off"
+        );
+        state.startup.set_terms_required();
+
+        let index = call_tool(&state, "read_docs", json!({})).await;
+        assert_eq!(index["result"]["isError"], false, "{index:#}");
+        assert_eq!(index["result"]["structuredContent"]["name"], "home");
+
+        let found = call_tool(&state, "search_docs", json!({"query": "install"})).await;
+        assert_eq!(found["result"]["isError"], false, "{found:#}");
+        assert!(
+            !found["result"]["structuredContent"]["results"]
+                .as_array()
+                .expect("results")
+                .is_empty()
+        );
+
+        // The Vault tools stay behind the gate, so the exemption is the
+        // manual's alone.
+        let blocked = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        assert_eq!(blocked["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_the_docs_tools_as_items_like_list_vaults() {
+        let (state, _tmp) = test_state();
+        for op in ["list_vaults", "read_docs", "search_docs"] {
+            let body = call_tool(
+                &state,
+                "batch",
+                json!({"operations": [{"op": op, "arguments": {"query": "git"}}]}),
+            )
+            .await;
+            assert_eq!(body["error"]["code"], -32602, "{op}: {body:#}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not a valid batch operation"),
+                "{op}: {body:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_notes_across_all_vaults_never_returns_a_manual_page() {
+        let (state, _tmp) = test_state();
+        let search = |query: &'static str| {
+            let state = state.clone();
+            async move {
+                let body = call_tool_unscoped(
+                    &state,
+                    "search_notes",
+                    json!({"scope": "all", "query": query, "mode": "keyword"}),
+                )
+                .await;
+                assert_eq!(body["result"]["isError"], false, "{query}: {body:#}");
+                body["result"]["structuredContent"]["data"]["results"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{query}: results array in {body:#}"))
+                    .clone()
+            }
+        };
+        // The control: the Vault's own notes are searchable here.
+        assert!(!search("alpha").await.is_empty());
+        // Phrases only the manual contains find nothing.
+        for query in ["Git-backed", "Hatchdoor documentation", "Zettelkasten"] {
+            assert_eq!(search(query).await, Vec::<Value>::new(), "{query}");
+        }
+    }
+
     /// `refresh_vault` is deliberately outside the collection-management
     /// exemption that keeps discovery and Vault control reachable while model
     /// setup is pending (#228). That exemption is for tools which stay
@@ -2398,6 +3051,375 @@ mod tests {
                 "{body:#}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Outline and section reads (#502)
+    // ---------------------------------------------------------------------------
+
+    const SECTIONED_NOTE: &str = "---\ntags: [rules]\n---\nOpening.\n# Filing\nWhere notes go.\n## Notes\nFiling notes.\n# Tags\n## Notes\nTag notes.\n```\n# fenced\n```\n";
+
+    fn sectioned_state() -> (AppState, TempDir) {
+        let (state, tmp) = test_state();
+        std::fs::write(
+            registered_vault_path(&state).join("Rules.md"),
+            SECTIONED_NOTE,
+        )
+        .expect("write rules");
+        (state, tmp)
+    }
+
+    #[tokio::test]
+    async fn get_note_outline_lists_headings_and_sizes_without_any_text() {
+        let (state, _tmp) = sectioned_state();
+        let note = call_tool(&state, "get_note", json!({"slug": "rules"})).await;
+        let note = &note["result"]["structuredContent"];
+        let body = call_tool(&state, "get_note_outline", json!({"slug": "rules"})).await;
+        let outline = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        assert_eq!(outline["vault_id"], note["vault_id"]);
+        assert_eq!(outline["slug"], "rules");
+        assert_eq!(outline["relative_path"], "Rules");
+        assert_eq!(outline["content_hash"], note["note"]["content_hash"]);
+        assert_eq!(outline["size_bytes"], SECTIONED_NOTE.len());
+        assert_eq!(
+            outline["frontmatter_bytes"],
+            "---\ntags: [rules]\n---\n".len()
+        );
+        assert_eq!(outline["opening_text_bytes"], "Opening.\n".len());
+        let filing_notes = "## Notes\nFiling notes.\n";
+        let filing = format!("# Filing\nWhere notes go.\n{filing_notes}");
+        let tag_notes = "## Notes\nTag notes.\n```\n# fenced\n```\n";
+        let tags = format!("# Tags\n{tag_notes}");
+        assert_eq!(
+            outline["headings"],
+            json!([
+                {"text": "Filing", "level": 1, "heading_path": "Filing", "size_bytes": filing.len()},
+                {"text": "Notes", "level": 2, "heading_path": "Filing > Notes", "size_bytes": filing_notes.len()},
+                {"text": "Tags", "level": 1, "heading_path": "Tags", "size_bytes": tags.len()},
+                {"text": "Notes", "level": 2, "heading_path": "Tags > Notes", "size_bytes": tag_notes.len()},
+            ])
+        );
+        let text = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        assert!(!text.contains("Where notes go"), "{text}");
+
+        // A note with no headings is an empty outline, not an error.
+        std::fs::write(
+            registered_vault_path(&state).join("Flat.md"),
+            "just prose\n",
+        )
+        .expect("write flat");
+        let flat = call_tool(&state, "get_note_outline", json!({"slug": "flat"})).await;
+        let flat = &flat["result"]["structuredContent"];
+        assert_eq!(flat["headings"], json!([]));
+        assert_eq!(flat["size_bytes"], 11);
+        assert_eq!(flat["opening_text_bytes"], 11);
+        assert_eq!(flat["frontmatter_bytes"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_note_section_returns_each_requested_section_or_its_own_error_in_order() {
+        let (state, _tmp) = sectioned_state();
+        let note = call_tool(&state, "get_note", json!({"slug": "rules"})).await;
+        let body = call_tool(
+            &state,
+            "get_note_section",
+            json!({"slug": "rules", "headings": ["Tags > Notes", "Missing", "Notes", "Filing"]}),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        let reply = &body["result"]["structuredContent"];
+        assert_eq!(
+            reply["content_hash"],
+            note["result"]["structuredContent"]["note"]["content_hash"]
+        );
+        assert_eq!(reply["slug"], "rules");
+        assert_eq!(
+            reply["sections"],
+            json!([
+                {
+                    "requested": "Tags > Notes",
+                    "heading_path": "Tags > Notes",
+                    "level": 2,
+                    "section": "## Notes\nTag notes.\n```\n# fenced\n```\n",
+                },
+                {
+                    "requested": "Missing",
+                    "error": {
+                        "code": "heading_not_found",
+                        "message": "No heading has the text or the heading path 'Missing'. Give a heading's text without its '#' characters, or its heading path.",
+                        "matches": [],
+                    },
+                },
+                {
+                    "requested": "Notes",
+                    "error": {
+                        "code": "heading_ambiguous",
+                        "message": "'Notes' matches 2 headings. Ask for one by its heading path.",
+                        "matches": ["Filing > Notes", "Tags > Notes"],
+                    },
+                },
+                {
+                    "requested": "Filing",
+                    "heading_path": "Filing",
+                    "level": 1,
+                    "section": "# Filing\nWhere notes go.\n## Notes\nFiling notes.\n",
+                },
+            ])
+        );
+        // Nothing in the reply is named `content`, the field a whole note
+        // travels in.
+        assert!(!reply.to_string().contains("\"content\""), "{reply:#}");
+    }
+
+    #[tokio::test]
+    async fn get_note_section_refuses_a_malformed_request_and_a_missing_note() {
+        let (state, _tmp) = sectioned_state();
+        for headings in [
+            json!([]),
+            json!([""]),
+            json!(["Filing", "  "]),
+            json!(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]),
+        ] {
+            let body = call_tool(
+                &state,
+                "get_note_section",
+                json!({"slug": "rules", "headings": headings}),
+            )
+            .await;
+            assert_eq!(body["result"]["isError"], true, "{body:#}");
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], "invalid_heading_selection",
+                "{body:#}"
+            );
+        }
+        // Ten is allowed.
+        let ten = call_tool(
+            &state,
+            "get_note_section",
+            json!({"slug": "rules", "headings": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]}),
+        )
+        .await;
+        assert_eq!(ten["result"]["isError"], false, "{ten:#}");
+
+        // A missing note fails the way get_note does.
+        let missing_note = call_tool(&state, "get_note", json!({"slug": "ghost"})).await;
+        for (name, arguments) in [
+            ("get_note_outline", json!({"slug": "ghost"})),
+            (
+                "get_note_section",
+                json!({"slug": "ghost", "headings": ["Filing"]}),
+            ),
+        ] {
+            let body = call_tool(&state, name, arguments).await;
+            assert_eq!(
+                body["result"]["structuredContent"], missing_note["result"]["structuredContent"],
+                "{name}: {body:#}"
+            );
+        }
+
+        // Arguments the tools do not take are protocol errors.
+        for (name, arguments) in [
+            (
+                "get_note_outline",
+                json!({"slug": "rules", "outline": true}),
+            ),
+            ("get_note_section", json!({"slug": "rules"})),
+            (
+                "get_note_section",
+                json!({"slug": "rules", "headings": "Filing"}),
+            ),
+        ] {
+            let body = call_tool(&state, name, arguments).await;
+            assert_eq!(body["error"]["code"], -32602, "{name}: {body:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_carries_the_outline_and_section_reads() {
+        let (state, _tmp) = sectioned_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "get_note_outline", "arguments": {"vault_id": vault_id, "slug": "rules"}},
+                {"op": "get_note_section", "arguments": {"vault_id": vault_id, "slug": "rules", "headings": ["Tags"]}},
+                {"op": "get_note_section", "arguments": {"vault_id": vault_id, "slug": "rules", "headings": []}},
+            ]}),
+        )
+        .await;
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], true, "{body:#}");
+        assert_eq!(items[0]["result"]["headings"][2]["heading_path"], "Tags");
+        assert_eq!(items[1]["ok"], true, "{body:#}");
+        assert_eq!(
+            items[1]["result"]["sections"][0]["section"]
+                .as_str()
+                .map(str::len),
+            items[0]["result"]["headings"][2]["size_bytes"]
+                .as_u64()
+                .map(|size| size as usize)
+        );
+        assert_eq!(items[2]["ok"], false, "{body:#}");
+        assert_eq!(items[2]["error"]["code"], "invalid_heading_selection");
+    }
+
+    #[tokio::test]
+    async fn a_section_hash_is_accepted_by_replace_section_for_the_same_heading() {
+        let (state, _tmp) = write_state();
+        let path = registered_vault_path(&state).join("Rules.md");
+        std::fs::write(&path, SECTIONED_NOTE).expect("write rules");
+        let read = call_tool(
+            &state,
+            "get_note_section",
+            json!({"slug": "rules", "headings": ["Filing > Notes"]}),
+        )
+        .await;
+        let reply = &read["result"]["structuredContent"];
+        let section = reply["sections"][0]["section"].as_str().expect("section");
+        let written = call_tool(
+            &state,
+            "replace_section",
+            json!({
+                "slug": "rules",
+                "heading": "## Notes",
+                "mode": "replace",
+                "content": "## Notes\nRewritten.\n",
+                "expected_content_hash": reply["content_hash"],
+            }),
+        )
+        .await;
+        // `## Notes` is two headings, so the write refuses. The hash was
+        // accepted to get that far, and nothing changed.
+        assert_eq!(written["result"]["isError"], true, "{written:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SECTIONED_NOTE);
+
+        let written = call_tool(
+            &state,
+            "replace_section",
+            json!({
+                "slug": "rules",
+                "heading": "# Filing",
+                "mode": "replace",
+                "content": "",
+                "expected_content_hash": reply["content_hash"],
+            }),
+        )
+        .await;
+        assert_eq!(written["result"]["isError"], false, "{written:#}");
+        assert!(SECTIONED_NOTE.contains(section));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            SECTIONED_NOTE.replace("# Filing\nWhere notes go.\n## Notes\nFiling notes.\n", "")
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Text match (#500, ADR-46)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn find_text_counts_a_literal_string_across_every_layer_inside_the_envelope() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(&state, "find_text", json!({"text": "Melatonin"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert!(content.get("scope").is_some(), "{body:#}");
+        assert!(content["participants"].is_array());
+        let data = &content["data"];
+        assert_eq!(data["total_notes"], 2, "{body:#}");
+        assert_eq!(data["total_occurrences"], 2);
+        assert_eq!(data["truncated"], false);
+        assert_eq!(data["total_unread"], 0);
+        let notes = data["notes"].as_array().expect("notes array");
+        // A demoted Note is found with no layers argument, and says so.
+        assert_eq!(notes[0]["relative_path"], "sources/Clip");
+        assert_eq!(notes[0]["layer"], "sources");
+        assert_eq!(notes[1]["relative_path"], "wiki/Page");
+        assert_eq!(notes[1]["layer"], Value::Null);
+        assert_eq!(notes[1]["occurrences"], 1);
+        assert_eq!(
+            notes[1]["snippets"],
+            json!([{"place": "body", "line": 5, "text": "melatonin body"}])
+        );
+        assert!(notes[0].get("score").is_none());
+
+        // The strict flag, the layer selector and the snippet count all reach
+        // the core.
+        let strict = call_tool(
+            &state,
+            "find_text",
+            json!({"text": "Melatonin", "case_sensitive": true}),
+        )
+        .await;
+        assert_eq!(
+            strict["result"]["structuredContent"]["data"]["total_notes"],
+            0
+        );
+        let narrowed = call_tool(
+            &state,
+            "find_text",
+            json!({"text": "melatonin", "layers": ["sources"], "snippets_per_note": 0, "limit": 1}),
+        )
+        .await;
+        let data = &narrowed["result"]["structuredContent"]["data"];
+        assert_eq!(data["total_notes"], 1, "{narrowed:#}");
+        assert_eq!(data["notes"][0]["relative_path"], "sources/Clip");
+        assert_eq!(data["notes"][0]["snippets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_text_refuses_what_it_cannot_answer_as_a_structured_error() {
+        let (state, _tmp) = layered_test_state();
+        for (arguments, code) in [
+            (json!({"text": ""}), "invalid_text_match"),
+            (
+                json!({"text": "melatonin", "layers": ["ghost"]}),
+                "invalid_layer_selection",
+            ),
+        ] {
+            let body = call_tool(&state, "find_text", arguments).await;
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], code,
+                "{body:#}"
+            );
+        }
+        // An argument the tool does not take is a protocol error, as on every
+        // other tool.
+        let body = call_tool(&state, "find_text", json!({"text": "x", "regex": true})).await;
+        assert_eq!(body["error"]["code"], -32602, "{body:#}");
+    }
+
+    #[tokio::test]
+    async fn batch_carries_find_text() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "find_text", "arguments": {"scope": "all", "text": "melatonin clipping"}},
+                {"op": "find_text", "arguments": {"scope": "all", "text": ""}},
+            ]}),
+        )
+        .await;
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("batch items: {body:#}"));
+        assert_eq!(items[0]["ok"], true, "{body:#}");
+        assert_eq!(items[0]["result"]["data"]["total_notes"], 1);
+        assert_eq!(items[1]["ok"], false, "{body:#}");
+        assert_eq!(items[1]["error"]["code"], "invalid_text_match");
     }
 
     // ---------------------------------------------------------------------------
@@ -2774,6 +3796,14 @@ mod tests {
                 "resolve_wikilink",
                 json!({"vault_id": "not-a-uuid", "target": "Home"}),
             ),
+            (
+                "get_note_outline",
+                json!({"vault_id": "not-a-uuid", "slug": "home"}),
+            ),
+            (
+                "get_note_section",
+                json!({"vault_id": "not-a-uuid", "slug": "home", "headings": ["Home"]}),
+            ),
         ] {
             let body = call_tool_unscoped(&state, name, arguments).await;
             assert_eq!(body["result"]["isError"], true, "{name}: {body:#}");
@@ -2815,6 +3845,10 @@ mod tests {
             (
                 "query_notes",
                 json!({"scope": "not-a-scope", "conditions": [{"type": "tag", "tag": "topic"}]}),
+            ),
+            (
+                "find_text",
+                json!({"scope": "not-a-scope", "text": "needle"}),
             ),
         ] {
             let body = call_tool_unscoped(&state, name, arguments).await;
@@ -3198,11 +4232,19 @@ mod tests {
                 .map(str::to_string)
         };
 
-        // An ordinary instance still reads all three.
+        // An ordinary instance still reads all of them.
         for (name, arguments) in [
             (
                 "get_frontmatter",
                 json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_note_outline",
+                json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_note_section",
+                json!({"vault_id": vault_id, "slug": "clip", "headings": ["Clip"]}),
             ),
             (
                 "list_note_attachments",
@@ -3242,6 +4284,23 @@ mod tests {
             .as_deref(),
             Some("note_not_found")
         );
+
+        for (name, arguments) in [
+            (
+                "get_note_outline",
+                json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_note_section",
+                json!({"vault_id": vault_id, "slug": "clip", "headings": ["Clip"]}),
+            ),
+        ] {
+            assert_eq!(
+                tool(demo.clone(), name, arguments).await.as_deref(),
+                Some("note_not_found"),
+                "{name} withholds a demoted Note"
+            );
+        }
 
         // And the demoted asset is refused with the same code the HTTP asset
         // route reports for the same path on the same instance.
@@ -3457,6 +4516,77 @@ mod tests {
         assert_eq!(content["properties"]["status"], "active");
         let serialized = serde_json::to_string(content).expect("serialize");
         assert!(!serialized.contains("secret body"));
+    }
+
+    #[tokio::test]
+    async fn get_note_carries_the_metadata_get_frontmatter_reports() {
+        let (state, _tmp) = test_state();
+        let vault_path = registered_vault_path(&state);
+        let broken = "---\ntags: [unclosed\n---\n# Broken\n";
+        std::fs::write(
+            vault_path.join("Tagged.md"),
+            "---\ntags: [Space/Hobby, status/on-track]\naliases: [Tagged Home]\ndue: 2026-09-01\n---\n# Tagged\n",
+        )
+        .expect("write tagged note");
+        std::fs::write(vault_path.join("Broken.md"), broken).expect("write broken note");
+        let index = crate::vault::VaultIndex::build(&vault_path).expect("index");
+        let vault_id = match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot
+                .definitions()
+                .next()
+                .expect("test definition")
+                .vault_id(),
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("test recovery"),
+        };
+        state
+            .startup_sqlite
+            .replace_vault_snapshot(vault_id, &index, state.embedder.as_ref())
+            .expect("republish snapshot");
+        let schema = serde_json::to_value(
+            crate::mcp::results::output_schema_for("get_note").expect("schema"),
+        )
+        .expect("schema value");
+        let validator = jsonschema::validator_for(&schema).expect("valid schema");
+
+        let body = call_tool(&state, "get_note", json!({"slug": "tagged"})).await;
+        let tagged = &body["result"]["structuredContent"];
+        assert_eq!(
+            tagged["note"]["metadata"],
+            json!({
+                "tags": ["space/hobby", "status/on-track"],
+                "aliases": ["Tagged Home"],
+                "properties": {"due": "2026-09-01"},
+            })
+        );
+        assert!(validator.is_valid(tagged), "populated metadata: {tagged}");
+        let body = call_tool(&state, "get_frontmatter", json!({"slug": "tagged"})).await;
+        let frontmatter = &body["result"]["structuredContent"];
+        for field in ["tags", "aliases", "properties"] {
+            assert_eq!(tagged["note"]["metadata"][field], frontmatter[field]);
+        }
+
+        // test_state's Home has no frontmatter block.
+        let body = call_tool(&state, "get_note", json!({"slug": "home"})).await;
+        let plain = &body["result"]["structuredContent"];
+        assert_eq!(
+            plain["note"]["metadata"],
+            json!({"tags": [], "aliases": [], "properties": {}})
+        );
+        assert!(validator.is_valid(plain));
+
+        // Frontmatter that does not parse: the note still reads, whole.
+        let body = call_tool(&state, "get_note", json!({"slug": "broken"})).await;
+        let unparsed = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], false, "{body}");
+        assert_eq!(unparsed["note"]["metadata"], Value::Null);
+        assert_eq!(unparsed["note"]["content"], broken);
+        assert_eq!(
+            unparsed["note"]["content_hash"],
+            crate::cache::parse::content_hash(broken)
+        );
+        assert!(validator.is_valid(unparsed), "null metadata: {unparsed}");
+        let body = call_tool(&state, "get_frontmatter", json!({"slug": "broken"})).await;
+        assert_eq!(body["result"]["isError"], true, "{body}");
     }
 
     #[tokio::test]
@@ -4088,18 +5218,311 @@ mod tests {
         assert_eq!(bad_mode["error"]["code"], -32602);
     }
 
-    #[tokio::test]
-    async fn search_notes_returns_compact_results() {
-        let (state, _tmp) = test_state();
-        let body = call_tool(&state, "search_notes", json!({"query":"Home", "limit": 5})).await;
-        let results = body["result"]["structuredContent"]["data"]["results"]
-            .as_array()
-            .expect("results array");
-        assert!(results.iter().any(|r| r["note_slug"] == "home"));
-        let first = &results[0];
-        for key in ["vault_id", "note_slug", "chunk_id", "content", "score"] {
-            assert!(first.get(key).is_some(), "{key} present");
+    /// A Vault for the hit-shape tests (#501): one note whose only `needle`
+    /// sits far into a long chunk, fifty-five notes of full-size chunks that
+    /// all say `filler`, and one tagged note.
+    fn search_shape_state() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        std::fs::write(
+            vault_root.join("Long.md"),
+            format!(
+                "# Long\n\n[[Tagged]]\n\n{} needle {}",
+                vec!["alpha"; 150].join(" "),
+                vec!["omega"; 150].join(" ")
+            ),
+        )
+        .expect("write long");
+        for index in 0..55 {
+            std::fs::write(
+                vault_root.join(format!("Bulk {index:02}.md")),
+                format!("# Bulk {index:02}\n\n{}", vec!["filler"; 450].join(" ")),
+            )
+            .expect("write bulk");
         }
+        std::fs::write(
+            vault_root.join("Tagged.md"),
+            "---\ntags: [topic/sub]\naliases: [Labelled]\n---\n# Tagged\nneedle body",
+        )
+        .expect("write tagged");
+        let mut state = base_state(&tmp);
+        state.runtime_config = mcp_runtime_config(false);
+        (scoped_test_state(state, vault_root), tmp)
+    }
+
+    fn search_hits(body: &Value) -> &Vec<Value> {
+        assert_eq!(body["result"]["isError"], false, "{body:#}");
+        body["result"]["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("results array")
+    }
+
+    fn field_names(hit: &Value) -> Vec<&str> {
+        let mut names = hit
+            .as_object()
+            .expect("a hit object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+
+    const COMPACT_HIT_FIELDS: [&str; 8] = [
+        "heading_path",
+        "layer",
+        "note_path",
+        "note_slug",
+        "note_title",
+        "score",
+        "snippet",
+        "vault_id",
+    ];
+
+    const FULL_HIT_FIELDS: [&str; 11] = [
+        "chunk_id",
+        "content",
+        "heading_path",
+        "layer",
+        "metadata",
+        "note_path",
+        "note_slug",
+        "note_title",
+        "outbound_links",
+        "score",
+        "vault_id",
+    ];
+
+    /// The three ways a search runs, as `(query, mode)`.
+    const SEARCH_SHAPE_CASES: [(&str, &str); 3] = [
+        ("needle", "semantic"),
+        ("needle", "keyword"),
+        ("#topic", "semantic"),
+    ];
+
+    #[tokio::test]
+    async fn search_notes_hits_are_compact_unless_full_detail_is_asked_for() {
+        let (state, _tmp) = search_shape_state();
+        for (query, mode) in SEARCH_SHAPE_CASES {
+            let arguments = json!({"query": query, "mode": mode});
+            let omitted = call_tool(&state, "search_notes", arguments.clone()).await;
+            let mut with_detail = arguments.clone();
+            with_detail["detail"] = json!("compact");
+            let compact = call_tool(&state, "search_notes", with_detail.clone()).await;
+            assert_eq!(
+                omitted["result"]["structuredContent"], compact["result"]["structuredContent"],
+                "{query} {mode}: compact is the default"
+            );
+            with_detail["detail"] = json!("full");
+            let full = call_tool(&state, "search_notes", with_detail).await;
+
+            let (compact, full) = (search_hits(&compact), search_hits(&full));
+            assert!(!compact.is_empty(), "{query} {mode} finds something");
+            assert_eq!(compact.len(), full.len(), "{query} {mode}");
+            for (compact, full) in compact.iter().zip(full) {
+                assert_eq!(field_names(compact), COMPACT_HIT_FIELDS, "{query} {mode}");
+                assert_eq!(field_names(full), FULL_HIT_FIELDS, "{query} {mode}");
+                // Same hits, same scores, same order.
+                for shared in [
+                    "vault_id",
+                    "note_slug",
+                    "note_title",
+                    "note_path",
+                    "heading_path",
+                    "score",
+                    "layer",
+                ] {
+                    assert_eq!(compact[shared], full[shared], "{query} {mode} {shared}");
+                }
+            }
+        }
+    }
+
+    /// `detail: "full"` is the reply the shared search core serializes to,
+    /// which is what this tool returned before it had a compact shape.
+    #[tokio::test]
+    async fn search_notes_full_detail_is_the_search_core_reply_unchanged() {
+        use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
+
+        let (state, _tmp) = search_shape_state();
+        for (query, mode) in SEARCH_SHAPE_CASES {
+            let body = call_tool(
+                &state,
+                "search_notes",
+                json!({"query": query, "mode": mode, "detail": "full"}),
+            )
+            .await;
+            let core = VaultSearchCore::new(
+                &state.startup_sqlite,
+                &state.vaults,
+                state.embedder.as_ref(),
+            )
+            .search(VaultSearchRequest {
+                scope: crate::vault_read::VaultScope::One(vault_id_of(&state)),
+                query: query.to_owned(),
+                mode: serde_json::from_value(json!(mode)).expect("mode"),
+                limit: 10,
+                per_note_cap: 2,
+                layers: crate::search::LayerSelection::default(),
+            })
+            .expect("core search");
+            // Compared as the bytes sent: a score read back from JSON text
+            // can differ from the original in its last digit.
+            let expected = serde_json::to_string(&serde_json::to_value(&core).expect("serializes"))
+                .expect("text");
+            assert_eq!(body["result"]["content"][0]["text"], expected, "{query}");
+            assert_eq!(
+                body["result"]["structuredContent"],
+                serde_json::from_str::<Value>(&expected).expect("parses"),
+                "{query}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_notes_keyword_snippet_shows_a_match_deep_in_a_long_chunk() {
+        let (state, _tmp) = search_shape_state();
+        let body = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "needle", "mode": "keyword"}),
+        )
+        .await;
+        let long = search_hits(&body)
+            .iter()
+            .find(|hit| hit["note_slug"] == "long")
+            .expect("the long note matches");
+        let snippet = long["snippet"].as_str().expect("snippet");
+        assert!(snippet.contains(" needle "), "{snippet}");
+        assert!(
+            snippet.starts_with('…') && snippet.ends_with('…'),
+            "{snippet}"
+        );
+        assert!(snippet.chars().count() <= 200, "{snippet}");
+    }
+
+    #[tokio::test]
+    async fn search_notes_semantic_snippets_start_the_chunk_and_tag_snippets_name_the_tag() {
+        let (state, _tmp) = search_shape_state();
+        let compact = call_tool(&state, "search_notes", json!({"query": "needle"})).await;
+        let full = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "needle", "detail": "full"}),
+        )
+        .await;
+        for (compact, full) in search_hits(&compact).iter().zip(search_hits(&full)) {
+            let snippet = compact["snippet"].as_str().expect("snippet");
+            let shown = snippet
+                .strip_suffix('…')
+                .expect("a long chunk is cut short");
+            let content = full["content"].as_str().expect("content");
+            assert!(content.starts_with(shown), "{snippet}");
+            assert!(snippet.chars().count() <= 200, "{snippet}");
+        }
+
+        let tagged = call_tool(&state, "search_notes", json!({"query": "#topic"})).await;
+        assert_eq!(tagged["result"]["structuredContent"]["data"]["mode"], "tag");
+        assert_eq!(search_hits(&tagged)[0]["snippet"], "Matched tag: #topic");
+    }
+
+    /// The reason the compact shape exists: the largest search an agent can
+    /// ask for fits in one result.
+    #[tokio::test]
+    async fn search_notes_at_the_limit_ceiling_fits_in_thirty_kilobytes() {
+        let (state, _tmp) = search_shape_state();
+        let arguments =
+            json!({"query": "filler", "mode": "keyword", "limit": 50, "per_note_cap": 1});
+        let body = call_tool(&state, "search_notes", arguments.clone()).await;
+        assert_eq!(search_hits(&body).len(), 50);
+        let compact = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .len();
+        assert!(compact < 30_000, "compact reply is {compact} bytes");
+
+        // The control: the same call in full is far past that.
+        let mut full = arguments;
+        full["detail"] = json!("full");
+        let body = call_tool(&state, "search_notes", full).await;
+        let full = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .len();
+        assert!(full > 100_000, "full reply is {full} bytes");
+    }
+
+    #[tokio::test]
+    async fn search_notes_refuses_an_unknown_detail() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            &state,
+            "search_notes",
+            json!({"query": "Home", "detail": "tiny"}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn search_notes_output_schema_validates_both_hit_shapes() {
+        let (state, _tmp) = search_shape_state();
+        let tools = tools_list_result(&state).await;
+        let tool = tool_named(&tools, "search_notes");
+        let validator = jsonschema::validator_for(&tool["outputSchema"]).expect("valid schema");
+        for detail in ["compact", "full"] {
+            let body = call_tool(
+                &state,
+                "search_notes",
+                json!({"query": "needle", "mode": "keyword", "detail": detail}),
+            )
+            .await;
+            assert!(!search_hits(&body).is_empty());
+            let reply = &body["result"]["structuredContent"];
+            assert!(validator.is_valid(reply), "{detail}: {reply:#}");
+        }
+        // The schema names the fields of each shape rather than accepting
+        // anything: a hit with neither a snippet nor content is refused.
+        let mut neither = call_tool(&state, "search_notes", json!({"query": "needle"})).await
+            ["result"]["structuredContent"]
+            .clone();
+        neither["data"]["results"][0]
+            .as_object_mut()
+            .expect("hit")
+            .remove("snippet");
+        assert!(!validator.is_valid(&neither));
+
+        let input = &tool["inputSchema"]["properties"]["detail"];
+        assert_eq!(input["enum"], json!(["compact", "full"]));
+        assert_eq!(input["default"], "compact");
+        let description = tool["description"].as_str().expect("description");
+        for said in ["compact", "get_note", "detail: \"full\""] {
+            assert!(description.contains(said), "description says {said}");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_notes_inside_batch_is_compact_by_default() {
+        let (state, _tmp) = search_shape_state();
+        let vault_id = vault_id_of(&state).to_string();
+        let search = |detail: Option<&str>| {
+            let mut arguments = json!({"scope": vault_id, "query": "needle", "mode": "keyword"});
+            if let Some(detail) = detail {
+                arguments["detail"] = json!(detail);
+            }
+            json!({"op": "search_notes", "arguments": arguments})
+        };
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [search(None), search(Some("full"))]}),
+        )
+        .await;
+        let items = &body["result"]["structuredContent"]["items"];
+        let hit = |item: usize| &items[item]["result"]["data"]["results"][0];
+        assert_eq!(field_names(hit(0)), COMPACT_HIT_FIELDS);
+        assert_eq!(field_names(hit(1)), FULL_HIT_FIELDS);
     }
 
     /// `tag` is a mode a search response reports, never one a caller can ask

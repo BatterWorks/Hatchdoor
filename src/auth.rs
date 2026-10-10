@@ -74,7 +74,7 @@ pub async fn require_web_token(
     }
 }
 
-fn request_is_authorized(request: &Request, expected: &[u8]) -> bool {
+pub(crate) fn request_is_authorized(request: &Request, expected: &[u8]) -> bool {
     if let Some(presented) = request
         .headers()
         .get(header::AUTHORIZATION)

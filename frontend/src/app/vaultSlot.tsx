@@ -97,18 +97,33 @@ export function VaultAggregateSlot({
   vaults,
   counts,
   demoMode = false,
+  compact = false,
 }: {
   vaults: VaultSummary[];
   counts: Record<VaultId, number | undefined>;
   demoMode?: boolean;
+  /** The folded Scope head's form (#530): `5 of 8` beside the scope name,
+   * which the head has no room to follow with a word; the sentence rides on
+   * the title. Every other place says what the count counts. */
+  compact?: boolean;
 }) {
   const aggregate = deriveVaultAggregate(vaults, counts, demoMode);
   if (aggregate.kind === "count") {
     return <span className="side-count">{aggregate.count}</span>;
   }
+  const reading = `${aggregate.participating} of ${aggregate.total}`;
   return (
-    <span className={`vault-slot-shortfall vault-tier-${aggregate.tier}`}>
-      {aggregate.participating} of {aggregate.total}
+    <span
+      className={`vault-slot-shortfall vault-tier-${aggregate.tier}`}
+      title={compact ? `${reading} answering` : undefined}
+    >
+      {reading}
+      {/* A plain span's aria-label is not reliably read, so the word stays
+          in the text and is only hidden from sight. */}
+      <span className={compact ? "visually-hidden" : undefined}>
+        {" "}
+        answering
+      </span>
     </span>
   );
 }

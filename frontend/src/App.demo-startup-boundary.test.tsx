@@ -196,7 +196,7 @@ describe("write mode re-derives when the backend flips into demo mode (#339)", (
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    expect(await screen.findByRole("button", { name: "Edit" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Source" })).toBeVisible();
     expect(screen.getByRole("button", { name: "New note" })).toBeVisible();
 
     // The server restarts into demo mode; the revision stream reconnects and
@@ -211,7 +211,7 @@ describe("write mode re-derives when the backend flips into demo mode (#339)", (
 
     await waitFor(() => {
       expect(
-        screen.queryByRole("button", { name: "Edit" }),
+        screen.queryByRole("button", { name: "Source" }),
       ).not.toBeInTheDocument();
     });
     expect(
@@ -230,7 +230,7 @@ describe("write mode re-reads keep or drop Edit for the right reasons (#339)", (
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    expect(await screen.findByRole("button", { name: "Edit" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Source" })).toBeVisible();
     const readsBefore = server.capabilityReads;
 
     server.capabilitiesUnreachable = true;
@@ -248,7 +248,7 @@ describe("write mode re-reads keep or drop Edit for the right reasons (#339)", (
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(screen.getByRole("button", { name: "Edit" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Source" })).toBeVisible();
     expect(screen.getByRole("button", { name: "New note" })).toBeVisible();
   });
 
@@ -261,15 +261,14 @@ describe("write mode re-reads keep or drop Edit for the right reasons (#339)", (
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    expect(await screen.findByRole("button", { name: "Edit" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Source" })).toBeVisible();
     const readsBefore = server.capabilityReads;
 
     // The posture moved under the tab, but discovery still says
     // `demo_mode: false` and no revision arrives: only the refusal itself
     // can prompt the re-read.
     server.refuseWrites = true;
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    fireEvent.click(screen.getByRole("button", { name: "New note" }));
     fireEvent.change(screen.getByLabelText("Note name"), {
       target: { value: "Refused" },
     });
@@ -285,7 +284,7 @@ describe("write mode re-reads keep or drop Edit for the right reasons (#339)", (
     });
     await waitFor(() => {
       expect(
-        screen.queryByRole("button", { name: "Edit" }),
+        screen.queryByRole("button", { name: "Source" }),
       ).not.toBeInTheDocument();
     });
   });
@@ -399,7 +398,7 @@ describe("startup states after the gate has stepped aside (#339)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Notes Explorer" });
+    await screen.findByRole("heading", { level: 1, name: "Notes" });
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     fireEvent.click(await screen.findByRole("button", { name: "Retry setup" }));
 
@@ -456,7 +455,7 @@ describe("unknown routes (#339)", () => {
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Go to notes" }));
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeVisible();
   });
 });

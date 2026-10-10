@@ -24,7 +24,10 @@ pub struct Note {
     /// The note's layer (`None` = default surface). Reachable by slug or path
     /// regardless of layer; the field tells the caller which surface it is on.
     pub layer: Option<String>,
-    pub metadata: NoteMetadata,
+    /// The note's frontmatter: its tags, aliases and remaining properties, as
+    /// the frontmatter read reports them. `null` is frontmatter that does not
+    /// parse, which stays distinct from a note that has no tags (#521).
+    pub metadata: Option<NoteMetadata>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]

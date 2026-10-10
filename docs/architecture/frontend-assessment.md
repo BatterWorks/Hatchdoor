@@ -2,6 +2,8 @@
 
 Point-in-time record, 2026-08-30, taken on `development` at `f3c8d52` (after the Lean Hatchdoor programme merged). It answers four questions that came up while reviewing the frontend: what the stack is, how much of it is bespoke, whether the line counts are earned, and where the structural risk sits. Numbers are reproducible with the commands at the end.
 
+> **Out of date on the editor since 2026-10-09.** The block editor this record describes, and advises against replacing, was replaced by one CodeMirror editor over the whole note (issue #540, pull requests #543 and #545). `BlockInput.tsx`, `EditableBlock.tsx`, `InlineEditorProvider.tsx`, `lib/blockOps.ts`, `lib/caretMap.ts` and `lib/editHistory.ts` no longer exist; the editor is in `frontend/src/components/note-page/live-editor/`. Every statement here about the editor, including its line counts and the first sentence of the verdict's last paragraph, describes the code as it was on 2026-08-30. The rest of the record was not reviewed again.
+
 ## Verdict
 
 The frontend is a deliberately narrow set of libraries (React, router, CodeMirror 6, the unified/remark pipeline, d3-force, two lazy-loaded embed renderers) with everything user-facing written by hand. The line counts are mostly earned by features the project chose not to outsource. The structural cost is concentration rather than volume: three components over 1,200 lines each hold most of the orchestration, and those are where changes get risky.

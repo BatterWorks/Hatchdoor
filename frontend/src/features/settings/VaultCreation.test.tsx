@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
+import { HelpContext } from "../help/useHelp";
 import { VaultCreationDialog } from "./VaultCreation";
 
 vi.mock("../../api/api", () => ({ apiFetch: vi.fn() }));
@@ -13,15 +14,39 @@ const json = (body: unknown, init?: ResponseInit) =>
     ...init,
   });
 
+/** The Vault mount as `GET /api/v1/folders` lists it (#430). */
+const MOUNT_LISTING = {
+  root: "/data/vault",
+  root_found: true,
+  path: "",
+  markdown: { count: 12, at_least: false },
+  vault: null,
+  folders: [
+    {
+      name: "Journal",
+      path: "Journal",
+      markdown: { count: 12, at_least: false },
+      vault: null,
+      has_subfolders: false,
+    },
+  ],
+  skipped_invalid_names: 0,
+};
+
 function mockRoutes(
   routes: Record<
     string,
     (init: RequestInit | undefined) => Response | Promise<Response>
   >,
 ) {
+  // The folder picker lists the mount as soon as the dialog opens.
+  const withFolders: typeof routes = {
+    "/api/v1/folders": () => json(MOUNT_LISTING),
+    ...routes,
+  };
   mockedApiFetch.mockImplementation(async (input, init) => {
     const url = String(input);
-    for (const [pattern, handler] of Object.entries(routes)) {
+    for (const [pattern, handler] of Object.entries(withFolders)) {
       const method = init?.method ?? "GET";
       const [patternUrl, patternMethod] = pattern.split(" ");
       if (
@@ -57,13 +82,22 @@ const CREATED_VAULT = {
   },
 };
 
+/** The typed Folder path field, behind "Type a path instead" since the
+ * folder picker became the default (#430). */
+function typedPathField(): HTMLElement {
+  const toggle = screen.queryByRole("button", { name: "Type a path instead" });
+  if (toggle) fireEvent.click(toggle);
+  return screen.getByLabelText("Folder path");
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("VaultCreationDialog — opening", () => {
-  it("renders the name field, source-kind toggle and the four own-folder behaviours", () => {
+  it("renders the name field, source-kind toggle and the four own-folder behaviours", async () => {
+    mockRoutes({});
     render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
 
     expect(screen.getByRole("dialog", { name: "Add a Vault" })).toBeVisible();
@@ -71,7 +105,10 @@ describe("VaultCreationDialog — opening", () => {
     expect(
       screen.getByLabelText("Ignore these files and folders"),
     ).toBeVisible();
-    expect(screen.getByLabelText("Folder path")).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: /^Journal/ }),
+    ).toBeVisible();
+    expect(typedPathField()).toBeVisible();
     for (const label of ["No Git", "Local history", "Pull-only", "Two-way"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
@@ -107,7 +144,7 @@ describe("VaultCreationDialog — exclusion patterns", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.change(screen.getByLabelText("Ignore these files and folders"), {
@@ -152,7 +189,7 @@ describe("VaultCreationDialog — exclusion patterns", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
@@ -192,7 +229,7 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
@@ -235,7 +272,7 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "  /notes  \n" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
@@ -244,6 +281,146 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     expect(
       (postedBody as unknown as { source: { path: string } }).source.path,
     ).toBe("/notes");
+  });
+});
+
+describe("VaultCreationDialog — a folder picked from the list (#430)", () => {
+  const registry = () =>
+    json({
+      registry_revision: 5,
+      collection_revision: 5,
+      vaults: [],
+      demo_mode: false,
+    });
+
+  it("creates a Vault from a picked folder without typing a path", async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    mockRoutes({
+      "/api/v1/vaults GET": registry,
+      "/api/v1/vaults POST": (init) => {
+        postedBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
+      },
+    });
+    const onCreated = vi.fn();
+    render(<VaultCreationDialog onClose={() => {}} onCreated={onCreated} />);
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Field notes" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /^Journal/ }));
+    expect(screen.getByText("/data/vault/Journal")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
+
+    await vi.waitFor(() =>
+      expect(onCreated).toHaveBeenCalledWith(CREATED_VAULT),
+    );
+    expect(postedBody).toEqual({
+      expected_registry_revision: 5,
+      name: "Field notes",
+      source: { type: "local", path: "/data/vault/Journal" },
+    });
+    expect(screen.queryByLabelText("Folder path")).toBeNull();
+  });
+
+  it("creates a Vault in a folder just made in the picker, with the request unchanged (#494)", async () => {
+    let folderBody: Record<string, unknown> | null = null;
+    let postedBody: Record<string, unknown> | null = null;
+    let submits = 0;
+    mockRoutes({
+      "/api/v1/folders POST": (init) => {
+        folderBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            name: "Fresh",
+            path: "Fresh",
+            markdown: { count: 0, at_least: false },
+            vault: null,
+            has_subfolders: false,
+          },
+          { status: 201 },
+        );
+      },
+      "/api/v1/vaults GET": registry,
+      "/api/v1/vaults POST": (init) => {
+        submits += 1;
+        postedBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
+      },
+    });
+    const onCreated = vi.fn();
+    render(<VaultCreationDialog onClose={() => {}} onCreated={onCreated} />);
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Field notes" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /New folder/ }));
+    const name = screen.getByLabelText(/Name of the new folder/);
+    fireEvent.change(name, { target: { value: "Fresh" } });
+    // Enter makes the folder. It must not submit the Vault form around it.
+    fireEvent.keyDown(name, { key: "Enter" });
+
+    expect(
+      await screen.findByRole("button", { name: /^Fresh/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(folderBody).toEqual({ parent: "", name: "Fresh" });
+    expect(submits).toBe(0);
+    expect(screen.getByText("/data/vault/Fresh")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
+    await vi.waitFor(() =>
+      expect(onCreated).toHaveBeenCalledWith(CREATED_VAULT),
+    );
+    expect(postedBody).toEqual({
+      expected_registry_revision: 5,
+      name: "Field notes",
+      source: { type: "local", path: "/data/vault/Fresh" },
+    });
+  });
+
+  it("asks for a folder when none was picked, without contacting the server", async () => {
+    mockRoutes({});
+    render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Field notes" },
+    });
+    await screen.findByRole("button", { name: /^Journal/ });
+    fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Pick the folder that holds your notes, or type its path.",
+    );
+    expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries a picked folder into the typed field and back", async () => {
+    mockRoutes({});
+    render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Journal/ }));
+    expect(typedPathField()).toHaveValue("/data/vault/Journal");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pick from the list instead" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: /^Journal/ }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 });
 
@@ -323,7 +500,7 @@ describe("VaultCreationDialog — an API failure", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
@@ -361,7 +538,7 @@ describe("VaultCreationDialog — an API failure", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
@@ -402,7 +579,7 @@ describe("VaultCreationDialog — double-submit", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     const button = screen.getByRole("button", { name: "Create Vault" });
@@ -467,7 +644,7 @@ describe("VaultCreationDialog — an own-folder remote behaviour", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Pull-only" }));
@@ -510,7 +687,7 @@ describe("VaultCreationDialog — an own-folder remote behaviour", () => {
     fireEvent.change(screen.getByLabelText("Vault name"), {
       target: { value: "Field notes" },
     });
-    fireEvent.change(screen.getByLabelText("Folder path"), {
+    fireEvent.change(typedPathField(), {
       target: { value: "/notes" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Pull-only" }));
@@ -578,5 +755,29 @@ describe("VaultCreationDialog — keyboard (#338)", () => {
 
     fireEvent.keyDown(create, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+  it("closes Help first while it is open beside the dialog, and lets Tab reach it (#430)", () => {
+    mockRoutes({});
+    const onClose = vi.fn();
+    const closeHelp = vi.fn();
+    render(
+      <HelpContext.Provider
+        value={{ openHelp: () => {}, closeHelp, isOpen: true }}
+      >
+        <VaultCreationDialog onClose={onClose} onCreated={() => {}} />
+      </HelpContext.Provider>,
+    );
+
+    const create = screen.getByRole("button", { name: "Create Vault" });
+    create.focus();
+    fireEvent.keyDown(create, { key: "Tab" });
+    expect(screen.getByLabelText("Vault name")).not.toHaveFocus();
+
+    fireEvent.keyDown(create, { key: "Escape" });
+    expect(closeHelp).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("dialog", { name: "Add a Vault" }).parentElement,
+    ).toHaveClass("is-beside-help");
   });
 });

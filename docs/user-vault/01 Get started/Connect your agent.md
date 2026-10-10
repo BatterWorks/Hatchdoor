@@ -4,8 +4,22 @@ tags: [type/tutorial, topic/mcp]
 
 # Connect your agent
 
-Hatchdoor exposes a Streamable HTTP MCP endpoint. It is off by default and has
-its own password, separate from the web token you used to open the browser.
+In this step you let an AI agent, such as Claude Code or Codex, search and read your notes. Agents connect to Hatchdoor over MCP, the standard way agents talk to tools. Agent access is off until you turn it on, and it uses its own password, the MCP password, which is separate from the web token you sign in to the browser with. Your agent starts read-only: it can search and read, but cannot change anything.
+
+## The quick way: the setup checklist
+
+A new install opens on the **Set up Hatchdoor** checklist. Its third step, **Connect your agent**, does the whole setup below in one click:
+
+1. Select **Connect an agent**. Hatchdoor turns agent access on, keeps **Let assistants change notes** off, and makes a new MCP password.
+2. Pick your agent: **Claude Code**, **Codex**, **OpenClaw**, **Hermes**, or **Other** for any other MCP client. The checklist shows the exact command or settings to paste, with your Hatchdoor address and the new password already filled in.
+3. Copy it now. The password is shown only this once. If you lose it, select **Make a new password**; agents still using the old one stop getting in.
+4. Paste it into your agent and ask it to use Hatchdoor. The step ticks itself as soon as the agent makes its first request, and names it, for example "Claude Code connected 2 minutes ago".
+
+If you closed the checklist, reopen it from **Help** → **Setup checklist**. If the MCP password is set in the deployment's `.env` file as `HATCHDOOR_MCP_BEARER_TOKEN`, the checklist cannot show it: the config says `<your MCP password>` where it goes.
+
+The rest of this page does the same thing by hand, from Settings.
+
+## Set it up in Settings
 
 In Hatchdoor, open **Settings** → **Agent access (MCP)**. Then:
 
@@ -14,8 +28,7 @@ In Hatchdoor, open **Settings** → **Agent access (MCP)**. Then:
 3. Leave **Let assistants change notes** off for now.
 4. Select **Save**.
 
-The change applies to new MCP requests immediately; it does not require a
-container restart.
+The change applies straight away; you don't need to restart Hatchdoor.
 
 > [!success]
 > Your agent can now read, but it cannot create, edit, move, delete, or attach anything. Read-only is the right first connection.
@@ -37,9 +50,7 @@ Authorization: Bearer <your-mcp-password>
 
 Agents download and upload files through short-lived links that carry the server's address. If an agent reaches Hatchdoor through such a layer, such as a proxy that adds HTTPS, the links use the address the proxy reports in its `Forwarded` header, or its `X-Forwarded-Proto` and `X-Forwarded-Host` headers. If the proxy sends none of them, or serves Hatchdoor under a path, fill in **Public address** in **Agent access (MCP)** with the address the agent uses, for example `https://notes.example.com`. When set, it always wins.
 
-Do not put the MCP password in a note, a prompt, or a screenshot. MCP is a
-second door into your Vault; it stays disabled unless you deliberately enable
-it, and it always needs this password even for reading.
+Do not put the MCP password in a note, a prompt, or a screenshot. Anyone with it can read every Vault, so treat it like any other password.
 
 ## Configure your MCP client
 
@@ -122,12 +133,11 @@ Try this prompt with your agent:
 Use Hatchdoor MCP in read-only mode. Start with list_vaults. Then search the Vault collection for notes about [a topic I care about], read the best match, and give me a short summary. Do not change any notes.
 ```
 
-The agent should begin with `list_vaults`, use `search_notes`, and call
-`get_note` only after it has identified the note. It should retain the returned
-Vault ID; there is no implicit default Vault for MCP work.
+The agent should begin with `list_vaults`, use `search_notes`, and call `get_note` only after it has found the note. If it struggles, point it at [[How to work in a Vault as an agent]], which is written for agents.
 
-Continue to [[Search and change notes with your agent]] when that read-only
-test works.
+To check that the connection worked, open **Settings** → **Agent access (MCP)** in Hatchdoor. Once the agent has used a tool, the section names it and says how long ago, for example "Claude Code connected 2 minutes ago". If it still says "No agent has connected yet", the agent never got through: check the address, and that the client sends the MCP password and not the web token.
+
+Continue to [[Search and change notes with your agent]] when that read-only test works. If the agent cannot connect, [[How to troubleshoot common problems#An agent can't connect over MCP]] matches the error it reports to its cause.
 
 ---
 

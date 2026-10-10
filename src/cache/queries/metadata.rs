@@ -65,11 +65,11 @@ impl SqliteCache {
             content,
             content_hash,
             layer,
-            metadata: NoteMetadata {
+            metadata: Some(NoteMetadata {
                 tags,
                 aliases,
                 properties,
-            },
+            }),
         }))
     }
 }
@@ -102,13 +102,14 @@ mod tests {
             .read_note_by_slug("device")
             .expect("read note")
             .expect("device note");
+        let metadata = note.metadata.expect("cached metadata");
         assert_eq!(
-            note.metadata.tags,
+            metadata.tags,
             vec!["action/review", "area/network", "type/device"]
         );
-        assert_eq!(note.metadata.aliases, vec!["Router", "Gateway"]);
+        assert_eq!(metadata.aliases, vec!["Router", "Gateway"]);
         assert_eq!(
-            note.metadata.properties,
+            metadata.properties,
             serde_json::json!({"status":"active", "review-date":"2026-08-01"})
         );
     }

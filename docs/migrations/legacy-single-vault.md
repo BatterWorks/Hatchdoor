@@ -1,9 +1,39 @@
 # Legacy single-Vault upgrade
 
-The managed-Vault foundation replaces ambient single-Vault configuration with
-ordinary, UUID-addressed Vault definitions in `/data/state/vaults.json`. This
-file is authoritative instance state. It must persist across container or
-binary upgrades; it is not part of the disposable SQLite cache.
+Hatchdoor keeps its Vaults as ordinary, UUID-addressed definitions in
+`/data/state/vaults.json`, the Vault registry. This file is authoritative
+instance state. It must persist across container or binary upgrades; it is not
+part of the disposable SQLite cache.
+
+Releases 2.4.x and earlier had no registry. They served one Vault, configured
+through `VAULT_PATH`, `HATCHDOOR_EXCLUDE` and the `HATCHDOOR_GIT_*` settings.
+Releases 2.5.0 to 2.7.x converted such a deployment into the registry on their
+first start. Hatchdoor 2.8.0 removed that conversion (ADR-40, #427).
+
+## Minimum direct-upgrade version
+
+**Hatchdoor 2.8.0 and later upgrade directly only from 2.5.0 or later.** An
+install still on 2.4.x or earlier upgrades in two steps:
+
+1. Upgrade to any release from 2.5.0 to 2.7.x and start it once. It converts
+   the single Vault into the registry. Its own upgrade notes, in this file at
+   that release's tag, describe what it imports and how to recover when it
+   cannot.
+2. Upgrade to 2.8.0 or later.
+
+An install that skips the first step and has no registry but still stores any
+of the retired Git settings (`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`,
+`_HTTPS_USERNAME`, `_REMOTE`, `_BRANCH`, `_DEBOUNCE_SECONDS`) in its settings
+file refuses to start, with a log message naming this document.
+Nothing is written: the Markdown, the Git repository and the settings file are
+left for the 2.5.0 to 2.7.x release to import. Opening on zero Vaults instead
+would look like lost notes.
+
+A single-Vault install configured only through environment variables, or
+storing only `HATCHDOOR_EXCLUDE` or the commit author, cannot be told apart from
+a fresh install: a current install may store those settings too. It starts with no
+Vaults. Its Markdown is untouched; add the folder as a Vault in Settings, or
+upgrade through a 2.5.0 to 2.7.x release first to carry its Git settings over.
 
 ## Before upgrading
 
@@ -25,66 +55,33 @@ sudo chown 65532:65532 data/state
 For rootless Podman, use `podman unshare chown 65532:65532 data/state` instead.
 Use the corresponding directory when `HOST_STATE_PATH` is customized.
 
-Keep the existing Vault and cache paths available for the first managed-Vault
-startup. Legacy values are resolved with the same precedence as before:
-non-empty environment values, then stored settings, then defaults.
+## A start with no registry
 
-## What import does
+A start that finds no registry, and no stored single-Vault settings, writes an
+empty one and opens on zero Vaults, whatever `VAULT_PATH` holds and whether or
+not it is set. The folder `VAULT_PATH` names is never registered as a Vault by
+itself and never written to. It stays valid configuration: it is the folder
+Hatchdoor can see Vaults in, and every Vault is one you added.
 
-Import runs only when the registry is absent and there is positive legacy
-evidence: Markdown content, a recognized Hatchdoor SQLite cache, Git history
-paired with explicit Git configuration, stored Vault-specific settings, or an
-explicit non-default `VAULT_PATH`. An empty `./vault` or Compose `/data/vault`
-directory by itself is a fresh deployment and does not trigger migration.
+## Leftover settings
 
-A safe import creates one enabled ordinary Vault with a new UUID. It preserves
-the legacy directory name, exclusion patterns, local-history or two-way Git
-mode, branch, HTTPS remote, optional credentials, and the configured commit
-author name and email, which become that Vault's commit identity.
-`HATCHDOOR_GIT_DEBOUNCE_SECONDS` has no counterpart and needs none: #148's AC4
-retired the "wait N seconds after the last edit" concept, because the
-multi-Vault write pipeline coalesces through a fixed watcher debounce that no
-per-Vault setting feeds. A leftover value is obsolete, and does not block the
-import. Import only inspects the existing filesystem and
-repository: it never seeds, moves, edits, clones, pulls, commits, pushes,
-checks out, merges, or otherwise changes Vault content or Git state.
+Every start on an existing registry removes the retired Git-lane keys
+(`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
+`_BRANCH`, `_DEBOUNCE_SECONDS`) from stored settings again, so a plaintext Git
+token never survives there. A failed removal is logged and retried on the next
+start. `HATCHDOOR_EXCLUDE` and the two author keys are left alone; the author
+keys are still the commit identity of a Vault without its own.
 
-The registry is committed first. Only after that durable commit may Hatchdoor
-remove migrated stored settings and the recognized legacy slug-only SQLite
-cache. Markdown remains the authority; search stays unavailable until the
-per-Vault cache is rebuilt by the later runtime activation step.
+Per-Vault values set in the environment have no effect: each Vault keeps its
+own settings in the registry. Hatchdoor logs a warning at startup naming any
+that are still set. Remove them from `.env`, and change a Vault's settings in
+Settings or with the `edit_vault` MCP tool. `VAULT_PATH` is exempt, because
+Docker Compose sets it on every deployment as the container's Vault mount.
 
-Any existing registry, including an intentional zero-Vault registry,
-permanently suppresses legacy import. Legacy environment values have no effect
-after that point, and are reported together in a restricted recovery screen
-rather than silently ignored. See [After the import](#after-the-import).
-
-## Recovery
-
-When legacy evidence exists but conversion is unsafe, import changes nothing
-and reports `legacy_migration_required`. Correct the named path, repository, or
-setting and retry.
-
-Alternatively, explicitly confirm **Start with no Vaults**; that writes an
-intentional empty registry and permanently disables automatic legacy import.
-The legacy Vault, Git repository, settings, and cache remain untouched by a
-refused conversion.
-
-## After the import
-
-Per-Vault values set in the environment no longer have any effect once the
-registry owns them, so Hatchdoor starts only its health, web shell, and recovery
-status while they are still set, naming each one. No Vault runtime or mutation
-surface is activated. Remove them from `.env` and restart; change them in
-Settings or with the `edit_vault` MCP tool from then on. `VAULT_PATH` is exempt,
-because Docker Compose sets it on every deployment as the container's vault
-mount.
-
-The development-only `HATCHDOOR_VAULT_SOURCE` and
-`HATCHDOOR_VAULT_GIT_*` startup-source variables were never part of a released
-deployment contract and are not migrated. If they are present, Hatchdoor opens
-the same restricted recovery screen and names them; remove them, restart, and create or edit the
-Git-backed registry Vault instead.
+The development-only `HATCHDOOR_VAULT_SOURCE` and `HATCHDOOR_VAULT_GIT_*`
+startup-source variables were never part of a released deployment contract.
+If they are present, Hatchdoor refuses to start and names them; remove them,
+restart, and create or edit the Git-backed registry Vault instead.
 
 ## Retired legacy routes
 

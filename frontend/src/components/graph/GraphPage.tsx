@@ -148,8 +148,9 @@ function tagHue(tag: string): number {
   return Math.abs(hash) % 360;
 }
 
-function nodeColor(tag: string | null, alpha = 1): string {
-  if (!tag) return `rgba(138, 134, 120, ${alpha})`;
+// An untagged node has no colour of its own: the canvas draws it in the
+// theme's --muted, read with the other theme colours.
+function nodeColor(tag: string, alpha = 1): string {
   const hue = tagHue(tag);
   return `hsla(${hue}, 60%, 58%, ${alpha})`;
 }
@@ -1574,8 +1575,12 @@ export function GraphPage() {
           )}
         </div>
 
-        {/* Desktop: always visible inline. Mobile: hidden, rendered as overlay below. */}
-        <div className="graph-tags-desktop">{tagChips}</div>
+        {/* Folded behind the Tags toggle at every width (#530): on desktop an
+            inline block under the header, on the phone the overlay below. A
+            row of fifty chips was 100px of header before the canvas. */}
+        {filterOpen ? (
+          <div className="graph-tags-desktop">{tagChips}</div>
+        ) : null}
 
         <p className="graph-hint">
           Scroll to zoom · Drag background to pan · Click node to select ·

@@ -6,9 +6,10 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { VaultApp as App } from "./App";
+import { SCOPE_ZONE_COLLAPSED_KEY } from "./app/constants";
 import { discoveryResponse, THREE_VAULTS } from "./test/fixtures/vaults";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -52,6 +53,11 @@ function mockThreeVaultFetch() {
     },
   );
 }
+
+// The Scope zone starts folded (#530); these tests drive its rows directly.
+beforeEach(() => {
+  window.localStorage.setItem(SCOPE_ZONE_COLLAPSED_KEY, "0");
+});
 
 afterEach(() => {
   cleanup();

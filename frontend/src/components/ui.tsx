@@ -38,9 +38,11 @@ export function UiToolbar({
 
 /**
  * A Vault declaring itself as a marked path root (#140): the Vault name in
- * hot ink followed by a middot, never a `/`, so it reads as visibly not a
- * folder segment. Inert — a plain span, never a click target — and never
- * elides; callers give the adjacent title or path the shrinking room instead.
+ * muted mono followed by a middot, never a `/`, so it reads as visibly not a
+ * folder segment. Inert — a plain span, never a click target. It takes at
+ * most a share of its row and elides past that (#530): a long Vault name
+ * used to push the note title off the row entirely, and the title is what
+ * the row is for.
  */
 export function VaultPrefix({ name }: { name: string }) {
   return (
@@ -71,6 +73,7 @@ export function StateBlock({
   secondaryActionLabel,
   onSecondaryAction,
   tone,
+  help,
 }: {
   title: string;
   description: string;
@@ -84,6 +87,9 @@ export function StateBlock({
   /** The documented §23 error variant (red heading) — a genuine failure,
    * never the plain empty shell used for "nothing here yet". */
   tone?: "error";
+  /** A link to the manual page that explains this state (#423), on its own
+   * line under the description. */
+  help?: ReactNode;
 }) {
   return (
     <UiPanel
@@ -91,6 +97,7 @@ export function StateBlock({
     >
       <h2>{title}</h2>
       <p>{description}</p>
+      {help ? <p>{help}</p> : null}
       {actionLabel && onAction ? (
         secondaryActionLabel && onSecondaryAction ? (
           <div className="modal-actions">

@@ -190,9 +190,128 @@ function printGroup(title, values, format = (value) => `  ${value}`) {
   }
 }
 
+// Each module section runs from its H3 heading to the next heading of the
+// same or a higher level. Headings inside a fenced code block do not count.
+function moduleSections(lines) {
+  const sections = new Map();
+  let open = null;
+  let fenced = false;
+
+  for (const [index, line] of lines.entries()) {
+    if (/^(?:```|~~~)/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    const heading = fenced ? null : line.match(/^(#{1,3})\s+(.+)$/);
+    if (!heading) {
+      continue;
+    }
+    if (open) {
+      open.end = index;
+      open = null;
+    }
+    if (heading[1] === "###") {
+      open = { start: index, end: lines.length };
+      sections.set(heading[2], open);
+    }
+  }
+
+  return sections;
+}
+
+// `--owner <path>...` answers "which module sections do I need to read?"
+// without reading the whole map: it names the section that owns each file and
+// prints those sections in full. A directory lists the sections under it, and
+// a path outside the production inventory is pointed at the map's own section
+// for such paths.
+function printOwners(markdown, assignments, requested) {
+  const lines = markdown.split(/\r?\n/);
+  const sections = moduleSections(lines);
+  const span = (name) => {
+    const { start, end } = sections.get(name);
+    return `module-map.md lines ${start + 1}-${end}`;
+  };
+  const sectionsOwning = (matches) => [
+    ...new Set(
+      [...assignments.entries()]
+        .filter(([file]) => matches(file))
+        .flatMap(([, owners]) => owners.map(({ section }) => section)),
+    ),
+  ];
+  const auxiliaryHeading = "## Auxiliary repository paths";
+  const auxiliaryLine = lines.indexOf(auxiliaryHeading) + 1;
+  const toPrint = new Set();
+
+  for (const raw of requested) {
+    const file = path.isAbsolute(raw)
+      ? toRepositoryPath(raw)
+      : path.posix.normalize(raw.split(path.sep).join("/"));
+    const owners = assignments.get(file);
+    if (owners) {
+      for (const { section, kind } of owners) {
+        console.log(`${file}: ${section} (${kind}), ${span(section)}`);
+        toPrint.add(section);
+      }
+      continue;
+    }
+
+    const directory = `${file.replace(/\/$/, "")}/`;
+    const sectionsInDirectory = sectionsOwning((assigned) =>
+      assigned.startsWith(directory),
+    );
+    if (sectionsInDirectory.length > 0) {
+      console.log(`${file}: a directory, with files in these sections:`);
+      for (const section of sectionsInDirectory) {
+        console.log(`  ${section}, ${span(section)}`);
+      }
+      continue;
+    }
+
+    if (!/^(?:src|frontend\/src)\//.test(file)) {
+      const where =
+        auxiliaryLine > 0
+          ? `"${auxiliaryHeading}" (module-map.md line ${auxiliaryLine})`
+          : "its work packet";
+      console.log(
+        `${file}: outside the production inventory, so no module owns it. It needs its own work-packet scope: see ${where}`,
+      );
+      continue;
+    }
+
+    const beside = path.posix.dirname(file);
+    const siblings = sectionsOwning(
+      (assigned) => path.posix.dirname(assigned) === beside,
+    );
+    console.log(
+      siblings.length > 0
+        ? `${file}: no assignment. Files beside it belong to: ${siblings.join("; ")}`
+        : `${file}: no assignment, and none for any file beside it`,
+    );
+  }
+
+  for (const section of toPrint) {
+    const { start, end } = sections.get(section);
+    console.log(
+      `\n${"-".repeat(72)}\n${lines.slice(start, end).join("\n").trimEnd()}`,
+    );
+  }
+}
+
 const markdown = await readFile(moduleMapPath, "utf8");
-const productionFiles = await productionSourcePaths();
 const { assignments, errors } = ownershipAssignments(markdown);
+
+const argv = process.argv.slice(2);
+if (argv[0] === "--owner") {
+  const requested = argv.slice(1);
+  if (requested.length === 0) {
+    console.error("Usage: check-module-map.mjs --owner <path>...");
+    process.exit(2);
+  }
+  printOwners(markdown, assignments, requested);
+  process.exit(0);
+}
+
+const productionFiles = await productionSourcePaths();
 
 const unowned = productionFiles.filter((file) => !assignments.has(file));
 const duplicates = [...assignments.entries()]

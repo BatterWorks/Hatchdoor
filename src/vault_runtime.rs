@@ -326,6 +326,31 @@ impl VaultRuntime {
         self.set_phase(VaultPhase::Ready);
     }
 
+    /// Move the phase to `Ready` from `Validating`, `Scanning` or `Indexing`
+    /// only, and say whether it moved. Decided under the one write lock, so
+    /// a caller that judged the collection settled cannot overwrite a model
+    /// setup that began, or failed, after it looked.
+    pub fn settle_ready(&self) -> bool {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .expect("vault runtime snapshot poisoned");
+        if !matches!(
+            snapshot.phase,
+            VaultPhase::Validating | VaultPhase::Scanning | VaultPhase::Indexing
+        ) {
+            return false;
+        }
+        snapshot.phase = VaultPhase::Ready;
+        snapshot.capabilities = VaultCapabilities::derive(snapshot.mode, snapshot.phase);
+        snapshot.model = None;
+        snapshot.downloaded_bytes = None;
+        snapshot.total_bytes = None;
+        snapshot.indexing = None;
+        snapshot.error = None;
+        true
+    }
+
     pub fn set_unavailable(&self, code: impl Into<String>, message: impl Into<String>) {
         let mut snapshot = self
             .snapshot
@@ -534,10 +559,11 @@ impl VaultCollectionRevisionEvent {
 #[derive(Clone)]
 pub(crate) struct VaultWriteExclusion {
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
-    /// How many foreground mutations have taken `mutation_lock`. Written once
-    /// per acquisition, by the acquirer, while it holds that lock — and read
-    /// only by the two accessors on the control block, each of which also
-    /// holds it. A holder therefore reads a value that cannot move until it
+    /// How many times this Vault's Markdown was rewritten under
+    /// `mutation_lock`: once per foreground mutation, counted as it acquires,
+    /// and once per Git turn that reports a rewrite. Written only by a holder
+    /// of that lock, and read only by the two Index accessors on the control
+    /// block, each of which also holds it. A holder therefore reads a value that cannot move until it
     /// releases, which is the only way to read it honestly. It travels with
     /// the lock: a generation taken before an edit must stay comparable with
     /// one taken after it, or an Index turn spanning the edit would conclude
@@ -1150,8 +1176,34 @@ impl VaultControlBlock {
         Ok((guard, generation))
     }
 
-    /// The exclusion itself: everything both acquisitions above have in common,
-    /// minus what makes one a mutation and the other a read.
+    /// Take this Vault's foreground mutation guard for a Git, commit or
+    /// recovery turn. The same exclusion a Markdown write gets, so the turn
+    /// and a write never overlap, minus the generation advance: holding the
+    /// guard is not rewriting Markdown. A commit moves `HEAD` and leaves the
+    /// working tree alone, and counting it made an overlapping Index turn
+    /// publish stale with no changed file for the watcher to answer (#549).
+    /// A turn that does rewrite Markdown says so through
+    /// [`Self::record_markdown_rewrite`] before it lets the guard go.
+    pub(crate) async fn acquire_mutation_for_git_turn(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
+        self.acquire_mutation_exclusion().await
+    }
+
+    /// Advance the mutation generation for a holder of
+    /// [`Self::acquire_mutation_for_git_turn`] whose work rewrote this Vault's
+    /// Markdown. Takes the guard to keep the advance under the lock, where
+    /// [`Self::blocking_retake_mutation_for_index`] reads it. The caller owes
+    /// the Index turn that catches up: an Index turn that sees the advance
+    /// publishes stale and queues nothing itself.
+    pub(crate) fn record_markdown_rewrite(&self, _held: &tokio::sync::OwnedMutexGuard<()>) {
+        self.exclusion
+            .mutations_taken
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The exclusion itself: everything the acquisitions above have in common,
+    /// minus what makes one a mutation and the others not.
     async fn acquire_mutation_exclusion(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
@@ -1162,8 +1214,9 @@ impl VaultControlBlock {
     }
 
     /// Retake the foreground mutation guard from a blocking thread and answer,
-    /// under that one acquisition, whether a foreground mutation completed
-    /// since `since` (a generation from
+    /// under that one acquisition, whether this Vault's Markdown was rewritten
+    /// under the guard (a foreground mutation, or a sync that pulled) since
+    /// `since` (a generation from
     /// [`Self::acquire_mutation_for_index_reads`]).
     ///
     /// An Index turn releases the guard before its embedding pass and calls
@@ -1517,7 +1570,7 @@ struct VaultCollectionState {
     /// watcher or local-file status moving. It does not count note
     /// content. A note write never advances it; the Index turn that write
     /// arms usually does, twice, but only because the Vault's search status
-    /// passes through `indexing` and back. Neither its moving nor its
+    /// passes through `stale` and back. Neither its moving nor its
     /// holding still says whether a read includes a given write: that is
     /// what a collection read's `participants[].state` answers (#259).
     collection_revision: u64,

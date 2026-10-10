@@ -179,21 +179,11 @@ export type VaultRegistryRecovery = {
   message: string;
 };
 
-/** Present only when the registry itself loaded fine (empty, revision 0) but
- * a failed safe legacy import still needs operator recovery (#150). Distinct
- * from `VaultRegistryRecovery`: that one means the persisted registry file
- * itself is unreadable. */
-export type LegacyMigrationRecovery = {
-  code: "legacy_migration_required" | "legacy_environment_cleanup_required";
-  message: string;
-};
-
 export type VaultDiscoveryResponse = {
   registry_revision?: number;
   collection_revision: number;
   vaults: VaultSummary[];
   recovery?: VaultRegistryRecovery;
-  legacy_migration_recovery?: LegacyMigrationRecovery;
   demo_mode: boolean;
 };
 
@@ -255,7 +245,8 @@ export type Note = {
   content: string;
   content_hash: string;
   layer: string | null;
-  metadata?: NoteMetadata;
+  /** `null` when the note's frontmatter does not parse (#521). */
+  metadata?: NoteMetadata | null;
 };
 
 export type NoteMetadata = {
@@ -514,4 +505,43 @@ export type MermaidApi = {
     };
   }) => void;
   render: (id: string, chart: string) => Promise<{ svg: string }>;
+};
+
+/** The last MCP client that called a tool, from the settings response (#426).
+ * `connected_at` is RFC 3339. Only the name and time are ever recorded. */
+export type LastAgentConnection = {
+  name: string;
+  connected_at: string;
+};
+
+/** How many Markdown notes a folder holds, counted recursively. `at_least`
+ * means counting stopped early (a cap or the time budget) and the real
+ * number is higher. */
+export type FolderNoteCount = { count: number; at_least: boolean };
+
+/** The registered Vault rooted exactly at a listed folder. */
+export type FolderVaultRef = { vault_id: string; name: string };
+
+/** One folder in a `GET /api/v1/folders` answer (#429, ADR-41), and the
+ * whole answer of `POST /api/v1/folders` (#494, ADR-44). `path` is relative
+ * to the Vault mount, `/`-separated. */
+export type FolderListingEntry = {
+  name: string;
+  path: string;
+  markdown: FolderNoteCount;
+  vault: FolderVaultRef | null;
+  has_subfolders: boolean;
+};
+
+/** `GET /api/v1/folders?path=<relative>`: one folder under the Vault mount
+ * and its immediate subfolders. `root` is the mount's absolute path (#430);
+ * joined with a `path` it is what `POST /api/v1/vaults` takes. */
+export type FolderListing = {
+  root: string;
+  root_found: boolean;
+  path: string;
+  markdown: FolderNoteCount;
+  vault: FolderVaultRef | null;
+  folders: FolderListingEntry[];
+  skipped_invalid_names: number;
 };

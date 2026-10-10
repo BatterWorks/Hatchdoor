@@ -111,8 +111,12 @@ describe("Demo mode (#152)", () => {
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
     expect(
-      screen.queryByRole("button", { name: "Edit" }),
+      screen.queryByRole("button", { name: "Source" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reading" }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector(".live-editor")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "New note" }),
     ).not.toBeInTheDocument();
@@ -200,7 +204,7 @@ describe("Demo mode (#152)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "Notes Explorer" }),
+        screen.getByRole("heading", { level: 1, name: "Notes" }),
       ).toBeVisible();
     });
     expect(

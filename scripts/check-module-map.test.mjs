@@ -54,11 +54,15 @@ async function fixture(moduleMap = baselineMap) {
   return root;
 }
 
-function run(root) {
-  return spawnSync(process.execPath, ["scripts/check-module-map.mjs"], {
-    cwd: root,
-    encoding: "utf8",
-  });
+function run(root, ...args) {
+  return spawnSync(
+    process.execPath,
+    ["scripts/check-module-map.mjs", ...args],
+    {
+      cwd: root,
+      encoding: "utf8",
+    },
+  );
 }
 
 afterEach(async () => {
@@ -175,4 +179,79 @@ test("supports inline Owned paths and Shared path fields", async () => {
 
   const result = run(await fixture(moduleMap));
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("--owner names the owning section and prints it whole", async () => {
+  const result = run(await fixture(), "--owner", "./src/lib.rs");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /^src\/lib\.rs: Runtime \(shared\), module-map\.md lines 5-12$/m,
+  );
+  assert.match(result.stdout, /### Runtime\n\n\*\*Owned paths:\*\*/);
+  assert.doesNotMatch(result.stdout, /## Frontend|### Shell/);
+});
+
+test("--owner keeps a heading inside a code block within its section", async () => {
+  const root = await fixture(
+    baselineMap.replace(
+      "## Frontend",
+      "```bash\n# not a heading\n```\n\nStill Runtime.\n\n## Frontend",
+    ),
+  );
+  const result = run(root, "--owner", "src/lib.rs");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /# not a heading[\s\S]*Still Runtime\./);
+});
+
+test("--owner lists the sections under a directory", async () => {
+  const result = run(await fixture(), "--owner", "frontend/src/");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /frontend\/src\/: a directory/);
+  assert.match(result.stdout, /^  Shell, module-map\.md lines \d+-\d+$/m);
+  assert.doesNotMatch(result.stdout, /### Shell/);
+});
+
+test("--owner points an unassigned file at the sections beside it only", async () => {
+  const root = await fixture();
+  await mkdir(path.join(root, "src", "deep"));
+  const result = run(root, "--owner", "src/new.rs", "src/deep/new.rs");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /^src\/new\.rs: no assignment\. Files beside it belong to: Runtime$/m,
+  );
+  assert.match(
+    result.stdout,
+    /^src\/deep\/new\.rs: no assignment, and none for any file beside it$/m,
+  );
+});
+
+test("--owner accepts an absolute path", async () => {
+  const root = await fixture();
+  const result = run(root, "--owner", path.join(root, "src", "lib.rs"));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^src\/lib\.rs: Runtime \(shared\)/m);
+});
+
+test("--owner sends a path outside the inventory to the auxiliary section", async () => {
+  const root = await fixture(
+    `${baselineMap}\n## Auxiliary repository paths\n\n- \`scripts/**\`: tooling.\n`,
+  );
+  const result = run(root, "--owner", "justfile", "frontend/package.json");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /^justfile: outside the production inventory.*"## Auxiliary repository paths" \(module-map\.md line 21\)$/m,
+  );
+  assert.match(
+    result.stdout,
+    /^frontend\/package\.json: outside the production/m,
+  );
+});
+
+test("--owner with no path is a usage error", async () => {
+  const result = run(await fixture(), "--owner");
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Usage:/);
 });

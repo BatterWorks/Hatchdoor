@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "hatchdoor"
-version = "2.7.0"
+version = "2.8.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1492,6 +1492,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
+ "ureq",
  "walkdir",
  "zip",
 ]

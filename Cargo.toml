@@ -1,11 +1,11 @@
 [package]
 name = "hatchdoor"
-version = "2.7.0"
+version = "2.8.0"
 edition = "2024"
 default-run = "hatchdoor"
 license = "AGPL-3.0-only"
 description = "Self-hosted Obsidian-style Markdown vault browser with optional web and MCP write access"
-repository = "https://github.com/battermanz/hatchdoor"
+repository = "https://github.com/BatterWorks/Hatchdoor"
 readme = "README.md"
 keywords = ["markdown", "obsidian", "mcp", "search", "self-hosted"]
 categories = ["command-line-utilities", "web-programming::http-server"]
@@ -54,6 +54,9 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-normalization = "0.1"
+# ADR-39: the opt-in update check. Already compiled through hf-hub, which
+# downloads the search models with it; this only makes the edge direct.
+ureq = { version = "3.3", default-features = false, features = ["json", "native-tls"] }
 walkdir = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 

@@ -69,6 +69,35 @@ impl Embedder for BlockingEmbedder {
     }
 }
 
+/// [`BlockingEmbedder`] that parks on its first `embed` call only, for a
+/// Vault with more than one note to embed.
+struct OnceBlockingEmbedder {
+    inner: BlockingEmbedder,
+    parked: std::sync::atomic::AtomicBool,
+}
+
+impl Embedder for OnceBlockingEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        if !self.parked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.entered.wait();
+            self.inner.release.wait();
+        }
+        self.inner.inner.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.inner.inner.embedding_dim()
+    }
+
+    fn identity(&self) -> String {
+        self.inner.inner.identity()
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.inner.inner.token_count(text, add_special_tokens)
+    }
+}
+
 /// Parks a build inside its *read* phase. `token_count` is what the chunker
 /// calls while note content is still being read and chunked, before any vector
 /// work, so blocking the first call holds the turn exactly where its foreground
@@ -687,8 +716,17 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
                 .expect("active runtime")
                 .snapshot()
                 .search,
-            VaultSearchStatus::Indexing,
-            "runtime status reflects the active turn"
+            VaultSearchStatus::Stale,
+            "runtime status says what the retained generation answers during the turn"
+        );
+        assert!(
+            collection
+                .runtime(vault_id)
+                .expect("active runtime")
+                .snapshot()
+                .capabilities
+                .search,
+            "the search capability holds through the embedding pass"
         );
         assert_eq!(
             cache.snapshot_status(vault_id).expect("read status"),
@@ -752,12 +790,46 @@ struct EmbeddingTurnFixture {
     directory: tempfile::TempDir,
     vault_id: VaultId,
     collection: VaultCollectionRuntime,
+    coordinator: VaultWorkCoordinator,
     worker: Option<crate::vault_work::VaultWorkWorker>,
     cache: Arc<SqliteCache>,
 }
 
 impl EmbeddingTurnFixture {
     async fn new() -> Self {
+        let mut fixture = Self::unindexed().await;
+        let mut worker = fixture.worker.take().expect("the fixture's worker");
+        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let published = worker
+            .run_next({
+                let collection = fixture.collection.clone();
+                let cache = fixture.cache.clone();
+                move |request| async move {
+                    dispatch_vault_index_turn(&collection, cache, working, request).await
+                }
+            })
+            .await
+            .expect("initial Index turn");
+        published.result.expect("initial publication succeeds");
+        fixture.worker = Some(worker);
+
+        // A write burst lands, which is what arms the next Index turn in
+        // production: the watcher forwards the change intent to this
+        // coordinator.
+        std::fs::write(
+            fixture.vault_path().join("Home.md"),
+            "# Home\n\nmelatonin updated",
+        )
+        .expect("update note");
+        fixture
+            .coordinator
+            .request(fixture.vault_id, VaultWorkKind::Index);
+        fixture
+    }
+
+    /// The same Vault before its first Index turn, which activation has
+    /// already armed: nothing published, nothing retained.
+    async fn unindexed() -> Self {
         let directory = tempdir().expect("temporary state directory");
         let vault_path = directory.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create Vault directory");
@@ -773,37 +845,18 @@ impl EmbeddingTurnFixture {
         let vault_id = vault_id_named(&snapshot, "Only");
 
         let collection = VaultCollectionRuntime::new();
-        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let (coordinator, worker) = VaultWorkCoordinator::new();
         let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
         collection
             .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
             .await;
         let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
-        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-
-        let published = worker
-            .run_next({
-                let collection = collection.clone();
-                let cache = cache.clone();
-                move |request| async move {
-                    dispatch_vault_index_turn(&collection, cache, working, request).await
-                }
-            })
-            .await
-            .expect("initial Index turn");
-        published.result.expect("initial publication succeeds");
-
-        // A write burst lands, which is what arms the next Index turn in
-        // production: the watcher forwards the change intent to this
-        // coordinator.
-        std::fs::write(vault_path.join("Home.md"), "# Home\n\nmelatonin updated")
-            .expect("update note");
-        coordinator.request(vault_id, VaultWorkKind::Index);
 
         Self {
             directory,
             vault_id,
             collection,
+            coordinator,
             worker: Some(worker),
             cache,
         }
@@ -911,6 +964,102 @@ async fn finish_held_turn(
         .expect("Index turn ran")
         .result
         .expect("Index turn publishes successfully");
+}
+
+/// Issue #483. An Index turn on a Vault that already answers search used to
+/// report `Indexing` for its whole length, which withdraws the search
+/// capability, while search went on answering from the retained generation.
+/// The status now says what that generation supports. Held open in the read
+/// phase, the earliest point a turn can be observed, and the status already
+/// agrees with the snapshot.
+#[tokio::test]
+async fn an_index_turn_on_a_searchable_vault_reports_stale_and_keeps_the_search_capability() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let control = fixture.control();
+    assert_eq!(control.snapshot().search, VaultSearchStatus::Ready);
+    let (entered, release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&entered).await;
+
+    let during = control.snapshot();
+    let snapshot_during = fixture.snapshot_status();
+
+    finish_held_turn(&release, turn).await;
+
+    assert_eq!(
+        during.search,
+        VaultSearchStatus::Stale,
+        "a rebuild of a searchable Vault reports what its retained generation answers"
+    );
+    assert!(
+        during.capabilities.search,
+        "a Vault that keeps answering search keeps the search capability"
+    );
+    assert_eq!(
+        during.search_error, None,
+        "a running rebuild is not a failure"
+    );
+    assert_eq!(
+        snapshot_during.map(|status| status.freshness),
+        Some(VaultSnapshotFreshness::Stale),
+        "the status and the snapshot's freshness agree while the turn runs"
+    );
+    assert_eq!(
+        control.snapshot().search,
+        VaultSearchStatus::Ready,
+        "a turn that publishes cleanly ends ready"
+    );
+}
+
+/// The other side of #483: a Vault with nothing retained has nothing to
+/// answer from, so its first turn still reports `Indexing` and no search
+/// capability.
+#[tokio::test]
+async fn a_first_index_turn_still_reports_indexing_without_the_search_capability() {
+    let mut fixture = EmbeddingTurnFixture::unindexed().await;
+    let control = fixture.control();
+    let (entered, release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&entered).await;
+
+    let during = control.snapshot();
+
+    finish_held_turn(&release, turn).await;
+
+    assert_eq!(during.search, VaultSearchStatus::Indexing);
+    assert!(!during.capabilities.search);
+    assert_eq!(control.snapshot().search, VaultSearchStatus::Ready);
+}
+
+/// A retained generation with no vectors participates but can only answer a
+/// search with nothing, so a rebuild over it never grants the capability,
+/// the rule `retained_search_status` applies to a paused or failed turn.
+#[tokio::test]
+async fn an_index_turn_over_a_vectorless_generation_never_grants_the_search_capability() {
+    let mut fixture = EmbeddingTurnFixture::unindexed().await;
+    let control = fixture.control();
+    let index = control.authoritative_index().expect("scan the Vault");
+    assert!(
+        fixture
+            .cache
+            .publish_vault_structure_snapshot(
+                fixture.vault_id,
+                &index,
+                &StubEmbedder::new(384),
+                true,
+            )
+            .expect("publish the structure-only generation"),
+        "the Vault retains a participating generation with no vectors"
+    );
+
+    let (read_entered, read_release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&read_entered).await;
+    let during = control.snapshot();
+    finish_held_turn(&read_release, turn).await;
+
+    assert_eq!(during.search, VaultSearchStatus::Indexing);
+    assert!(
+        !during.capabilities.search,
+        "a vectorless retained generation must not grant the search capability"
+    );
 }
 
 /// The narrowing stops at the read phase. A foreground mutation arriving while
@@ -2211,6 +2360,361 @@ async fn a_vaults_git_work_waits_for_its_index_read_phase_but_not_its_embedding(
     }
 }
 
+/// A Two-way `ExistingGit` Vault whose first Index turn has published, with
+/// one Git-lane turn having run inside that turn's embedding pass.
+struct GitWorkInsideAnEmbeddingPass {
+    _directory: tempfile::TempDir,
+    vault_id: VaultId,
+    collection: VaultCollectionRuntime,
+    control_block: VaultControlBlock,
+    worker: crate::vault_work::VaultWorkWorker,
+    cache: Arc<SqliteCache>,
+    git_result: Result<(), VaultWorkError>,
+}
+
+impl GitWorkInsideAnEmbeddingPass {
+    /// `prepare` gets the checkout and its bare remote before the Index turn
+    /// reads anything, so whatever it leaves on disk is in that turn's scan.
+    async fn run(kind: VaultWorkKind, prepare: impl FnOnce(&Path, &Path)) -> Self {
+        let directory = tempdir().expect("temporary state directory");
+        let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+        prepare(&repository_path, &remote_path);
+        let (collection, registry, control_block, vault_id) = existing_git_control_block(
+            directory.path(),
+            "Git inside embedding",
+            repository_path,
+            VaultGitMode::TwoWay,
+        );
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+        let cooldown = crate::git::CommitCooldown::new();
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let embedder: Arc<dyn Embedder> = Arc::new(OnceBlockingEmbedder {
+            inner: BlockingEmbedder {
+                inner: StubEmbedder::new(384),
+                entered: entered.clone(),
+                release: release.clone(),
+            },
+            parked: std::sync::atomic::AtomicBool::new(false),
+        });
+        coordinator.request(vault_id, VaultWorkKind::Index);
+        let index_turn = worker.next_turn().await.expect("Index turn admitted");
+        let index = tokio::spawn({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            async move {
+                index_turn
+                    .run(|request| dispatch_vault_index_turn(&collection, cache, embedder, request))
+                    .await
+            }
+        });
+        meet_barrier(&entered).await;
+
+        coordinator.request(vault_id, kind);
+        let git_turn = worker.next_turn().await.expect("Git-lane turn admitted");
+        assert_eq!(git_turn.request().kind(), kind);
+        let git_result = {
+            let (collection, registry, managed_git, cooldown, coordinator) = (
+                &collection,
+                &registry,
+                &managed_git,
+                &cooldown,
+                &coordinator,
+            );
+            git_turn
+                .run(|request| async move {
+                    if kind == VaultWorkKind::Commit {
+                        dispatch_commit_turn(
+                            collection,
+                            registry,
+                            managed_git,
+                            cooldown,
+                            "Hatchdoor",
+                            "hatchdoor@example.test",
+                            request,
+                        )
+                        .await
+                    } else {
+                        dispatch_git_turn(
+                            collection,
+                            registry,
+                            coordinator,
+                            managed_git,
+                            "Hatchdoor",
+                            "hatchdoor@example.test",
+                            request,
+                        )
+                        .await
+                    }
+                })
+                .await
+                .result
+        };
+
+        // Released before anything is asserted: a panic with the barrier
+        // unmet hangs the runtime on drop instead of reporting the failure.
+        meet_barrier(&release).await;
+        let index_result = index.await.expect("Index turn task").result;
+        index_result.expect("Index turn publishes");
+
+        Self {
+            _directory: directory,
+            vault_id,
+            collection,
+            control_block,
+            worker,
+            cache,
+            git_result,
+        }
+    }
+
+    /// Run the Index turn the Git work left queued, and fail if it left none.
+    async fn run_queued_catch_up(&mut self) -> Arc<dyn Embedder> {
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let catch_up = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.worker.run_next({
+                let collection = self.collection.clone();
+                let cache = self.cache.clone();
+                let embedder = embedder.clone();
+                move |request| async move {
+                    assert_eq!(request.kind(), VaultWorkKind::Index);
+                    dispatch_vault_index_turn(&collection, cache, embedder, request).await
+                }
+            }),
+        )
+        .await
+        .expect("the sync queued the catch-up Index turn itself")
+        .expect("catch-up Index turn dequeued");
+        catch_up.result.expect("catch-up Index turn publishes");
+        embedder
+    }
+
+    fn snapshot_freshness(&self) -> Option<VaultSnapshotFreshness> {
+        self.cache
+            .snapshot_status(self.vault_id)
+            .expect("read snapshot status")
+            .map(|status| status.freshness)
+    }
+}
+
+/// Issue #549. A commit turn holds the Vault's mutation guard like a write
+/// does, and every holder used to count as a write. A commit turn that found
+/// nothing to commit inside an Index turn's embedding pass therefore made
+/// that turn publish stale, with no changed file for the watcher to answer
+/// with a catch-up turn. The Vault then reported `stale` over a current index
+/// until something unrelated reindexed it.
+#[tokio::test]
+async fn a_commit_turn_with_nothing_to_commit_leaves_a_concurrent_index_turn_fresh() {
+    let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Commit, |_, _| {}).await;
+    overlap.git_result.as_ref().expect("commit turn succeeds");
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh),
+        "a commit turn that changed no file must not make the Index turn publish stale"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// The same for a commit turn that does commit. The note was on disk before
+/// the Index turn scanned, so the published generation already holds it:
+/// committing moves `HEAD` and leaves the working tree as it was.
+#[tokio::test]
+async fn a_commit_turn_that_commits_leaves_a_concurrent_index_turn_fresh() {
+    let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Commit, |checkout, _| {
+        std::fs::write(checkout.join("vault/Mine.md"), "# mine\n").expect("write note");
+    })
+    .await;
+    overlap.git_result.as_ref().expect("commit turn succeeds");
+
+    let checkout =
+        git2::Repository::open(overlap.control_block.vault_path().parent().expect("root"))
+            .expect("open checkout");
+    let head = checkout
+        .head()
+        .expect("HEAD")
+        .peel_to_commit()
+        .expect("HEAD commit");
+    assert!(
+        head.tree()
+            .expect("HEAD tree")
+            .get_path(Path::new("vault/Mine.md"))
+            .is_ok(),
+        "precondition: the commit turn committed the note"
+    );
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh),
+        "a commit rewrites no Markdown, so the generation is not behind it"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// A sync that pulls a remote edit does rewrite Markdown, after the Index
+/// turn read it. That generation is behind and says so, and the sync has
+/// queued the Index turn that catches up, with no `refresh_vault`.
+#[tokio::test]
+async fn a_sync_that_pulls_markdown_inside_an_embedding_pass_is_followed_by_a_fresh_index() {
+    let mut overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Git, |_, remote| {
+        let actor_path = remote.parent().expect("fixture root").join("actor");
+        let actor = git2::Repository::clone(remote.to_str().expect("remote path"), &actor_path)
+            .expect("actor checkout");
+        commit_file(
+            &actor,
+            "vault/Theirs.md",
+            "# Theirs\n\nvalerian pulled from the remote\n",
+            "their commit",
+        );
+        actor
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("actor push");
+    })
+    .await;
+    overlap.git_result.as_ref().expect("sync succeeds");
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Stale),
+        "the generation was read before the pull and must not claim to be current"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Stale
+    );
+
+    let embedder = overlap.run_queued_catch_up().await;
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh)
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+    let response = VaultSearchCore::new(&overlap.cache, &overlap.collection, embedder.as_ref())
+        .search(VaultSearchRequest {
+            scope: VaultScope::One(overlap.vault_id),
+            query: "valerian".to_string(),
+            mode: SearchMode::Keyword,
+            limit: 10,
+            per_note_cap: 1,
+            layers: LayerSelection::default_surface(),
+        })
+        .expect("keyword search against the caught-up generation");
+    assert!(
+        response
+            .data
+            .results
+            .iter()
+            .any(|hit| hit.note_slug == "theirs"),
+        "the pulled note is in the published generation"
+    );
+}
+
+/// A sync that pushes a local commit and pulls nothing rewrites no note, so
+/// the Index turn it overlapped is not behind anything.
+#[tokio::test]
+async fn a_sync_that_only_pushes_leaves_a_concurrent_index_turn_fresh() {
+    let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Git, |checkout, _| {
+        std::fs::write(checkout.join("vault/Mine.md"), "# mine\n").expect("write note");
+    })
+    .await;
+    overlap.git_result.as_ref().expect("sync succeeds");
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh),
+        "committing and pushing changes no file the Index turn read"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// A failed sync cannot say whether it rewrote a note: a merge can land
+/// before its push is refused. The Index turn it overlapped publishes stale,
+/// and because nothing else follows a failed sync with an Index turn, the
+/// sync queues the catch-up itself. Here the remote is gone, so nothing was
+/// rewritten and the catch-up settles the Vault `Ready`.
+#[tokio::test]
+async fn a_failed_sync_inside_an_embedding_pass_queues_its_own_catch_up_index_turn() {
+    let mut overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Git, |_, remote| {
+        std::fs::remove_dir_all(remote).expect("remove the remote");
+    })
+    .await;
+    overlap
+        .git_result
+        .as_ref()
+        .expect_err("precondition: the sync fails without its remote");
+
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Stale
+    );
+    overlap.run_queued_catch_up().await;
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh)
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// With no Index turn admitted there is no verdict for a failed sync to
+/// spoil, so it queues nothing: a Vault whose remote is down must not reindex
+/// on every retry.
+#[tokio::test]
+async fn a_failed_sync_with_no_index_turn_admitted_queues_no_index_turn() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+    std::fs::remove_dir_all(remote_path).expect("remove the remote");
+    let (collection, registry, _control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Remote down",
+        repository_path,
+        VaultGitMode::TwoWay,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    coordinator.request(vault_id, VaultWorkKind::Git);
+
+    worker
+        .run_next(|request| {
+            dispatch_git_turn(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("Git turn dequeued")
+        .result
+        .expect_err("precondition: the sync fails without its remote");
+
+    assert!(!coordinator.has_work(vault_id, VaultWorkKind::Index));
+}
+
 /// The executor reads the author defaults from the snapshot bound to each
 /// turn rather than from a value captured once at startup, so saving a new
 /// name or email applies to the next Git turn of every Vault without its own
@@ -2339,6 +2843,190 @@ fn a_vault_without_a_directory_does_not_hold_the_collection_unsettled() {
         .set_search_status(VaultSearchStatus::Ready, None)
         .expect("publish ready search status");
     assert!(collection_indexes_settled(&vaults));
+}
+
+fn loaded_registry(registry: &VaultRegistryStore) -> VaultRegistrySnapshot {
+    match registry.load().expect("load registry") {
+        VaultRegistryState::Ready(snapshot) => snapshot,
+        VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    }
+}
+
+/// 2.8.0 starts with no Vaults (ADR-40), so no Index turn ever runs to settle
+/// startup. Once the model is set up there is nothing left to wait for (#453).
+#[test]
+fn an_instance_with_no_vaults_is_ready_once_the_model_is_set_up() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let vaults = VaultCollectionRuntime::new();
+    let startup = StartupTracker::scanning();
+    let model_setup_started = AtomicBool::new(true);
+
+    assert!(collection_indexes_settled(&vaults));
+    settle_startup(&startup, &vaults, &registry, &model_setup_started);
+
+    assert!(startup.collection_indexes_ready());
+    assert_eq!(startup.status().state, "ready");
+    assert!(
+        !model_setup_started.load(Ordering::Acquire),
+        "settling releases the model-setup claim, as it does after an Index turn"
+    );
+}
+
+/// A Vault that is disabled is not active, so an instance whose Vaults are
+/// all disabled waits on nothing either (#453).
+#[test]
+fn an_instance_whose_vaults_are_all_disabled_is_ready_once_the_model_is_set_up() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = add_local_vault(&registry, &loaded_registry(&registry), "Only", vault_path);
+    let disabled = registry
+        .disable(added.revision(), vault_id_named(&added, "Only"))
+        .expect("disable the Vault");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &disabled);
+    let startup = StartupTracker::scanning();
+
+    settle_startup(&startup, &vaults, &registry, &AtomicBool::new(true));
+
+    assert!(startup.collection_indexes_ready());
+}
+
+/// A registry that needs operator recovery activates no Vault, but it is not
+/// an empty instance: nothing can be served until it is recovered, so a
+/// script waiting on `/ready` must keep waiting (#453).
+#[test]
+fn a_registry_awaiting_recovery_is_not_ready_although_no_vault_is_active() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry_path = directory.path().join("state/vaults.json");
+    std::fs::create_dir_all(registry_path.parent().expect("state directory"))
+        .expect("create state directory");
+    std::fs::write(&registry_path, "not a registry").expect("write a corrupt registry");
+    let registry = VaultRegistryStore::new(registry_path);
+    assert!(matches!(
+        registry.load().expect("load registry"),
+        VaultRegistryState::Recovery(_)
+    ));
+    let vaults = VaultCollectionRuntime::new();
+    let startup = StartupTracker::scanning();
+    let model_setup_started = AtomicBool::new(true);
+
+    settle_startup(&startup, &vaults, &registry, &model_setup_started);
+
+    assert!(!startup.collection_indexes_ready());
+    assert_eq!(startup.status().state, "scanning");
+    assert!(model_setup_started.load(Ordering::Acquire));
+}
+
+/// Model setup gates readiness whatever the Vault count: with terms
+/// outstanding, a download in flight or a failed setup, an instance with no
+/// Vaults is not ready. It becomes ready when the model has loaded (#453).
+#[test]
+fn an_instance_with_no_vaults_is_not_ready_while_model_setup_is_pending() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let vaults = VaultCollectionRuntime::new();
+    let startup = StartupTracker::terms_required();
+    let model_setup_started = AtomicBool::new(true);
+    let settle = || settle_startup(&startup, &vaults, &registry, &model_setup_started);
+
+    settle();
+    assert_eq!(startup.status().state, "terms_required");
+
+    startup.set_downloading("EmbeddingGemma 300M Q4", Some(1), Some(2));
+    settle();
+    assert_eq!(startup.status().state, "downloading");
+
+    startup.set_model_setup_failed();
+    settle();
+    assert_eq!(startup.status().state, "failed");
+    assert!(model_setup_started.load(Ordering::Acquire));
+
+    // What a finished model setup does before it asks.
+    startup.set_scanning();
+    settle();
+    assert_eq!(startup.status().state, "ready");
+}
+
+/// The last Vault still in its first index leaving the active set leaves
+/// nothing to wait for. No Index turn reports that, so the collection's own
+/// change does (#453).
+#[tokio::test]
+async fn disabling_the_only_vault_still_in_its_first_index_settles_startup() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = add_local_vault(&registry, &loaded_registry(&registry), "Only", vault_path);
+    let vault_id = vault_id_named(&added, "Only");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &added);
+    vaults
+        .runtime(vault_id)
+        .expect("active Vault")
+        .set_search_status(VaultSearchStatus::Indexing, None)
+        .expect("publish indexing search status");
+    let startup = StartupTracker::scanning();
+    let model_setup_started = Arc::new(AtomicBool::new(true));
+    // While the Vault is active and unsettled, asking settles nothing.
+    settle_startup(&startup, &vaults, &registry, &model_setup_started);
+    assert!(!startup.collection_indexes_ready());
+    let watching = tokio::spawn(settle_startup_on_collection_changes(
+        startup.clone(),
+        vaults.clone(),
+        registry.clone(),
+        model_setup_started,
+    ));
+
+    let disabled = registry
+        .disable(added.revision(), vault_id)
+        .expect("disable the Vault");
+    vaults.reconcile(&registry, &disabled);
+
+    wait_until_ready(&startup).await;
+    watching.abort();
+}
+
+/// Disconnecting it does the same: the Vault leaves the registry, and the
+/// collection with it (#453).
+#[tokio::test]
+async fn disconnecting_the_only_vault_still_in_its_first_index_settles_startup() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = add_local_vault(&registry, &loaded_registry(&registry), "Only", vault_path);
+    let vault_id = vault_id_named(&added, "Only");
+    let vaults = VaultCollectionRuntime::new();
+    vaults.reconcile(&registry, &added);
+    let startup = StartupTracker::scanning();
+    let watching = tokio::spawn(settle_startup_on_collection_changes(
+        startup.clone(),
+        vaults.clone(),
+        registry.clone(),
+        Arc::new(AtomicBool::new(true)),
+    ));
+    assert!(!startup.collection_indexes_ready());
+
+    let disconnected = registry
+        .disconnect(added.revision(), vault_id)
+        .expect("disconnect the Vault");
+    vaults.reconcile(&registry, &disconnected);
+
+    wait_until_ready(&startup).await;
+    watching.abort();
+}
+
+async fn wait_until_ready(startup: &StartupTracker) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !startup.collection_indexes_ready() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("startup settles once the collection has no Vault in its first index");
 }
 
 /// The executor binds the settings snapshot at the *start of each turn*, not
@@ -3143,7 +3831,7 @@ async fn one_vaults_failed_index_turn_leaves_the_collection_ready() {
 }
 
 /// A routine reindex after the collection settled is one Vault's upkeep and
-/// reports its own `Indexing`; it must not move the instance tracker, which
+/// reports on that Vault's own status; it must not move the instance tracker, which
 /// `/ready` reads, back out of `Ready` (#326).
 #[tokio::test]
 async fn a_routine_reindex_does_not_leave_startup_readiness() {

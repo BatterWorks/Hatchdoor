@@ -1,6 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { CONTEXTUAL_HELP } from "../features/help";
+import { HelpContext } from "../features/help/useHelp";
 import { StartupGate } from "./StartupGate";
 import type { StartupStatus } from "./useStartupStatus";
 
@@ -205,5 +207,40 @@ describe("StartupGate", () => {
     });
 
     expect(screen.getByText("Private vault")).toBeVisible();
+  });
+});
+
+describe("StartupGate's How does this work? link (#423)", () => {
+  it("opens Help at choosing a search model", () => {
+    const openHelp = vi.fn();
+    render(
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        <StartupGate
+          status={{ state: "terms_required" }}
+          connectionIssue={false}
+          hasSteppedPastGate={false}
+          discoveryLoading={false}
+          hasRegistryRecovery={false}
+          hasNoVaults={false}
+          onAcceptGemma={vi.fn()}
+          onDeclineGemma={vi.fn()}
+        >
+          <div>Private vault</div>
+        </StartupGate>
+      </HelpContext.Provider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "How does this work? Choosing a search model",
+      }),
+    );
+
+    expect(openHelp).toHaveBeenCalledWith(
+      CONTEXTUAL_HELP.modelChoice.page,
+      CONTEXTUAL_HELP.modelChoice.heading,
+    );
   });
 });

@@ -6,6 +6,7 @@ import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
 import noteContentCss from "./styles/note-content.css?raw";
 import noteEditorSource from "./components/NoteEditor.tsx?raw";
+import tokenPromptSource from "./components/TokenPrompt.tsx?raw";
 import wikilinksSource from "./components/note-page/wikilinks.ts?raw";
 import mainSource from "./main.tsx?raw";
 import graphCss from "./styles/graph.css?raw";
@@ -109,6 +110,27 @@ describe("client audit launch contracts", () => {
     );
   });
 
+  it("draws the live editor's inline code as the reading view's chip", () => {
+    // The library fills inline code with --atomic-editor-code-bg, the fenced
+    // block's dark slab, under the body text colour: black on black in the
+    // light theme (#550).
+    const rule = /\.live-editor \.cm-atomic-inline-code\s*{([^}]*)}/s.exec(
+      noteContentCss,
+    )?.[1];
+    expect(rule).toMatch(/background:\s*var\(--paper-2\)/);
+    expect(rule).toMatch(/color:\s*var\(--ink\)/);
+    expect(rule).toMatch(/font-family:\s*var\(--font-mono\)/);
+    expect(rule).toMatch(/border-radius:\s*var\(--radius-none\)/);
+    expect(rule).not.toMatch(/code-surface|atomic-editor-code-bg/);
+    // The text sits in a syntax-highlight span that carries its own colour.
+    expect(noteContentCss).toMatch(
+      /\.live-editor \.cm-atomic-inline-code \*\s*{[^}]*color:\s*var\(--ink\)/s,
+    );
+    expect(noteContentCss).toMatch(
+      /--atomic-editor-code-bg:\s*var\(--code-surface\)/,
+    );
+  });
+
   it("adds trailing scroll space only once the reader jumps to a heading", () => {
     // Plain reading ends where the note's text ends; the space exists solely
     // so an end-of-note heading can reach the top of the pane, and only a
@@ -195,5 +217,64 @@ describe("client audit launch contracts", () => {
     expect(uiCss).toMatch(
       /@media\s*\(hover:\s*hover\)\s*{[^}]*\.ui-button:hover,\s*\.close-note:hover/s,
     );
+  });
+
+  // The bullet inset used to be declared on `:root` in a stylesheet section
+  // that belonged to something else, and went when that section did (#547).
+  // A plain bullet then padded by an undefined property, which is zero, and
+  // its dash landed on the text.
+  it("declares the bullet list inset beside the list rules that read it", () => {
+    expect(noteContentCss).toMatch(
+      /\.note-body ul li,\s*\.note-body ol li\s*{[^}]*padding-left:\s*var\(--li-inset\)/s,
+    );
+    expect(noteContentCss).toMatch(
+      /\.note-body ul\s*{[^}]*--li-inset:\s*1\.4rem/s,
+    );
+  });
+
+  // None of these five names is a Forge token. A rule that reads one always
+  // renders its fallback, so it ignores the theme (#547).
+  it("reads none of the five undefined properties #547 removed", () => {
+    const sources = import.meta.glob(
+      ["./**/*.{css,ts,tsx}", "!./**/*.test.*"],
+      {
+        query: "?raw",
+        import: "default",
+        eager: true,
+      },
+    ) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(50);
+    const offenders = Object.entries(sources)
+      .filter(([, source]) =>
+        /var\(--(accent|surface|hover|border|text)\s*[,)]/.test(source),
+      )
+      .map(([path]) => path);
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps raw colours and radii out of the token prompt and the app stylesheet", () => {
+    // Comments cite issues as "#547", which reads as a hex colour.
+    const withoutComments = (source: string) =>
+      source.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const source of [appCss, tokenPromptSource].map(withoutComments)) {
+      expect(source).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+      expect(source).not.toMatch(/\brgba?\(/);
+      const radii = [
+        ...source.matchAll(/border-?[rR]adius"?\s*:\s*"?([^;",]+)/g),
+      ].map((match) => match[1].trim());
+      expect(
+        radii.filter((radius) => !/^var\(--radius-[a-z]+\)$/.test(radius)),
+      ).toEqual([]);
+    }
+  });
+
+  it("tints the code block header from a token, squares the graph badge, and has no fixed grey for an untagged node", () => {
+    expect(noteContentCss).not.toMatch(
+      /\.code-block-head\s*{[^}]*background:\s*rgba?\(/s,
+    );
+    expect(graphCss).toMatch(
+      /\.graph-filter-badge\s*{[^}]*border-radius:\s*var\(--radius-none\)/s,
+    );
+    expect(graphPageSource).not.toMatch(/rgba\(138, 134, 120/);
   });
 });

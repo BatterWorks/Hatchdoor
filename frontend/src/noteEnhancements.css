@@ -20,11 +20,13 @@
   gap: 0.3rem;
 }
 
-/* Links panel (collapsible) */
+/* Links (collapsible), after the body (#530). The head is §05's section
+   head grammar — caret, label, rule, mono count — so a foldable thing reads
+   the same here as in the sidebar; the rule above it closes the text. */
 .note-links-panel {
-  margin: 0 0 0.9rem;
-  border: 1px solid var(--rule);
-  background: var(--paper);
+  margin: 1rem 0 0;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--rule-strong);
 }
 
 .note-links-panel summary {
@@ -32,58 +34,56 @@
   list-style: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.5rem 0.6rem;
-  font-family: var(--font-display);
-  font-variation-settings:
-    "wdth" 92,
-    "wght" 600;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ink);
+  gap: 0.55rem;
+  padding: 0.6rem 0;
 }
 
 .note-links-panel summary::-webkit-details-marker {
   display: none;
 }
 
+/* The same caret as the sidebar's section heads and folder rows. */
 .note-links-panel summary::before {
   content: "";
-  display: inline-block;
-  width: 0.5rem;
-  height: 0.5rem;
-  margin-right: 0.3rem;
-  background: var(--muted);
-  clip-path: polygon(30% 18%, 30% 82%, 84% 50%);
-  transition: transform 120ms ease;
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--muted);
+  transition: transform var(--dur) var(--ease);
 }
 
 .note-links-panel[open] > summary::before {
   transform: rotate(90deg);
-  background: var(--hot);
+  border-left-color: var(--hot);
+}
+
+.note-links-label {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 84,
+    "wght" 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.note-links-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
 }
 
 .note-links-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.4rem;
-  height: 1.4rem;
-  padding: 0 0.3rem;
-  border: 1px solid var(--rule-strong);
-  background: var(--bg);
-  color: var(--ink-soft);
   font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 600;
-  border-radius: var(--radius-pill);
+  font-size: 0.66rem;
+  color: var(--muted);
 }
 
 .note-links-body {
-  border-top: 1px solid var(--rule);
-  padding: 0.6rem 0.7rem;
+  padding: 0.2rem 0 0.6rem;
 }
 
 .note-links-grid {
@@ -197,11 +197,21 @@
   overflow: auto;
 }
 
+/* The folded heading list for the band where the TOC column is gone but the
+   topbar is still the wide one (921 to 1160px). Below 920 the shell's scope
+   row carries the headings as a chip instead (#530), so this never shows
+   there. */
 .note-toc-mobile {
   display: none;
   margin: 0 0 0.8rem;
   border: 1px solid var(--rule);
   background: var(--paper);
+}
+
+/* The note's own title repeated as its first heading: kept for line-addressed
+   editing, never drawn (#530). */
+.note-body .note-heading-duplicate {
+  display: none;
 }
 
 .note-toc-mobile summary {
@@ -266,7 +276,7 @@
 @media (max-width: 1160px) {
   .note-page-layout {
     grid-template-columns: minmax(0, 1fr);
-    max-width: 1120px;
+    max-width: var(--note-measure);
   }
 
   .note-toc-desktop {
@@ -279,6 +289,10 @@
 }
 
 @media (max-width: 920px) {
+  .note-toc-mobile {
+    display: none;
+  }
+
   .note-links-grid {
     grid-template-columns: minmax(0, 1fr);
   }

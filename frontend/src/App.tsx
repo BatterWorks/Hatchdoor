@@ -31,6 +31,8 @@ import {
   SIDEBAR_WIDTH_KEY,
 } from "./app/constants";
 import { ExplorerPane, type StartupProgress } from "./app/ExplorerPane";
+import { HomePage } from "./app/HomePage";
+import { pageName, usePageTitle } from "./app/pageTitle";
 import {
   clampSidebarWidth,
   getStoredNumber,
@@ -56,7 +58,6 @@ import { GraphPage } from "./components/graph/GraphPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
-import { StartWithNoVaultsDialog } from "./components/StartWithNoVaultsDialog";
 import { useNoteActions } from "./hooks/useNoteActions";
 import { useVaultTree } from "./hooks/useVaultTree";
 import { resolvePrimaryVaultId, useVaultScope } from "./hooks/useVaultScope";
@@ -65,13 +66,31 @@ import { scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import { isDemoReadOnlyError } from "./api/writeApi";
+import type { NoteHeading } from "./lib/noteHeadings";
 import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
 import {
   useStartupStatus,
   type StartupStatus,
 } from "./startup/useStartupStatus";
+import {
+  CONTEXTUAL_HELP,
+  ContextualHelpLink,
+  type ContextualHelp,
+  HelpProvider,
+  useHelp,
+} from "./features/help";
 import { SearchDialog, useSearch } from "./features/search";
+import {
+  fetchFreshInstall,
+  FirstRunChecklist,
+  recordSearchResults,
+  reopenFirstRun,
+  shouldShowFirstRun,
+  useFirstRunState,
+} from "./features/first-run";
+import { UpdateBanner } from "./features/update-banner";
+import { WhatsNew } from "./features/whats-new";
 
 function VaultWorkspace({
   startupStatus,
@@ -88,6 +107,8 @@ function VaultWorkspace({
   );
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [activeNote, setActiveNote] = useState<ActiveNoteMeta | null>(null);
+  // The open note's headings, for the phone's "On this page" chip (#530).
+  const [noteHeadings, setNoteHeadings] = useState<NoteHeading[]>([]);
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
@@ -96,7 +117,6 @@ function VaultWorkspace({
   >(() => getStoredExpandedFolders());
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [scopeSheetOpen, setScopeSheetOpen] = useState(false);
-  const [startWithNoVaultsOpen, setStartWithNoVaultsOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
@@ -108,8 +128,10 @@ function VaultWorkspace({
   // allowed to navigate out of. Matched by the router itself rather than by a
   // second spelling of the path.
   const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
+  usePageTitle(activeNote);
   const isMobile = useIsMobile(920);
-  const { theme, cycleTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
+  const help = useHelp();
 
   const [scope, setScope, scopeFallbackNotice] = useVaultScope();
   const {
@@ -119,15 +141,12 @@ function VaultWorkspace({
     readState: collectionReadState,
     error: collectionError,
     recovery: registryRecovery,
-    legacyMigrationRecovery,
     noteCounts: vaultNoteCounts,
     revision: collectionRevision,
     refresh: loadVaults,
   } = useVaultCollection();
   const vaultProjection = useVaultProjection();
-  const hasRegistryRecovery = Boolean(
-    registryRecovery || legacyMigrationRecovery,
-  );
+  const hasRegistryRecovery = Boolean(registryRecovery);
   const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
 
   const {
@@ -185,6 +204,26 @@ function VaultWorkspace({
   // Without `!vaultsLoading` here, the sidebar footer's Settings link would
   // render and stay clickable for that entire fetch on a demo instance.
   const settingsEnabled = !vaultsLoading && !demoMode;
+  // The first-run checklist (#419): on a fresh install (#424) until closed,
+  // or once reopened from Help, and never in demo mode.
+  const firstRun = useFirstRunState();
+  const [freshInstall, setFreshInstall] = useState(false);
+  useEffect(() => {
+    if (!settingsEnabled) return;
+    const controller = new AbortController();
+    void fetchFreshInstall(controller.signal).then((fresh) => {
+      if (!controller.signal.aborted) setFreshInstall(fresh);
+    });
+    return () => controller.abort();
+  }, [settingsEnabled]);
+  const showFirstRun =
+    settingsEnabled &&
+    shouldShowFirstRun({
+      demoMode,
+      freshInstall,
+      dismissed: firstRun.dismissed,
+      reopened: firstRun.reopened,
+    });
   // A demo_read_only refusal is the one write error rendered in the app's
   // own words rather than the server's (#152). `writeEnabled` already stays
   // false once the collection knows it is on a demo instance, and re-derives
@@ -225,6 +264,13 @@ function VaultWorkspace({
     searchInputRef,
     openSearchForTag,
   } = useSearch();
+  // A search that found something proves the notes are indexed, which ticks
+  // the checklist's last step in this browser.
+  useEffect(() => {
+    if (!searchLoading && !searchError && searchResults.length > 0) {
+      recordSearchResults(searchQuery, searchResults.length);
+    }
+  }, [searchLoading, searchError, searchResults, searchQuery]);
   const {
     noteActionDialog,
     noteActionError,
@@ -258,9 +304,11 @@ function VaultWorkspace({
     () => safeGetItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
   );
   // The Scope zone remembers whether it is folded away, same as Recently
-  // viewed; default expanded per the design spec.
+  // viewed. It starts folded (#530): its head already names the scope and
+  // its state, and the accordion below lists the same Vaults, so unfolded by
+  // default it said everything twice before the first folder appeared.
   const [scopeZoneCollapsed, setScopeZoneCollapsed] = useState<boolean>(
-    () => safeGetItem(SCOPE_ZONE_COLLAPSED_KEY) === "1",
+    () => safeGetItem(SCOPE_ZONE_COLLAPSED_KEY) !== "0",
   );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
@@ -577,6 +625,39 @@ function VaultWorkspace({
         return;
       }
 
+      // Escape closes the "…" menu like any other popover (#530); it used
+      // to stay open behind whatever the next key opened.
+      if (event.key === "Escape" && actionsMenuOpen) {
+        setActionsMenuOpen(false);
+        return;
+      }
+
+      // `e` opens the editor on the open note (#530), the key the Edit
+      // button shows. Bare key only, outside any field or open dialog.
+      if (
+        event.key.toLowerCase() === "e" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        writeEnabled &&
+        onNoteRoute &&
+        !isEditableTarget(event.target) &&
+        !noteActionDialog &&
+        !searchOpen &&
+        !actionsMenuOpen &&
+        !help.isOpen &&
+        // The scope sheet, the heading sheet and the theme menu hold focus
+        // inside a dialog or menu; `e` there is for them, not the editor.
+        !(
+          event.target instanceof Element &&
+          event.target.closest('[role="dialog"], [role="menu"]')
+        )
+      ) {
+        event.preventDefault();
+        setEditRequestId((prev) => prev + 1);
+        return;
+      }
+
       if (
         event.key.toLowerCase() === "v" &&
         !event.ctrlKey &&
@@ -602,6 +683,8 @@ function VaultWorkspace({
     noteActionDialog,
     searchOpen,
     actionsMenuOpen,
+    onNoteRoute,
+    help.isOpen,
   ]);
 
   // The shell's polite scope live region (#146): announces the scope name
@@ -711,8 +794,12 @@ function VaultWorkspace({
     if (!activeNote) {
       return;
     }
-    await copyText(window.location.href);
-  }, [activeNote]);
+    // The address alone: a note reached from search carries `?q=` and `?m=`
+    // for its match navigator, which a link handed to someone else should
+    // not replay (#530). The router's own path, so it holds under a memory
+    // router too.
+    await copyText(`${window.location.origin}${location.pathname}`);
+  }, [activeNote, location.pathname]);
   const copyPageContent = useCallback(async () => {
     if (!activeNote) {
       return;
@@ -747,7 +834,19 @@ function VaultWorkspace({
       }
     >
       <AppTopbar
-        activeNote={activeNote}
+        // Off the note route the last note is still remembered (for the
+        // landing redirect) but is not what is on screen (#530).
+        activeNote={onNoteRoute ? activeNote : null}
+        pageName={pageName(location.pathname)}
+        tocHeadings={onNoteRoute ? noteHeadings : []}
+        onJumpToHeading={(id) =>
+          // Replace, like the desktop TOC's own jump: a heading pick is not
+          // a page the reader wants Back to return through.
+          navigate(
+            `${location.pathname}${location.search}#${encodeURIComponent(id)}`,
+            { replace: true },
+          )
+        }
         vaults={vaults}
         scope={scope}
         writeEnabled={writeEnabled}
@@ -763,13 +862,13 @@ function VaultWorkspace({
         onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
-        onEditNote={() => setEditRequestId((prev) => prev + 1)}
-        onNewNote={() => openCreateDialog("")}
         onRenameNote={() => openActionDialog("rename")}
         onMoveNote={() => openActionDialog("move")}
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
-        onCycleTheme={cycleTheme}
+        onSetTheme={setTheme}
+        helpOpen={help.isOpen}
+        onToggleHelp={() => (help.isOpen ? help.closeHelp() : help.openHelp())}
         onScopeChange={handleScopeChange}
         viewingVaultId={activeNote?.vaultId}
         vaultNoteCounts={vaultNoteCounts}
@@ -795,6 +894,10 @@ function VaultWorkspace({
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {scopeLiveMessage}
       </div>
+
+      {/* The opt-in update check's banner (#425). Signed in only: it reads
+          the settings response, which demo mode does not serve. */}
+      {settingsEnabled ? <UpdateBanner /> : null}
 
       {writeWarnings.length > 0 || writeNotice ? (
         <div className="write-notice" role="status">
@@ -867,6 +970,9 @@ function VaultWorkspace({
             safeSetItem(EXPLORER_SCROLL_TOP_KEY, String(current));
           }}
           demoMode={demoMode}
+          onToggleHelp={() =>
+            help.isOpen ? help.closeHelp() : help.openHelp()
+          }
         />
 
         {!isMobile ? (
@@ -922,37 +1028,23 @@ function VaultWorkspace({
                     title="Vaults Unavailable"
                     message={collectionError ?? "Could not load your Vaults."}
                     onTryAgain={() => void loadVaults()}
+                    manual={CONTEXTUAL_HELP.vaultsUnavailable}
                   />
                 ) : registryRecovery ? (
                   <BrokenStartState
                     message={registryRecovery.message}
                     onTryAgain={() => void loadVaults()}
                   />
-                ) : legacyMigrationRecovery ? (
-                  <BrokenStartState
-                    title={
-                      legacyMigrationRecovery.code ===
-                      "legacy_environment_cleanup_required"
-                        ? "Restart Required"
-                        : undefined
+                ) : showFirstRun ? (
+                  <FirstRunChecklist
+                    vaults={vaults}
+                    onVaultCreated={() => void loadVaults()}
+                    onAddGitVault={() =>
+                      navigate("/settings", {
+                        state: { openVaultCreation: true },
+                      })
                     }
-                    message={legacyMigrationRecovery.message}
-                    onTryAgain={
-                      legacyMigrationRecovery.code ===
-                      "legacy_migration_required"
-                        ? () => void loadVaults()
-                        : undefined
-                    }
-                    onStartWithNoVaults={
-                      legacyMigrationRecovery.code ===
-                      "legacy_migration_required"
-                        ? () => setStartWithNoVaultsOpen(true)
-                        : undefined
-                    }
-                    unchangedNotice={
-                      legacyMigrationRecovery.code ===
-                      "legacy_migration_required"
-                    }
+                    onOpenSearch={() => setSearchOpen(true)}
                   />
                 ) : vaults.length === 0 ? (
                   <ZeroVaultState
@@ -964,7 +1056,16 @@ function VaultWorkspace({
                     }
                   />
                 ) : (
-                  <EmptyState />
+                  <HomePage
+                    vaults={vaults}
+                    scope={scope}
+                    noteCounts={vaultNoteCounts}
+                    modifiedNotes={modifiedNotes}
+                    recentNotes={recentNotes}
+                    writeEnabled={writeEnabled}
+                    onNewNote={() => openCreateDialog("")}
+                    onOpenSearch={() => setSearchOpen(true)}
+                  />
                 )
               }
             />
@@ -1032,6 +1133,7 @@ function VaultWorkspace({
                 ) : (
                   <NotePage
                     onActiveNoteChange={setActiveNote}
+                    onHeadingsChange={setNoteHeadings}
                     onTagSelect={openSearchForTag}
                     propertiesCollapsedStorageKey={
                       NOTE_PROPERTIES_COLLAPSED_KEY
@@ -1121,16 +1223,6 @@ function VaultWorkspace({
           onMove={(targetFolder) => void handleMoveNote(targetFolder)}
           onArchive={() => void handleArchiveNote()}
           onDelete={() => void handleDeleteNote()}
-        />
-      ) : null}
-
-      {startWithNoVaultsOpen ? (
-        <StartWithNoVaultsDialog
-          onClose={() => setStartWithNoVaultsOpen(false)}
-          onConfirmed={() => {
-            setStartWithNoVaultsOpen(false);
-            void loadVaults();
-          }}
         />
       ) : null}
     </div>
@@ -1223,11 +1315,10 @@ export function App() {
 }
 
 function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
+  const navigate = useNavigate();
   const [authRequired, setAuthRequired] = useState(false);
   const collection = useVaultCollection();
-  const hasRegistryRecovery = Boolean(
-    collection.recovery || collection.legacyMigrationRecovery,
-  );
+  const hasRegistryRecovery = Boolean(collection.recovery);
   // Only a discovery that answered can say there are no Vaults; a failed one
   // (`readState` "error") knows nothing either way.
   const hasNoVaults =
@@ -1248,7 +1339,18 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
   }, []);
 
   return (
-    <>
+    <HelpProvider
+      demoMode={collection.demoMode}
+      signedOut={authRequired}
+      onOpenSetupChecklist={
+        authRequired || collection.loading || collection.demoMode
+          ? undefined
+          : () => {
+              reopenFirstRun();
+              navigate("/");
+            }
+      }
+    >
       {authRequired ? (
         <TokenPrompt
           onSubmit={(token) => {
@@ -1276,8 +1378,12 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
           startupStatus={startup.status}
           onRetryModelSetup={() => void startup.retryModelSetup()}
         />
+        {/* After an upgrade (#418), over the workspace only: the gate holds
+            its children until discovery has said whether this is a demo,
+            which never shows it (the server refuses it there too). */}
+        {!authRequired && !collection.demoMode ? <WhatsNew /> : null}
       </StartupGate>
-    </>
+    </HelpProvider>
   );
 }
 
@@ -1290,15 +1396,6 @@ function NotFoundState({ onGoHome }: { onGoHome: () => void }) {
       description="Nothing lives at this address. The link may be out of date."
       actionLabel="Go to notes"
       onAction={onGoHome}
-    />
-  );
-}
-
-function EmptyState() {
-  return (
-    <StateBlock
-      title="Notes Explorer"
-      description="Select any note from the explorer to start reading."
     />
   );
 }
@@ -1327,37 +1424,38 @@ function ZeroVaultState({
       }
       actionLabel={demoMode ? undefined : "Add a Vault"}
       onAction={demoMode ? undefined : onAddVault}
+      help={
+        demoMode ? undefined : (
+          <ContextualHelpLink to={CONTEXTUAL_HELP.noVaults} />
+        )
+      }
     />
   );
 }
 
-/** A broken start (#150): the registry file itself is unreadable, or a
- * failed legacy import needs recovery. Both open the ordinary workspace
- * with this same documented error block rather than a full-screen gate. */
+/** A broken start (#150): the registry file itself is unreadable, or
+ * discovery failed. Both open the ordinary workspace with this same
+ * documented error block rather than a full-screen gate. */
 function BrokenStartState({
   title = "Vault Registry Unavailable",
   message,
   onTryAgain,
-  onStartWithNoVaults,
-  unchangedNotice = true,
+  manual = CONTEXTUAL_HELP.registryRecovery,
 }: {
   title?: string;
   message: string;
   onTryAgain?: () => void;
-  onStartWithNoVaults?: () => void;
-  unchangedNotice?: boolean;
+  /** The manual page that explains this start (#423). */
+  manual?: ContextualHelp;
 }) {
   return (
     <StateBlock
       tone="error"
       title={title}
-      description={`${message}${unchangedNotice ? " Nothing was changed, and your Markdown is untouched." : ""}`}
+      description={`${message} Nothing was changed, and your Markdown is untouched.`}
       actionLabel={onTryAgain ? "Try again" : undefined}
       onAction={onTryAgain}
-      secondaryActionLabel={
-        onStartWithNoVaults ? "Start with no Vaults" : undefined
-      }
-      onSecondaryAction={onStartWithNoVaults}
+      help={<ContextualHelpLink to={manual} />}
     />
   );
 }

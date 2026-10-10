@@ -69,7 +69,7 @@ describe("App navigation/search", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeInTheDocument();
   });
 
@@ -327,7 +327,7 @@ describe("App navigation/search", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeInTheDocument();
 
     act(() => {
@@ -372,7 +372,7 @@ describe("App navigation/search", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Notes Explorer" }),
+      await screen.findByRole("heading", { level: 1, name: "Notes" }),
     ).toBeInTheDocument();
     expect(
       setIntervalSpy.mock.calls.some(([, delay]) => delay === 10_000),
@@ -627,10 +627,9 @@ describe("App navigation/search", () => {
       </MemoryRouter>,
     );
 
-    // Last Modified no longer sits in the sidebar: it conflated awareness with
-    // navigation. The same data now opens from the rail instead.
+    // Changed on disk is a folding section at the top of the list (#530).
     const openChanges = await screen.findByRole("button", {
-      name: "Recently changed notes",
+      name: /^Changed on disk/,
     });
     fireEvent.click(openChanges);
 

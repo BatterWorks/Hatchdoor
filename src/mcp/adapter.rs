@@ -20,7 +20,7 @@ use rmcp::{RoleServer, ServerHandler};
 use serde_json::{Value, json};
 use tracing::error;
 
-use super::config::{McpConfig, SERVER_INSTRUCTIONS, SETUP_INSTRUCTIONS};
+use super::config::{McpConfig, SERVER_INSTRUCTIONS, SETUP_INSTRUCTIONS, USAGE_REPORT_NOTICE};
 use super::protocol::JsonRpcFailure;
 use super::subscriptions::{MAX_SUBSCRIPTIONS_PER_TOKEN, McpBearerToken, SubscriptionRegistry};
 use super::tools;
@@ -57,6 +57,58 @@ impl HatchdoorMcpHandler {
     fn config(&self) -> Result<McpConfig, String> {
         let snapshot = self.state.runtime_snapshot();
         AppState::runtime_mcp_config(&snapshot)
+    }
+
+    /// Server information for an opening handshake, and whether it carries
+    /// the one-time usage report sentence (#479). Only `initialize` and
+    /// `discover` call this: rmcp also reads `get_info` for other purposes,
+    /// which would spend the sentence where no agent sees it.
+    async fn opening_info(&self) -> (ServerInfo, bool) {
+        let mut info = self.get_info();
+        let usage_report = Arc::clone(&self.state.usage_report);
+        let versions = Arc::clone(&self.state.instance_versions);
+        // The mark is read from and written to the state file.
+        let due = tokio::task::spawn_blocking(move || usage_report.take_notice(&versions))
+            .await
+            .unwrap_or(false);
+        // First, not last: Claude Code keeps only about the first 2,000
+        // characters of a server's instructions, and at the end the sentence
+        // arrived cut in half (#480).
+        if due && let Some(instructions) = info.instructions.as_mut() {
+            *instructions = format!("{USAGE_REPORT_NOTICE} {instructions}");
+        }
+        (info, due)
+    }
+
+    /// Remember which client called and when (#426). `client_info` reads the
+    /// request's own `_meta` on the modern revision and the `initialize`
+    /// handshake on a legacy session. Only the name and time are kept, and a
+    /// save that fails is logged by the log itself, never returned to the
+    /// caller.
+    fn record_agent_connection(&self, context: &RequestContext<RoleServer>) {
+        let client = context.client_info();
+        let now = std::time::SystemTime::now();
+        // The usage report (ADR-45) reads the name the client sends, not its
+        // display title, and keeps only the agent family it maps onto.
+        let usage_report = &self.state.usage_report;
+        let client_name = client.as_ref().map_or("", |client| client.name.as_str());
+        if usage_report.observe_mcp_call(client_name, now) {
+            let usage_report = Arc::clone(usage_report);
+            tokio::task::spawn_blocking(move || usage_report.save());
+        }
+        let name = client
+            .map(|client| {
+                client
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or(client.name)
+            })
+            .unwrap_or_default();
+        let log = &self.state.agent_connections;
+        if log.observe(&name, now) {
+            let log = Arc::clone(log);
+            tokio::task::spawn_blocking(move || log.save());
+        }
     }
 }
 
@@ -299,7 +351,7 @@ impl ServerHandler for HatchdoorMcpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
         context.peer.set_peer_info(request.clone());
-        let mut info = self.get_info();
+        let (mut info, _) = self.opening_info().await;
         let supported = self.supported_protocol_versions();
         let negotiated = if supported.contains(&request.protocol_version) {
             request.protocol_version.clone()
@@ -319,11 +371,15 @@ impl ServerHandler for HatchdoorMcpHandler {
         &self,
         _context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, ErrorData> {
+        let (info, noticed) = self.opening_info().await;
+        // The answer that carries the one-time sentence is not cacheable, so
+        // a client cannot replay it to a second session.
+        let ttl_ms = if noticed { 0 } else { LIST_CACHE_TTL_MS };
         Ok(rmcp::model::DiscoverResult::from_server_info(
             advertised_protocol_versions().into_owned(),
-            self.get_info(),
+            info,
         )
-        .with_ttl_ms(LIST_CACHE_TTL_MS)
+        .with_ttl_ms(ttl_ms)
         .with_cache_scope(CacheScope::Private))
     }
 
@@ -347,6 +403,7 @@ impl ServerHandler for HatchdoorMcpHandler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        self.record_agent_connection(&context);
         let mut config = self.config().map_err(internal_config_error)?;
         config.request_origin = context
             .extensions

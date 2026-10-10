@@ -77,8 +77,8 @@ use super::super::protocol::{JsonRpcFailure, OUTCOME_FIELD, tool_success};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
 use super::write::WRITE_OPS;
 use super::{
-    READ_OPS, WRITE_DISABLED_CODE, WRITE_DISABLED_MESSAGE, dispatch_read_tool,
-    environment_cleanup_refusal, write, write_tool_annotations,
+    READ_OPS, WRITE_DISABLED_CODE, WRITE_DISABLED_MESSAGE, dispatch_read_tool, write,
+    write_tool_annotations,
 };
 
 /// The write ops that carry both `slug` and `expected_content_hash` — the
@@ -431,11 +431,8 @@ async fn dispatch_one(
     match op {
         _ if READ_OPS.contains(&op) => dispatch_read_tool(state, config, op, arguments).await,
         _ if WRITE_OPS.contains(&op) => {
-            // Both refusals carry a stable string code (#327), like every
+            // The refusal carries a stable string code (#327), like every
             // other item error: an item is data, not a JSON-RPC error.
-            if let Some(refusal) = environment_cleanup_refusal(&state) {
-                return Err(structured_item_failure(&refusal));
-            }
             if !config.write_enabled {
                 return Err(structured_item_failure(
                     &crate::vault_error::VaultOperationError::new(
@@ -606,7 +603,7 @@ fn plain_failure_code(jsonrpc_code: i64) -> &'static str {
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). rename_tag and delete_tag are not allowed inside a batch; call them on their own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, publish_recovery_branch, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Each search_notes item counts against the per-minute tool-call quota as a standalone search would. Every failed item's error carries a string code to branch on. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults, read_docs and search_docs). rename_tag and delete_tag are not allowed inside a batch; call them on their own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, publish_recovery_branch, refresh_vault, list_vaults) and the manual tools (read_docs, search_docs) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Each search_notes item counts against the per-minute tool-call quota as a standalone search would. Every failed item's error carries a string code to branch on. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -653,6 +650,8 @@ mod tests {
         }
         for excluded in [
             "list_vaults",
+            "read_docs",
+            "search_docs",
             "create_vault",
             "edit_vault",
             "enable_vault",

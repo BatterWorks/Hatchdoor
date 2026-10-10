@@ -35,6 +35,9 @@ const FIXTURE_NOTES = [
   "docs/user-vault/02 Guides/How to manage multiple Vaults.md",
   "docs/user-vault/01 Get started/Connect your first Vault.md",
   "docs/user-vault/04 Concepts/Vault lifecycle states.md",
+  "docs/user-vault/03 Reference/Usage report reference.md",
+  "docs/user-vault/03 Reference/Settings and environment variables reference.md",
+  "docs/user-vault/04 Concepts/The security model.md",
 ];
 
 function run(root, args = []) {
@@ -445,6 +448,108 @@ test("test-only changes need no changelog entry", async () => {
   const result = run(root, ["--acknowledge"]);
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stderr, /CHANGELOG/);
+});
+
+test("a bundled manual change names the MCP tools reference", async () => {
+  const root = await fixture();
+  await write(root, "src/docs_bundle.rs", "// a new page name rule\n");
+  await commit(root, "manual bundle");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /MCP tools reference\.md/);
+});
+
+test("a usage report change names its reference page", async () => {
+  const root = await fixture();
+  await write(root, "src/usage_report.rs", "// a new report field\n");
+  await commit(root, "usage report");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Usage report reference\.md/);
+  assert.match(result.stderr, /The security model\.md/);
+});
+
+// #486: the Docker Hub overview is published from this repository and repeats
+// the install steps, so whatever can outdate them must name it. It is the one
+// reading-list entry outside docs/user-vault.
+const DOCKER_HUB_OVERVIEW = "docs/maintenance/docker-hub/overview.md";
+const INSTALL_GUIDE =
+  "docs/user-vault/01 Get started/Install Hatchdoor with Docker Compose.md";
+
+async function deploymentFixture() {
+  const root = await fixture();
+  git(root, ["switch", "--quiet", "development"]);
+  await write(root, "docker-compose.yml");
+  await write(root, DOCKER_HUB_OVERVIEW);
+  for (const note of [
+    INSTALL_GUIDE,
+    "docs/user-vault/02 Guides/How to deploy Hatchdoor with an agent.md",
+    "docs/user-vault/01 Get started/Understand where your data lives.md",
+  ]) {
+    await write(root, note);
+  }
+  await commit(root, "deployment files");
+  git(root, ["switch", "--quiet", "-c", "deployment"]);
+  return root;
+}
+
+test("a Compose file change names the Docker Hub overview", async () => {
+  const root = await deploymentFixture();
+  await write(root, "docker-compose.yml", "services: {}\n");
+  await addChangelogEntry(root);
+  await commit(root, "change a mount");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Install Hatchdoor with Docker Compose\.md/);
+  assert.match(
+    result.stderr,
+    /docs\/maintenance\/docker-hub\/overview\.md {2}\(UNTOUCHED\)/,
+  );
+});
+
+test("an install guide edit names the Docker Hub overview", async () => {
+  const root = await deploymentFixture();
+  await write(root, INSTALL_GUIDE, "# A new first step\n");
+  await addChangelogEntry(root);
+  await commit(root, "reword the install guide");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /docs\/maintenance\/docker-hub\/overview\.md {2}\(UNTOUCHED\)/,
+  );
+});
+
+test("reports the Docker Hub overview as edited when the branch changed it", async () => {
+  const root = await deploymentFixture();
+  await write(root, INSTALL_GUIDE, "# A new first step\n");
+  await write(root, DOCKER_HUB_OVERVIEW, "# The same new step\n");
+  await addChangelogEntry(root);
+  await commit(root, "reword both");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /docker-hub\/overview\.md {2}\(edited on this branch\)/,
+  );
+});
+
+// The manual ships inside the binary (ADR-38), so editing a page changes
+// what an install serves.
+test("a manual page edit needs a changelog entry", async () => {
+  const root = await fixture();
+  await write(root, UI_NOTE, "# Browse and review through the Web UI\nNew.\n");
+  await commit(root, "manual");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /CHANGELOG ENTRY MISSING/);
+  assert.match(result.stderr, /Browse and review through the Web UI\.md/);
 });
 
 test("a dependency change needs a changelog entry", async () => {

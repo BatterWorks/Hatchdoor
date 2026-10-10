@@ -84,10 +84,13 @@ _Horizon: unversioned ("at some point"). No implementation started._
 **Problem:** a first-time user lands in Hatchdoor with no onboarding.
 
 Direction: build a first-run onboarding flow, tracked as
-[#9](https://github.com/BattermanZ/Hatchdoor/issues/9).
+[#9](https://github.com/BatterWorks/Hatchdoor/issues/9).
 
-_Horizon: unversioned ("at some point"); slipped past v2.6.0, which shipped
-without it. No implementation started._
+_Horizon: **v2.8.0**, shipped. A fresh install starts with no Vaults and opens
+on a setup checklist: add your notes through a folder picker, choose a search
+model, connect an agent read-only in one click, try a search. An agent can also
+do the whole install from the deploy guide served at `/docs/deploy.md`. The work
+was planned in [#415](https://github.com/BatterWorks/Hatchdoor/issues/415)._
 
 ### Vault lifecycle & multi-vault
 
@@ -145,7 +148,11 @@ its own Hatchdoor Vault, served by a separate public instance, and the README
 links into it rather than duplicating it; the demo and documentation instances
 cross-link. The second half, making that instance queryable from inside the app
 through the existing MCP interface so the in-app agent can answer from the docs,
-is not started and remains unversioned._
+was not built that way. **v2.8.0** took a shorter route to the same end (ADR-38):
+the manual ships inside the binary, opens as Help beside whatever the user is
+doing, is read by agents through the `read_docs` and `search_docs` MCP tools, and
+is served as plain Markdown at `/docs/` on every instance. An in-app agent that
+answers questions from it is still not started and remains unversioned._
 
 ### Multi-user, network-exposed deployment
 

@@ -165,6 +165,29 @@ describe("deriveVaultSlot", () => {
     ).toEqual({ kind: "indexing" });
   });
 
+  it("keeps the count while a searchable Vault's own reindex runs (#483)", () => {
+    const reindexing = healthyVault("Alpha", {
+      search: "stale",
+      index_turn: "running",
+    });
+    expect(deriveVaultSlot(reindexing, 40)).toEqual({
+      kind: "count",
+      count: 40,
+    });
+    expect(
+      deriveVaultAggregate([reindexing], { [reindexing.vault_id]: 40 }),
+    ).toEqual({
+      kind: "count",
+      count: 1,
+    });
+  });
+
+  it("keeps the stale condition for a failed build while its retry runs", () => {
+    expect(
+      deriveVaultSlot({ ...staleVault("Alpha"), index_turn: "running" }, 40),
+    ).toMatchObject({ kind: "condition", word: "stale" });
+  });
+
   it("shows stale in warn tier when indexing has failed", () => {
     const result = deriveVaultSlot(staleVault("Alpha"), 40);
     expect(result).toMatchObject({
@@ -448,7 +471,9 @@ describe("describeScopeSlot", () => {
 
   it("names the shortfall in the slot's own words at all scope", () => {
     const unavailable = unavailableVault("Beta");
-    expect(describeScopeSlot("all", [alpha, unavailable], {})).toBe("1 of 2");
+    expect(describeScopeSlot("all", [alpha, unavailable], {})).toBe(
+      "1 of 2 answering",
+    );
   });
 
   it("names a healthy Vault's note count when narrowed", () => {
@@ -500,7 +525,8 @@ describe("VaultAggregateSlot", () => {
       />,
     );
 
-    const shortfall = screen.getByText("1 of 2");
+    const shortfall = document.querySelector(".vault-slot-shortfall")!;
+    expect(shortfall).toHaveTextContent("1 of 2 answering");
     expect(shortfall).toHaveClass("vault-slot-shortfall");
     expect(shortfall).toHaveClass("vault-tier-error");
   });
@@ -514,7 +540,8 @@ describe("VaultAggregateSlot", () => {
       />,
     );
 
-    const shortfall = screen.getByText("1 of 2");
+    const shortfall = document.querySelector(".vault-slot-shortfall")!;
+    expect(shortfall).toHaveTextContent("1 of 2 answering");
     expect(shortfall).toHaveClass("vault-tier-warn");
     expect(shortfall).not.toHaveClass("vault-tier-error");
   });

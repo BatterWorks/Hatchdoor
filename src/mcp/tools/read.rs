@@ -1,7 +1,8 @@
-//! Vault-scoped MCP read tools, plus the eight Vault collection management
-//! tools. These are deliberately thin in-process adapters over the same
-//! shared cores used by HTTP: MCP owns JSON-RPC framing, while scope parsing,
-//! projections, and error shapes stay in the core.
+//! Vault-scoped MCP read tools, the eight Vault collection management
+//! tools, and the two that read the bundled manual. These are deliberately
+//! thin in-process adapters over the same shared cores used by HTTP: MCP owns
+//! JSON-RPC framing, while scope parsing, projections, and error shapes stay
+//! in the core.
 //!
 //! Since #188 no tool here proxies an HTTP handler. Each read parses its
 //! arguments, calls `VaultReadCore`, `VaultSearchCore`, or (for the
@@ -19,6 +20,7 @@ use std::str::FromStr;
 
 use crate::app_state::AppState;
 use crate::mcp::results;
+use crate::search::compact::CompactSearchResponse;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::vault::allowed_attachment_extensions;
 use crate::vault_error::VaultOperationError;
@@ -27,9 +29,9 @@ use crate::vault_management::{
 };
 use crate::vault_read::{
     AssetPathError, AssetReadError, NoteQuery, NoteQueryCondition, OffloadedReadError,
-    ResolvedAsset, TreeScope, VaultReadError, VaultReads, VaultResolveResponse, VaultScope,
-    clamp_recent_limit, clamp_search_limit, clamp_search_per_note_cap, clamp_tree_max_depth,
-    note_not_found,
+    ResolvedAsset, TextMatchRequest, TreeScope, VaultReadError, VaultReadProjection, VaultReads,
+    VaultResolveResponse, VaultScope, clamp_recent_limit, clamp_search_limit,
+    clamp_search_per_note_cap, clamp_tree_max_depth, note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -115,6 +117,20 @@ struct SearchArgs {
     per_note_cap: Option<usize>,
     #[serde(default)]
     layers: Vec<String>,
+    #[serde(default)]
+    detail: SearchDetail,
+}
+
+/// How much of each hit `search_notes` returns (#501). Compact is the
+/// default because most searches only locate a note that `get_note` then
+/// reads; the HTTP search route has no such argument and always answers in
+/// full.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SearchDetail {
+    #[default]
+    Compact,
+    Full,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +152,25 @@ struct QueryArgs {
     properties: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// `find_text`'s arguments. Only `scope` and `text` are required; the rest
+/// narrow the sweep or shape the answer, and the core owns every default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindTextArgs {
+    scope: String,
+    text: String,
+    #[serde(default)]
+    case_sensitive: bool,
+    #[serde(default)]
+    layers: Vec<String>,
+    #[serde(default)]
+    path_prefix: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    snippets_per_note: Option<usize>,
 }
 
 /// `get_tree`'s arguments. The three narrowing ones are optional and default to
@@ -162,6 +197,16 @@ fn notes_included_by_default() -> bool {
 struct ExactSlugArgs {
     vault_id: String,
     slug: String,
+}
+
+/// `get_note_section`'s arguments. How many `headings` a call may carry, and
+/// what each may be, is the read core's rule.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteSectionArgs {
+    vault_id: String,
+    slug: String,
+    headings: Vec<String>,
 }
 
 /// `evaluate_saved_query`'s arguments. There is deliberately no `scope`: a
@@ -233,6 +278,8 @@ pub(super) async fn search_notes_tool(
             .then(|| args.layers.join(","))
             .as_deref(),
     );
+    let detail = args.detail;
+    let query = args.query.clone();
     let request = VaultSearchRequest {
         scope,
         query: args.query,
@@ -253,7 +300,23 @@ pub(super) async fn search_notes_tool(
     })
     .await;
     match result {
-        Ok(Ok(projection)) => Ok(tool_result::<results::SearchNotesResult>(&projection)),
+        Ok(Ok(projection)) => {
+            let data = match detail {
+                SearchDetail::Compact => results::SearchNotesData::Compact(
+                    CompactSearchResponse::from_full(projection.data, &query),
+                ),
+                SearchDetail::Full => results::SearchNotesData::Full(projection.data),
+            };
+            Ok(tool_result::<results::SearchNotesResult>(
+                &VaultReadProjection {
+                    scope: projection.scope,
+                    collection_revision: projection.collection_revision,
+                    partial: projection.partial,
+                    participants: projection.participants,
+                    data,
+                },
+            ))
+        }
         Ok(Err(error)) => Ok(structured_error(error.into_operation_error())),
         Err(join_error) => Err(JsonRpcFailure::internal(format!(
             "background task panicked: {join_error}"
@@ -276,6 +339,46 @@ pub(super) async fn get_note_tool(
         .await
     {
         Ok(Some(note)) => Ok(tool_result::<results::GetNoteResult>(&note)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn get_note_outline_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ExactSlugArgs = parse("get_note_outline", arguments)?;
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.note_outline(vault_id, &slug))
+        .await
+    {
+        Ok(Some(outline)) => Ok(tool_result::<results::GetNoteOutlineResult>(&outline)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn get_note_section_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: NoteSectionArgs = parse("get_note_section", arguments)?;
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.note_sections(vault_id, &slug, &args.headings))
+        .await
+    {
+        Ok(Some(sections)) => Ok(tool_result::<results::GetNoteSectionResult>(&sections)),
         Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
         Err(error) => read_failure(error),
     }
@@ -467,6 +570,33 @@ pub(super) async fn query_notes_tool(
         .await
     {
         Ok(projection) => Ok(tool_result::<results::QueryNotesResult>(&projection)),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn find_text_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: FindTextArgs = parse("find_text", arguments)?;
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    let request = TextMatchRequest {
+        text: args.text,
+        case_sensitive: args.case_sensitive,
+        layers: args.layers,
+        path_prefix: args.path_prefix,
+        // Clamped by the core, like the snippet count.
+        limit: args.limit,
+        snippets_per_note: args.snippets_per_note,
+    };
+    match VaultReads::new(&state)
+        .read(move |core| core.find_text(scope, &request))
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::FindTextResult>(&projection)),
         Err(error) => read_failure(error),
     }
 }
@@ -780,6 +910,81 @@ pub(super) async fn list_vaults_tool(
                 JsonRpcFailure::internal(format!("background task panicked: {join_error}"))
             })?;
     management_result::<results::ListVaultsResult>(listing)
+}
+
+/// The code `read_docs` answers with when no bundled page has the name asked
+/// for.
+const DOCS_PAGE_NOT_FOUND: &str = "docs_page_not_found";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadDocsArgs {
+    #[serde(default)]
+    page: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchDocsArgs {
+    query: String,
+}
+
+/// The bundled manual (ADR-38): the index with no `page`, otherwise that one
+/// page. It reads nothing but the binary, so it needs no Vault, no index and
+/// no offload.
+pub(super) fn read_docs_tool(arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: ReadDocsArgs = parse("read_docs", arguments)?;
+    let Some(name) = args.page else {
+        let pages = crate::docs_bundle::pages()
+            .iter()
+            .map(|page| results::DocsPageSummary {
+                name: page.name.clone(),
+                title: page.title.clone(),
+            })
+            .collect();
+        return Ok(docs_page_result(crate::docs_bundle::home(), Some(pages)));
+    };
+    let name = super::non_empty_argument("page", name)?;
+    Ok(match crate::docs_bundle::page(&name) {
+        Some(page) => docs_page_result(page, None),
+        None => structured_error(VaultOperationError::new(
+            DOCS_PAGE_NOT_FOUND,
+            format!(
+                "No manual page is named {name:?}. Call read_docs with no page for the list of pages, or search_docs to find one."
+            ),
+            None,
+            false,
+        )),
+    })
+}
+
+fn docs_page_result(
+    page: &crate::docs_bundle::ManualPage,
+    pages: Option<Vec<results::DocsPageSummary>>,
+) -> Value {
+    tool_result(&results::ReadDocsResult {
+        name: page.name.clone(),
+        title: page.title.clone(),
+        markdown: page.markdown.clone(),
+        pages,
+    })
+}
+
+/// Word search over the bundled manual (ADR-38). No embedding model is
+/// involved, so it answers before any model has downloaded.
+pub(super) fn search_docs_tool(arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: SearchDocsArgs = parse("search_docs", arguments)?;
+    let query = super::non_empty_argument("query", args.query)?;
+    Ok(tool_result(&results::SearchDocsResult {
+        results: crate::docs_bundle::search(&query)
+            .into_iter()
+            .map(|hit| results::SearchDocsHit {
+                name: hit.page.name.clone(),
+                title: hit.page.title.clone(),
+                excerpt: hit.excerpt,
+            })
+            .collect(),
+    }))
 }
 
 /// Registry writes go straight to the Vault collection management core, the
@@ -1113,8 +1318,10 @@ fn exclude_patterns_schema() -> Value {
 pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
         json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool. collection_revision counts Vault collection status changes and does not advance on note writes; to tell whether a collection read is current, use that read's participants. index_turn is running while a Vault indexes and waiting while its indexing is queued behind another Vault's or paused to let one through; search says what the Vault answers meanwhile.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_notes", "description":collection_description("Search one Vault or all enabled Vaults. Every hit is Vault-qualified. Hits are compact by default: each names its note and carries a snippet of at most 200 characters, centred on the first matched word in keyword mode and otherwise the start of the matched chunk, except for a #tag query, where it names the matched tag. get_note returns the content. Pass detail: \"full\" to get the whole matched chunk, the note's outbound links, its tags and aliases and the chunk_id on every hit instead of the snippet. Results are ranked and may include notes that do not contain the query's words, so to learn which notes contain exactly a given string, or how many times, use find_text."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]},"detail":{"type":"string","enum":["compact","full"],"default":"compact","description":"compact returns a snippet per hit; full returns the matched chunk, outbound links and metadata."}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory. note.content is always the file exactly as written, including any saved query definitions; no argument ever returns computed rows in its place. note.metadata holds the frontmatter's tags, aliases and remaining properties, the same values get_frontmatter returns, and is null when the frontmatter does not parse, in which case the note is still returned whole so it can be repaired. saved_queries lists the Note's saved queries (fenced base blocks) in document order, each with the name to pass to evaluate_saved_query, or null for one without a name. For a long note, get_note_outline lists its headings with their sizes and get_note_section returns only the sections you name.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        get_note_outline_tool_schema(),
+        get_note_section_tool_schema(),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         tree_tool(),
@@ -1131,8 +1338,11 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an absolute HTTP download_url built on the server's configured public address if one is set, else on the address the client reached this MCP endpoint on, as reported by a reverse proxy's Forwarded or X-Forwarded-Proto/X-Forwarded-Host headers; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
+        find_text_tool_schema(),
         evaluate_saved_query_tool_schema(),
         json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"read_docs", "description":"Read Hatchdoor's own manual, the one bundled with this running version. With no page, returns the Home page plus the name and title of every page; with a page name, returns that page as Markdown, its links to other pages pointing at page names you can pass back here. Takes no Vault and works during model setup. A name that matches no page is the structured docs_page_not_found error.", "inputSchema":{"type":"object","properties":{"page":{"type":"string","minLength":1,"description":"A page name from the index or a link, such as guides/how-to-set-up-a-git-backed-vault. Omit it for the index."}},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_docs", "description":"Search Hatchdoor's own manual by plain, case-insensitive word matching: pages holding a punctuated query word such as find_text exactly as typed rank first, then pages whose title matches, then pages whose headings match, then body text. Returns up to five pages, best first, each with its name, title and a matching line; read a page with read_docs. Takes no Vault, uses no search model and works during model setup. A query that matches nothing returns an empty list.", "inputSchema":{"type":"object","properties":{"query":{"type":"string","minLength":1}},"required":["query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
     ]
 }
 
@@ -1228,6 +1438,77 @@ fn evaluate_saved_query_tool_schema() -> Value {
             "additionalProperties": false
         },
         "annotations": read_only_tool_annotations(),
+    })
+}
+
+/// `get_note_outline` (#502). The description has to say what a section's
+/// size measures, since that number is what an agent budgets a read on.
+fn get_note_outline_tool_schema() -> Value {
+    json!({
+        "name": "get_note_outline",
+        "description": "List one exact Note's headings and sizes without returning any of its text, read from its authoritative Vault Markdown directory. Use it on a long note to choose which sections to read with get_note_section. Returns the note's content_hash (the same string get_note reports, so a hash-protected write can follow), size_bytes for the whole file, frontmatter_bytes, opening_text_bytes for the text between the frontmatter and the first heading, and headings in document order. Each heading has its text without the '#' characters, its level (1 to 6), its heading_path (the headings above it and its own text joined with ' > ', the form a search_notes hit's heading_path has) and size_bytes, the size of its section: the heading line and everything under it up to the next heading of the same or a higher level, subsections included, which is exactly what get_note_section returns for it and what replace_section replaces. A '#' line inside a fenced code block is not a heading. A note with no headings returns an empty list, not an error.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "slug": {"type": "string", "minLength": 1}
+            },
+            "required": ["vault_id", "slug"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
+}
+
+/// `get_note_section` (#502). The description has to keep an agent from
+/// handing a section to `update_note` as if it were the whole note.
+fn get_note_section_tool_schema() -> Value {
+    json!({
+        "name": "get_note_section",
+        "description": "Read whole sections of one exact Note, picked by heading, without the rest of the note. The note is read once from its authoritative Vault Markdown directory and the reply has one entry per requested heading, in the order asked. A section is the heading line and everything under it up to the next heading of the same or a higher level, subsections included: the span replace_section replaces. A found entry has requested (the string you sent), the heading_path it resolved to, its level, and the text in section, byte for byte as the file holds it. This is part of a note, never a whole one: do not pass it to update_note, which replaces the entire note. A string that matches nothing has error.code heading_not_found in its entry. One that matches several headings has heading_ambiguous, with error.matches listing each matching heading_path to ask for next; two headings that share a full heading path cannot be told apart. The other entries still come back. The reply's content_hash is the whole note's, the same string get_note reports, so edit_note or replace_section can follow. The frontmatter and the text before the first heading are not sections: use get_frontmatter or get_note for those. Call get_note_outline first when you do not know the headings.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "slug": {"type": "string", "minLength": 1},
+                "headings": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "maxItems": crate::vault_read::MAX_SECTION_HEADINGS,
+                    "description": "One to ten headings. Each is a heading's exact text without its '#' characters, such as Filing rules, or a heading path such as Rules > Filing rules, as get_note_outline and search_notes report it. A string that is the text of exactly one heading selects it; otherwise it is read as a heading path. Matching is exact, including case. An empty list, an empty string or more than ten is refused with the structured invalid_heading_selection error."
+                }
+            },
+            "required": ["vault_id", "slug", "headings"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
+}
+
+/// `find_text` (ADR-46). The description has to keep an agent from reaching
+/// for `search_notes` when the question is exact, and has to say the two
+/// things that differ from its neighbours: it reads every layer, and it reads
+/// the files rather than the index.
+fn find_text_tool_schema() -> Value {
+    json!({
+        "name": "find_text",
+        "description": collection_description("Find every Note in one Vault, or all enabled Vaults, that contains one literal string, with how many times each contains it. Use it for exact questions: does anything still say the old name, did a bulk edit land everywhere, which notes cite this path or ID. Nothing is ranked and there is no score: a Note either contains the string or it does not, and Notes come back ordered by path. Every character means itself, so there are no wildcards or patterns, and one call takes one string. The string is looked for in three places, and each occurrence is counted under its place: the body, the frontmatter block (aliases, tags and properties as written), and the Vault-relative file path. Case is ignored unless case_sensitive is true. Accents always count, so resume does not match résumé. total_notes and total_occurrences are true for the whole scope even when limit cut the list, and truncated says when it did; there is no paging, so narrow with path_prefix or raise limit. Unlike search_notes this covers every layer unless layers narrows it, and each Note reports its layer. Each Note's text is read from its Markdown file when the call runs, so an edit is matched at once, with no wait for indexing. Only the list of Notes comes from the index, so a Note created in the last few seconds can be absent; its Vault usually reports stale meanwhile. Occurrences are counted without overlap. A Note whose file could not be read is listed in unread and was not checked, so check total_unread is 0 before treating an empty result as proof."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": scope_schema(),
+                "text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "The literal string to find. Punctuation, brackets and spaces are matched as written. An empty string is refused with the structured invalid_text_match error."},
+                "case_sensitive": {"type": "boolean", "default": false, "description": "true matches case exactly. The composed and decomposed Unicode forms of an accented letter are equal either way."},
+                "layers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Omit to cover every layer. Otherwise only the named layers, with default naming the default surface. A name no Vault in scope declares is the structured invalid_layer_selection error, as in search_notes."},
+                "path_prefix": {"type": "string", "minLength": 1, "description": "Only Notes at or under this Vault-relative folder, such as 40-reference/Parenting. Matched case-insensitively and by whole path segment, so notes never selects notes-archive."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum Notes to return. The totals count every match regardless."},
+                "snippets_per_note": {"type": "integer", "minimum": 0, "maximum": 3, "default": 3, "description": "Matched lines shown per Note, one per line, each cut to about 200 characters with its place and line number. 0 returns counts only."}
+            },
+            "required": ["scope", "text"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
     })
 }
 
@@ -1479,6 +1760,7 @@ mod tests {
             checked,
             [
                 "evaluate_saved_query",
+                "find_text",
                 "get_graph",
                 "get_stats",
                 "get_tree",

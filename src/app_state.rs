@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -10,7 +10,6 @@ use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::StartupTracker;
 use crate::vault::VaultScanConfig;
-use crate::vault_migration::LegacyMigrationRecovery;
 use crate::vault_registry::{VaultDefinition, VaultRegistryStore};
 use crate::vault_runtime::VaultCollectionRuntime;
 
@@ -31,12 +30,6 @@ pub struct AppState {
     /// watcher-forwarding path asks it whether a change may request a commit
     /// and the Vault work executor is what arms and clears it (#267).
     pub commit_cooldown: Arc<crate::git::CommitCooldown>,
-    /// Present when safe automatic import could not prove the legacy
-    /// deployment. Collection/setup surfaces remain available for recovery.
-    /// Cleared by a confirmed "Start with no Vaults"
-    /// (`start_with_no_vaults_handler`), so this needs interior mutability
-    /// rather than a plain `Option` fixed at startup.
-    pub legacy_migration_recovery: Arc<StdRwLock<Option<LegacyMigrationRecovery>>>,
     /// The one SQLite database every Vault's snapshot is read from and
     /// written to. Opened at startup, before any Vault runtime is activated.
     pub startup_sqlite: Arc<SqliteCache>,
@@ -67,6 +60,19 @@ pub struct AppState {
     /// Signs and checks transfer links (ADR-27). Its key lives only here, in
     /// memory, so a restart strands every outstanding link.
     pub transfer_links: Arc<crate::transfer_link::TransferLinks>,
+    /// The configured Vault root (`VAULT_PATH`), which the folder listing
+    /// walks so a Vault can be picked from what Hatchdoor can see (ADR-41).
+    pub vault_mount_root: std::path::PathBuf,
+    /// Which versions this instance has run, recorded once at startup
+    /// (`instance_state`, ADR-40 decision 6).
+    pub instance_versions: Arc<crate::instance_state::VersionRecord>,
+    /// The last MCP client that called a tool, and when (#426). Written by the
+    /// MCP adapter, read by the settings response.
+    pub agent_connections: Arc<crate::instance_state::AgentConnectionLog>,
+    /// The one owner of the usage report's install ID and activity record
+    /// (ADR-45). Brought in line with the setting at startup and after every
+    /// settings save; fed by the MCP adapter and the web-activity middleware.
+    pub usage_report: Arc<crate::usage_report::UsageReport>,
     /// Fired once when the process starts shutting down. The HTTP server
     /// stops accepting on it, and every response that would otherwise stay
     /// open forever ends on it (#353).

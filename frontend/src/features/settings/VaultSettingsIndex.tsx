@@ -4,6 +4,12 @@ import { apiFetch } from "../../api/api";
 import { UnknownCount, VaultSlot } from "../../app/vaultSlot";
 import type { VaultSlotState } from "../../app/vaultSlotLogic";
 import { StateBlock } from "../../components/ui";
+import {
+  CONTEXTUAL_HELP,
+  ContextualHelpLink,
+  gitConsoleHelp,
+  vaultConditionHelp,
+} from "../help";
 import { copyText } from "../../lib/clipboard";
 import type { VaultId, VaultSource, VaultSummary } from "../../types";
 import { useVaultCollection, useVaultProjection } from "../../vaults";
@@ -84,9 +90,6 @@ export function VaultSettingsIndex({
   // every surface reads (#198). `recovery` means the persisted registry file
   // itself is unreadable (#150) — distinct from a Vault-level `needs
   // attention` recovery below, it replaces the whole group.
-  // `legacy_migration_recovery` is deliberately not surfaced here: the
-  // registry loads fine (empty) in that case, so the group renders its
-  // ordinary zero-Vault "Add a Vault" state.
   const {
     allVaults: vaults,
     noteCounts: counts,
@@ -114,6 +117,7 @@ export function VaultSettingsIndex({
           description={`${registryRecovery.message} Nothing was changed, and your Markdown is untouched.`}
           actionLabel="Try again"
           onAction={() => void loadVaults()}
+          help={<ContextualHelpLink to={CONTEXTUAL_HELP.registryRecovery} />}
         />
       </section>
     );
@@ -131,6 +135,7 @@ export function VaultSettingsIndex({
           description={`${discoveryError ?? "Could not load your Vaults."} Nothing was changed, and your Markdown is untouched.`}
           actionLabel="Try again"
           onAction={() => void loadVaults()}
+          help={<ContextualHelpLink to={CONTEXTUAL_HELP.vaultsUnavailable} />}
         />
       </section>
     );
@@ -817,6 +822,7 @@ export function VaultSettingsDetail({
     : remoteBacked
       ? "Sync now"
       : "Commit now";
+  const conditionHelp = vaultConditionHelp(vault, paused);
   const healthySentence = remoteBacked
     ? "This Vault's Git sync is healthy."
     : "This Vault's Git history is up to date.";
@@ -875,7 +881,10 @@ export function VaultSettingsDetail({
             className="settings-console-strip"
             data-tier={gitFailure ? gitFailure.tier : "ok"}
           >
-            <p>{gitFailure ? gitFailure.sentence : healthySentence}</p>
+            <p>
+              {gitFailure ? gitFailure.sentence : healthySentence}{" "}
+              <ContextualHelpLink to={gitConsoleHelp(vault)} />
+            </p>
             {gitFailure?.files ? (
               <ul className="settings-console-files">
                 {gitFailure.files.map((path) => (
@@ -911,6 +920,12 @@ export function VaultSettingsDetail({
         {paused
           ? "This Vault is paused. It is kept here so you can turn it back on."
           : conditionSentence(vaultProjection.slotFor(vault))}
+        {conditionHelp ? (
+          <>
+            {" "}
+            <ContextualHelpLink to={conditionHelp} />
+          </>
+        ) : null}
       </p>
       {notice ? (
         <div

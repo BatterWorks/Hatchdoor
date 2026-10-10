@@ -14,10 +14,10 @@ use super::paths::{
     unique_slug,
 };
 use super::types::{
-    ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
-    VaultScanConfig,
+    ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata, SearchHit,
+    VaultIndex, VaultScanConfig,
 };
-use crate::cache::parse::content_hash;
+use crate::cache::parse::{content_hash, parse_frontmatter_metadata};
 
 impl VaultIndex {
     /// Scans with default deployment configuration. Retained so existing
@@ -282,6 +282,15 @@ impl VaultIndex {
         };
 
         let content = fs::read_to_string(&entry.path)?;
+        // The parser the frontmatter read uses, so the two cannot drift. Bad
+        // frontmatter leaves the note readable: that is how it gets repaired.
+        let metadata = parse_frontmatter_metadata(&content)
+            .ok()
+            .map(|frontmatter| NoteMetadata {
+                tags: frontmatter.tags,
+                aliases: frontmatter.aliases,
+                properties: serde_json::Value::Object(frontmatter.properties),
+            });
         Ok(Some(Note {
             title: entry.title.clone(),
             slug: entry.slug.clone(),
@@ -289,7 +298,7 @@ impl VaultIndex {
             content_hash: content_hash(&content),
             content,
             layer: entry.layer.clone(),
-            metadata: Default::default(),
+            metadata,
         }))
     }
 

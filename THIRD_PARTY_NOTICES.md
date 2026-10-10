@@ -24,6 +24,28 @@ the SVG path data is copied verbatim; only the surrounding markup differs (the
 
 Apache 2.0 is compatible with AGPL-3.0 in this direction, so bundling is clean.
 
+### Fonts
+
+Four font families ship inside the web app, under `frontend/src/assets/fonts/`.
+Each is licensed under the SIL Open Font License, Version 1.1, and none of them
+declares a Reserved Font Name. The full licence text sits beside each family's
+files as `OFL.txt`.
+
+- **Bricolage Grotesque.** Copyright 2022 The Bricolage Grotesque Project
+  Authors. Source: <https://github.com/ateliertriay/bricolage>
+- **Newsreader.** Copyright 2020 The Newsreader Project Authors. Source:
+  <https://github.com/productiontype/Newsreader>
+- **Inter Tight.** Copyright 2022 The Inter Project Authors. Source:
+  <https://github.com/rsms/inter-tight>
+- **JetBrains Mono.** Copyright 2020 The JetBrains Mono Project Authors. Source:
+  <https://github.com/JetBrains/JetBrainsMono>
+
+The files are the `woff2` subsets Google Fonts serves for these families, one
+per script, unmodified. The OFL allows bundling and redistribution with other
+software provided the copyright notice and licence travel with the fonts, which
+the `OFL.txt` files do. It is compatible with distribution alongside
+AGPL-3.0 software.
+
 ---
 
 ## Downloaded at runtime

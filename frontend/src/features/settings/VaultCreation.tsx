@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 
+import { FolderPicker } from "./FolderPicker";
 import { SettingsModal } from "./SettingsModal";
 import type { GitBehavior } from "./vaultGitBehavior";
 import {
@@ -47,6 +48,9 @@ export function VaultCreationDialog({
   const [excludeDraft, setExcludeDraft] = useState("");
   const [kind, setKind] = useState<CreateVaultKind>("own");
   const [pathDraft, setPathDraft] = useState("");
+  // A folder is picked from the list (#430) unless the reader asks to type
+  // a path, for a folder mounted somewhere the list does not cover.
+  const [pathMode, setPathMode] = useState<"pick" | "type">("pick");
   const [behavior, setBehavior] = useState<GitBehavior>(
     defaultBehaviorFor("own"),
   );
@@ -113,6 +117,10 @@ export function VaultCreationDialog({
     const trimmedName = name.trim();
     if (!trimmedName) {
       setError("Enter a name for this Vault.");
+      return;
+    }
+    if (kind === "own" && pathMode === "pick" && !pathDraft.trim()) {
+      setError("Pick the folder that holds your notes, or type its path.");
       return;
     }
     const sourceError = validateCreateSource(finalSource);
@@ -202,7 +210,7 @@ export function VaultCreationDialog({
           <span className="settings-row-label">Where is this Vault?</span>
         </span>
         <div
-          className="settings-segmented"
+          className="settings-segmented settings-segmented-stackable"
           role="group"
           aria-label="Where is this Vault?"
         >
@@ -219,21 +227,49 @@ export function VaultCreationDialog({
         </div>
       </div>
 
-      {kind === "own" ? (
-        <label className="settings-row">
+      {kind === "own" && pathMode === "pick" ? (
+        <div className="folder-picker-field">
           <span>
-            <span className="settings-row-label">Folder path</span>
+            <span className="settings-row-label">Folder</span>
             <span className="settings-row-help">
-              A folder already on this server.
+              The folders Hatchdoor can see, with how many notes each holds.
             </span>
           </span>
-          <input
-            className="settings-input"
-            aria-label="Folder path"
-            value={pathDraft}
-            onChange={(event) => setPathDraft(event.target.value)}
-          />
-        </label>
+          <FolderPicker value={pathDraft} onPick={setPathDraft} />
+          <button
+            type="button"
+            className="folder-picker-more"
+            onClick={() => setPathMode("type")}
+          >
+            Type a path instead
+          </button>
+        </div>
+      ) : null}
+
+      {kind === "own" && pathMode === "type" ? (
+        <div className="folder-picker-field">
+          <label className="settings-row">
+            <span>
+              <span className="settings-row-label">Folder path</span>
+              <span className="settings-row-help">
+                A folder already on this server.
+              </span>
+            </span>
+            <input
+              className="settings-input"
+              aria-label="Folder path"
+              value={pathDraft}
+              onChange={(event) => setPathDraft(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="folder-picker-more"
+            onClick={() => setPathMode("pick")}
+          >
+            Pick from the list instead
+          </button>
+        </div>
       ) : null}
 
       <div className="settings-row">

@@ -120,7 +120,7 @@ overriding them.
 
 A Git repository should become a first-class way to supply and share a vault.
 The initial capability is described in more detail in
-[the managed Git vault proposal](https://github.com/BattermanZ/Hatchdoor/pull/18).
+[the managed Git vault proposal](https://github.com/BatterWorks/Hatchdoor/pull/18).
 
 From a product perspective, a user should be able to:
 

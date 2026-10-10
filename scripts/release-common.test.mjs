@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   CHECKLIST_ITEMS,
+  addWhatsNewSection,
+  draftHighlights,
+  highlightProblems,
+  whatsNewSection,
   DOCS_FRESHNESS_ITEM,
   compareVersions,
   hasEntries,
@@ -260,3 +264,61 @@ test("a ticked box inside pasted output does not tick the real item", () => {
   const parsed = parseChecklist(renderChecklist(`- [x] ${last}`));
   assert.equal(parsed.items.find((item) => item.text === last).checked, false);
 });
+
+test("drafts one line per entry, first sentence only, references dropped, action needed first", () => {
+  const body = `
+### Added
+- A new thing. It does more. [#12]
+- Another, with \`a.b\` inside ([#13]).
+
+### ⚠️ Breaking changes — action required on upgrade
+- Move the folder first. Then restart. [#14]
+`;
+  assert.deepEqual(draftHighlights(body), [
+    "- **Action needed:** Move the folder first.",
+    "- A new thing.",
+    "- Another, with `a.b` inside.",
+  ]);
+});
+
+test("a new section goes above older releases, or after the intro when there is none", () => {
+  const lines = ["- One.", "- Two.", "- Three."];
+  assert.equal(
+    addWhatsNewSection("# What's new\n\nIntro.\n", "2.8.0", "2026-10-20", lines),
+    "# What's new\n\nIntro.\n\n## v2.8.0 - 2026-10-20\n\n- One.\n- Two.\n- Three.\n",
+  );
+  const page = addWhatsNewSection(
+    "# What's new\n\nIntro.\n\n## v2.8.0 - 2026-10-20\n\n- Old.\n",
+    "2.9.0",
+    "2026-12-01",
+    lines,
+  );
+  assert.ok(page.indexOf("## v2.9.0") < page.indexOf("## v2.8.0"));
+  assert.equal(
+    whatsNewSection(page, "2.9.0").body.trim(),
+    "- One.\n- Two.\n- Three.",
+  );
+  assert.equal(whatsNewSection(page, "2.7.0"), null);
+});
+
+test("a section ships with 3 to 6 one-line items, action needed first", () => {
+  const items = (count) =>
+    Array.from({ length: count }, (_, index) => `- Line ${index}.`).join("\n");
+  assert.deepEqual(highlightProblems(`\n${items(3)}\n`), []);
+  assert.deepEqual(highlightProblems(items(6)), []);
+  assert.match(highlightProblems(items(2)).join(), /2 lines; a release has 3 to 6/);
+  assert.match(highlightProblems(items(7)).join(), /7 lines/);
+  assert.match(
+    highlightProblems(`- One.\n- **Action needed:** Two.\n- Three.`).join(),
+    /action-needed line comes after a plain one/,
+  );
+  assert.deepEqual(
+    highlightProblems(`- **Action needed:** One.\n- Two.\n- Three.`),
+    [],
+  );
+  assert.match(
+    highlightProblems(`${items(3)}\nA paragraph.`).join(),
+    /"A paragraph\." is not a one-line/,
+  );
+});
+

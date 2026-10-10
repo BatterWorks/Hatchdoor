@@ -15,7 +15,7 @@ docker build -t hatchdoor:local .
 permission-sensitive tests. It runs the default-feature suite, just like the
 same Cargo command outside Docker; feature-gated model/evaluation tests are not
 implicitly enabled. Production builds do not depend on this target. Callers
-that require tests before publication must run it first and propagate failure. `verification` derives from `chef` rather than from the dependency stage, so its
+that require tests before publication must run it first and propagate failure. The suite needs three things beyond the Rust sources: the `git` program, which `chef` installs; `frontend/vite.config.ts`, which the stage copies so the SPA test can compare the backend reserved prefixes with the service-worker denylist; and `frontend/public/link-preview.png`, which the link-preview test reads to check the actual image's dimensions and size. A new test that reads another file outside `src/` and `docs/user-vault` needs its own `COPY` here. `verification` derives from `chef` rather than from the dependency stage, so its
 first run on a builder compiles the test profile from scratch even when a release
 build is already cached. That is the expected cost of a separate profile, not a
 regression.
@@ -42,7 +42,22 @@ runtime image never depends on a mounted cache at runtime.
 | `CARGO_PROFILE_RELEASE_INCREMENTAL` | `false` | Opt into compiler reuse within changed release crates. |
 | `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` | `16` | Preserve Cargo's normal non-incremental release value when opting into incrementality. |
 | `CARGO_CACHE_NAMESPACE` | `hatchdoor` | Isolate persistent caches on a shared builder. |
-| `GIT_SHA` | Empty | Existing application build provenance value. |
+| `GIT_SHA` | Empty | The commit the image was built from. Written to the `org.opencontainers.image.revision` label and compiled into the binary, where a build that is not a release shows it in its version, as `2.8.0 (dev abc123)`. |
+| `HATCHDOOR_IMAGE` | Empty | How the image was built, `docker` or `podman`. Compiled into the binary, and reported as `image` by the opt-in usage report. Any other value, or none, reports `source`. |
+| `VERSION` | Empty | The release version, such as `2.8.0`, written to the `org.opencontainers.image.version` label. It also marks the build as a release: when it equals the version in `Cargo.toml`, the binary reports that plain version and the opt-in usage report says `channel: stable`. Without it, or with any other value, the build is a development build and reports `dev`. Pass it only for a release: a nightly or test image that passes the current version would report itself as that release. The version number itself always comes from `Cargo.toml`. |
+
+## Image labels
+
+The `runtime` stage labels every image, whatever builds it. Six [OCI labels](https://github.com/opencontainers/image-spec/blob/main/annotations.md) are fixed in the Dockerfile: `title`, `description`, `licenses`, `source`, `url` and `documentation` under `org.opencontainers.image.`. Update notifiers, scanners and Renovate read `source` to find the repository behind `battermanz/hatchdoor`. `io.modelcontextprotocol.server.name` is the name the [MCP registry](https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/package-types.mdx) compares with a `server.json` to prove who owns the image, so the two must change together.
+
+`version` and `revision` come from the `VERSION` and `GIT_SHA` build arguments and are empty strings when a build passes neither:
+
+```sh
+docker build --build-arg VERSION=2.8.0 --build-arg GIT_SHA="$(git rev-parse HEAD)" -t hatchdoor:local .
+docker inspect hatchdoor:local --format '{{json .Config.Labels}}'
+```
+
+`description`, `licenses` and `source` repeat `Cargo.toml`. Nothing runs the comparison for you, so after changing a label or one of those `Cargo.toml` fields, run `node --test scripts/dockerfile-labels.test.mjs`.
 
 ### Resource-limited builders
 

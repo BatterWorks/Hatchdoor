@@ -7,14 +7,29 @@
  *
  * Path data is copied verbatim from `google/material-design-icons` (Apache
  * 2.0); only the surrounding markup differs. See `THIRD_PARTY_NOTICES.md`.
- * Nothing is installed — nine icons do not justify a dependency (ADR-13).
+ * Nothing is installed — a few dozen icons do not justify a dependency (ADR-13).
  *
  * Icons size to `1em` and paint with `currentColor`, so a caller controls both
  * through ordinary font-size and color. They are `aria-hidden`: every icon here
  * sits inside a control that carries its own accessible name.
  */
 
-const VIEW_BOX = "0 -960 960 960";
+import {
+  FORMAT_INDENT_DECREASE_PATH,
+  FORMAT_INDENT_INCREASE_PATH,
+  FORMAT_LIST_BULLETED_PATH,
+  CHECKLIST_PATH,
+  FORMAT_H2_PATH,
+  FORMAT_BOLD_PATH,
+  FORMAT_ITALIC_PATH,
+  FORMAT_STRIKETHROUGH_PATH,
+  CODE_PATH,
+  FORMAT_INK_HIGHLIGHTER_PATH,
+  LINK_PATH,
+  UNDO_PATH,
+  REDO_PATH,
+  VIEW_BOX,
+} from "./iconPaths";
 
 function Icon({ path }: { path: string }) {
   return (
@@ -34,6 +49,13 @@ function Icon({ path }: { path: string }) {
 export function MenuIcon() {
   return (
     <Icon path="M120-240v-80h720v80H120Zm0-200v-80h720v80H120Zm0-200v-80h720v80H120Z" />
+  );
+}
+
+/** Material Symbols `toc`: the phone's "On this page" chip (#530). */
+export function TocIcon() {
+  return (
+    <Icon path="M120-280v-80h480v80H120Zm0-160v-80h480v80H120Zm0-160v-80h480v80H120Zm560 320v-80h160v80H680Zm0-160v-80h160v80H680Zm0-160v-80h160v80H680Z" />
   );
 }
 
@@ -95,4 +117,109 @@ export function SettingsIcon() {
   return (
     <Icon path="m370-80-16-128q-13-5-24.5-12T307-235l-119 50L78-375l103-78q-1-7-1-13.5v-27q0-6.5 1-13.5L78-585l110-190 119 50q11-8 23-15t24-12l16-128h220l16 128q13 5 24.5 12t22.5 15l119-50 110 190-103 78q1 7 1 13.5v27q0 6.5-2 13.5l103 78-110 190-118-50q-11 8-23 15t-24 12L590-80H370Zm70-80h79l14-106q31-8 57.5-23.5T639-327l99 41 39-68-86-65q5-14 7-29.5t2-31.5q0-16-2-31.5t-7-29.5l86-65-39-68-99 42q-22-23-48.5-38.5T533-694l-13-106h-79l-14 106q-31 8-57.5 23.5T321-633l-99-41-39 68 86 64q-5 15-7 30t-2 32q0 16 2 31t7 30l-86 65 39 68 99-42q22 23 48.5 38.5T427-266l13 106Zm42-180q58 0 99-41t41-99q0-58-41-99t-99-41q-59 0-99.5 41T342-480q0 58 40.5 99t99.5 41Zm-2-140Z" />
   );
+}
+
+export function HelpIcon() {
+  return (
+    <Icon path="M478-240q21 0 35.5-14.5T528-290q0-21-14.5-35.5T478-340q-21 0-35.5 14.5T428-290q0 21 14.5 35.5T478-240Zm-36-154h74q0-33 7.5-52t42.5-52q26-26 41-49.5t15-56.5q0-56-41-86t-97-30q-57 0-92.5 30T342-618l66 26q5-18 22.5-39t53.5-21q32 0 48 17.5t16 38.5q0 20-12 37.5T506-526q-44 39-54 59t-10 73Zm38 314q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z" />
+  );
+}
+
+export function CloseIcon() {
+  return (
+    <Icon path="m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z" />
+  );
+}
+
+export function HomeIcon() {
+  return (
+    <Icon path="M240-200h120v-240h240v240h120v-360L480-740 240-560v360Zm-80 80v-480l320-240 320 240v480H520v-240h-80v240H160Zm320-350Z" />
+  );
+}
+
+export function ArrowBackIcon() {
+  return (
+    <Icon path="m313-440 224 224-57 56-320-320 320-320 57 56-224 224h487v80H313Z" />
+  );
+}
+
+export function OpenInFullIcon() {
+  return (
+    <Icon path="M120-120v-320h80v184l504-504H520v-80h320v320h-80v-184L256-200h184v80H120Z" />
+  );
+}
+
+export function CloseFullscreenIcon() {
+  return (
+    <Icon path="m136-80-56-56 264-264H160v-80h320v320h-80v-184L136-80Zm344-400v-320h80v184l264-264 56 56-264 264h184v80H480Z" />
+  );
+}
+
+/* The live editor's formatting (#541): the keyboard bar on touch and the
+   floating toolbar on desktop. The toolbar is built outside React, so the
+   paths live in `iconPaths.ts`, which both read. */
+
+/** Material Symbols `format_indent_decrease`. */
+export function FormatIndentDecreaseIcon() {
+  return <Icon path={FORMAT_INDENT_DECREASE_PATH} />;
+}
+
+/** Material Symbols `format_indent_increase`. */
+export function FormatIndentIncreaseIcon() {
+  return <Icon path={FORMAT_INDENT_INCREASE_PATH} />;
+}
+
+/** Material Symbols `format_list_bulleted`. */
+export function FormatListBulletedIcon() {
+  return <Icon path={FORMAT_LIST_BULLETED_PATH} />;
+}
+
+/** Material Symbols `checklist`. */
+export function ChecklistIcon() {
+  return <Icon path={CHECKLIST_PATH} />;
+}
+
+/** Material Symbols `format_h2`. */
+export function FormatH2Icon() {
+  return <Icon path={FORMAT_H2_PATH} />;
+}
+
+/** Material Symbols `format_bold`. */
+export function FormatBoldIcon() {
+  return <Icon path={FORMAT_BOLD_PATH} />;
+}
+
+/** Material Symbols `format_italic`. */
+export function FormatItalicIcon() {
+  return <Icon path={FORMAT_ITALIC_PATH} />;
+}
+
+/** Material Symbols `format_strikethrough`. */
+export function FormatStrikethroughIcon() {
+  return <Icon path={FORMAT_STRIKETHROUGH_PATH} />;
+}
+
+/** Material Symbols `code`. */
+export function CodeIcon() {
+  return <Icon path={CODE_PATH} />;
+}
+
+/** Material Symbols `format_ink_highlighter`. */
+export function FormatInkHighlighterIcon() {
+  return <Icon path={FORMAT_INK_HIGHLIGHTER_PATH} />;
+}
+
+/** Material Symbols `link`. */
+export function LinkIcon() {
+  return <Icon path={LINK_PATH} />;
+}
+
+/** Material Symbols `undo`. */
+export function UndoIcon() {
+  return <Icon path={UNDO_PATH} />;
+}
+
+/** Material Symbols `redo`. */
+export function RedoIcon() {
+  return <Icon path={REDO_PATH} />;
 }

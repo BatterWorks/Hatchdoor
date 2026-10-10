@@ -6,7 +6,13 @@
  * (`react-refresh/only-export-components`).
  */
 
-import type { VaultSource, VaultSummary } from "../../types";
+import type {
+  FolderListing,
+  FolderListingEntry,
+  FolderNoteCount,
+  VaultSource,
+  VaultSummary,
+} from "../../types";
 import {
   DEFAULT_POLL_MINUTES,
   missingRequiredRepositoryUrl,
@@ -97,4 +103,71 @@ export async function createVault(params: {
   if (!ok || !typed.vault)
     return { ok: false, code: typed.code, message: typed.message };
   return { ok: true, vault: typed.vault };
+}
+
+export type FolderListingResult =
+  { ok: true; listing: FolderListing } | { ok: false; message: string };
+
+/** `GET /api/v1/folders` (#429): one folder under the Vault mount, `""`
+ * for the mount itself. */
+export async function fetchFolderListing(
+  path: string,
+): Promise<FolderListingResult> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  const { ok, payload } = await requestJson(`/api/v1/folders${query}`);
+  const typed = payload as Partial<FolderListing> & { message?: string };
+  if (!ok || !Array.isArray(typed.folders) || typeof typed.root !== "string")
+    return {
+      ok: false,
+      message: typed.message ?? "Could not list the folders Hatchdoor can see.",
+    };
+  return { ok: true, listing: typed as FolderListing };
+}
+
+/** A folder Hatchdoor refused to make: the server's stable `code` and its
+ * plain message. */
+export type CreateFolderRefusal = { ok: false; code?: string; message: string };
+
+export type CreateFolderResult =
+  { ok: true; folder: FolderListingEntry } | CreateFolderRefusal;
+
+/** `POST /api/v1/folders` (#494, ADR-44): make one new, empty folder called
+ * `name` in the folder at `parent`, `""` for the mount itself. */
+export async function createFolder(
+  parent: string,
+  name: string,
+): Promise<CreateFolderResult> {
+  const { ok, payload } = await requestJson("/api/v1/folders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent, name }),
+  });
+  const typed = payload as Partial<FolderListingEntry> & {
+    code?: string;
+    message?: string;
+  };
+  if (!ok || typeof typed.path !== "string" || typeof typed.name !== "string")
+    return {
+      ok: false,
+      code: typed.code,
+      message: typed.message ?? "Could not make the folder.",
+    };
+  return { ok: true, folder: typed as FolderListingEntry };
+}
+
+/** The absolute folder path a picked folder is created from: the mount's
+ * absolute `root` joined with the folder's mount-relative `path`. */
+export function mountFolderPath(root: string, path: string): string {
+  const base = root.length > 1 ? root.replace(/\/+$/, "") : root;
+  if (!path) return base;
+  return base === "/" ? `/${path}` : `${base}/${path}`;
+}
+
+/** "1,280 notes", "no notes", or "at least 10,000 notes" when counting
+ * stopped early. */
+export function noteCountLabel(markdown: FolderNoteCount): string {
+  const number = markdown.count.toLocaleString("en-US");
+  if (markdown.at_least) return `at least ${number} notes`;
+  if (markdown.count === 0) return "no notes";
+  return markdown.count === 1 ? "1 note" : `${number} notes`;
 }

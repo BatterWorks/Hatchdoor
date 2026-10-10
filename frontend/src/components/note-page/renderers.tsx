@@ -10,8 +10,6 @@ import {
   MermaidDiagram,
 } from "./RendererComponents";
 import { markAsParagraph } from "./paragraphs";
-import { EditableBlock } from "./EditableBlock";
-import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
 import { OrphanedMarkerNotice, SavedQueryBlock } from "./SavedQueryBlock";
 import { ORPHANED_MARKER_ELEMENT } from "./savedQueries";
@@ -19,13 +17,23 @@ import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 import type { VaultId } from "../../types";
 
-export function createNoteMarkdownComponents(
-  vaultId: VaultId,
-  noteRelativePath: string,
+type MarkdownCodeProps = {
+  children?: ReactNode;
+  className?: string;
+  node?: { position?: { start?: { line?: number } } };
+};
+
+/**
+ * The renderers that never touch a Vault: code blocks, callouts, lists,
+ * tables and headings. Both the note renderer and the manual renderer build
+ * on these, so the manual looks exactly like a note.
+ */
+function createSharedMarkdownComponents(
   headingIdsBySourceLine: Map<number, string>,
-  options: { editable?: boolean } = {},
+  renderBaseBlock: (content: string, props: MarkdownCodeProps) => ReactNode,
+  hiddenHeadingLine?: number,
 ) {
-  const components = {
+  return {
     pre(props: { children?: ReactNode }) {
       const first = Children.toArray(props.children)[0];
       if (
@@ -36,11 +44,7 @@ export function createNoteMarkdownComponents(
       }
       return <pre>{props.children}</pre>;
     },
-    code(props: {
-      children?: ReactNode;
-      className?: string;
-      node?: { position?: { start?: { line?: number } } };
-    }) {
+    code(props: MarkdownCodeProps) {
       const { children, className } = props;
       const content = String(children ?? "").replace(/\n$/, "");
       const match = /language-(\w+)/.exec(className || "");
@@ -50,12 +54,7 @@ export function createNoteMarkdownComponents(
       }
 
       if (match?.[1] === "base") {
-        return (
-          <SavedQueryBlock
-            source={content}
-            line={props.node?.position?.start?.line}
-          />
-        );
+        return renderBaseBlock(content, props);
       }
 
       if (!match) {
@@ -64,6 +63,120 @@ export function createNoteMarkdownComponents(
 
       return <CodeBlock language={match[1]} content={content} />;
     },
+    input(props: { type?: string; checked?: boolean; className?: string }) {
+      // mdast-util-to-hast emits task checkboxes disabled, and a disabled input
+      // fires no click events at all, so the toggle on the li would never be
+      // reached. Enabling it also gives the checkbox a keyboard path: Space
+      // fires a click, which bubbles to the same handler.
+      if (props.type !== "checkbox") {
+        return <input {...props} />;
+      }
+      return (
+        <input
+          type="checkbox"
+          className={props.className}
+          checked={props.checked ?? false}
+          disabled
+          onChange={() => {}}
+        />
+      );
+    },
+    li(props: { children?: ReactNode; className?: string }) {
+      return <ListItem className={props.className}>{props.children}</ListItem>;
+    },
+    blockquote(props: { children?: ReactNode }) {
+      return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+    },
+    // A `hatchdoor-query` marker naming no block (#276): see
+    // remarkHideQueryMarkers.
+    [ORPHANED_MARKER_ELEMENT](props: { "data-name"?: string }) {
+      return <OrphanedMarkerNotice name={props["data-name"]} />;
+    },
+    table(props: { children?: ReactNode }) {
+      return (
+        <div className="table-wrap">
+          <table>{props.children}</table>
+        </div>
+      );
+    },
+    h1(props: MarkdownHeadingProps) {
+      return renderHeading(
+        "h1",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+        hiddenHeadingLine,
+      );
+    },
+    h2(props: MarkdownHeadingProps) {
+      return renderHeading(
+        "h2",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+        hiddenHeadingLine,
+      );
+    },
+    h3(props: MarkdownHeadingProps) {
+      return renderHeading(
+        "h3",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+        hiddenHeadingLine,
+      );
+    },
+    h4(props: MarkdownHeadingProps) {
+      return renderHeading(
+        "h4",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+        hiddenHeadingLine,
+      );
+    },
+    h5(props: MarkdownHeadingProps) {
+      return renderHeading(
+        "h5",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+        hiddenHeadingLine,
+      );
+    },
+    h6(props: MarkdownHeadingProps) {
+      return renderHeading(
+        "h6",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+        hiddenHeadingLine,
+      );
+    },
+  };
+}
+
+export function createNoteMarkdownComponents(
+  vaultId: VaultId,
+  noteRelativePath: string,
+  headingIdsBySourceLine: Map<number, string>,
+  options: {
+    /** The body line of a heading that only repeats the note's title (#530),
+     * kept in the DOM but not drawn. */
+    hiddenHeadingLine?: number;
+  } = {},
+) {
+  const components = {
+    ...createSharedMarkdownComponents(
+      headingIdsBySourceLine,
+      (content, props) => (
+        <SavedQueryBlock
+          source={content}
+          line={props.node?.position?.start?.line}
+        />
+      ),
+      options.hiddenHeadingLine,
+    ),
     a(props: { href?: string; children?: ReactNode }) {
       const { href, children } = props;
       if (typeof href === "string" && href.startsWith("/__missing__/")) {
@@ -154,159 +267,49 @@ export function createNoteMarkdownComponents(
         />
       );
     },
-    input(props: { type?: string; checked?: boolean; className?: string }) {
-      // mdast-util-to-hast emits task checkboxes disabled, and a disabled input
-      // fires no click events at all, so the toggle on the li would never be
-      // reached. Enabling it also gives the checkbox a keyboard path: Space
-      // fires a click, which bubbles to the same handler.
-      if (props.type !== "checkbox") {
-        return <input {...props} />;
-      }
+  };
+
+  return components;
+}
+
+/**
+ * Renderers for the bundled manual (ADR-38), which belongs to no Vault. A
+ * `base` block shows as its source, since a saved query has no Vault to run
+ * against, and nothing here calls a Vault endpoint. `renderLink` decides
+ * where each link goes; the manual's own links stay inside Help.
+ */
+export function createManualMarkdownComponents(
+  headingIdsBySourceLine: Map<number, string>,
+  renderLink: (href: string | undefined, children: ReactNode) => ReactNode,
+) {
+  return {
+    ...createSharedMarkdownComponents(headingIdsBySourceLine, (content) => (
+      <CodeBlock language="base" content={content} />
+    )),
+    a(props: { href?: string; children?: ReactNode }) {
+      return renderLink(props.href, props.children);
+    },
+    p: markAsParagraph(function ManualParagraph(props: {
+      children?: ReactNode;
+    }) {
+      return <p>{props.children}</p>;
+    }),
+    img(props: { src?: string; alt?: string }) {
       return (
-        <input
-          type="checkbox"
-          className={props.className}
-          checked={props.checked ?? false}
-          disabled={!options.editable}
-          aria-label={options.editable ? "Toggle task" : undefined}
-          onChange={() => {}}
+        <img
+          src={props.src}
+          alt={props.alt ?? ""}
+          loading="lazy"
+          decoding="async"
         />
       );
     },
-    li(props: { children?: ReactNode; className?: string; node?: unknown }) {
-      // Absent from EDITABLE_UNITS on purpose: a wrapped item is addressed one
-      // line at a time (D25a), which only this renderer can see, so it owns
-      // its own EditableBlock rather than being wrapped in one.
-      return (
-        <ListItem
-          node={props.node}
-          className={props.className}
-          editable={options.editable ?? false}
-        >
-          {props.children}
-        </ListItem>
-      );
-    },
-    blockquote(props: { children?: ReactNode; node?: unknown }) {
-      return (
-        <CalloutOrQuote node={props.node}>{props.children}</CalloutOrQuote>
-      );
-    },
-    // A `hatchdoor-query` marker naming no block (#276): see
-    // remarkHideQueryMarkers.
-    [ORPHANED_MARKER_ELEMENT](props: { "data-name"?: string }) {
-      return <OrphanedMarkerNotice name={props["data-name"]} />;
-    },
-    table(props: { children?: ReactNode }) {
-      return (
-        <div className="table-wrap">
-          <table>{props.children}</table>
-        </div>
-      );
-    },
-    h1(props: MarkdownHeadingProps) {
-      return renderHeading(
-        "h1",
-        props.children,
-        headingIdsBySourceLine,
-        props.node,
-      );
-    },
-    h2(props: MarkdownHeadingProps) {
-      return renderHeading(
-        "h2",
-        props.children,
-        headingIdsBySourceLine,
-        props.node,
-      );
-    },
-    h3(props: MarkdownHeadingProps) {
-      return renderHeading(
-        "h3",
-        props.children,
-        headingIdsBySourceLine,
-        props.node,
-      );
-    },
-    h4(props: MarkdownHeadingProps) {
-      return renderHeading(
-        "h4",
-        props.children,
-        headingIdsBySourceLine,
-        props.node,
-      );
-    },
-    h5(props: MarkdownHeadingProps) {
-      return renderHeading(
-        "h5",
-        props.children,
-        headingIdsBySourceLine,
-        props.node,
-      );
-    },
-    h6(props: MarkdownHeadingProps) {
-      return renderHeading(
-        "h6",
-        props.children,
-        headingIdsBySourceLine,
-        props.node,
-      );
-    },
   };
-
-  return options.editable ? withEditableBlocks(components) : components;
 }
 
 // Block-level entries get wrapped so each rendered block can be swapped for its
 // own source lines. Inline entries (a, code, img) are deliberately absent: they
 // belong to the block that contains them, not to a range of their own.
-const EDITABLE_UNITS: Record<string, UnitType> = {
-  p: "paragraph",
-  h1: "heading",
-  h2: "heading",
-  h3: "heading",
-  h4: "heading",
-  h5: "heading",
-  h6: "heading",
-  // D27: the tr is the unit, not the td. mdast gives tr and td identical
-  // ranges, and the delimiter row belongs to no node at all.
-  tr: "table row",
-  pre: "code block",
-};
-
-type ComponentMap = Record<string, (props: never) => ReactNode>;
-
-function withEditableBlocks<T extends ComponentMap>(components: T): T {
-  const wrapped = { ...components } as ComponentMap;
-
-  for (const [tag, unitType] of Object.entries(EDITABLE_UNITS)) {
-    const Original = components[tag];
-    const Wrapped = (props: { node?: unknown; children?: ReactNode }) => (
-      <EditableBlock node={props.node} unitType={unitType}>
-        {/* Called rather than rendered, deliberately: this has to yield the
-            intrinsic element (a <p>, an <li>) so EditableBlock can clone the
-            handlers straight onto it. Rendering it as a component would make
-            the child a component element, which falls back to a wrapper div
-            and takes the tabIndex off the real element. The cost is that a
-            wrapped renderer may not use hooks; none do, and the keyboard-entry
-            tests fail loudly if this changes. */}
-        {Original
-          ? (Original as (p: unknown) => ReactNode)(props)
-          : createElement(tag, null, props.children)}
-      </EditableBlock>
-    );
-    wrapped[tag] = Wrapped as (props: never) => ReactNode;
-  }
-
-  // The paragraph marker must survive wrapping, or callout detection stops
-  // recognising its own first child.
-  if (wrapped.p) {
-    markAsParagraph(wrapped.p);
-  }
-
-  return wrapped as T;
-}
-
 type MarkdownElementNode = {
   children?: Array<{
     type?: string;
@@ -363,12 +366,20 @@ function renderHeading(
   children: ReactNode,
   headingIdsBySourceLine: Map<number, string>,
   node: MarkdownHeadingProps["node"],
+  hiddenHeadingLine?: number,
 ) {
   const text = flattenText(children).trim();
-  const id =
-    headingIdsBySourceLine.get(node?.position?.start?.line ?? -1) ??
-    slugifyHeading(text);
-  return createElement(tag, { id }, children);
+  const line = node?.position?.start?.line ?? -1;
+  const id = headingIdsBySourceLine.get(line) ?? slugifyHeading(text);
+  // The note's own title, repeated as its first heading, stays in the DOM
+  // (line-addressed editing counts on every block being there) but is not
+  // drawn: the page already set the title above the body (#530).
+  const hidden = hiddenHeadingLine !== undefined && line === hiddenHeadingLine;
+  return createElement(
+    tag,
+    hidden ? { id, className: "note-heading-duplicate", hidden: true } : { id },
+    children,
+  );
 }
 
 function isExternalHref(href: string | undefined): boolean {

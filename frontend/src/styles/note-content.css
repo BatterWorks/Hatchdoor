@@ -9,15 +9,23 @@
   overflow-x: hidden;
 }
 
-/* Two-col layout: body + TOC
-   max-width = 1120px note + gap + 220px TOC, so the note column is exactly 1120px */
+/* Two-col layout: body + TOC. The note column is the reading measure: 38rem
+   holds about 75 characters of the body serif at 1.18rem, and the title,
+   properties, tables and diagrams all keep to it so the page has one edge. */
 .note-page-layout {
+  --note-measure: 38rem;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;
   gap: 1.4rem;
   align-items: start;
-  max-width: calc(1120px + 1.4rem + 220px);
+  max-width: calc(var(--note-measure) + 1.4rem + 220px);
   margin: 0 auto;
+}
+
+/* Source and the conflict review are Markdown in a monospace face, and the
+   review sets two versions side by side: they keep the wide column. */
+.note-page-layout:has(.note-editor) {
+  --note-measure: 1120px;
 }
 
 /* Article wrapper */
@@ -352,6 +360,14 @@
   position: relative;
 }
 
+/* A dash's worth of room, at every depth and inside an ordered list too. It is
+   set on the list itself, here beside the rule that reads it: declared anywhere
+   else it can be deleted with its neighbours, and an undefined inset is zero,
+   which puts the marker on top of the text (#547). */
+.note-body ul {
+  --li-inset: 1.4rem;
+}
+
 /* D25a: a wrapped list item is addressed one source line at a time, so each
    line is its own element. They are lines of one item, not separate blocks, so
    consecutive lines sit on their own baselines with no gap. The last line keeps
@@ -426,12 +442,6 @@
    times the width of "1.". */
 .note-body ol ol ol {
   --li-inset: 2.7rem;
-}
-
-/* A bullet nested inside an ordered list is still a bullet, and needs only a
-   dash's worth of room. */
-.note-body ol ul {
-  --li-inset: 1.4rem;
 }
 
 /* Use > so only direct ol children get the counter — prevents ul sub-items
@@ -638,7 +648,9 @@
    the marker sits, in the saved query note type above. */
 
 /* Images */
-.note-body img {
+/* Not inside the live editor, whose own image widget and CodeMirror's
+   caret-positioning buffers (also imgs) carry their own sizing. */
+.note-body img:not(.live-editor img) {
   display: block;
   max-width: 100%;
   height: auto;
@@ -660,7 +672,9 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: rgba(255, 255, 255, 0.06);
+  /* A faint lift off the slab, mixed from the code ink so it follows the
+     slab and not the page theme. */
+  background: color-mix(in oklab, var(--code-ink) 6%, transparent);
   padding: 0.3rem 0.7rem;
   border-bottom: 1px solid var(--code-rule);
 }
@@ -1147,136 +1161,534 @@
   outline-offset: 1px;
 }
 
-/* ── Inline editing ─────────────────────────────────────────────────────────
-   The affordance is a rule in the left gutter, not a fill or a box. It reuses
-   the device the list bullet already uses, so it reads as "this is a line of
-   your content" rather than as a control, and it costs no horizontal space, so
-   nothing reflows when a block is entered.
-
-   It is drawn with ::after because ::before is already the list marker, and
-   .editable-block is the rendered element itself: wrapping blocks in a div
-   would sit between a ul and its li children and break every marker rule.
-
-   The gutter is borrowed from .note-pane's padding, which is 56px on desktop
-   and 16px on a phone, so the offset is a token rather than a constant. */
-:root {
-  --edit-gutter: 0.75rem;
-  /* The bullet inset on .note-body li. */
-  --li-inset: 1.4rem;
+/* ── Live editor ────────────────────────────────────────────────────────
+   One CodeMirror over the whole note body (#540). The editor inherits the
+   note's typography through the library's custom properties, mapped here
+   onto Forge tokens; nothing below names a colour or a size of its own. */
+.live-editor .atomic-cm-editor,
+[data-theme="light"] .live-editor .atomic-cm-editor,
+[data-theme="dark"] .live-editor .atomic-cm-editor {
+  --atomic-editor-font: var(--font-serif);
+  --atomic-editor-font-mono: var(--font-mono);
+  --atomic-editor-body-size: 1.18rem;
+  --atomic-editor-body-leading: 1.62;
+  --atomic-editor-measure: 100%;
+  --atomic-editor-fg: var(--ink);
+  --atomic-editor-fg-muted: var(--muted);
+  --atomic-editor-fg-faint: var(--tertiary);
+  --atomic-editor-bg: transparent;
+  --atomic-editor-bg-panel: var(--paper);
+  --atomic-editor-bg-surface: var(--paper-2);
+  --atomic-editor-border: var(--rule);
+  --atomic-editor-accent: var(--hot);
+  --atomic-editor-accent-bright: var(--hot);
+  --atomic-editor-accent-soft: var(--hot-soft);
+  --atomic-editor-link: var(--hot);
+  --atomic-editor-link-hover: var(--hot);
+  --atomic-editor-code-bg: var(--code-surface);
+  --atomic-editor-code-rail: var(--code-rule);
+  --atomic-editor-selection-bg: var(--highlight);
+  --atomic-editor-search-bg: var(--highlight);
+  --atomic-editor-search-bg-active: var(--highlight-active);
+  --atomic-editor-radius: var(--radius-none);
+  --atomic-editor-hl-keyword: var(--code-ink);
+  --atomic-editor-hl-string: var(--code-ink-soft);
+  --atomic-editor-hl-number: var(--code-ink);
+  --atomic-editor-hl-comment: var(--code-ink-soft);
+  --atomic-editor-hl-type: var(--code-ink);
+  --atomic-editor-hl-function: var(--code-ink);
+  --atomic-editor-hl-property: var(--code-ink);
+  --atomic-editor-hl-regexp: var(--code-ink);
+  --atomic-editor-hl-escape: var(--code-ink);
+  --atomic-editor-hl-tag: var(--code-ink);
+  --atomic-editor-hl-variable: var(--code-ink);
+  --atomic-editor-hl-operator: var(--code-ink-soft);
+  --atomic-editor-hl-invalid: var(--err-fg);
 }
 
-.note-body .editable-block {
-  position: relative;
-  cursor: text;
-  /* Entry on touch is a double tap, and the viewport does not disable
-     double-tap-to-zoom, so without this iOS zooms the page instead of opening
-     the block. `manipulation` drops double-tap zoom and the legacy click delay
-     while leaving panning and pinch-zoom alone, so scrolling from a paragraph
-     and zooming for legibility both still work. */
-  touch-action: manipulation;
+/* The note pane scrolls, not the editor, so the editor grows with its text. */
+.live-editor .cm-editor {
+  height: auto;
+}
+.live-editor .cm-scroller {
+  overflow: visible !important;
+}
+.live-editor .cm-editor.cm-focused {
+  outline: none;
+}
+.live-editor .cm-content {
+  caret-color: var(--hot);
+  padding: 0 0 4rem;
+}
+.live-editor .cm-activeLine {
+  background: transparent;
+}
+.live-editor .cm-cursor {
+  border-left-color: var(--hot);
 }
 
-.note-body .editable-block::after {
-  content: "";
-  position: absolute;
-  left: calc(var(--edit-gutter) * -1);
-  top: 0.15em;
-  bottom: 0.15em;
+/* Inline code is the reading view's chip. The library fills it with
+   --atomic-editor-code-bg, the fenced block's dark slab, and leaves the text
+   to whichever syntax colour the line carries, so both are set here. */
+.live-editor .cm-atomic-inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--paper-2);
+  padding: 0.05rem 0.35rem;
+  color: var(--ink);
+  border-radius: var(--radius-none);
+}
+.live-editor .cm-atomic-inline-code * {
+  color: var(--ink);
+}
+
+/* Headings in the note's own faces, as the reading view draws them. */
+.live-editor .cm-line.cm-atomic-h1 {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
+  letter-spacing: -0.012em;
+}
+.live-editor .cm-line.cm-atomic-h2 {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 500;
+}
+.live-editor .cm-line.cm-atomic-h3,
+.live-editor .cm-line.cm-atomic-h4 {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+}
+
+/* An image drawn under the line that embeds it. */
+.live-editor-image {
+  margin: 0.6rem 0 1rem;
+}
+.live-editor-image img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+/* Rendered blocks (#544): a mermaid fence, a `base` fence, `$$` math and a
+   PDF embed, drawn by the reading view's own components in place of their
+   source while the caret is elsewhere. They inherit the note-body rules
+   those components already have; only the host is styled here. */
+.live-editor-block {
+  margin: 0.6rem 0 1rem;
+  font-family: var(--font-serif);
+  font-size: 1.18rem;
+  line-height: 1.62;
+}
+/* The diagram arrives a tick after the host, so the host holds the room
+   first and the lines under the caret do not jump when it lands. */
+.live-editor-mermaid {
+  min-height: 6rem;
+}
+.live-editor-mermaid .mermaid {
+  margin: 0;
+}
+.live-editor-saved-query .table-wrap {
+  margin: 0;
+}
+.live-editor-pdf .pdf-preview {
+  margin: 0;
+}
+.live-editor-math {
+  text-align: center;
+  color: var(--ink);
+}
+.live-editor .cm-line .live-editor-math-inline {
+  color: var(--ink);
+}
+
+/* Callouts (#544): the reading view's accent, by the same `.callout-<kind>`
+   rules, on each line of the quote. The spine replaces the library's
+   blockquote rail and the tint is the reading view's 12% mix. */
+.live-editor .cm-line.live-editor-callout {
+  --callout-accent: var(--muted);
+  border-left: 3px solid var(--callout-accent);
+  background: color-mix(in oklab, var(--callout-accent) 12%, var(--paper));
+  color: var(--ink-soft);
+  padding-left: 0.95rem;
+}
+.live-editor .cm-line.live-editor-callout-title {
+  margin-top: 1.6rem;
+  padding-top: 0.5rem;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
+  font-style: normal;
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  line-height: 2.2;
+  color: var(--callout-accent);
+}
+.live-editor .cm-line.live-editor-callout-body {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.02rem;
+  line-height: 1.55;
+}
+.live-editor .cm-line.live-editor-callout-last {
+  padding-bottom: 0.6rem;
+  margin-bottom: 1.6rem;
+}
+/* A title line that is also the last line still sits off the bottom edge. */
+.live-editor .cm-line.live-editor-callout-title.live-editor-callout-last {
+  padding-bottom: 0.5rem;
+}
+
+/* Search hits, the reading view's mark in editor clothing. */
+.live-editor .search-hit {
+  background: var(--highlight);
+  color: var(--ink);
+}
+
+/* The floating toolbar over a selection (desktop only). Ink on paper
+   inverted, like the topbar menu, so it reads as a control over the text.
+   CodeMirror puts its own tooltip class on this same element, and the
+   library's theme styles that class, so the selector has to outrank it. */
+.live-editor .cm-tooltip.live-editor-toolbar {
+  display: inline-flex;
+  gap: 0.1rem;
+  padding: 0.2rem;
+  border: 0;
+  background: var(--ink);
+  color: var(--bg);
+  box-shadow: var(--shadow-float);
+  border-radius: var(--radius-none);
+  font-family: var(--font-sans);
+}
+.live-editor-toolbar button {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.15rem;
+  min-width: 1.9rem;
+  height: 1.9rem;
+  padding: 0 0.3rem;
+  cursor: pointer;
+}
+.live-editor-toolbar button:hover {
+  background: var(--ink-soft);
+  color: var(--hot);
+}
+/* Between what the selection is and what its line is. */
+.live-editor-toolbar-gap {
+  align-self: stretch;
   width: 1px;
+  margin: 0.25rem 0.2rem;
+  background: var(--ink-soft);
+}
+
+/* The `/` menu and `[[` completion, in the search dialog's idiom. */
+.live-editor .cm-tooltip.cm-tooltip-autocomplete {
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+.live-editor .cm-tooltip-autocomplete ul li {
+  padding: 0.35rem 0.7rem;
+}
+.live-editor .cm-tooltip-autocomplete ul li[aria-selected] {
+  background: var(--hot-soft);
+  color: var(--ink);
+}
+.live-editor .cm-completionDetail {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-style: normal;
+  margin-left: 0.8rem;
+}
+
+/* The find and replace bar (Ctrl+F). The library ships it with its own dark
+   gradient buttons, rounded fields and the browser's serif; here it is the
+   system's field (§18) and default button (§25) on a paper strip. */
+.live-editor .cm-panels {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+}
+/* CodeMirror already keeps the bar stuck to the top of the pane. A container,
+   so the bar lays itself out by the width it has and not by the window's. */
+.live-editor .cm-panels-top {
+  container-type: inline-size;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 1rem;
+}
+.live-editor .cm-panel.cm-search {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 2.4rem 0.6rem 0.7rem;
+  background: var(--paper);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+/* Three rows, in the order the controls come in the document, so Tab walks
+   them as they read: find, its options, then replace. The library's own line
+   break is not a usable flex item, so it is dropped and the rows are made by
+   two full-width spacers placed between the groups. */
+.live-editor .cm-panel.cm-search br {
+  display: none;
+}
+.live-editor .cm-panel.cm-search::before,
+.live-editor .cm-panel.cm-search::after {
+  content: "";
+  flex-basis: 100%;
+  order: 1;
+}
+.live-editor .cm-panel.cm-search label {
+  order: 2;
+}
+.live-editor .cm-panel.cm-search::after {
+  order: 3;
+}
+.live-editor .cm-panel.cm-search [name="replace"],
+.live-editor .cm-panel.cm-search [name="replaceAll"] {
+  order: 4;
+}
+.live-editor .cm-panel.cm-search .cm-textfield {
+  width: 14rem;
+  max-width: 100%;
+  margin: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-none);
+  padding: 0.35rem 0.55rem;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  transition: border-color var(--dur) var(--ease);
+}
+.live-editor .cm-panel.cm-search .cm-textfield::placeholder {
+  color: var(--muted);
+}
+.live-editor .cm-panel.cm-search .cm-textfield:focus {
+  outline: none;
+  border-color: var(--hot);
+}
+.live-editor .cm-panel.cm-search .cm-button {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-none);
+  padding: 0.4rem 0.7rem;
+  background: var(--bg);
+  background-image: none;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+@media (hover: hover) {
+  .live-editor .cm-panel.cm-search .cm-button:hover {
+    background: var(--paper-2);
+    border-color: var(--rule-strong);
+  }
+}
+.live-editor .cm-panel.cm-search .cm-button:active {
   background: var(--hot);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease);
+  background-image: none;
+  color: var(--bg);
+  border-color: var(--hot);
+}
+.live-editor .cm-panel.cm-search .cm-button:focus-visible,
+.live-editor .cm-panel.cm-search input[type="checkbox"]:focus-visible,
+.live-editor .cm-panel.cm-search button[name="close"]:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+.live-editor .cm-panel.cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0.6rem 0 0;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search input[type="checkbox"] {
+  appearance: none;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-none);
+  background: var(--bg);
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search input[type="checkbox"]:checked {
+  border-color: var(--hot);
+  background: var(--hot);
+  box-shadow: inset 0 0 0 2px var(--bg);
+}
+.live-editor .cm-panel.cm-search button[name="close"] {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.5rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-none);
+  color: var(--muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search button[name="close"]:hover {
+  color: var(--ink);
+}
+.live-editor .cm-searchMatch {
+  border-radius: var(--radius-none);
+  background: var(--highlight);
+  color: var(--ink);
+}
+.live-editor .cm-searchMatch.cm-searchMatch-selected {
+  background: var(--hot-soft);
+  outline: 1px solid var(--hot);
 }
 
-.note-body .editable-block:hover::after {
-  opacity: 0.45;
+/* A narrow bar: each field takes a full row and its buttons share the row
+   under it in equal parts, so Next, Previous and Select all sit together. */
+@container (max-width: 36rem) {
+  .live-editor .cm-panel.cm-search {
+    padding-right: 0.7rem;
+  }
+  .live-editor .cm-panel.cm-search .cm-textfield {
+    flex: 1 0 100%;
+    width: auto;
+  }
+  /* The close button keeps the corner beside the find field. */
+  .live-editor .cm-panel.cm-search .cm-textfield[name="search"] {
+    flex: 0 0 calc(100% - 2.6rem);
+  }
+  .live-editor .cm-panel.cm-search .cm-button {
+    flex: 1 1 0;
+    padding-inline: 0.3rem;
+    white-space: nowrap;
+  }
+  .live-editor .cm-panel.cm-search label {
+    margin-right: 0.3rem;
+  }
+  /* The full-width replace field already starts its own row. */
+  .live-editor .cm-panel.cm-search::after {
+    display: none;
+  }
 }
-
-/* The active block: same device at full weight, no ring and no fill, so it
-   does not fight the borders .callout and .table-wrap already carry. */
-.note-body .editable-block.is-active::after {
-  width: 2px;
-  opacity: 1;
+/* Fingers: full-size targets, and 16px fields so iOS does not zoom the page
+   when one takes focus. */
+@media (pointer: coarse) {
+  .live-editor .cm-panel.cm-search .cm-textfield {
+    min-height: 2.75rem;
+    font-size: 1rem;
+  }
+  .live-editor .cm-panel.cm-search .cm-button {
+    min-height: 2.75rem;
+  }
+  .live-editor .cm-panel.cm-search label {
+    min-height: 2.75rem;
+    font-size: 0.9rem;
+  }
+  .live-editor .cm-panel.cm-search input[type="checkbox"] {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .live-editor .cm-panel.cm-search {
+    padding-right: 3.4rem;
+  }
+  .live-editor .cm-panel.cm-search button[name="close"] {
+    top: 0.6rem;
+    right: 0.35rem;
+    width: 2.75rem;
+    height: 2.75rem;
+  }
 }
-
-/* Touch gets no resting rule. A phone is where reading dominates, and a mark
-   beside every block reads as clutter on a narrow column rather than as an
-   affordance. The rule still appears on the block being edited, which is the
-   only moment it carries information. */
-
-@media (prefers-reduced-motion: reduce) {
-  .note-body .editable-block::after {
-    transition: none;
+@container (max-width: 36rem) {
+  @media (pointer: coarse) {
+    .live-editor .cm-panel.cm-search {
+      padding-right: 0.7rem;
+    }
+    .live-editor .cm-panel.cm-search .cm-textfield[name="search"] {
+      flex-basis: calc(100% - 3.1rem);
+    }
   }
 }
 
-.block-input {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/* The bar above a phone's keyboard. Lifted by the editor to clear iOS's
+   overlaid keyboard; the safe-area inset covers the home indicator. */
+.live-editor-keyboard-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.35rem 0.5rem;
+  padding-bottom: calc(0.35rem + env(safe-area-inset-bottom));
+  background: var(--paper);
+  border-top: 1px solid var(--rule);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  font-family: var(--font-sans);
+}
+.live-editor-keyboard-bar button {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: 2.6rem;
+  height: 2.4rem;
   border: 0;
-  border-radius: 0;
   background: transparent;
-  outline: none;
-  /* Visible, because the editor inside is pulled left by the width of the
-     line's markdown prefix so the prose stays put when a block is entered.
-     That overhang is the `- ` or `1.` itself: clipping it hides the one thing
-     telling the writer they are still in a list. The editor does its own
-     scrolling, so nothing here needs to. */
-  overflow: visible;
-
-  /* Metrics are inherited from the block being replaced. Transforms are not:
-     h1, h3, h6, callout titles and table headers all uppercase their text, and
-     an editor that inherited that would show the typist a different string
-     than the one being written to the file. */
+  color: var(--ink);
   font: inherit;
-  color: inherit;
-  letter-spacing: inherit;
-  text-transform: none;
-  text-indent: 0;
-  caret-color: var(--hot);
+  font-size: 1.35rem;
+  border-radius: var(--radius-none);
 }
-
-/* A list item's marker is drawn by ::before and the revealed source carries
-   its own "- ", so the drawn marker steps aside while the line is being
-   edited. The input hangs by the marker inset, which puts the typed marker
-   exactly where the drawn one was, so nothing shifts. */
-/* The hang is measured per line by BlockInput, because the typed prefix and
-   the drawn marker it replaces are different widths. */
-
-.note-body li.is-active::before {
-  display: none;
+.live-editor-keyboard-bar button:active {
+  background: var(--paper-2);
 }
-
-/* A wrapped item's lines sit inside the li's bullet inset (D25a), so their
-   gutter rule has to be pulled back out of it to land in the same column as a
-   whole item's. A task item has no inset, so it needs no correction. */
-.note-body .li-line::after {
-  left: calc((var(--edit-gutter) + var(--li-inset)) * -1);
+.live-editor-keyboard-gap {
+  flex: 0 0 1px;
+  height: 1.4rem;
+  background: var(--rule);
+  margin: 0 0.3rem;
 }
-
-.note-body li.task-list-item .li-line::after {
-  left: calc(var(--edit-gutter) * -1);
-}
-
-/* Only an item's first line reveals the `- ` or `1.` marker, so only that line
-   replaces the drawn one. A continuation line reveals its indent and leaves the
-   bullet where it is. */
-.note-body li:has(> .li-line:first-child.is-active)::before {
-  display: none;
-}
-
-/* The click target for the space between blocks. It reaches past the last one
-   so the run-out at the end of a note is clickable too, which is where writing
-   usually continues. 4rem rather than the full pane height: enough to land in
-   without turning a click well below a short note into an edit, and without
-   leaving dead space under every note. */
-.note-body .block-gap {
-  padding-bottom: 4rem;
-  cursor: text;
+.live-editor-keyboard-done {
+  margin-left: auto;
+  color: var(--hot);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .note-inline-actions {
@@ -1286,26 +1698,6 @@
 
 .note-inline-actions .close-note {
   white-space: nowrap;
-}
-
-/* A table row's cells stay in the flow while it is edited, so the columns keep
-   their widths, and the input is laid over the row instead of replacing it. */
-.note-body tr.editable-block.is-active {
-  position: relative;
-}
-
-.note-body .block-input-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  padding: 0 0.7rem;
-  background: var(--paper);
-}
-
-.note-body .block-input-overlay .block-input {
-  font-family: var(--font-mono);
-  font-size: 0.82rem;
 }
 
 .save-state {

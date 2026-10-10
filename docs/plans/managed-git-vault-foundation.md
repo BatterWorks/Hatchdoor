@@ -3,7 +3,7 @@
 - Status: Draft for discussion
 - Architecture: [`docs/architecture/managed-git-vault-foundation.md`](../architecture/managed-git-vault-foundation.md)
 - Product roadmap: [`docs/roadmap/vault-lifecycle.md`](../roadmap/vault-lifecycle.md)
-- Design proposal: [Managed Git Vault Lifecycle, PR #18](https://github.com/BattermanZ/Hatchdoor/pull/18)
+- Design proposal: [Managed Git Vault Lifecycle, PR #18](https://github.com/BatterWorks/Hatchdoor/pull/18)
 - Fresh-chat entry point: [`docs/plans/managed-git-vault-agent-handoff.md`](managed-git-vault-agent-handoff.md)
 - Target: One environment-configured local or managed Git vault with an
   observable background lifecycle

@@ -1,5 +1,5 @@
 use super::normalize::{
-    extract_frontmatter_metadata, in_fenced, strip_code_fences, strip_frontmatter,
+    extract_frontmatter_metadata, in_fenced, restore_fences, strip_code_fences, strip_frontmatter,
 };
 use crate::embed::Embedder;
 use std::ops::Range;
@@ -9,7 +9,13 @@ use std::ops::Range;
 pub struct Chunk {
     pub ordinal: usize,
     pub heading_path: Option<String>,
+    /// The text that is embedded and hashed: fence marker lines removed, code
+    /// kept. ADR-16 locks it, so nothing a reader needs may be added here.
     pub content: String,
+    /// The text the cache stores and a search hit returns: `content` with a
+    /// fence marker line back around each run of code, so a reader can tell
+    /// code from prose (#532). Equal to `content` when the chunk has no code.
+    pub stored_content: String,
     pub byte_start: usize,
     pub byte_end: usize,
     pub content_hash: String,
@@ -79,11 +85,13 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
         let heading_path =
             derive_heading_path(&normalized.text, heading_scan_end, &normalized.fenced);
         let content = piece.to_string();
+        let stored_content = restore_fences(&normalized, byte_start, byte_end);
         let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
         chunks.push(Chunk {
             ordinal,
             heading_path,
             content,
+            stored_content,
             byte_start,
             byte_end,
             content_hash,
@@ -240,6 +248,55 @@ mod tests {
         let joined: String = result.chunks.iter().map(|c| c.content.clone()).collect();
         assert!(joined.contains("fn foo()"));
         assert!(!joined.contains("```"));
+    }
+
+    #[test]
+    fn stored_content_delimits_code_and_leaves_the_embedded_text_alone() {
+        let content = "# A\n\nprose\n\n```mermaid\ngraph LR; A --> B\n```\n\nmore prose";
+        let result = chunk(content, ChunkOptions::default());
+        assert_eq!(result.chunks.len(), 1);
+        let only = &result.chunks[0];
+        // Byte for byte what the chunker produced before #532.
+        assert_eq!(
+            only.content,
+            "# A\n\nprose\n\ngraph LR; A --> B\n\nmore prose"
+        );
+        assert_eq!(
+            only.content_hash,
+            blake3::hash(only.content.as_bytes()).to_hex().to_string()
+        );
+        assert_eq!(
+            only.stored_content,
+            "# A\n\nprose\n\n```mermaid\ngraph LR; A --> B\n```\n\nmore prose"
+        );
+    }
+
+    #[test]
+    fn a_block_split_across_chunks_is_whole_in_each_stored_content() {
+        let code = "let value = compute(input);\n".repeat(40);
+        let content = format!("# A\n\nintro\n\n```rust\n{code}```\n\noutro");
+        let opts = ChunkOptions {
+            max_tokens: 30,
+            overlap_tokens: 0,
+        };
+        let result = chunk(&content, opts);
+        let with_code: Vec<&Chunk> = result
+            .chunks
+            .iter()
+            .filter(|c| c.content.contains("compute"))
+            .collect();
+        assert!(with_code.len() >= 2, "expected the block to be split");
+        for c in with_code {
+            assert_eq!(c.stored_content.matches("```").count(), 2, "{c:?}");
+            assert!(c.stored_content.contains("```rust\n"), "{c:?}");
+            assert!(!c.content.contains("```"), "{c:?}");
+        }
+        let prose_only = result
+            .chunks
+            .iter()
+            .find(|c| !c.content.contains("compute"))
+            .expect("a chunk without code");
+        assert_eq!(prose_only.stored_content, prose_only.content);
     }
 
     #[test]

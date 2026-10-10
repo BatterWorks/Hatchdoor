@@ -9,6 +9,7 @@ cargo_home := env_var_or_default("CARGO_HOME", env_var("HOME") + "/.cargo")
 cargo_tmp_dir := env_var_or_default("HATCHDOOR_TMPDIR", cargo_target_dir + "/tmp")
 backend_port := "42824"
 frontend_port := "5173"
+browser_token_port := "42825"
 dev_dir := ".dev"
 target_warn_gb := "20"
 
@@ -83,8 +84,47 @@ dev-vaults-reset:
 
 # Stop the tracked backend/frontend, whole process group (catches vite's
 # npm -> sh -> node child chain, not just the top PID).
-dev-stop: _kill-stale
+dev-stop: _kill-stale _stop-browser-token
     @echo "stopped"
+
+# Serves the web token on 127.0.0.1, to the dev frontend's pages only, so it
+# never passes through a tool call or a transcript. Stops by itself after 15
+# minutes. The key in the printed line is TOKEN_KEY in frontend/src/api/api.ts.
+#
+# Sign a test browser in to the dev app; run the line it prints in the page.
+dev-browser-token: _stop-browser-token
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{dev_dir}}
+    setsid python3 scripts/dev-browser-token.py --port {{browser_token_port}} \
+        --origin http://127.0.0.1:{{frontend_port}} --origin http://localhost:{{frontend_port}} \
+        > {{dev_dir}}/browser-token.log 2>&1 &
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        fuser {{browser_token_port}}/tcp >/dev/null 2>&1 && break
+        sleep 0.3
+    done
+    if ! fuser {{browser_token_port}}/tcp >/dev/null 2>&1; then
+        cat {{dev_dir}}/browser-token.log >&2
+        exit 1
+    fi
+    echo "open http://127.0.0.1:{{frontend_port}} in the test browser, then run this in the page:"
+    echo "  localStorage.setItem('hatchdoor_web_token', await (await fetch('http://127.0.0.1:{{browser_token_port}}/')).text()); location.reload()"
+    echo "'just dev-browser-token-stop' when the check is done"
+
+# Stop the helper `dev-browser-token` started.
+dev-browser-token-stop: _stop-browser-token
+    @echo "stopped"
+
+# By port, like the dev ports below: nothing to go stale once the helper has
+# stopped by itself.
+_stop-browser-token:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    fuser -k -TERM {{browser_token_port}}/tcp >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        fuser {{browser_token_port}}/tcp >/dev/null 2>&1 || break
+        sleep 0.2
+    done
 
 _prepare-cargo:
     @mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
@@ -126,6 +166,9 @@ dev-status:
             echo "${name}: not running"
         fi
     done
+    if fuser {{browser_token_port}}/tcp >/dev/null 2>&1; then
+        echo "browser-token: running (just dev-browser-token-stop to stop)"
+    fi
     if [ -d "$CARGO_TARGET_DIR" ]; then
         echo "cargo target dir ($CARGO_TARGET_DIR): $(du -sh "$CARGO_TARGET_DIR" 2>/dev/null | cut -f1)"
     fi
@@ -134,21 +177,30 @@ dev-status:
 dev-clean: _prepare-cargo
     cargo clean
 
-# The checks to run before a pull request: formatting, lints for both the
-# shipped and the all-features build, the backend tests once, and the frontend.
-# Skips the tests that load real model weights. See CONTRIBUTING.md.
+# The checks to run before a pull request: the repository's own scripts,
+# formatting, lints for both the shipped and the all-features build, the
+# backend tests once, and the frontend. Skips the tests that load real model
+# weights. See CONTRIBUTING.md.
 #
 # The test lines drop HATCHDOOR_VAULT_REGISTRY_PATH, which this file exports
 # for the dev server: the tests must see the deployed default, not .dev/.
-check: _check-static && _check-frontend
+check: _check-scripts _check-static && _check-frontend
     env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
 
 # Everything `check` covers, plus the backend tests in the exact configuration
 # a deployment ships and the tests that load real model weights (the first run
 # downloads them from Hugging Face).
-check-full: _check-static && _check-frontend
+check-full: _check-scripts _check-static && _check-frontend
     env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all
     env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --all-features
+
+# Seconds, so they run first: the module map's structural coverage, the
+# docs-freshness table, and the tests of everything under scripts/. Those
+# tests build fixtures under TMPDIR, which _prepare-cargo creates.
+_check-scripts: _prepare-cargo
+    node scripts/check-module-map.mjs
+    node scripts/check-docs-freshness.mjs --validate-table
+    node --test scripts/*.test.mjs
 
 _check-static: _prepare-cargo
     cargo fmt --all -- --check

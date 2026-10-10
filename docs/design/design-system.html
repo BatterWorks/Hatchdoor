@@ -4,9 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hatchdoor — Design System (Forge)</title>
+<!-- This contributor page loads its fonts from Google on purpose: it is opened
+     from the repository, not served by an instance. The app bundles the same
+     families (frontend/src/assets/fonts). -->
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400;500;600;700;800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500;1,6..72,600&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <style>
   /* ════════════════════════════════════════════════════════════════
      TOKENS — Forge palette (light & dark)
@@ -134,7 +137,6 @@
     --space-12: 3rem;
     --space-16: 4rem;
     --radius-pill: 999px;
-    --edit-gutter: 0.75rem;
     --radius-none: 0;
     --dur-fast: 120ms;
     --dur: 200ms;
@@ -838,6 +840,127 @@
   }
 
   /* ════════════════════════════════════════════════════════════════
+     COMPONENT — Side panel (Help)
+     ════════════════════════════════════════════════════════════════ */
+  .side-panel-stage {
+    position: relative;
+    height: 360px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .side-panel-under {
+    padding: 1.25rem 1.5rem;
+    max-width: 30rem;
+  }
+  .help-panel {
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: min(32rem, 62%);
+    display: flex; flex-direction: column;
+    background: var(--paper);
+    border-left: 1px solid var(--rule-strong);
+    box-shadow: var(--shadow-overlay);
+  }
+  .help-panel-head {
+    display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-3) var(--space-3) var(--space-2) var(--space-5);
+    border-bottom: 1px solid var(--rule);
+  }
+  .help-eyebrow {
+    font-family: var(--font-display);
+    font-variation-settings: "wdth" 84, "wght" 700;
+    font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--hot);
+  }
+  .help-crumb { flex: 1; font-family: var(--font-sans); font-size: 0.85rem; color: var(--muted); }
+  .help-search { padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--rule); }
+  .help-search input {
+    width: 100%; box-sizing: border-box;
+    border: 1px solid var(--rule-strong); border-radius: 0;
+    padding: 0.6rem 0.7rem; background: var(--bg); color: var(--ink);
+    font-family: var(--font-sans); font-size: 1rem;
+  }
+  .help-panel-body { padding: var(--space-4) var(--space-5); overflow: hidden; }
+
+  /* ════════════════════════════════════════════════════════════════
+     COMPONENT — What's new pop-up
+     ════════════════════════════════════════════════════════════════ */
+  .whats-new-stage {
+    display: flex; justify-content: center; align-items: center;
+    padding: var(--space-6) var(--space-4);
+    background: var(--overlay-bg);
+  }
+  .whats-new-demo {
+    width: min(560px, 100%);
+    display: flex; flex-direction: column;
+    background: var(--paper); color: var(--ink);
+    border: 1px solid var(--rule-strong);
+  }
+  .whats-new-demo .wn-head { display: grid; gap: var(--space-1); padding: var(--space-4) var(--space-4) var(--space-3); border-bottom: 1px solid var(--rule); }
+  .whats-new-demo .wn-title { margin: 0; font-family: var(--font-display); font-size: 1.5rem; line-height: 1.1; text-transform: uppercase; }
+  .whats-new-demo .wn-sub { margin: 0; color: var(--muted); font-size: 0.9rem; }
+  .whats-new-demo .wn-body { display: grid; gap: var(--space-4); padding: var(--space-4); }
+  .whats-new-demo .wn-action { border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn-fg); padding: var(--space-3); }
+  .whats-new-demo .wn-label {
+    margin: 0 0 var(--space-2);
+    font-family: var(--font-display); font-variation-settings: "wdth" 84, "wght" 700;
+    font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .whats-new-demo .wn-release-head { display: flex; justify-content: space-between; padding-bottom: var(--space-1); border-bottom: 1px solid var(--rule); }
+  .whats-new-demo .wn-date { color: var(--muted); font-family: var(--font-mono); letter-spacing: 0; text-transform: none; }
+  .whats-new-demo ul { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-2); font-size: 0.95rem; line-height: 1.45; }
+  .whats-new-demo li { position: relative; padding-left: var(--space-6); }
+  .whats-new-demo li::before { content: "\2014"; position: absolute; left: 0; color: var(--hot); }
+  .whats-new-demo .wn-action li::before { color: inherit; }
+  .whats-new-demo .wn-tag { font-family: var(--font-mono); font-size: 0.75rem; }
+  .whats-new-demo .wn-link { color: inherit; text-decoration: underline; text-decoration-color: var(--hot); text-underline-offset: 3px; }
+  .whats-new-demo .wn-link::after { content: "\00a0\2192"; }
+  .whats-new-demo .wn-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--rule); }
+  /* §36 folder picker */
+  .folder-picker-demo { width: min(470px, 100%); display: grid; gap: var(--space-2); color: var(--ink); }
+  .folder-picker-demo + .folder-picker-demo { margin-top: var(--space-5); }
+  .folder-picker-demo .fpd-box { border: 1px solid var(--rule-strong); background: var(--paper); }
+  .folder-picker-demo .fpd-crumbs { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 0.76rem; }
+  .folder-picker-demo .fpd-crumbs a { color: var(--hot); }
+  .folder-picker-demo .fpd-crumbs i { color: var(--muted); font-style: normal; }
+  .folder-picker-demo ul { list-style: none; margin: 0; padding: 0; }
+  .folder-picker-demo li { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--rule); }
+  .folder-picker-demo li:last-child { border-bottom: 0; }
+  .folder-picker-demo .fpd-row { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-2); padding: var(--space-2) var(--space-3); border-left: 3px solid transparent; font-size: 0.88rem; }
+  .folder-picker-demo .fpd-row.is-on { background: var(--hot-soft); border-left-color: var(--hot); }
+  .folder-picker-demo .fpd-row.is-off { color: var(--muted); }
+  .folder-picker-demo .fpd-this { font-style: italic; }
+  .folder-picker-demo .fpd-count { margin-left: auto; font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted); }
+  .folder-picker-demo .fpd-badge { font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 var(--space-1); border: 1px solid var(--rule-strong); color: var(--ink-soft); }
+  .folder-picker-demo .fpd-open { width: 2.5rem; display: grid; place-items: center; border-left: 1px solid var(--rule); color: var(--ink-soft); font-size: 1.2rem; }
+  .folder-picker-demo .fpd-note { flex-basis: 100%; padding: 0 var(--space-3) var(--space-2); font-size: 0.8rem; color: var(--warn-fg); }
+  .folder-picker-demo .fpd-picked { margin: 0; font-size: 0.82rem; }
+  .folder-picker-demo code { font-family: var(--font-mono); font-size: 0.76rem; }
+  .folder-picker-demo .fpd-new { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--rule); font-size: 0.82rem; }
+  .folder-picker-demo .fpd-new.is-off { display: block; color: var(--muted); }
+  .folder-picker-demo .fpd-new-open { color: var(--hot); }
+  .folder-picker-demo .fpd-new-label { color: var(--ink-soft); }
+  .folder-picker-demo .fpd-new-input { padding: var(--space-2) var(--space-2); border: 1px solid var(--rule-strong); background: var(--paper); font-family: var(--font-mono); }
+  .folder-picker-demo .fpd-new-actions { display: flex; gap: var(--space-2); }
+  .folder-picker-demo .fpd-btn { padding: var(--space-2) var(--space-3); border: 1px solid var(--rule-strong); font-family: var(--font-display); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; }
+  .folder-picker-demo .fpd-btn.is-hot { background: var(--hot); border-color: var(--hot); color: var(--bg); }
+  .folder-picker-demo .fpd-new-error { color: var(--err-fg); }
+  .folder-picker-demo .fpd-more { color: var(--ink-soft); font-size: 0.82rem; text-decoration: underline; }
+
+  .first-run-demo { width: min(560px, 100%); padding: var(--space-5); background: var(--paper); border: 1px solid var(--rule-strong); color: var(--ink); }
+  .first-run-demo .frd-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--space-2); }
+  .first-run-demo .frd-head b { font-family: var(--font-display); text-transform: uppercase; letter-spacing: 0.04em; font-size: 1.2rem; }
+  .first-run-demo .frd-mono { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+  .first-run-demo ol { list-style: none; margin: var(--space-3) 0 0; padding: 0; border-top: 1px solid var(--rule); }
+  .first-run-demo li { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--rule); }
+  .first-run-demo .frd-mark { flex: none; display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border: 1px solid var(--rule-strong); font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); }
+  .first-run-demo .is-done .frd-mark { background: var(--hot); border-color: var(--hot); color: var(--bg); }
+  .first-run-demo .is-open .frd-mark { border-color: var(--hot); color: var(--hot); }
+  .first-run-demo .frd-title { flex: 1; font-family: var(--font-display); font-weight: 600; }
+  .first-run-demo .is-done .frd-title { color: var(--ink-soft); }
+  .first-run-demo pre { margin: 0 0 0 calc(1.6rem + var(--space-3)); padding: var(--space-3); background: var(--code-surface); color: var(--code-ink); font-family: var(--font-mono); font-size: 0.74rem; overflow-x: auto; }
+
+  /* ════════════════════════════════════════════════════════════════
      COMPONENT — Note page
      ════════════════════════════════════════════════════════════════ */
   .note-page {
@@ -998,8 +1121,8 @@
   .toc-link[data-level="3"] { padding-left: 1rem; color: var(--muted); }
 
   /* Body & blocks */
-  /* Uncapped: see the Reading measure note in §07. */
-  .note-body { max-width: 100%; }
+  /* Capped by the column: see the Reading measure note in §10. */
+  .note-body { max-width: 38rem; }
   .note-body p { font-family: var(--font-serif); font-size: 1.18rem; line-height: 1.62; color: var(--ink); margin: 0 0 1.2rem; }
   .note-body h1 { font-family: var(--font-display); font-variation-settings: "wdth" 88, "wght" 700; font-size: 1.7rem; text-transform: uppercase; letter-spacing: -0.012em; margin: 2.4rem 0 0.8rem; }
   .note-body h2 { font-family: var(--font-serif); font-style: italic; font-weight: 500; font-size: 1.85rem; line-height: 1.18; letter-spacing: -0.012em; margin: 2.6rem 0 0.5rem; }
@@ -1140,9 +1263,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(255,255,255,0.06);
+    background: color-mix(in oklab, var(--code-ink) 6%, transparent);
     padding: 0.3rem 0.7rem;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    border-bottom: 1px solid var(--code-rule);
   }
   .code-lang {
     font-family: var(--font-mono);
@@ -1333,16 +1456,15 @@
     outline: none;
     border-color: var(--hot);
   }
-  .search-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 0.7rem 0 0.55rem;
-    font-family: var(--font-sans);
-    font-size: 0.82rem;
-    color: var(--muted);
-  }
-  .search-toggle input { accent-color: var(--hot); }
+  .search-mode-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0.7rem 0 0.55rem; }
+  .search-mode-label { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .search-mode { display: inline-flex; border: 1px solid var(--rule-strong); }
+  .search-mode button { font-family: var(--font-display); font-variation-settings: "wdth" 92, "wght" 600; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; padding: 0.4rem 0.8rem; border: none; border-right: 1px solid var(--rule); background: var(--paper); color: var(--muted); cursor: pointer; }
+  .search-mode button:last-child { border-right: none; }
+  .search-mode button[aria-pressed="true"] { background: var(--hot); color: var(--bg); }
+  .search-progress { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; padding: 0.55rem 0.8rem; border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn-fg); font-family: var(--font-sans); font-size: 0.84rem; line-height: 1.4; }
+  .search-progress-bar { flex: 0 0 5rem; height: 4px; background: var(--warn-border); }
+  .search-progress-fill { display: block; height: 100%; background: var(--warn-fg); }
 
   /* Facet rail (#119, #144) — the dialog's own Vault filter, never the browsing scope. */
   .search-body { display: flex; align-items: flex-start; gap: 1rem; }
@@ -1465,8 +1587,8 @@
 
   /* Marked path root (#115, implemented by #140). Sized and weighted from the
      surrounding row; only colour and the middot separator are its own. */
-  .path-vault { flex: 0 0 auto; display: inline-flex; align-items: baseline; color: var(--hot); font-variation-settings: "wdth" 100, "wght" 500; }
-  .path-sep { margin-left: 0.3rem; margin-right: 0.3rem; color: var(--hot); }
+  .path-vault { flex: 0 1 auto; min-width: 0; max-width: 42%; display: inline-block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: baseline; color: var(--muted); font-family: var(--font-mono); font-size: 0.72rem; }
+  .path-sep { margin-left: 0.3rem; margin-right: 0.3rem; color: var(--tertiary); }
 
   /* Island caption + enclosure (#143). Canvas furniture — no DOM class backs
      these in the app; this demo approximates the canvas draw with inline SVG. */
@@ -1513,84 +1635,15 @@
     gap: 0.5rem;
   }
 
-  /* Body demos are shown at the width the app actually gives a note. That
-     width is not a max-width on .note-body: it is what remains of
-     .note-page-layout's grid once the 220px table of contents and its gap are
-     taken, which is 798px at a 1440px window and caps at 1120px. Demoing prose
-     at the full doc column would show a measure the app never renders. */
-  .stage-note > .note-body { max-width: 798px; }
+  /* Body demos are shown at the width the app actually gives a note: the
+     38rem reading measure that .note-page-layout caps its note column at. */
+  .stage-note > .note-body { max-width: 38rem; }
 
   /* ════════════════════════════════════════════════════════════════
-     COMPONENT — Inline editing
+     COMPONENT — Live editor
      ════════════════════════════════════════════════════════════════ */
-  .editable-block { position: relative; cursor: text; }
-  .editable-block::after {
-    content: "";
-    position: absolute;
-    left: calc(var(--edit-gutter) * -1);
-    top: 0.15em; bottom: 0.15em;
-    width: 1px;
-    background: var(--hot);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--dur-fast) var(--ease);
-  }
-  .editable-block:hover::after, .editable-block.is-hover::after { opacity: 0.45; }
-  .editable-block.is-active::after { width: 2px; opacity: 1; }
-
-  .block-input {
-    display: block;
-    width: 100%;
-    box-sizing: border-box;
-    margin: 0; padding: 0; border: 0;
-    border-radius: var(--radius-none);
-    background: transparent;
-    resize: none;
-    overflow: hidden;
-    outline: none;
-    font: inherit;
-    color: inherit;
-    letter-spacing: inherit;
-    text-transform: none;
-    caret-color: var(--hot);
-  }
-
-  .save-state {
-    font-family: var(--font-sans);
-    font-size: 0.72rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .save-state.is-error { color: var(--err-fg); }
-
-  .write-notice {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.6rem 0.85rem;
-    border: 1px solid var(--rule);
-    border-radius: var(--radius-none);
-    background: var(--paper);
-    color: var(--ink);
-    font-family: var(--font-sans);
-    font-size: 0.9rem;
-  }
-
-  .note-property-input {
-    width: 100%;
-    box-sizing: border-box;
-    border: 1px solid var(--rule-strong);
-    border-radius: var(--radius-none);
-    background: var(--paper);
-    font-family: var(--font-sans);
-    font-size: 0.88rem;
-    color: var(--ink);
-    padding: 0.15rem 0.35rem;
-  }
-  .note-property-input:focus { outline: none; border-color: var(--hot); }
+  .live-editor-demo { font-family: var(--font-serif); font-size: 1.18rem; line-height: 1.62; }
+  .live-editor-demo .syntax { color: var(--muted); opacity: 0.65; }
 
   /* ════════════════════════════════════════════════════════════════
      UTIL — keys/values list for tokens display
@@ -1719,9 +1772,14 @@
     <a href="#search">Search dialog</a>
     <a href="#fields">Form fields &amp; dialog</a>
     <a href="#menu">Popover menu</a>
+    <a href="#side-panel">Side panel (Help)</a>
+    <a href="#whats-new">What&rsquo;s new pop-up</a>
+    <a href="#folder-picker">Folder picker</a>
+    <a href="#first-run">First-run checklist</a>
+    <a href="#home">Home</a>
 
     <h3>Editing</h3>
-    <a href="#editing">Inline editing</a>
+    <a href="#editing">Live editor</a>
     <a href="#save-state">Save state</a>
     <a href="#write-notice">Notices &amp; banners</a>
 
@@ -1751,7 +1809,7 @@
   <main class="doc-main">
 
     <h1 class="doc-h1">Hatchdoor design <span class="wide">system</span>.</h1>
-    <p class="doc-lede">Single source of truth for the Forge direction. Every component, state, and token used by the React app — rendered so you can see exactly what gets implemented. Implementation note: copy tokens into <code>base.css</code>, swap fonts via Google Fonts, then port each component class by class.</p>
+    <p class="doc-lede">Single source of truth for the Forge direction. Every component, state, and token used by the React app — rendered so you can see exactly what gets implemented. Implementation note: copy tokens into <code>base.css</code>, use the fonts bundled in <code>frontend/src/assets/fonts</code>, then port each component class by class.</p>
 
     <!-- ───────── TOKENS ───────── -->
     <section class="doc-section" id="tokens">
@@ -1861,7 +1919,7 @@
     <section class="doc-section" id="typography">
       <div class="doc-section-num">§02</div>
       <h2>Typography scale</h2>
-      <p class="blurb">Three families do the work. <b>Display</b> (Bricolage variable wdth + wght) for title, chrome, labels. <b>Serif</b> (Newsreader) for body prose, h2 sections, blockquote, callout body. <b>Sans</b> (Inter Tight) for lede, list items, table, metadata. <b>Mono</b> (JetBrains Mono) for code and the small kbd / pill / eyebrow markers.</p>
+      <p class="blurb">Four families do the work. <b>Display</b> (Bricolage variable wdth + wght) for title, chrome, labels. <b>Serif</b> (Newsreader) for body prose, h2 sections, blockquote, callout body. <b>Sans</b> (Inter Tight) for lede, list items, table, metadata. <b>Mono</b> (JetBrains Mono) for code and the small kbd / pill / eyebrow markers. Weights run 400 to 800 for Display and Mono, 400 to 600 for Serif (upright and italic) and 400 to 700 for Sans. The app declares the same ranges in <code>frontend/src/assets/fonts/fonts.css</code>, and a style that asks for more gets a weight the browser fakes, so change the two together.</p>
 
       <div class="stage paper">
         <div class="scale-grid"><div class="scale-name">ty-title</div><div class="scale-spec">disp 700/wdth85<br>clamp 2.4–3.6rem</div><div class="scale-sample"><h1 class="ty-title" style="font-size:2.2rem;">Field notes <span class="wide">from</span> the orchard</h1></div></div>
@@ -1947,9 +2005,9 @@
     <section class="doc-section" id="sidebar">
       <div class="doc-section-num">§05</div>
       <h2>Sidebar (Explorer)</h2>
-      <p class="blurb"><b>Four zones:</b> the Scope zone (#138), a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the third scrolls</b> &mdash; scope, rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>). One exception, from #150: at a single Vault it stays on screen while first-run scanning or indexing is running, purely to hold that progress reading (<a href="#vault-slot">§27</a>) &mdash; the zone is where progress is reported, so it outlives its own visibility rule for as long as there is progress to report. At zero Vaults it holds its place too, reading <code>All Vaults</code> with no rows beneath it, in neutral ink.</p>
+      <p class="blurb"><b>Three zones:</b> the Scope zone (#138), the scrolling note navigation, and a footer holding the rail of whole-vault destinations beside the create action (#530). <b>Only the middle scrolls</b> &mdash; scope and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. It sits at the bottom because a row of destinations is a tab bar, and a tab bar belongs where a thumb reaches it; it holds <em>destinations only</em> (Stats, Graph, Settings, and Help on the phone), so nothing it opens appears out of sight at the top of the list. <b>Changed on disk is a folding section</b> at the top of the navigation, in the same shape as Recently viewed and folded by default with its count showing; it was a panel a rail toggle opened, which paired a button with a list far from it once the rail moved. <b>The Scope zone starts folded.</b> Its head already names the scope and its state, and the accordion below lists the same Vaults, so unfolded by default it said everything twice before the first folder. The folded head shows the compact <code>5 of 8</code> aggregate with the full <code>5 of 8 answering</code> sentence as its name; the unfolded rows, the phone row and the sheet say <code>5 of 8 answering</code> in full. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>). One exception, from #150: at a single Vault it stays on screen while first-run scanning or indexing is running, purely to hold that progress reading (<a href="#vault-slot">§27</a>) &mdash; the zone is where progress is reported, so it outlives its own visibility rule for as long as there is progress to report. At zero Vaults it holds its place too, reading <code>All Vaults</code> with no rows beneath it, in neutral ink.</p>
 
-      <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The rail below it stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
+      <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The footer below the list stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
 
       <p class="blurb"><b>Scope rows are set one step tighter than the tree below them:</b> <span class="key">0.82rem</span> against the tree&rsquo;s own size, <span class="key">0.32rem 0.35rem</span> padding, <span class="key">0.5rem</span> gap. The zone is a register of what exists, read once and then ignored; the tree is the thing under the cursor all day. Sizing them alike made the sidebar open with two equal claims on attention. Rows keep <span class="key">--font-display</span> with its <span class="key">wdth</span>/<span class="key">wght</span> axes rather than dropping to the sans face &mdash; a Vault name is a name, and the display face is what names are set in everywhere else in this app.</p>
 
@@ -2093,6 +2151,7 @@
       <div class="doc-section-num">§07</div>
       <h2>Note title block</h2>
       <p class="blurb">The opening of every note: super-row (pill + date + section), uppercase posterized title with a lowercase orange middle word, italic sans lede.</p>
+      <p class="blurb"><b>The title is said once.</b> A note that opens with <code># Its own title</code> as its first heading keeps that line in the file and in the DOM (line-addressed editing counts on every block being there) but does not draw it, and the tables of contents skip it (#530). Only the first heading can qualify, and only with nothing but blank lines before it: an H1 further down is a section.</p>
       <p class="blurb"><b>The title owns the full measure.</b> Nothing shares its line — the save state and <b>Edit</b> moved down to the Properties rule (<a href="#save-state">§21</a>) precisely so a long title wraps on its own terms.</p>
       <p class="blurb"><b>Trailing scroll space is conditional.</b> A note long enough to scroll keeps a screenful below it, so a heading near its end can still be brought to the top of the pane. A note that does not scroll gets none: a short note that ended two lines in was offering a screenful of nothing to scroll through.</p>
       <div class="stage" style="padding: 2rem 1.5rem;">
@@ -2132,7 +2191,8 @@
     <section class="doc-section" id="enhancements">
       <div class="doc-section-num">§09</div>
       <h2>In-note enhancements</h2>
-      <p class="blurb">Three optional panels above the body: in-note search nav (when searching inside a note), links panel (back/forward links), and table of contents.</p>
+      <p class="blurb"><b>Links come after the text</b> (#530), folded under a head set in the sidebar&rsquo;s own §05 grammar &mdash; caret, <code>LINKS</code>, rule, mono count &mdash; above a hairline that closes the body. Backlinks are what a reader consults once they have read, and every outgoing link is already a link in the text above, so the panel that used to sit between the properties and the first sentence was two screens of navigation before any reading. <b>The folded heading strip is a tablet device:</b> it shows only between 921 and 1160px, where the TOC column is gone but the topbar is still the wide one. Below 920 the topbar&rsquo;s meta row carries the headings as an <em>On this page</em> chip (§30) and the strip never renders. Neither Links nor Properties render while the editor is open; the editor carries its own frontmatter form.</p>
+      <p class="blurb">Three optional pieces around the body: the in-note search nav above it (when searching inside a note), the table of contents beside it, and the links panel after it.</p>
 
       <h3 class="doc-sub">In-note search nav</h3>
       <div class="stage">
@@ -2197,7 +2257,7 @@
     <section class="doc-section" id="body-text">
       <div class="doc-section-num">§10</div>
       <h2>Prose &amp; inline elements</h2>
-      <p class="blurb"><b>Reading measure: uncapped.</b> This document previously specified <code>max-width: 36rem</code> on the note body; the app has always rendered full width, about 100 characters at 1440px. Capping was considered and rejected. Nearly every non-prose block here is a bordered box &mdash; <span class="key">.table-wrap</span>, <span class="key">.callout</span>, <span class="key">.code-block</span> &mdash; so a narrow text column beside full-width boxes reads as broken alignment rather than as hierarchy, and capping every block uniformly instead pushes tables and diagrams into horizontal scrolling much sooner. The app is authoritative; this document was stale.</p>
+      <p class="blurb"><b>Reading measure: 38rem, about 75 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
       <div class="stage stage-note paper">
         <div class="note-body">
@@ -2321,7 +2381,7 @@
     <section class="doc-section" id="code">
       <div class="doc-section-num">§14</div>
       <h2>Code block</h2>
-      <p class="blurb">Inverted: dark surface always (even in light mode) for contrast. Optional header with language label and copy button.</p>
+      <p class="blurb">Inverted: dark surface always (even in light mode) for contrast. Optional header with language label and copy button. The header strip is lifted off the slab by mixing 6% of <span class="key">--code-ink</span> into it, so the tint follows the slab and not the page theme, and no raw white is involved (#547).</p>
       <div class="stage stage-note">
         <div class="code-block">
           <div class="code-block-head">
@@ -2426,7 +2486,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="search">
       <div class="doc-section-num">§17</div>
       <h2>Search dialog</h2>
-      <p class="blurb">Full-screen overlay with dim backdrop. Panel fixed at top center on desktop, full-screen on mobile. Input is large. Toggle for &ldquo;search inside note content&rdquo;. Result rows show title, breadcrumb, kind, and an optional snippet.</p>
+      <p class="blurb">Full-screen overlay with dim backdrop. Panel fixed at top center on desktop, full-screen on mobile. Input is large. Under it, one <b>Mode</b> control at every width (#530): a two-way <code>.search-mode</code> segmented Semantic / Keyword switch, the same grammar as Settings&rsquo; Git behaviour (§32), in place of a checkbox on desktop and a select on the phone. Result rows show title, provenance and path, an optional heading line (omitted when it only repeats the title), and a snippet with wikilink brackets and fenced code stripped. <b>Work in flight is progress, not failure:</b> while the index is still building, a <code>.search-progress</code> line in the warn tier sits under the controls with the percentage and which mode already answers, and Keyword results render beneath it. It is never a block above results; <em>Could not load</em> is kept for a model that is missing or failed, and even that shrinks to the same line once Keyword results are on screen. The path reads left to right and elides at its tail: the head-first <code>direction: rtl</code> form let the bidi algorithm move a numbered folder&rsquo;s digits to the other end.</p>
       <div class="stage" style="padding:0; overflow: hidden;">
         <div class="search-overlay">
           <div class="search-panel">
@@ -2435,9 +2495,17 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
               <button class="icon-btn" title="Close">✕</button>
             </div>
             <input class="search-input is-focus" placeholder="Search by title, folder, or content…" value="orchard" />
-            <label class="search-toggle">
-              <input type="checkbox" checked /> include note content
-            </label>
+            <div class="search-mode-row">
+              <span class="search-mode-label">Mode</span>
+              <div class="search-mode" role="group" aria-label="Search mode">
+                <button type="button" aria-pressed="false">Semantic</button>
+                <button type="button" aria-pressed="true">Keyword</button>
+              </div>
+            </div>
+            <p class="search-progress" role="status">
+              <span class="search-progress-bar" aria-hidden="true"><span class="search-progress-fill" style="width:41%"></span></span>
+              <span>Semantic search is still indexing, 41% done. Keyword search answers now.</span>
+            </p>
             <ul class="search-results">
               <li><button class="search-result is-hover">
                 <div class="search-main">
@@ -2466,7 +2534,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-toggle</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
+      <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-mode</span><span class="key">.search-progress</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
 
       <h3 class="doc-sub">The dialog&rsquo;s own filter &mdash; never the browsing scope</h3>
       <p class="blurb">The sidebar decides what you are browsing; the dialog decides what you are looking at right now. Selecting a facet (or the phone&rsquo;s <code>Scope</code> field) narrows only the results in view, changes no ranking, and dies the moment the dialog closes. No future surface may adopt either as a scope control (#119).</p>
@@ -2519,16 +2587,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
               <option disabled>Archive (no answer)</option>
             </select>
           </div>
-          <div class="field">
-            <span class="field-label">Mode</span>
-            <select class="field-input">
-              <option>Semantic</option>
-              <option>Keyword</option>
-            </select>
-          </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.search-field-strip</span></div>
+      <div class="tag-row"><span class="key">.search-field-strip</span><span class="key">.search-mode</span><span class="key">.search-progress</span></div>
 
       <p class="blurb">Tapping a <code>#tag</code> opens the dialog with the query filled in and that note&rsquo;s own Vault already selected in the filter &mdash; tags are per-Vault vocabularies, and this is the dialog&rsquo;s own filter doing the pre-filling, not a scope change. Layer folders stay out of both shapes entirely: there is no way to reach a demoted note from the web application (#119).</p>
     </section>
@@ -2561,6 +2622,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <p class="blurb">The path line is live: nothing else in the dialog says what is about to be created or where, and it surfaces the numeric folder prefixes at the moment they matter.</p>
+      <p class="blurb"><b>The access token prompt is this dialog</b> (#547): <span class="key">.modal-backdrop</span>, <span class="key">.modal-panel</span>, one <span class="key">.field-input</span> and a default button in <span class="key">.modal-actions</span>. It used to style itself inline from custom properties the app never defined, so it showed a grey panel and a blue button in both themes. Its only additions are a stacking order above everything except Help, which it links to, and a row for its two help links.</p>
       <div class="tag-row"><span class="key">.field</span><span class="key">.field-label</span><span class="key">.field-input</span><span class="key">.field-input:focus</span><span class="key">.field-path</span><span class="key">.modal-panel</span><span class="key">.modal-actions</span></div>
     </section>
 
@@ -2568,15 +2630,24 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="menu">
       <div class="doc-section-num">§19</div>
       <h2>Popover menu</h2>
-      <p class="blurb">The topbar &ldquo;more&rdquo; button opens this. On desktop it anchors to the trigger. On mobile it becomes a bottom-sheet (CSS variant in implementation).</p>
+      <p class="blurb">The topbar &ldquo;more&rdquo; button opens this. On desktop it anchors to the trigger. On mobile it becomes a bottom-sheet (CSS variant in implementation). <b>It is about the open note</b> (#530): rename and move, then the copy and download utilities, then Archive and Delete last. New note and Edit left it, since both have buttons of their own on the page, and <code>Escape</code> closes it like any other popover. <b>The theme button opens the same popover shape</b> with three <code>menuitemradio</code> rows, System, Light and Dark, the current one in hot ink; a three-way cycle on one button could not say what the next click would do.</p>
       <p class="blurb"><b>Rows are borderless.</b> Only the popover carries a border &mdash; a box per row inside a bordered container is the &ldquo;boxes in boxes&rdquo; nesting issue #8 objected to. The border is kept and made transparent rather than removed, so a row does not shift when <code>:active</code> paints it hot. Hover fills with <code>--paper-2</code>. Long menus group with <code>.menu-divider</code> rather than growing into an undifferentiated wall.</p>
-      <div class="stage" style="display:flex; justify-content: center;">
+      <div class="stage" style="display:flex; justify-content: center; gap: 2rem; flex-wrap: wrap;">
         <div class="menu">
-          <button class="ui-btn ghost">Copy current path</button>
-          <button class="ui-btn ghost">Open in editor</button>
+          <button class="ui-btn ghost">Rename note</button>
+          <button class="ui-btn ghost">Move note</button>
           <div class="menu-divider"></div>
-          <button class="ui-btn ghost">Export note</button>
-          <button class="ui-btn ghost">Toggle theme</button>
+          <button class="ui-btn ghost">Copy note text</button>
+          <button class="ui-btn ghost">Download .md file</button>
+          <button class="ui-btn ghost">Copy note link</button>
+          <div class="menu-divider"></div>
+          <button class="ui-btn ghost">Archive note</button>
+          <button class="ui-btn ghost">Delete note</button>
+        </div>
+        <div class="menu" role="menu" aria-label="Theme" style="min-width: 15rem;">
+          <button class="ui-btn ghost" role="menuitemradio" aria-checked="true" style="color: var(--hot); display:flex; gap:0.6rem;">◐ System <span style="margin-left:auto; font-family: var(--font-mono); font-size: 0.62rem; color: var(--muted); text-transform:none; letter-spacing:0;">follows the device</span></button>
+          <button class="ui-btn ghost" role="menuitemradio" aria-checked="false">☼ Light</button>
+          <button class="ui-btn ghost" role="menuitemradio" aria-checked="false">☾ Dark</button>
         </div>
       </div>
       <div class="tag-row"><span class="key">.menu</span><span class="key">.menu .ui-btn</span><span class="key">.menu-divider</span></div>
@@ -2585,51 +2656,50 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <!-- ───────── INLINE EDITING ───────── -->
     <section class="doc-section" id="editing">
       <div class="doc-section-num">§20</div>
-      <h2>Inline editing</h2>
-      <p class="blurb">Clicking a block swaps it for a textarea holding that block&rsquo;s own markdown. The affordance is a <b>rule in the left gutter</b>, not a fill and not a box: it reuses the device the list bullet already uses, so it reads as content rather than as a control, and it costs no horizontal space, so nothing reflows.</p>
-      <p class="blurb">It is drawn with <span class="key">::after</span> because <span class="key">::before</span> is already the list marker, and <span class="key">.editable-block</span> is the rendered element itself. Wrapping blocks in a div would sit between a <code>ul</code> and its <code>li</code> children and break every marker rule.</p>
+      <h2>Live editor</h2>
+      <p class="blurb">On a writable Vault the note body <b>is</b> one CodeMirror editor, Obsidian Live Preview style (#540). Markdown syntax shows on the caret line and renders everywhere else; the document is the file&rsquo;s text and nothing re-serializes it. The editor carries no chrome of its own: no border, no fill, no gutter, so a note in the editor and a note in Reading view sit on the same paper at the same measure.</p>
+      <p class="blurb">The library exposes its typography and palette as custom properties. They are <b>mapped onto Forge tokens</b> in <span class="key">note-content.css</span> and never set to a literal: prose is <span class="key">--font-serif</span> at the paragraph&rsquo;s own 1.18rem / 1.62, the caret and links are <span class="key">--hot</span>, selection and search hits are <span class="key">--highlight</span>, a fenced code block is the dark <span class="key">--code-surface</span> slab. Headings take the level&rsquo;s own face on their line, transforms excepted, so the typist sees the string being written.</p>
+      <div class="tag-row"><span class="key">.live-editor</span><span class="key">.atomic-cm-editor</span><span class="key">--atomic-editor-*</span><span class="key">caret-color: --hot</span></div>
 
-      <div class="stage stage-note paper">
-        <div class="note-body">
-          <p class="editable-block">Resting: no mark at all, so a note reads as a document.</p>
-          <p class="editable-block is-hover">Hovered: a 1px hot hairline at 45% in the gutter.</p>
-          <p class="editable-block is-active">Active: the same device at 2px and full weight. No ring, no fill, so it does not fight the borders callouts and tables already carry.</p>
-        </div>
-      </div>
-      <div class="tag-row"><span class="key">.editable-block</span><span class="key">.editable-block:hover</span><span class="key">.editable-block.is-active</span><span class="key">--edit-gutter</span></div>
+      <h3 class="doc-sub">Inline code</h3>
+      <p class="blurb">Inline code looks the same in both views: the reading view&rsquo;s chip, <span class="key">--ink</span> mono text on <span class="key">--paper-2</span> with square corners, on whatever line holds it. The library would fill it with <span class="key">--atomic-editor-code-bg</span>, which stays mapped to the fenced block&rsquo;s slab, and colour its text by the line&rsquo;s syntax, so the editor sets both on the span (#550).</p>
+      <div class="tag-row"><span class="key">.cm-atomic-inline-code</span><span class="key">background: --paper-2</span><span class="key">color: --ink</span><span class="key">--radius-none</span></div>
 
-      <h3 class="doc-sub">The gutter is borrowed, not owned</h3>
-      <p class="blurb">The note body sits flush against its container. The space the rule occupies is <span class="key">.note-pane</span>&rsquo;s padding, which is <b>56px on desktop and 16px on a phone</b>, and that element is <code>overflow-x: hidden</code>. Clipping happens at the padding box, so a negative-margin rule survives, but the offset has to be a token rather than a constant.</p>
+      <h3 class="doc-sub">The pane scrolls, not the editor</h3>
+      <p class="blurb">The editor&rsquo;s scroller is <code>overflow: visible</code> and its height is auto, so it grows with the text and the note pane remains the one scroll container. A jump from the table of contents or a search hit is a CodeMirror scroll-into-view, which scrolls the pane.</p>
 
-      <h3 class="doc-sub">Block input: match the metrics, never the transforms</h3>
-      <p class="blurb">The input inherits family, size, weight, line-height and colour from the block it replaces, and explicitly resets <code>text-transform</code>. Three rendered styles in this system uppercase their text &mdash; <code>h1</code>, <code>h3</code>, <code>h6</code>, callout titles and table headers &mdash; and an input that inherited that would show the typist a different string than the one being written to the file.</p>
-      <p class="blurb">The line&rsquo;s markdown prefix is <b>measured and hung into the gutter</b>, so the visible text does not move on entry. A fixed hang cannot work: <code>- </code> is about 9px while the bullet it replaces is inset 22.4px, and the width varies per prefix. On a phone the hang is clamped to the pane&rsquo;s 16px, so a long prefix shifts slightly rather than being clipped.</p>
-      <div class="tag-row"><span class="key">.block-input</span><span class="key">font: inherit</span><span class="key">text-transform: none</span><span class="key">caret-color: --hot</span></div>
+      <h3 class="doc-sub">Floating toolbar (desktop)</h3>
+      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, then after a hairline of <span class="key">--ink-soft</span> the three things the line itself can become, heading, bullet and to-do. They are the same Sharp icons the keyboard bar uses. Indent, outdent, undo and redo stay on the keyboard, where a desktop already has them. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. It rides 10px above the selected line, so it does not sit on the words it formats. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
+      <div class="tag-row"><span class="key">.live-editor-toolbar</span><span class="key">background: --ink</span><span class="key">--shadow-float</span></div>
 
-      <h3 class="doc-sub">Per-unit skins</h3>
-      <table class="kv-table">
-        <tr><th>Unit</th><th>Skin</th></tr>
-        <tr><td class="name">paragraph</td><td class="val">serif 1.18rem / 1.62</td></tr>
-        <tr><td class="name">heading</td><td class="val">the level&rsquo;s own family and size, transform reset</td></tr>
-        <tr><td class="name">list item</td><td class="val">sans 1.02rem, marker hidden while active</td></tr>
-        <tr><td class="name">callout title</td><td class="val">band&rsquo;s display face; light on a saturated fill for a known kind, dark on paper otherwise</td></tr>
-        <tr><td class="name">callout body</td><td class="val">serif italic 1.02rem</td></tr>
-        <tr><td class="name">fenced code</td><td class="val">--code-surface / --code-ink, mono 0.82rem</td></tr>
-        <tr><td class="name">fence, no language</td><td class="val">bare <code>pre</code>, a different presentation from .code-block</td></tr>
-        <tr><td class="name">table row</td><td class="val">mono, overlaid on the row (see below)</td></tr>
-      </table>
+      <h3 class="doc-sub">Menus</h3>
+      <p class="blurb">The <code>/</code> menu at the start of a line and the <code>[[</code> completion share the search dialog&rsquo;s idiom: paper surface, <span class="key">--rule-strong</span> border, the selected row on <span class="key">--hot-soft</span>, the detail column in mono <span class="key">--muted</span>.</p>
+      <div class="tag-row"><span class="key">.cm-tooltip-autocomplete</span><span class="key">.cm-completionDetail</span></div>
 
-      <h3 class="doc-sub">Table rows are overlaid, not replaced</h3>
-      <p class="blurb">A <code>tr</code> may not contain a textarea, and swapping its cells for one lets every column resize on entry and again on exit, because widths derive from content. The cells stay in the flow holding the grid still, and the input is laid over the row from inside its first cell.</p>
+      <h3 class="doc-sub">Find and replace bar</h3>
+      <p class="blurb"><code>Ctrl+F</code> opens the library&rsquo;s find panel above the note. Its stock look is dark gradient buttons, rounded fields and the browser&rsquo;s serif, in both themes, so every part is restyled: a <span class="key">--paper</span> strip closed by a <span class="key">--rule</span> line, the fields as <a href="#fields">§18</a> fields on <span class="key">--bg</span> with a hot border on focus, the buttons as the default button of <a href="#buttons">§25</a>, and square checkboxes that fill <span class="key">--hot</span> when ticked. Three rows, in the order the controls come in the document so Tab walks them as they read: find, its options, then replace. The bar is a container, and under 36rem of its own width each field takes a full row with its buttons sharing the row beneath in equal parts, so Next, Previous and Select all stay together. On a coarse pointer every control is 2.75rem tall and the fields are 16px, which stops iOS zooming the page on focus. CodeMirror keeps the bar stuck to the top of the pane while Next scrolls to a match far down the note; nothing here restates that. The library&rsquo;s wording is replaced through <code>EditorState.phrases</code> (Select all, Match case, Regex, Whole word), and the floating toolbar stays down while the bar is open, since stepping through matches selects each one. Matches take <span class="key">--highlight</span>, the same as a search hit, and the current match <span class="key">--hot-soft</span> with a hot outline.</p>
+      <div class="tag-row"><span class="key">.cm-panel.cm-search</span><span class="key">.cm-textfield</span><span class="key">.cm-button</span><span class="key">.cm-searchMatch</span></div>
 
-      <h3 class="doc-sub">Touch</h3>
-      <p class="blurb">A tap reads; a <b>double tap</b> (400ms, within 30px) enters a block. Tap-to-edit would raise the keyboard on every stray touch, and reading is the dominant mode on a phone. This was a 500ms long press until a real phone showed it racing the OS text-selection gesture: nothing sets <code>user-select</code> on the note body, so holding raised selection handles and the copy bar against the block opening. A double tap makes no contact with that gesture, and the window can be generous because a single tap on prose has no action to delay.</p>
-      <p class="blurb"><code>touch-action: manipulation</code> on the block is load-bearing rather than polish. The viewport sets no <code>maximum-scale</code>, so without it a double tap zooms the page instead of opening the block; it drops double-tap zoom while leaving panning and pinch-zoom intact. Only a real touch pointer arms the two-tap requirement, so a screen reader activating the focused block still enters on one activation.</p>
-      <p class="blurb">The gutter rule is drawn persistently at low opacity on coarse pointers, but it is ambient signal, not instruction: a hairline says <i>something is here</i> and cannot say what gesture reaches it. A one-time notice, <span class="mono">Double-tap a line to edit it.</span>, carries the teaching. It retires on the first landed edit rather than on entry, so an accidental double tap does not count as having taught anything.</p>
-      <p class="blurb">It borrows the write notice's shell and its <b>&times;</b> rather than being silently its own dismiss target. On touch, <code>cursor: pointer</code> is the only signal a self-dismissing line has, and there is no cursor: a notice that can be dismissed has to look like one. The <b>&times;</b> takes a 44px target here, because this notice only ever meets a finger, while the shared device keeps its own size where it is also a mouse target.</p>
+      <h3 class="doc-sub">Touch: a bar above the keyboard, no floating toolbar</h3>
+      <p class="blurb">A phone draws its own Cut / Copy / Paste callout over a selection, in exactly the place a floating toolbar would sit, and the two fight. On a coarse pointer the toolbar is not mounted at all, and the formatting lives in a fixed bar above the keyboard, each a Sharp icon from §26: indent, outdent, bullet, to-do, heading, bold, italic, strikethrough, code, highlight, link, undo, redo, and <b>Done</b> as a word in <span class="key">--hot</span>. The bar is lifted by the part of the layout viewport the keyboard hides (iOS overlays it; Android resizes), and pads the safe-area inset. Buttons act on <code>mousedown</code> and prevent it, so focus never leaves the editor and the keyboard stays up.</p>
+      <div class="tag-row"><span class="key">.live-editor-keyboard-bar</span><span class="key">.live-editor-keyboard-done</span><span class="key">env(safe-area-inset-bottom)</span></div>
+
+      <h3 class="doc-sub">Images</h3>
+      <p class="blurb">An image is drawn as a block under the line that embeds it, in the reading view&rsquo;s frame: <span class="key">--rule</span> border on <span class="key">--paper</span>. The line keeps its source, so the path stays editable.</p>
+      <div class="tag-row"><span class="key">.live-editor-image</span></div>
+
+      <h3 class="doc-sub">Rendered blocks</h3>
+      <p class="blurb">A <code>mermaid</code> fence, a <code>base</code> fence, a <code>$$</code> block and an inline <code>$</code> formula render in place of their source while the caret is elsewhere, and are the source again the moment it lands on them (#544). They are the reading view&rsquo;s own components (§16&rsquo;s diagram and math, §15&rsquo;s saved-query table) drawn inside the editor through portals, so nothing is restyled: the host carries the paragraph&rsquo;s measure and nothing else. A diagram arrives a tick after its host, which reserves <code>6rem</code> so the lines under the caret do not jump. A PDF embed draws under its line like an image, with the line hidden until the caret comes; both are placed by the server&rsquo;s answer once the page has it, so a Vault-root path resolves as it does in Reading view. An embed of another note stays as its source, as it does in the reading view.</p>
+      <div class="tag-row"><span class="key">.live-editor-block</span><span class="key">.live-editor-mermaid</span><span class="key">.live-editor-saved-query</span><span class="key">.live-editor-math</span><span class="key">.live-editor-math-inline</span><span class="key">.live-editor-pdf</span></div>
+
+      <h3 class="doc-sub">Callouts</h3>
+      <p class="blurb">A quote opening with <code>[!kind]</code> takes §13&rsquo;s accent on every line: the same <span class="key">.callout-&lt;kind&gt;</span> rule sets <span class="key">--callout-accent</span>, and the editor draws the 3px spine and the 12% oklab tint from it, line by line. The first line is the title in §13&rsquo;s display face, the kind&rsquo;s name in place of the marker or the text after it, and the marker shows again under the caret. The body lines are the quote&rsquo;s italic serif. Folds are not drawn and a <code>[!quote]</code> keeps this treatment rather than the pullquote, since the lines stay editable prose.</p>
+      <div class="tag-row"><span class="key">.live-editor-callout</span><span class="key">.live-editor-callout-title</span><span class="key">.live-editor-callout-body</span><span class="key">.live-editor-callout-last</span><span class="key">.live-editor-callout-kind</span></div>
+
+      <h3 class="doc-sub">The view toggle</h3>
+      <p class="blurb">Above the note, beside the save badge: <b>Reading</b> switches to the rendered page and reads <b>Editing</b> there, a <code>.close-note</code> button like <b>Source</b> next to it, with <code>aria-pressed</code> carrying the state.</p>
     </section>
 
-    <!-- ───────── SAVE STATE ───────── -->
     <section class="doc-section" id="save-state">
       <div class="doc-section-num">§21</div>
       <h2>Save state</h2>
@@ -2660,6 +2730,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.write-notice</span><span class="key">.note-editor-notice</span></div>
+
+      <h3 class="doc-sub">Source-mode tones</h3>
+      <p class="blurb">The source editor borrows surfaces that already mean something, and adds no colour of its own (#547). A failed attachment notice takes <span class="key">--err-bg</span> and <span class="key">--err-border</span>. In the conflict view, a line from the version on disk sits on <span class="key">--err-bg</span>, because that version is the one in the way, and a line from the draft sits on the info callout&rsquo;s tint, 12% of <span class="key">--co-info</span> mixed into <span class="key">--paper</span> exactly as &sect;13 mixes a callout. The properties panel, the conflict panel and a hovered autocomplete row fill with <span class="key">--paper-2</span>, the same raised fill a menu row gets. A drop target and a drag-active field are outlined in <span class="key">--hot</span>, like a focused field. The autocomplete list floats on <span class="key">--shadow-float</span>.</p>
+      <div class="stage" style="display:grid; gap:0.8rem;">
+        <div class="write-notice" style="border-color: var(--err-border); background: var(--err-bg);">
+          <div>Could not attach diagram.png.</div>
+        </div>
+        <div style="border: 1px solid var(--rule); background: var(--paper); font-family: var(--font-mono); font-size: 0.82rem;">
+          <div style="padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--rule); background: var(--err-bg);">disk &nbsp; Prune the old wood first.</div>
+          <div style="padding: 0.25rem 0.5rem; background: color-mix(in oklab, var(--co-info) 12%, var(--paper));">draft &nbsp; Prune the dead wood first.</div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.note-editor-notice.attachment-error</span><span class="key">.note-editor-conflict-line.disk</span><span class="key">.note-editor-conflict-line.draft</span><span class="key">.note-editor-properties</span><span class="key">.note-editor-drop-target</span><span class="key">.note-editor-autocomplete</span></div>
 
       <h3 class="doc-sub">Editable properties</h3>
       <p class="blurb">Frontmatter values edit in place for the same reason blocks do: changing a tag should not require dropping the whole note into source mode. The input follows <span class="key">.field-input</span>. Tag chips keep filtering; editing tags is a separate <b>Edit</b> affordance on the row, so a chip does not silently stop doing what it always did.</p>
@@ -2837,6 +2920,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">graph_3</td><td class="val">rail: graph</td></tr>
           <tr><td class="name">inbox</td><td class="val">rail: changed on disk</td></tr>
           <tr><td class="name">settings</td><td class="val">rail: settings</td></tr>
+          <tr><td class="name">format_indent_decrease</td><td class="val">live editor keyboard bar: outdent</td></tr>
+          <tr><td class="name">format_indent_increase</td><td class="val">live editor keyboard bar: indent</td></tr>
+          <tr><td class="name">format_list_bulleted</td><td class="val">live editor: bullet (bar and toolbar)</td></tr>
+          <tr><td class="name">checklist</td><td class="val">live editor: to-do (bar and toolbar)</td></tr>
+          <tr><td class="name">format_h2</td><td class="val">live editor: heading (bar and toolbar)</td></tr>
+          <tr><td class="name">format_bold</td><td class="val">live editor: bold (bar and toolbar)</td></tr>
+          <tr><td class="name">format_italic</td><td class="val">live editor: italic (bar and toolbar)</td></tr>
+          <tr><td class="name">format_strikethrough</td><td class="val">live editor: strikethrough (bar and toolbar)</td></tr>
+          <tr><td class="name">code</td><td class="val">live editor: inline code (bar and toolbar)</td></tr>
+          <tr><td class="name">format_ink_highlighter</td><td class="val">live editor: highlight (bar and toolbar)</td></tr>
+          <tr><td class="name">link</td><td class="val">live editor: link (bar and toolbar)</td></tr>
+          <tr><td class="name">undo</td><td class="val">live editor keyboard bar: undo</td></tr>
+          <tr><td class="name">redo</td><td class="val">live editor keyboard bar: redo</td></tr>
         </tbody>
       </table>
       <div class="tag-row"><span class="key">components/icons.tsx</span><span class="key">.icon-button</span><span class="key">.explorer-rail-item</span></div>
@@ -3043,9 +3139,8 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <p class="blurb"><b>The Vault name keeps the capitalisation it was given.</b> It is the
       operator&rsquo;s own text, not a label this app wrote, so the head overrides
-      <span class="key">.side-label</span>&rsquo;s uppercase and tracking &mdash; the same reasoning
-      <a href="#editing">§20</a> applies to the inline editor, where an inherited
-      <code>text-transform</code> would show the typist a different string than the one on disk.
+      <span class="key">.side-label</span>&rsquo;s uppercase and tracking: an inherited
+      <code>text-transform</code> would show the operator a different string than the one they typed.
       Uppercasing it also collapsed the one signal separating these heads from
       <span class="key">SCOPE</span> and <span class="key">RECENTLY VIEWED</span> above them:
       <b>caps mean a heading Hatchdoor owns, sentence case means your data</b>. The Scope zone and the
@@ -3124,7 +3219,13 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       where it is, the magnifier in row one is the same search entry point the path button used to be,
       and scope persists where a path does not. The row carries three things, always in this order:
       the browsing scope's name, a rule, and §27's own count-or-condition slot &mdash; every one of
-      them on screen at all times, drawer closed, zero interaction.</p>
+      them on screen at all times, drawer closed, zero interaction. On a note with headings the row
+      ends with an <b>On this page</b> chip (#530): the <code>toc</code> glyph, the words and the
+      heading count, set off from the scope control by a hairline, which opens a sheet of the
+      headings in this sheet&rsquo;s own shell, rows stepped in by level. At one Vault, where no scope control
+      renders, the row renders for the chip alone. It costs the note no height, which is the point:
+      on a phone the body used to start a screen down, under Properties, Links and a folded
+      heading list.</p>
 
       <div class="stage" style="max-width: 22rem; padding: 0;">
         <div style="border-bottom:1px solid var(--rule); background:var(--paper); padding:0.32rem 0.75rem;">
@@ -3136,6 +3237,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </button>
         </div>
       </div>
+      <div class="stage" style="max-width: 22rem; padding: 0;">
+        <div style="display:flex; align-items:stretch; border-bottom:1px solid var(--rule); background:var(--paper); padding:0.32rem 0.75rem;">
+          <button class="topbar-scope-trigger" style="display:flex;align-items:center;flex:1 1 auto;min-width:0;background:transparent;border:0;padding:0.12rem 0.2rem;text-align:left;cursor:pointer;">
+            <span class="topbar-scope-name">All Vaults</span>
+            <span class="topbar-scope-rule" aria-hidden="true">/</span>
+            <span class="topbar-scope-slot"><span class="vault-slot-shortfall vault-tier-error">5 of 8 answering</span></span>
+          </button>
+          <button type="button" style="flex:0 0 auto;display:inline-flex;align-items:center;gap:0.35rem;margin-left:0.5rem;padding:0.12rem 0.2rem 0.12rem 0.7rem;border:0;border-left:1px solid var(--rule);background:transparent;color:var(--ink-soft);font-size:1.05rem;line-height:1;cursor:pointer;">
+            ☰ <span style="font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);">On this page</span><span style="font-family:var(--font-mono);font-size:0.66rem;color:var(--ink);">4</span>
+          </button>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.topbar-meta-row</span><span class="key">.topbar-toc-chip</span><span class="key">.toc-sheet</span></div>
 
       <p class="blurb"><b>The slot always describes the browsing scope, never the open note's
       Vault</b> &mdash; a slot that changed subject with the page is a slot nobody could learn. The
@@ -3188,15 +3302,17 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <h2>Marked path root</h2>
       <p class="blurb">On a flattened surface &mdash; search results, recent items, metadata queries
       &mdash; a note says which Vault it came from by declaring a marked path root: the Vault name in
-      hot ink at medium weight, followed by a middot rather than the <code>/</code> a folder path
-      would use, so it reads as visibly not a folder segment. Provenance leads the most specific
+      muted mono, followed by a middot rather than the <code>/</code> a folder path
+      would use, so it reads as visibly not a folder segment. It is quiet on purpose (#530): the
+      title beside it carries the row, and a prefix in hot ink was the loudest thing on every row. Provenance leads the most specific
       location line the surface has: the path line where one exists, the title line where none does.
       It renders on collection surfaces when the set <em>can</em> span (scope is <code>all</code> and
       more than one Vault is enabled), and on exact reads whenever more than one Vault is enabled
       &mdash; a single-Vault instance is byte-identical to an instance that never knew about Vaults.
       The prefix is <strong>inert</strong>, a plain span inside the row's own button or link and never
-      a second click target, and it <strong>never elides</strong>: the folder path takes the loss,
-      eliding head-first (#115, implemented by #140).</p>
+      a second click target. It takes <strong>at most 42% of its row</strong> and elides past that
+      (#530): it used to never elide, and a long Vault name then took the whole row and pushed the
+      title out of sight. The path beside it elides at its tail, left to right.</p>
 
       <div class="stage">
         <div class="vslot-row"><span class="vslot-name"><span class="path-vault">Notes<span class="path-sep">&middot;</span></span>10-topics/finance</span></div>
@@ -3213,6 +3329,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="settings">
       <div class="doc-section-num">§32</div>
       <h2>Settings</h2>
+      <p class="blurb"><b>A section&rsquo;s save button says Save</b> (#530); the section title beside it already names what. <b>A sub-heading inside a section</b>, <code>.settings-group-label</code>, set in §05&rsquo;s head grammar, groups rows that belong together under a section about something else: the server&rsquo;s commit identity under Notes handling reads <code>HISTORY (GIT)</code>. On a Vault&rsquo;s page <b>Disconnect stands apart</b> at the far edge of the action row, so three buttons of equal weight do not read as one set.</p>
       <p class="blurb">The first page-level surface in the system, settled by the Variant B prototype (issue&nbsp;#58). <b>An index of sections on the left, one section at a time on the right.</b> It sits inside <span class="key">.note-pane</span>, which already owns the gutter, so the page adds no outer padding of its own &mdash; only a deep bottom margin so the last row clears the fold.</p>
       <p class="blurb"><b>The index is the collection</b> (issue&nbsp;#120, Variant B). Every Vault is a settings section like any other, listed under a <span class="key">Vaults</span> group above the instance sections under <span class="key">This server</span>. There is no third level: selecting a Vault opens it in the same right-hand pane the other sections use, so a Vault is never a page inside a page. <span class="key">+ Add a Vault</span> is the last row of the collection rather than a link beneath it &mdash; underlined, it made the one row you cannot select the loudest thing in the list.</p>
       <p class="blurb">A Vault row is a name column and a status column, ending in §27&rsquo;s count-or-condition slot. <b>The status hangs from the name&rsquo;s first line</b>, not from the middle of the row: centred, it floated halfway down a wrapped name and the right-hand column read as scattered marks rather than a column. <b>Names wrap in full and are never truncated</b> &mdash; three Vaults called <span class="key">Git &mdash; unreachable remote</span>, <span class="key">Git &mdash; clones cleanly</span> and <span class="key">Git &mdash; auth refused</span> all ellipsise to the same stub, and this index is where you identify a Vault. The column is <span class="key">17rem</span> for the same reason: at 15rem an ordinary name plus a condition pill took three lines.</p>
@@ -3287,11 +3404,15 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <p class="blurb"><b>A choice with a field under it is one control, so it takes one width.</b> The Git sign-in row is the case: a two-option segmented group with a token field beneath it. Right-aligned at their natural widths and stacked flush, they read as two unrelated controls that happened to land together &mdash; a short group hanging over a wide field, no space between them. Inside <span class="key">.settings-choice-stack</span> the group stretches to the field&rsquo;s own edge with equal segments, and the pair is spaced by <span class="key">0.45rem</span>: one block, two shared edges, and the divider between the options lands mid-control rather than wherever the longer label happens to end.</p>
 
+      <p class="blurb"><b>A group too wide for a phone stacks its options; it never wraps them.</b> Add a Vault&rsquo;s &ldquo;Where is this Vault?&rdquo; has two long labels and needs about 375px on one line, more than a dialog has on a 390px screen. With <span class="key">.settings-segmented-stackable</span>, at <span class="key">640px</span> and narrower the options stack inside the same <span class="key">--rule-strong</span> box, the group stretches to the row&rsquo;s width, each option stays on one line with its full label set left, and a <span class="key">--rule</span> divider runs between them in place of the side-by-side one. Above 640px the group is an ordinary segmented control. Labels are never shortened for the phone: the stacked box still reads as one set, a wrapped label does not. Settings dialogs (<span class="key">.settings-modal</span>) mount on <span class="key">document.body</span>, so the sticky index, which is a stacking context of its own, cannot trap one under the main column.</p>
+
       <p class="blurb"><b>The toggle&rsquo;s travel is derived, not typed.</b> The track is 2.4rem with a 1px border each side and the knob is 1rem inset by 1px, so the on-position is <span class="key">calc(2.4rem - 1rem - 4px)</span>. Writing a rounded literal there leaves the knob fractionally past its resting inset, which on a 1px-bordered control reads as a wobble.</p>
 
       <p class="blurb"><b>A conflicted Vault&rsquo;s way out lives inside the console strip, not beside it.</b> While a Two-way Vault&rsquo;s sync is stopped on a conflict, <span class="key">.settings-console-recovery</span> takes the strip&rsquo;s full width under the file list, as the list does, so the fix sits in the same tinted ground as the failure it answers. It stacks the explanation, the branch name in <span class="key">--font-mono</span> at the file list&rsquo;s own size with its copy control and host link on one wrapping row (<span class="key">.settings-console-recovery-branch</span>), the last publish, and the button, spaced by <span class="key">--space-2</span>. It adds no colour of its own: a refused publish is a sentence in the strip&rsquo;s error ink, never a second banner (<a href="../adr/README.md">ADR-30</a>).</p>
 
-      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-index-group</span><span class="key">.settings-vault-index-item</span><span class="key">.settings-vault-index-add</span><span class="key">.settings-vault-disconnect-note</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-console-recovery</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-choice-stack</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
+      <p class="blurb"><b>A report is shown as what will be sent, not as a form.</b> The Usage report section (#477) ends in <span class="key">.settings-report</span>: an eyebrow in the plaque&rsquo;s own <span class="key">.settings-plaque-head</span>, then <span class="key">.settings-report-body</span>, the exact text on the code block&rsquo;s inverted surface (<a href="#code">&sect;14</a>, <span class="key">--code-surface</span> and <span class="key">--code-ink</span>), scrolling sideways on a phone and never wrapping, since a wrapped line would no longer be the text that is sent. While the report is on, <span class="key">.settings-report-id</span> states the install ID above it in mono. A second row of the same class says when the last report was sent (#478), in the body face: it is a time to read, not a value to copy.</p>
+
+      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-report</span><span class="key">.settings-report-id</span><span class="key">.settings-report-body</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-index-group</span><span class="key">.settings-vault-index-item</span><span class="key">.settings-vault-index-add</span><span class="key">.settings-vault-disconnect-note</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-console-recovery</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-choice-stack</span><span class="key">.settings-segmented-stackable</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
     </section>
 
     <!-- ───────── STARTUP GATE ───────── -->
@@ -3350,6 +3471,214 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">.startup-progress</span><span class="key">.startup-progress.is-indeterminate</span><span class="key">.startup-progress-line</span><span class="key">@keyframes startup-scan</span>
       </div>
     </section>
+
+    <!-- ───────── SIDE PANEL ───────── -->
+    <section class="doc-section" id="side-panel">
+      <div class="doc-section-num">§34</div>
+      <h2>Side panel (Help)</h2>
+      <p class="blurb"><b>Help reads beside the work, never instead of it.</b> The panel is an overlay (#417): it slides in from the right under the topbar, <span class="key">min(32rem, 40vw)</span> wide, and the screen underneath keeps its width and does not reflow. The part it covers is simply covered. It carries <span class="key">--shadow-overlay</span> and a <span class="key">--rule-strong</span> left edge, on <span class="key">--paper</span>, and it dims nothing: unlike the search dialog (<a href="#search">§17</a>) it is not modal, so the screen beside it stays usable. Entry animation is <span class="key">--dur</span> <span class="key">--ease</span> from <span class="key">--space-8</span> to the right, and none at all under <code>prefers-reduced-motion</code>.</p>
+
+      <div class="stage side-panel-stage" style="padding:0;">
+        <div class="side-panel-under">
+          <h3 style="margin:0 0 0.5rem; font-family: var(--font-display); text-transform: uppercase;">Field notes from the orchard</h3>
+          <p style="margin:0; font-family: var(--font-serif); color: var(--ink-soft);">The screen underneath keeps its layout. Help covers its right side and nothing else.</p>
+        </div>
+        <aside class="help-panel" aria-label="Help (example)">
+          <div class="help-panel-head">
+            <span class="help-eyebrow">Help</span>
+            <span class="help-crumb">How to set up a Git-backed Vault</span>
+            <button class="icon-btn" title="Back">&larr;</button>
+            <button class="icon-btn" title="Manual home">&#8962;</button>
+            <button class="icon-btn" title="Open full width">&#8599;</button>
+            <button class="icon-btn" title="Close">&#10005;</button>
+          </div>
+          <div class="help-search"><input placeholder="Search the manual" /></div>
+          <div class="help-panel-body">
+            <h2 class="ty-h2" style="font-size:1.3rem; margin:0 0 0.5rem;">The four Git behaviours</h2>
+            <p style="margin:0; font-family: var(--font-serif);">The manual renders exactly like a note: callouts, tables, code and diagrams come from the same renderer.</p>
+          </div>
+        </aside>
+      </div>
+
+      <p class="blurb"><b>The head says where you are and how to leave.</b> A hot <span class="key">.help-eyebrow</span> reading HELP, the page title in muted sans, then Back, Manual home, Open full width and Close as ordinary <span class="key">.icon-button</span>s. Under it one search field, the same field as <span class="key">.search-input</span> on <span class="key">--bg</span> so it reads as a field against the panel's paper. Results reuse the search dialog's result rows; no results is a <span class="key">.state-block</span> (<a href="#states">§23</a>) that says what to try.</p>
+
+      <p class="blurb"><b>Full width covers the work area, not the topbar,</b> with the reading column held to 46rem and centred. <b>Below 920px there is no side:</b> the panel covers the whole screen, topbar included, the full-width toggle goes away, and Close gains its label in a bordered button so it can be found with a thumb. On phones the way in is the first item of the topbar's &hellip; menu, because the phone topbar has no room for another icon; on wider screens it is a <span class="key">?</span> icon button beside the theme cycler. While Help is open it takes the filled state every expanded <span class="key">.icon-button</span> already has, with its glyph in <span class="key">--hot</span>.</p>
+
+      <p class="blurb"><b>Signed out it sits above the token prompt.</b> The prompt's two links open Help, so the panel takes <code>z-index: 1001</code> there, one above the prompt; everywhere else it is 50, above the topbar and under the search dialog, menus and form dialogs.</p>
+
+      <p class="blurb"><b>A stuck screen links to the page that explains it</b> (#423). The link reads <i>How does this work?</i> and is Help&rsquo;s own text-link button, <span class="key">.help-link</span>: underlined in <span class="key">--hot</span>, in the ink and size of the sentence it follows, with nothing added. Those words are all a reader sees, but several of these links can share a screen, so the button&rsquo;s accessible name adds what it explains: <i>How does this work? Adding your notes</i> (#460). The visible words come first in that name, so voice control still answers to what is on screen, and the topic comes from the link&rsquo;s entry in <span class="key">CONTEXTUAL_HELP</span>, never from text written in place. It sits at the end of that sentence, on its own line under a <span class="key">.state-block</span>&rsquo;s description, or after the key in a Settings &ldquo;Managed outside this page&rdquo; entry, never as a button beside the block&rsquo;s actions. One link per explanation: where a Vault&rsquo;s Git console explains a sync failure, the condition line above it carries none.</p>
+
+      <div class="tag-row">
+        <span class="key">features/help/HelpPanel.tsx</span><span class="key">features/help/help.css</span>
+        <span class="key">.help-panel</span><span class="key">.help-panel.is-full</span><span class="key">.help-panel.is-above-dialogs</span><span class="key">.help-panel-head</span><span class="key">.help-eyebrow</span><span class="key">.help-crumb</span>
+        <span class="key">.help-search</span><span class="key">.help-search-input</span><span class="key">.help-panel-body</span><span class="key">.help-start</span><span class="key">.help-start-card</span><span class="key">.help-trigger</span><span class="key">.help-link</span><span class="key">features/help/ContextualHelpLink.tsx</span>
+      </div>
+    </section>
+
+    <!-- ───────── WHAT'S NEW ───────── -->
+    <section class="doc-section" id="whats-new">
+      <div class="doc-section-num">§35</div>
+      <h2>What&rsquo;s new pop-up</h2>
+      <p class="blurb"><b>After an upgrade, one centred dialog says what changed</b> (#418). It is the dialog shell from <a href="#fields">§18</a>, <span class="key">.modal-backdrop</span> and <span class="key">.modal-panel</span>, widened to 560px and split into a fixed head and foot around a list that scrolls. It is modal on purpose: it shows once per browser per upgrade, and anything it pins is something the reader has to do.</p>
+
+      <div class="stage whats-new-stage">
+        <div class="whats-new-demo" role="dialog" aria-label="What's new (example)">
+          <div class="wn-head">
+            <span class="help-eyebrow">What&rsquo;s new</span>
+            <h3 class="wn-title">Hatchdoor 2.8.0</h3>
+            <p class="wn-sub">Updated to 2.8.0. You skipped 1 release since you last looked.</p>
+          </div>
+          <div class="wn-body">
+            <section class="wn-action">
+              <p class="wn-label">Action needed</p>
+              <ul><li><span class="wn-tag">v2.8.0</span> Installs on 2.4.x or earlier must upgrade to a 2.7.x release first. <a class="wn-link" href="#whats-new">Install Hatchdoor with Docker Compose</a></li></ul>
+            </section>
+            <section>
+              <p class="wn-label wn-release-head"><span>v2.8.0</span><span class="wn-date">20 Oct 2026</span></p>
+              <ul>
+                <li>Help opens beside what you are doing. <a class="wn-link" href="#whats-new">Browse and review through the Web UI</a></li>
+                <li>A setup checklist takes a new install from empty to a working agent.</li>
+              </ul>
+            </section>
+          </div>
+          <div class="wn-foot">
+            <a class="wn-link" href="#whats-new">Full changelog</a>
+            <button class="ui-btn">Got it</button>
+          </div>
+        </div>
+      </div>
+
+      <p class="blurb"><b>The head names the version, the body lists releases newest first.</b> A hot eyebrow reading WHAT&rsquo;S NEW, the version as a display title, and one muted line saying how many releases were skipped. <b>Action-needed items from every listed release are pinned first</b> in one box on <span class="key">--warn-bg</span> with a <span class="key">--warn-border</span> edge and <span class="key">--warn-fg</span> text, each tagged with its version in mono. Each release then gets a section-label heading with its date in mono on the right, and its other lines as em-dash items in <span class="key">--hot</span>, the same device note lists use.</p>
+
+      <p class="blurb"><b>Links open Help, not a new page.</b> A highlight&rsquo;s link and Full changelog are Help&rsquo;s own text-link buttons, <span class="key">.help-link</span>, underlined in <span class="key">--hot</span>, with a trailing arrow. The eyebrow is Help&rsquo;s <span class="key">.help-eyebrow</span>. Help (<a href="#side-panel">§34</a>) then opens above the dialog, and the backdrop shrinks to the space left of it so the dialog stays readable. <b>Below 920px</b> the backdrop pads by <span class="key">--space-2</span>, so the dialog fills a phone&rsquo;s width (still capped at 560px), scrolls inside, and keeps Got it in view; Help covers it until closed.</p>
+
+      <div class="tag-row">
+        <span class="key">features/whats-new/WhatsNew.tsx</span><span class="key">features/whats-new/whats-new.css</span>
+        <span class="key">.modal-backdrop.whats-new-backdrop</span><span class="key">.whats-new-backdrop.is-beside-help</span><span class="key">.modal-panel.whats-new</span><span class="key">.whats-new-head</span><span class="key">.help-eyebrow</span><span class="key">.whats-new-title</span><span class="key">.whats-new-sub</span><span class="key">.whats-new-body</span>
+        <span class="key">.whats-new-action</span><span class="key">.whats-new-action-label</span><span class="key">.whats-new-release-head</span><span class="key">.whats-new-date</span><span class="key">.whats-new-list</span><span class="key">.whats-new-version-tag</span><span class="key">.help-link.whats-new-link</span><span class="key">.whats-new-foot</span>
+      </div>
+    </section>
+
+    <section class="doc-section" id="folder-picker">
+      <div class="doc-section-num">§36</div>
+      <h2>Folder picker</h2>
+      <p class="blurb"><b>Add a Vault lists the folders Hatchdoor can see, one level at a time</b> (#430). It replaces the typed folder path as the default way to choose a local folder, and it is a component of its own so the first-run checklist can show it outside the dialog. It spans the dialog&rsquo;s full width, because a list of names and counts does not fit the <a href="#settings">Settings</a> row&rsquo;s 21.5rem control column.</p>
+
+      <div class="stage">
+        <div class="folder-picker-demo">
+          <div class="fpd-box">
+            <div class="fpd-crumbs"><a href="#folder-picker">vault</a><i>/</i><span>Work</span></div>
+            <ul>
+              <li><span class="fpd-row"><span class="fpd-this">Use Work</span><span class="fpd-count">1,280 notes</span></span></li>
+              <li><span class="fpd-row"><span>Clients</span><span class="fpd-count">310 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
+              <li><span class="fpd-row is-off"><span>Recipes</span><span class="fpd-badge">Already a Vault</span><span class="fpd-count">86 notes</span></span><span class="fpd-note">Recipes is already the Vault <b>Kitchen</b>. Pick another folder.</span></li>
+              <li><span class="fpd-row is-on"><span>Projects</span><span class="fpd-count">at least 10,000 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
+            </ul>
+            <div class="fpd-new"><span class="fpd-new-open">+ New folder</span></div>
+          </div>
+          <p class="fpd-picked">Folder <code>/data/vault/Work/Projects</code></p>
+          <span class="fpd-more">My folder isn&rsquo;t here</span>
+          <span class="fpd-more">Type a path instead</span>
+        </div>
+        <div class="folder-picker-demo">
+          <div class="fpd-box">
+            <div class="fpd-crumbs"><a href="#folder-picker">vault</a><i>/</i><span>Work</span></div>
+            <ul>
+              <li><span class="fpd-row"><span class="fpd-this">Use Work</span><span class="fpd-count">1,280 notes</span></span></li>
+              <li><span class="fpd-row"><span>Clients</span><span class="fpd-count">310 notes</span></span><span class="fpd-open">&rsaquo;</span></li>
+            </ul>
+            <div class="fpd-new">
+              <span class="fpd-new-label">Name of the new folder in <b>Work</b></span>
+              <span class="fpd-new-input">Projects</span>
+              <span class="fpd-new-actions"><span class="fpd-btn is-hot">Create folder</span><span class="fpd-btn">Cancel</span></span>
+              <span class="fpd-new-error">A folder with this name already exists.</span>
+            </div>
+          </div>
+        </div>
+        <div class="folder-picker-demo">
+          <div class="fpd-box">
+            <div class="fpd-crumbs"><a href="#folder-picker">vault</a><i>/</i><span>Recipes</span></div>
+            <ul>
+              <li><span class="fpd-row is-off"><span class="fpd-this">Use Recipes</span><span class="fpd-badge">Already a Vault</span><span class="fpd-count">86 notes</span></span></li>
+            </ul>
+            <div class="fpd-new is-off">No new folder here: this folder belongs to the Vault <b>Kitchen</b>.</div>
+          </div>
+        </div>
+      </div>
+
+      <p class="blurb"><b>A bordered box holds a mono trail and the rows.</b> The trail is the mount&rsquo;s last segment, then each folder opened, separated by muted slashes; every step but the current one is a <span class="key">--hot</span> underlined link back up. The first row, in italics, picks the folder currently open and names it (<i>Use Work</i>). Each other row is one button with the name, an optional <b>Already a Vault</b> badge (mono, uppercase, a <span class="key">--rule-strong</span> border, no radius) and the note count in muted mono on the right; a folder with subfolders adds a separate square <b>&rsaquo;</b> button on a <span class="key">--rule</span> divider that opens it. The list scrolls past 16rem.</p>
+
+      <p class="blurb"><b>The picked row takes the selection treatment</b>: <span class="key">--hot-soft</span> fill and a 3px <span class="key">--hot</span> left edge, the explorer&rsquo;s own. Below the box one line names the picked path in mono. A row that is already a Vault is muted and refuses the click with a <span class="key">--warn-fg</span> line under it naming the Vault. <b>Counts</b> read &ldquo;no notes&rdquo;, &ldquo;1 note&rdquo;, &ldquo;1,280 notes&rdquo;, or &ldquo;at least 10,000 notes&rdquo; when counting stopped early. While the next level loads, the current one stays on screen with a muted &ldquo;Looking for folders&hellip;&rdquo; line, so the trail keeps working.</p>
+
+      <p class="blurb"><b>Two quiet text links sit under the list</b>, underlined in <span class="key">--ink-soft</span>: <i>My folder isn&rsquo;t here</i> opens a <a href="#settings">.settings-notice</a> explaining that Hatchdoor only sees the folders shared with it at install, with Help&rsquo;s <span class="key">.help-link</span> and &ldquo;Or ask your agent to add it.&rdquo; <i>Type a path instead</i> swaps the picker for the original Folder path row, which has <i>Pick from the list instead</i> under it. <b>When the mount holds no notes</b>, a dashed <span class="key">--rule-strong</span> panel titled &ldquo;No notes found yet&rdquo; in the display face sits above the list, with the same Help link and agent line and a <i>Look again</i> button; the list stays pickable so an empty Vault can still be started. When the mount does not exist the panel stands alone. A failed listing shows <span class="key">.settings-notice-err</span> with <i>Try again</i>.</p>
+
+      <p class="blurb"><b>The box ends in a &ldquo;New folder&rdquo; strip</b> (#494), on a <span class="key">--rule</span> divider under the list, so it stays put while the list scrolls. Closed, it is one <span class="key">--hot</span> text button, <i>+ New folder</i>, underlined on hover. Open, it stacks a label naming the folder it will be made in, a full-width <a href="#settings">.settings-input</a>, and Settings&rsquo; own two buttons: <span class="key">.settings-btn-hot</span> <i>Create folder</i>, off until a name is typed and reading <i>Creating&hellip;</i> while it works, and <span class="key">.settings-btn</span> <i>Cancel</i>. Enter in the field creates the folder and never submits the form around the picker. A refusal sits under the buttons in <span class="key">--err-fg</span> and clears on the next keystroke; when the folder itself is the problem (read-only, gone) it ends with Help&rsquo;s <span class="key">.help-link</span>. The new folder joins the list in order, takes the selection treatment and takes focus. <b>Inside a Vault</b> the strip is one muted line naming the Vault instead, with no control. The strip is absent when the mount does not exist.</p>
+
+      <p class="blurb"><b>Help opens beside the dialog, not over it.</b> The picker&rsquo;s Help link is the first inside a Settings dialog, so the shared shell follows the What&rsquo;s new rules from <a href="#whats-new">§35</a>: while Help is open the backdrop gives up Help&rsquo;s width (<span class="key">.settings-modal-back.is-beside-help</span>, <span class="key">right: min(32rem, 40vw)</span> and <span class="key">z-index: 45</span>, under <span class="key">.help-panel</span>&rsquo;s 50), Escape closes Help before the dialog, and Tab is no longer held inside. Below 920px Help is full screen and covers the dialog until closed.</p>
+
+      <div class="tag-row">
+        <span class="key">features/settings/FolderPicker.tsx</span><span class="key">features/settings/settings.css</span>
+        <span class="key">.folder-picker-field</span><span class="key">.folder-picker</span><span class="key">.folder-picker-box</span><span class="key">.folder-picker-crumbs</span><span class="key">.folder-picker-crumb</span><span class="key">.folder-picker-crumb-step</span><span class="key">.folder-picker-sep</span><span class="key">.folder-picker-list</span><span class="key">.folder-picker-item</span><span class="key">.folder-picker-row</span><span class="key">.folder-picker-row-this</span><span class="key">.folder-picker-name</span>
+        <span class="key">.folder-picker-badge</span><span class="key">.folder-picker-count</span><span class="key">.folder-picker-open</span><span class="key">.folder-picker-row-note</span><span class="key">.folder-picker-picked</span><span class="key">.folder-picker-status</span><span class="key">.folder-picker-more</span><span class="key">.folder-picker-note</span><span class="key">.folder-picker-empty</span><span class="key">.folder-picker-new</span><span class="key">.folder-picker-new-open</span><span class="key">.folder-picker-new-label</span><span class="key">.folder-picker-new-actions</span><span class="key">.folder-picker-new-error</span><span class="key">.folder-picker-new-off</span><span class="key">.settings-modal-back.is-beside-help</span>
+      </div>
+    </section>
+
+    <section class="doc-section" id="first-run">
+      <div class="doc-section-num">&sect;37</div>
+      <h2>First-run checklist</h2>
+      <p class="blurb"><b>A fresh install opens on a checklist page, not on No Vaults Yet</b> (#419). It sits in the note pane where that empty screen would be, a single column capped at 46rem on <span class="key">--paper</span> with a <span class="key">--rule-strong</span> border, and stays until it is closed. Closed, it comes back from Help&rsquo;s home, where a <span class="key">.help-start-card</span> reads <i>Setup checklist</i>. It never shows in demo mode, and an upgraded install only sees it when reopened.</p>
+
+      <div class="stage">
+        <div class="first-run-demo">
+          <div class="frd-head"><b>Set up Hatchdoor</b><span class="frd-mono">2 of 4 done</span></div>
+          <ol>
+            <li class="is-done"><span class="frd-mark">&check;</span><span class="frd-title">Add your notes</span><span class="frd-mono">Done</span></li>
+            <li class="is-done"><span class="frd-mark">&check;</span><span class="frd-title">Choose a search model</span><span class="frd-mono">Done</span></li>
+            <li class="is-open" style="flex-wrap: wrap;"><span class="frd-mark">3</span><span class="frd-title">Connect your agent</span>
+              <pre>claude mcp add --transport http --scope user hatchdoor &hellip;</pre></li>
+            <li><span class="frd-mark">4</span><span class="frd-title">Try a search</span></li>
+          </ol>
+        </div>
+      </div>
+
+      <p class="blurb"><b>Each step is a row with a square mark.</b> The mark is 1.6rem, no radius, holding the step number in mono: muted on a <span class="key">--rule-strong</span> border while waiting, <span class="key">--hot</span> border and number for the step that is open, and a filled <span class="key">--hot</span> square with a <span class="key">--bg</span> check once done, with DONE in muted mono on the right. Only the first step not yet done opens; a waiting step&rsquo;s title is a plain button that opens it instead. A done step keeps one line of what proved it (&ldquo;Claude Code connected 2 minutes ago&rdquo;). Rows divide on <span class="key">--rule</span>; the progress count sits in the head in muted mono.</p>
+
+      <p class="blurb"><b>Inside a step, everything is borrowed.</b> Actions are Settings&rsquo; <span class="key">.settings-btn</span> and <span class="key">.settings-btn-hot</span>; the Name row and the folder picker are <a href="#folder-picker">&sect;36</a> unchanged; the client switcher is <span class="key">.settings-segmented</span>; the shown-once warning is <span class="key">.settings-notice</span>; the update check is <span class="key">.settings-toggle</span>; links are Help&rsquo;s <span class="key">.help-link</span>. Only three pieces are new: the config block (<span class="key">--code-surface</span> and <span class="key">--code-ink</span>, mono, scrolling sideways), a pulsing <span class="key">--hot</span> square beside &ldquo;Waiting for your agent to connect&rdquo; (still under reduced motion), and a dashed <span class="key">--rule-strong</span> divider above the line about allowing writes. <b>Below 920px</b> the page loses its outer margin and the step bodies their indent, so the config block gets the full width.</p>
+
+      <div class="tag-row">
+        <span class="key">features/first-run/FirstRunChecklist.tsx</span><span class="key">features/first-run/first-run.css</span>
+        <span class="key">.first-run</span><span class="key">.first-run-head</span><span class="key">.first-run-progress</span><span class="key">.first-run-steps</span><span class="key">.first-run-step</span><span class="key">.first-run-step-head</span><span class="key">.first-run-mark</span><span class="key">.first-run-step-title</span><span class="key">.first-run-step-open</span><span class="key">.first-run-step-status</span><span class="key">.first-run-step-summary</span><span class="key">.first-run-step-body</span>
+        <span class="key">.first-run-actions</span><span class="key">.first-run-name</span><span class="key">.first-run-demo-offer</span><span class="key">.first-run-muted</span><span class="key">.first-run-clients</span><span class="key">.first-run-config</span><span class="key">.first-run-code</span><span class="key">.first-run-wait</span><span class="key">.first-run-pulse</span><span class="key">.first-run-writes</span><span class="key">.first-run-update</span><span class="key">.first-run-update-head</span><span class="key">.first-run-foot</span><span class="key">.first-run-foot-note</span>
+      </div>
+    </section>
+    <!-- ───────── HOME ───────── -->
+    <section class="doc-section" id="home">
+      <div class="doc-section-num">§37</div>
+      <h2>Home</h2>
+      <p class="blurb">The landing page with no note open (#530). It replaced a box that said &ldquo;Select any note from the explorer to start reading&rdquo;, an instruction the explorer beside it already gave. <b>Every figure on it is state the shell holds for the sidebar</b>: the scope&rsquo;s name as a hot mono eyebrow, <code>NOTES</code> in the note title&rsquo;s own size (§07), a one-line summary of how many Vaults and notes the scope holds (the note count only once every Vault in scope has reported one), and New note and Search where the title block&rsquo;s actions go. Below, two lists side by side at desktop width and stacked on the phone: <b>Changed on disk</b> and <b>Recently viewed</b>, six rows each, in the sidebar&rsquo;s §05 grammar &mdash; head with rule and mono count, mono index, the marked path root (§31) where more than one Vault is enabled, the title in the display face, and when, in mono, at the row&rsquo;s end. An empty list says so in one sentence.</p>
+      <div class="stage" style="padding: 1.5rem;">
+        <p style="margin:0 0 0.25rem;font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--hot);">All Vaults</p>
+        <h1 class="ty-title" style="margin:0;">Notes</h1>
+        <p style="margin:0.5rem 0 1.5rem;font-family:var(--font-sans);font-size:0.95rem;color:var(--muted);">3 Vaults, 212 notes</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;">
+          <section>
+            <div class="side-head"><span class="side-label">Changed on disk</span><span class="side-rule"></span><span class="side-count">06</span></div>
+            <ul style="list-style:none;margin:0;padding:0;font-family:var(--font-display);font-size:0.95rem;">
+              <li style="display:flex;gap:0.75rem;align-items:baseline;padding:0.5rem 0;border-bottom:1px solid var(--rule);"><span class="idx">001</span><span class="path-vault">Kitchen<span class="path-sep">&middot;</span></span><span style="flex:1;">Sourdough timing</span><span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);">2 minutes ago</span></li>
+              <li style="display:flex;gap:0.75rem;align-items:baseline;padding:0.5rem 0;border-bottom:1px solid var(--rule);"><span class="idx">002</span><span class="path-vault">Journal<span class="path-sep">&middot;</span></span><span style="flex:1;">Field notes from the orchard</span><span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);">1 hour ago</span></li>
+            </ul>
+          </section>
+          <section>
+            <div class="side-head"><span class="side-label">Recently viewed</span><span class="side-rule"></span><span class="side-count">01</span></div>
+            <ul style="list-style:none;margin:0;padding:0;font-family:var(--font-display);font-size:0.95rem;">
+              <li style="display:flex;gap:0.75rem;align-items:baseline;padding:0.5rem 0;border-bottom:1px solid var(--rule);"><span class="idx">001</span><span class="path-vault">Journal<span class="path-sep">&middot;</span></span><span style="flex:1;">The grafting calendar</span><span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);">just now</span></li>
+            </ul>
+          </section>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">app/HomePage.tsx</span><span class="key">.home-page</span><span class="key">.home-head</span><span class="key">.home-list</span><span class="key">.home-note-title</span><span class="key">.home-note-meta</span></div>
+    </section>
+
 
   </main>
 </div>

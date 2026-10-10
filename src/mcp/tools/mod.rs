@@ -30,42 +30,20 @@ pub(super) const WRITE_DISABLED_MESSAGE: &str =
 /// an agent can branch on rather than the JSON-RPC number.
 pub(super) const WRITE_DISABLED_CODE: &str = "mcp_writes_disabled";
 
-/// The environment-cleanup recovery refusal (#327), when one is pending.
-///
-/// While `.env` still carries retired per-Vault keys, the HTTP composition
-/// root refuses every state-changing request with this same code. `/mcp` is
-/// exempt from that method-based guard, because every MCP request, reads and
-/// the handshake included, is a POST: the MCP surface refuses its own
-/// state-changing tools here instead, so an agent still reaches `list_vaults`
-/// (which explains the recovery) and gets a structured code for the rest.
-/// A pending *legacy migration* recovery that may start with no Vaults is not
-/// refused here, matching the HTTP guard; its own cores refuse what they must.
-pub(super) fn environment_cleanup_refusal(
-    state: &AppState,
-) -> Option<crate::vault_error::VaultOperationError> {
-    let recovery = state
-        .legacy_migration_recovery
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()?;
-    (!recovery.can_start_with_no_vaults()).then(|| {
-        crate::vault_error::VaultOperationError::new(
-            crate::vault_migration::LegacyMigrationRecovery::ENVIRONMENT_CLEANUP_CODE,
-            recovery.message(),
-            None,
-            false,
-        )
-    })
-}
-
-/// Whether a tool may run while [`environment_cleanup_refusal`] is pending:
-/// the reads, collection discovery, and `batch` (which refuses its own write
-/// items). Everything else changes state.
-fn runs_during_environment_cleanup(name: &str) -> bool {
-    READ_OPS.contains(&name) || matches!(name, "list_vaults" | "batch")
-}
-
+/// Runs one `tools/call`. A structured error for a code the manual explains
+/// gains a `docs` field naming the page (#423); `batch` item errors sit inside
+/// a successful call and are never touched.
 pub async fn handle_tools_call(
+    state: AppState,
+    params: Option<Value>,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    dispatch_tools_call(state, params, config)
+        .await
+        .map(super::docs_pointers::attach)
+}
+
+async fn dispatch_tools_call(
     state: AppState,
     params: Option<Value>,
     config: &McpConfig,
@@ -87,12 +65,14 @@ pub async fn handle_tools_call(
         )));
     }
 
-    if !runs_during_environment_cleanup(name)
-        && let Some(refusal) = environment_cleanup_refusal(&state)
-    {
-        return Ok(tool_structured_error(
-            serde_json::to_value(&refusal).unwrap_or_else(|_| json!({ "code": refusal.code })),
-        ));
+    // The bundled manual (ADR-38) takes no Vault and needs no model, so it
+    // answers ahead of the model-setup gate, under
+    // read and write permission alike. Like `list_vaults` it stays out of
+    // `READ_OPS`, so a `batch` item never names it.
+    match name {
+        "read_docs" => return read::read_docs_tool(arguments),
+        "search_docs" => return read::search_docs_tool(arguments),
+        _ => {}
     }
 
     // While model setup is still pending, only the explicit model-setup calls
@@ -244,6 +224,8 @@ fn select_model_tool(
 pub(super) const READ_OPS: &[&str] = &[
     "search_notes",
     "get_note",
+    "get_note_outline",
+    "get_note_section",
     "get_note_links",
     "resolve_wikilink",
     "get_tree",
@@ -251,6 +233,7 @@ pub(super) const READ_OPS: &[&str] = &[
     "get_graph",
     "recently_modified",
     "query_notes",
+    "find_text",
     "evaluate_saved_query",
     "get_attachment_import_config",
     "list_note_attachments",
@@ -270,6 +253,8 @@ pub(super) async fn dispatch_read_tool(
     match op {
         "search_notes" => read::search_notes_tool(state, arguments).await,
         "get_note" => read::get_note_tool(state, arguments).await,
+        "get_note_outline" => read::get_note_outline_tool(state, arguments).await,
+        "get_note_section" => read::get_note_section_tool(state, arguments).await,
         "get_note_links" => read::get_note_links_tool(state, arguments).await,
         "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
         "get_tree" => read::get_tree_tool(state, arguments).await,
@@ -277,6 +262,7 @@ pub(super) async fn dispatch_read_tool(
         "get_graph" => read::get_graph_tool(state, arguments).await,
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "query_notes" => read::query_notes_tool(state, arguments).await,
+        "find_text" => read::find_text_tool(state, arguments).await,
         "evaluate_saved_query" => read::evaluate_saved_query_tool(state, arguments).await,
         // Not gated on `write_enabled`: the tool reports the write posture
         // rather than exercising it, and an agent that cannot upload still
@@ -481,7 +467,6 @@ mod tests {
             vault_work,
             managed_git,
             commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
-            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
@@ -497,6 +482,10 @@ mod tests {
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::terms_required(),
             transfer_links: Default::default(),
+            vault_mount_root: Default::default(),
+            instance_versions: Default::default(),
+            agent_connections: Default::default(),
+            usage_report: Default::default(),
             shutdown: Default::default(),
         };
         (state, tmp)

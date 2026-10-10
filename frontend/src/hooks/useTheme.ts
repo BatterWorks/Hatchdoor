@@ -56,5 +56,7 @@ export function useTheme() {
   const cycleTheme = () =>
     setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
 
-  return { theme, cycleTheme };
+  // Picked by name from the topbar's menu (#530); the cycle stays for the
+  // keyboard and for callers that have no menu.
+  return { theme, cycleTheme, setTheme };
 }

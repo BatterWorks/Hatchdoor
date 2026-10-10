@@ -3,7 +3,7 @@
 - Status: Draft for discussion
 - Scope: First increment of the vault lifecycle roadmap
 - Related roadmap: [`docs/roadmap/vault-lifecycle.md`](../roadmap/vault-lifecycle.md)
-- Related proposal: [Managed Git Vault Lifecycle, PR #18](https://github.com/BattermanZ/Hatchdoor/pull/18)
+- Related proposal: [Managed Git Vault Lifecycle, PR #18](https://github.com/BatterWorks/Hatchdoor/pull/18)
 - Agent handoff: [`docs/plans/managed-git-vault-agent-handoff.md`](../plans/managed-git-vault-agent-handoff.md)
 - Compatibility: Preserve the existing local-directory workflow
 

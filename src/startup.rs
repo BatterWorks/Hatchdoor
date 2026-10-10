@@ -345,6 +345,13 @@ impl StartupTracker {
         self.runtime.set_ready();
     }
 
+    /// Latch `Ready` unless model setup stands in the way (terms
+    /// outstanding, a download in flight, a failed setup) or it is latched
+    /// already. Returns whether this call latched it.
+    pub fn settle_ready(&self) -> bool {
+        self.runtime.settle_ready()
+    }
+
     pub fn set_model_setup_failed(&self) {
         self.restart_pass();
         self.runtime.set_unavailable(
@@ -353,10 +360,12 @@ impl StartupTracker {
         );
     }
 
-    /// Whether every active Vault's Index turn has settled, which is the
-    /// condition `VaultWorkExecutor::publish_outcome` latches here through
-    /// `collection_indexes_settled`. Once latched it stays true through later
-    /// rebuilds and single-Vault failures; only model setup resets it.
+    /// Whether the model is set up and every active Vault's Index turn has
+    /// settled, which is the condition `vault_executor::settle_startup`
+    /// latches here through `collection_indexes_settled`. An instance with no
+    /// active Vault has nothing to settle (#453). Once latched it stays true
+    /// through later rebuilds and single-Vault failures; only model setup
+    /// resets it.
     ///
     /// Named for what it measures rather than for `Ready`, because the shorter
     /// `is_ready` invited a question it cannot answer: three callers read it as

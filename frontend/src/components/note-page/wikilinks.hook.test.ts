@@ -1,7 +1,11 @@
 import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useResolvedWikilinks } from "./wikilinks";
+import {
+  cachedAssetHref,
+  resolveNoteTargets,
+  useResolvedWikilinks,
+} from "./wikilinks";
 
 const VAULT_ID = "vault-1";
 
@@ -58,6 +62,33 @@ describe("useResolvedWikilinks asset targets (#158)", () => {
     );
   });
 
+  // The live editor draws embeds from the same answers (#544): before the
+  // batch lands an embed reads relative to its note, after it the server's
+  // path wins, as it does in the rendered body.
+  it("hands the editor the server's path once the batch has landed", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      jsonResponse({
+        vault_id: VAULT_ID,
+        results: [],
+        asset_results: [
+          { target: "report.pdf", path: "98_Attachments/report.pdf" },
+        ],
+      }),
+    );
+    expect(
+      cachedAssetHref(VAULT_ID, "report.pdf#page=2", "97_Notes/A.md"),
+    ).toBe("/api/v1/vaults/vault-1/assets/97_Notes/report.pdf#page=2");
+    const { result } = renderHook(() =>
+      useResolvedWikilinks(VAULT_ID, "![[report.pdf#page=2]]", "97_Notes/A.md"),
+    );
+    await waitFor(() => {
+      expect(result.current.resolvedFor).toBe("![[report.pdf#page=2]]");
+    });
+    expect(
+      cachedAssetHref(VAULT_ID, "report.pdf#page=2", "97_Notes/A.md"),
+    ).toBe("/api/v1/vaults/vault-1/assets/98_Attachments/report.pdf#page=2");
+  });
+
   it("does not reuse one note's asset resolution in a note at another depth", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -92,6 +123,61 @@ describe("useResolvedWikilinks asset targets (#158)", () => {
         "98_Attachments/shot.png",
       );
     });
+  });
+});
+
+describe("resolveNoteTargets (#544)", () => {
+  it("asks the server once for the targets it has not seen, in one request", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          vault_id: "vault-batch",
+          results: [
+            { target: "Alpha#Goals", slug: "alpha", archived: false },
+            { target: "Nowhere", slug: null, archived: false },
+          ],
+          asset_results: [],
+        });
+      },
+    );
+
+    const first = await resolveNoteTargets("vault-batch", "Home.md", [
+      "Alpha#Goals",
+      "Nowhere",
+    ]);
+    expect(first.get("Alpha#Goals")).toEqual({
+      slug: "alpha",
+      archived: false,
+    });
+    expect(first.get("Nowhere")).toBeNull();
+    expect(bodies).toEqual([
+      {
+        targets: ["Alpha#Goals", "Nowhere"],
+        asset_targets: [],
+        note_path: "Home.md",
+      },
+    ]);
+
+    // Both answers are cached: asking again sends nothing.
+    const second = await resolveNoteTargets("vault-batch", "Home.md", [
+      "Nowhere",
+      "Alpha#Goals",
+    ]);
+    expect(second.get("Alpha#Goals")).toEqual({
+      slug: "alpha",
+      archived: false,
+    });
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("leaves a target unresolved when the server cannot be reached", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const result = await resolveNoteTargets("vault-offline", "Home.md", [
+      "Beta",
+    ]);
+    expect(result.get("Beta")).toBeNull();
   });
 });
 

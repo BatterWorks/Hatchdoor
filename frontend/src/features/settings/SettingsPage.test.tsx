@@ -9,6 +9,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
+import { CONTEXTUAL_HELP, type ContextualHelp, helpLinkName } from "../help";
+import { HelpContext } from "../help/useHelp";
 import { SettingsPage } from "./SettingsPage";
 
 function renderSettingsPage() {
@@ -101,6 +103,22 @@ const settings = [
     kind: "number",
   },
   {
+    key: "HATCHDOOR_UPDATE_CHECK_ENABLED",
+    value: "false",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
+    key: "HATCHDOOR_USAGE_REPORT_ENABLED",
+    value: "false",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
     key: "HATCHDOOR_GIT_AUTHOR_NAME",
     value: "Server author",
     source: "default",
@@ -160,9 +178,26 @@ function vault(name: string, enabled = true) {
   };
 }
 
+const INSTALL_ID = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8";
+
+/** The report as the server sends it: already indented text. */
+function usageReport(enabled: boolean, lastSentAt: string | null = null) {
+  const id = enabled
+    ? INSTALL_ID
+    : "(created when the usage report is turned on)";
+  return {
+    enabled,
+    install_id: enabled ? INSTALL_ID : null,
+    last_sent_at: enabled ? lastSentAt : null,
+    report: `{\n  "type": "event",\n  "payload": {\n    "id": "${id}",\n    "data": {\n      "schema": 1\n    }\n  }\n}`,
+  };
+}
+
 function mockPage(
   vaults = [vault("Field notes")],
   onPatch?: (updates: Record<string, string>) => void,
+  lastAgent: { name: string; connected_at: string } | null = null,
+  loadedUsageReport = usageReport(false),
 ) {
   mockedApiFetch.mockImplementation(async (input, init) => {
     const url = String(input);
@@ -175,9 +210,17 @@ function mockPage(
         settings: settings.map((item) =>
           item.key in updates ? { ...item, value: updates[item.key] } : item,
         ),
+        usage_report: usageReport(
+          updates.HATCHDOOR_USAGE_REPORT_ENABLED === "true",
+        ),
       });
     }
-    if (url === "/api/settings") return json({ settings });
+    if (url === "/api/settings")
+      return json({
+        settings,
+        last_agent: lastAgent,
+        usage_report: loadedUsageReport,
+      });
     if (url === "/api/v1/vaults")
       return json({
         registry_revision: 3,
@@ -298,8 +341,8 @@ describe("SettingsPage", () => {
     expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
       "author@example.test",
     );
-    // The footer counts the rows the page renders: all eleven, none hidden.
-    expect(screen.getByText(/11 editable here, 0 set in/)).toBeVisible();
+    // The footer counts the rows the page renders: all thirteen, none hidden.
+    expect(screen.getByText(/13 editable here, 0 set in/)).toBeVisible();
   });
 
   it("offers the public address under Agent access", async () => {
@@ -313,6 +356,43 @@ describe("SettingsPage", () => {
     expect(
       screen.getByPlaceholderText("https://notes.example.com"),
     ).toBeVisible();
+  });
+
+  it("says no agent has connected yet under Agent access", async () => {
+    mockPage();
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+
+    expect(await screen.findByTestId("last-agent")).toHaveTextContent(
+      "No agent has connected yet",
+    );
+  });
+
+  it("names the last agent and when it connected under Agent access", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
+    mockPage([vault("Field notes")], undefined, {
+      name: "Claude Code",
+      connected_at: twoMinutesAgo,
+    });
+    renderSettingsPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+
+    expect(await screen.findByTestId("last-agent")).toHaveTextContent(
+      "Claude Code connected 2 minutes ago",
+    );
+  });
+
+  it("shows the last agent only under Agent access", async () => {
+    mockPage();
+    renderSettingsPage();
+    expect(
+      await screen.findByRole("heading", { name: /Notes handling/ }),
+    ).toBeVisible();
+    expect(screen.queryByTestId("last-agent")).toBeNull();
   });
 
   it("surfaces a held draft under This server and withdraws once it is discarded", async () => {
@@ -374,7 +454,7 @@ describe("SettingsPage", () => {
       renderSettingsPage();
       await editAcrossTwoSections();
 
-      fireEvent.click(screen.getByRole("button", { name: "Save uploads" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
       await screen.findByText("Saved");
       expect(sent).toHaveLength(1);
       expect(Object.keys(sent[0])).toEqual(["HATCHDOOR_MAX_ATTACHMENT_BYTES"]);
@@ -402,15 +482,26 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("says a layered folder leaves normal search and stays in the sidebar (#527)", async () => {
+    mockPage();
+    renderSettingsPage();
+    await screen.findByLabelText("Meaning search in demoted layers");
+
+    expect(
+      screen.getByText(
+        /stay out of normal search but still show in the sidebar/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/out of the browser/)).not.toBeInTheDocument();
+  });
+
   it("focuses the reindex confirmation and closes it on Escape", async () => {
     mockPage();
     renderSettingsPage();
     fireEvent.click(
       await screen.findByLabelText("Meaning search in demoted layers"),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save notes handling" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     const dialog = await screen.findByRole("dialog", {
       name: "Before this is saved",
@@ -422,5 +513,212 @@ describe("SettingsPage", () => {
     expect(
       screen.queryByRole("dialog", { name: "Before this is saved" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("How does this work? links (#423)", () => {
+  const openHelp = vi.fn();
+
+  async function openSection(name: RegExp, mock: () => void = mockPage) {
+    mock();
+    const view = render(
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        <MemoryRouter initialEntries={["/settings"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </HelpContext.Provider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name }));
+    return view;
+  }
+
+  function clickLinkIn(container: Element | null, to: ContextualHelp) {
+    expect(container).not.toBeNull();
+    fireEvent.click(
+      within(container as HTMLElement).getByRole("button", {
+        name: helpLinkName(to),
+      }),
+    );
+  }
+
+  it.each([
+    [/Notes handling/, CONTEXTUAL_HELP.notesSettings],
+    [/Agent access/, CONTEXTUAL_HELP.agentSettings],
+    [/Uploads/, CONTEXTUAL_HELP.uploadSettings],
+    [/Updates/, CONTEXTUAL_HELP.upgrade],
+    [/Usage report/, CONTEXTUAL_HELP.usageReport],
+  ] as const)("links the %s section to its page", async (name, target) => {
+    const { container } = await openSection(name);
+    clickLinkIn(container.querySelector(".settings-sec-head"), target);
+    expect(openHelp).toHaveBeenLastCalledWith(
+      target.page,
+      "heading" in target ? target.heading : undefined,
+    );
+  });
+
+  it("keeps the write switch's link when .env pins it", async () => {
+    const pinned = settings.map((item) =>
+      item.key === "HATCHDOOR_MCP_WRITE_ENABLED"
+        ? { ...item, source: "environment", locked: "environment" }
+        : item,
+    );
+    mockedApiFetch.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/settings")
+        return json({ settings: pinned, last_agent: null });
+      if (url === "/api/v1/vaults")
+        return json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [vault("Field notes")],
+          demo_mode: false,
+        });
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      return json({ data: [] });
+    });
+    render(
+      <HelpContext.Provider
+        value={{ openHelp, closeHelp: () => {}, isOpen: false }}
+      >
+        <MemoryRouter initialEntries={["/settings"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </HelpContext.Provider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+    clickLinkIn(
+      screen
+        .getByText("HATCHDOOR_MCP_WRITE_ENABLED")
+        .closest(".settings-plaque-row"),
+      CONTEXTUAL_HELP.agentWrites,
+    );
+    expect(openHelp).toHaveBeenLastCalledWith(
+      CONTEXTUAL_HELP.agentWrites.page,
+      undefined,
+    );
+  });
+
+  it("offers the update check off, saying exactly what it sends (#425)", async () => {
+    await openSection(/Updates/);
+    const row = screen
+      .getByText("Tell me about new releases")
+      .closest(".settings-row");
+    expect(row).toHaveTextContent(
+      "Once a day, Hatchdoor sends one request to GitHub's public list of Hatchdoor releases, carrying this server's IP address and the user-agent Hatchdoor, nothing else.",
+    );
+    expect(
+      within(row as HTMLElement).getByRole("button", {
+        name: "Tell me about new releases",
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+    clickLinkIn(row, CONTEXTUAL_HELP.updateCheck);
+    expect(openHelp).toHaveBeenLastCalledWith(
+      CONTEXTUAL_HELP.updateCheck.page,
+      CONTEXTUAL_HELP.updateCheck.heading,
+    );
+  });
+
+  it("offers the usage report off, saying what is sent and showing the exact report (#477)", async () => {
+    await openSection(/Usage report/);
+    const row = screen
+      .getByText("Send a usage report")
+      .closest(".settings-row");
+    expect(row).toHaveTextContent(
+      "Once a day, Hatchdoor sends the report shown below to telemetry-hatchdoor.battercloud.cc, which Hatchdoor's maintainer runs, to decide which platforms to test and which parts of Hatchdoor people rely on.",
+    );
+    expect(
+      within(row as HTMLElement).getByRole("button", {
+        name: "Send a usage report",
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+
+    const report = screen.getByTestId("usage-report");
+    expect(report).toHaveTextContent("The report this server would send");
+    expect(report.querySelector("pre")?.textContent).toBe(
+      usageReport(false).report,
+    );
+    expect(report).not.toHaveTextContent("Install ID");
+  });
+
+  it("shows the install ID and the report it goes with once the usage report is on (#477)", async () => {
+    await openSection(/Usage report/);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send a usage report" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const report = await screen.findByText("The next report");
+    const block = report.closest("[data-testid='usage-report']") as HTMLElement;
+    expect(block.querySelector("pre")?.textContent).toBe(
+      usageReport(true).report,
+    );
+    expect(within(block).getByText("Install ID")).toBeInTheDocument();
+    expect(within(block).getAllByText(INSTALL_ID).length).toBeGreaterThan(0);
+  });
+
+  it("says no report has been sent yet once the usage report is on (#478)", async () => {
+    await openSection(/Usage report/);
+    expect(screen.getByTestId("usage-report")).not.toHaveTextContent(
+      "Last report",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send a usage report" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await screen.findByText("The next report");
+    expect(screen.getByTestId("usage-report-last-sent")).toHaveTextContent(
+      "Last report None sent yet",
+    );
+  });
+
+  it("shows when the last usage report was sent while it is on (#478)", async () => {
+    const sentAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+    await openSection(/Usage report/, () =>
+      mockPage(undefined, undefined, null, usageReport(true, sentAt)),
+    );
+
+    const line = screen.getByTestId("usage-report-last-sent");
+    expect(line).toHaveTextContent("Last report 3 hours ago");
+    expect(line.querySelector("time")).toHaveAttribute("datetime", sentAt);
+  });
+
+  it("shows the usage report only in its own section", async () => {
+    await openSection(/Updates/);
+    expect(screen.queryByTestId("usage-report")).not.toBeInTheDocument();
+  });
+
+  it("names each help link in a section after what it explains (#460)", async () => {
+    await openSection(/Agent access/);
+    const links = screen.getAllByRole("button", {
+      name: /^How does this work\?/,
+    });
+    const names = links.map((link) => link.getAttribute("aria-label"));
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "How does this work? Connecting your agent",
+        "How does this work? Letting your agent change notes",
+      ]),
+    );
+    expect(new Set(names).size).toBe(names.length);
+    for (const link of links) {
+      expect(link).toHaveTextContent(/^How does this work\?$/);
+    }
+  });
+
+  it("links the write switch to the page on letting agents change notes", async () => {
+    await openSection(/Agent access/);
+    const row = screen
+      .getByText("Let assistants change notes")
+      .closest(".settings-row");
+    clickLinkIn(row, CONTEXTUAL_HELP.agentWrites);
+    expect(openHelp).toHaveBeenLastCalledWith(
+      CONTEXTUAL_HELP.agentWrites.page,
+      undefined,
+    );
   });
 });

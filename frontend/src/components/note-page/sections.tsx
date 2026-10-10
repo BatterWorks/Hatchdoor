@@ -304,8 +304,11 @@ export function NoteLinksPanel({
   return (
     <details className="note-links-panel" aria-label="Note links">
       <summary>
-        <span>Links</span>
-        <span className="note-links-count">{totalLinks}</span>
+        <span className="note-links-label">Links</span>
+        <span className="note-links-rule" aria-hidden="true" />
+        <span className="note-links-count">
+          {String(totalLinks).padStart(2, "0")}
+        </span>
       </summary>
       <div className="note-links-body">
         <div className="note-links-grid">

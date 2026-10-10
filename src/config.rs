@@ -9,14 +9,65 @@ use tracing_subscriber::EnvFilter;
 
 use crate::vault_runtime::VaultSource;
 
-/// The version reported to clients and logs. Nightly images bake the source
-/// commit in through the `HATCHDOOR_GIT_SHA` compile-time env var (fed by the
-/// Docker build arg of the same name); release builds leave it unset and
-/// report the plain crate version.
+/// Whether this build is a published release. A build is one only when it
+/// was told so: the image build passed its `VERSION` build argument, compiled
+/// in as `HATCHDOOR_RELEASE_VERSION`, and it names this crate's own version.
+/// A nightly image and a build from source are not, whatever else they pass.
+fn is_release_build() -> bool {
+    is_release(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("HATCHDOOR_RELEASE_VERSION"),
+    )
+}
+
+fn is_release(crate_version: &str, build_argument: Option<&str>) -> bool {
+    build_argument.map(str::trim) == Some(crate_version)
+}
+
+/// The version reported to clients and logs. A release reports the plain
+/// crate version, even when its image build passed the commit for the
+/// image's `revision` label. Any other build that was passed a commit,
+/// through the `HATCHDOOR_GIT_SHA` compile-time env var (fed by the `GIT_SHA`
+/// build argument), reports it as `2.8.0 (dev abc123)`.
 pub fn version_string() -> String {
-    match option_env!("HATCHDOOR_GIT_SHA") {
-        Some(sha) if !sha.is_empty() => format!("{} (dev {sha})", env!("CARGO_PKG_VERSION")),
-        _ => env!("CARGO_PKG_VERSION").to_string(),
+    describe_version(
+        env!("CARGO_PKG_VERSION"),
+        is_release_build(),
+        option_env!("HATCHDOOR_GIT_SHA"),
+    )
+}
+
+fn describe_version(crate_version: &str, release: bool, commit: Option<&str>) -> String {
+    match commit.map(str::trim) {
+        Some(commit) if !release && !commit.is_empty() => {
+            format!("{crate_version} (dev {commit})")
+        }
+        _ => crate_version.to_string(),
+    }
+}
+
+/// The build's channel, for the usage report (ADR-45): `stable` for a
+/// release and `dev` for every other build.
+pub fn build_channel() -> &'static str {
+    channel_word(is_release_build())
+}
+
+fn channel_word(release: bool) -> &'static str {
+    if release { "stable" } else { "dev" }
+}
+
+/// How this build was packaged, for the usage report (ADR-45): `docker` or
+/// `podman` when the image build passed that word as the `HATCHDOOR_IMAGE`
+/// build argument, and `source` for every other build.
+pub fn build_image() -> &'static str {
+    image_word(option_env!("HATCHDOOR_IMAGE"))
+}
+
+fn image_word(build_argument: Option<&str>) -> &'static str {
+    match build_argument.map(str::trim) {
+        Some("docker") => "docker",
+        Some("podman") => "podman",
+        _ => "source",
     }
 }
 
@@ -227,9 +278,146 @@ fn capped_log_filter(filter: EnvFilter) -> EnvFilter {
         })
 }
 
+/// Captures log lines the way `init_logging` formats them (compact, without
+/// targets), so a test can assert on the fields an operator would actually
+/// see.
+#[cfg(test)]
+pub(crate) mod log_capture {
+    use std::io;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    #[derive(Clone, Default)]
+    pub(crate) struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        /// A dispatcher writing here at `level` and above. Set it per thread
+        /// with `tracing::dispatcher::with_default` or `set_default`; code
+        /// that starts a thread of its own must carry it across. The first
+        /// call also starts the idle dispatcher described below, which lives
+        /// as long as the test process.
+        pub(crate) fn dispatch(&self, level: tracing::Level) -> tracing::Dispatch {
+            keep_a_second_dispatcher_alive();
+            let sink = self.clone();
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_max_level(level)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .compact()
+                    .with_writer(move || sink.clone())
+                    .finish(),
+            )
+        }
+
+        pub(crate) fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("captured logs lock").clone())
+                .expect("UTF-8 log output")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured logs lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `tracing` caches, for the whole process, whether anyone wants each log
+    /// statement. While at most one dispatcher is alive it asks only the
+    /// thread that reaches a statement first, so a test thread with no
+    /// subscriber switches the statement off for the capturing thread as well
+    /// (#535). With a second dispatcher alive it asks every live dispatcher
+    /// instead, so this one is never dropped. One gap is left: a statement
+    /// another thread is registering at the instant the process creates its
+    /// first capturing dispatcher can still end up switched off.
+    fn keep_a_second_dispatcher_alive() {
+        static IDLE: OnceLock<tracing::Dispatch> = OnceLock::new();
+        IDLE.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
+    }
+
+    mod tests {
+        use super::CapturedLogs;
+
+        fn log_once() {
+            tracing::info!("reached by a thread with no subscriber first");
+        }
+
+        #[test]
+        fn a_statement_first_reached_without_a_subscriber_is_still_captured() {
+            let logs = CapturedLogs::default();
+            let _dispatch = tracing::dispatcher::set_default(&logs.dispatch(tracing::Level::INFO));
+
+            std::thread::spawn(log_once).join().expect("other thread");
+            assert_eq!(logs.lines(), Vec::<String>::new());
+
+            log_once();
+            let lines = logs.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains("reached by a thread"), "{lines:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_reports_docker_or_podman_only_when_told_and_source_otherwise() {
+        assert_eq!(image_word(Some("docker")), "docker");
+        assert_eq!(image_word(Some(" podman ")), "podman");
+        assert_eq!(image_word(Some("")), "source");
+        assert_eq!(
+            image_word(Some("my-own-registry.example/hatchdoor")),
+            "source"
+        );
+        assert_eq!(image_word(None), "source");
+    }
+
+    #[test]
+    fn a_build_is_a_release_only_when_told_its_own_version() {
+        assert!(is_release("2.8.0", Some("2.8.0")));
+        assert!(is_release("2.8.0", Some(" 2.8.0 ")));
+        assert!(!is_release("2.8.0", Some("v2.8.0")));
+        assert!(!is_release("2.8.0", None));
+        assert!(!is_release("2.8.0", Some("")));
+        assert!(!is_release("2.8.0", Some("2.8.1")));
+        assert!(!is_release("2.8.0", Some("2.8")));
+        assert!(!is_release("2.8.0", Some("latest")));
+    }
+
+    #[test]
+    fn a_release_shows_a_plain_version_and_only_another_build_shows_its_commit() {
+        // A release, built with or without the commit the image label needs.
+        assert_eq!(describe_version("2.8.0", true, Some("abc123")), "2.8.0");
+        assert_eq!(describe_version("2.8.0", true, None), "2.8.0");
+        // A nightly image.
+        assert_eq!(
+            describe_version("2.8.0", false, Some("abc123")),
+            "2.8.0 (dev abc123)"
+        );
+        // Built from source with nothing passed.
+        assert_eq!(describe_version("2.8.0", false, None), "2.8.0");
+        assert_eq!(describe_version("2.8.0", false, Some("")), "2.8.0");
+    }
+
+    #[test]
+    fn the_channel_is_stable_for_a_release_and_dev_for_every_other_build() {
+        assert_eq!(channel_word(true), "stable");
+        assert_eq!(channel_word(false), "dev");
+        // This test binary was built with no build arguments.
+        assert_eq!(build_channel(), "dev");
+    }
 
     #[test]
     fn message_logging_stays_at_info_even_under_a_trace_filter() {

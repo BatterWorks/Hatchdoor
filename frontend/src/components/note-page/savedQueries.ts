@@ -107,7 +107,7 @@ export const ORPHANED_MARKER_ELEMENT = "hatchdoor-orphaned-marker";
  * {@link ORPHANED_MARKER_ELEMENT} carrying the name as written, where the
  * server's notice about it is drawn (#276). Every other piece of raw HTML
  * renders exactly as it did before. Every other node keeps its source
- * position, so inline editing still addresses the right lines.
+ * position, so the headings and the table of contents line up.
  */
 export function remarkHideQueryMarkers() {
   const visit = (node: MarkdownTreeNode) => {

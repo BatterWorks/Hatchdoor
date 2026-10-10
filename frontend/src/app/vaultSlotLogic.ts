@@ -73,7 +73,9 @@ const DIRTY_WORKING_COPY_CODE = "managed_git_dirty_working_copy";
  * Priority (worst first): `unavailable` outranks every Git condition, which
  * outranks `stale`, which outranks indexing. A Vault waiting its turn to
  * index behind another Vault (ADR-35) shows `waiting` in place of anything
- * below the Git conditions, unless it is ready or a failure rides along. A Vault that has never
+ * below the Git conditions, unless it is ready or a failure rides along. A
+ * searchable Vault whose own reindex is running keeps its count (#483): it
+ * reports `stale` with no error, and search answers throughout. A Vault that has never
  * published a snapshot reports the same `search: "unavailable"` the API uses
  * for a vanished directory, but only the latter also turns `activation`
  * `"unavailable"` (`activation_snapshot` in `src/vault_runtime.rs`: a Vault
@@ -151,6 +153,16 @@ export function deriveVaultSlot(
   ) {
     return { kind: "waiting", sentence: waitingSentence(vault) };
   }
+  // A searchable Vault whose own reindex is running answers search from its
+  // previous index the whole time (#483). Nothing is wrong and nothing needs
+  // doing, so it keeps its count, as a ready Vault waiting its turn does.
+  if (
+    vault.search === "stale" &&
+    vault.index_turn === "running" &&
+    !vault.search_error
+  ) {
+    return { kind: "count", count: noteCount ?? null };
+  }
   if (vault.search === "stale") {
     return {
       kind: "condition",
@@ -222,7 +234,7 @@ export function describeScopeSlot(
     if (aggregate.kind === "count") {
       return `${aggregate.count} Vault${aggregate.count === 1 ? "" : "s"}`;
     }
-    return `${aggregate.participating} of ${aggregate.total}`;
+    return `${aggregate.participating} of ${aggregate.total} answering`;
   }
   const vault = vaults.find((candidate) => candidate.vault_id === scope);
   if (!vault) {

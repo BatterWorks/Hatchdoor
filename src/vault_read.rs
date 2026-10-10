@@ -21,6 +21,8 @@ use crate::vault_runtime::{IndexedAssets, VaultCapabilities, VaultCollectionRunt
 mod assets;
 mod query;
 mod saved_query;
+mod sections;
+mod text_match;
 
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, encode_relative_path};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
@@ -29,6 +31,14 @@ pub use saved_query::{
     SavedQueryIgnored, SavedQueryMarkerProblem, SavedQueryOutcome, SavedQueryRefusal,
     SavedQueryResult, SavedQueryRow, SavedQueryRows, SavedQuerySummary, SavedQueryTable,
     SavedQueryTruncation, SavedQueryTruncationReason,
+};
+pub use sections::{
+    MAX_SECTION_HEADINGS, NoteOutline, NoteSection, NoteSectionEntry, NoteSectionError,
+    NoteSectionErrorCode, NoteSectionMiss, NoteSectionsResponse, OutlineHeading,
+};
+pub use text_match::{
+    TextMatchNote, TextMatchPlace, TextMatchPlaces, TextMatchRequest, TextMatchResponse,
+    TextMatchSnippet, TextMatchUnread, TextMatchUnreadReason,
 };
 
 /// An explicit collection read target. There is deliberately no selected,
@@ -192,6 +202,12 @@ impl VaultReadError {
             | "saved_query_name_ambiguous"
             | "saved_query_refused"
             | "saved_query_stopped"
+            // A text match (ADR-46), reported by MCP's `find_text`; no HTTP
+            // route runs one, so the HTTP adapter gives it no status yet.
+            | "invalid_text_match"
+            // A section read (#502), reported by MCP's `get_note_section`;
+            // no HTTP route runs one either.
+            | "invalid_heading_selection"
             // `note_attachments` reads the Note through the write module's
             // attachment lister, whose only failure on a read is I/O.
             | "write_failed" => self.code.as_str(),
@@ -736,7 +752,10 @@ impl VaultReads {
 
 /// The shared-core facade. Exact reads use the targeted Vault's current
 /// Markdown directory; collection projections use only already-published
-/// cache snapshots and report their freshness honestly.
+/// cache snapshots and report their freshness honestly. A text match
+/// (`find_text`, ADR-46) is the one collection read that also opens the
+/// files: it takes its list of Notes from the snapshot and their text from
+/// disk.
 pub struct VaultReadCore<'a> {
     cache: &'a SqliteCache,
     vaults: &'a VaultCollectionRuntime,
@@ -1050,6 +1069,84 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
+    /// Every Note whose text contains one literal string (ADR-46): a text
+    /// match, unranked, with the true number of matching Notes and of
+    /// occurrences across the whole scope.
+    ///
+    /// The Notes walked are each Vault's published ones, on this core's
+    /// browse surface, and each is read from its Markdown file on disk at
+    /// call time. So an edit is matched before its Index turn has run, a Note
+    /// too new to be indexed is absent, and the envelope reports that Vault
+    /// `stale` as on any collection read. A Vault whose directory cannot be
+    /// reached is an unavailable participant, never an empty answer.
+    pub fn find_text(
+        &self,
+        scope: VaultScope,
+        request: &TextMatchRequest,
+    ) -> Result<VaultReadProjection<TextMatchResponse>, VaultReadError> {
+        // Every layer unless the caller narrows it. A restricted surface has
+        // already lost its demoted rows by the time a Vault is matched, and
+        // clamps a named selection the way it does for search.
+        let named: Vec<&str> = request
+            .layers
+            .iter()
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+            .collect();
+        let layers = if named.is_empty() {
+            LayerSelection::All
+        } else {
+            self.surface.layer_selection(Some(&named.join(",")))
+        };
+        let compiled = text_match::CompiledTextMatch::compile(request, layers)?;
+        let projection = self.try_collection(
+            scope,
+            NoteBodies::Omit,
+            |vault_id, _vault_name, snapshot| {
+                let root = self.vault_directory(vault_id)?;
+                Ok(compiled.matches_for(vault_id, &root, snapshot))
+            },
+        )?;
+        validate_named_layers(
+            &compiled.layers,
+            projection
+                .data
+                .iter()
+                .flat_map(|vault| vault.declared_layers.iter()),
+            projection
+                .participants
+                .iter()
+                .any(|participant| participant.state == VaultParticipantState::Unavailable),
+        )?;
+
+        let mut response = TextMatchResponse {
+            notes: Vec::new(),
+            total_notes: 0,
+            total_occurrences: 0,
+            truncated: false,
+            unread: Vec::new(),
+            total_unread: 0,
+        };
+        for vault in projection.data {
+            response.notes.extend(vault.notes);
+            response.total_notes += vault.total_notes;
+            response.total_occurrences += vault.total_occurrences;
+            response.unread.extend(vault.unread);
+            response.total_unread += vault.total_unread;
+        }
+        text_match::sort_notes(&mut response.notes);
+        response.notes.truncate(compiled.limit);
+        response.truncated = response.total_notes > response.notes.len();
+        response.unread.truncate(text_match::MAX_UNREAD_LISTED);
+        Ok(VaultReadProjection {
+            scope: projection.scope,
+            collection_revision: projection.collection_revision,
+            partial: projection.partial,
+            participants: projection.participants,
+            data: response,
+        })
+    }
+
     /// Every saved query in one Note, each evaluated against that Note's own
     /// Vault at this moment (#275, ADR-21).
     ///
@@ -1257,18 +1354,9 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         slug: &str,
     ) -> Result<Option<VaultNoteFrontmatter>, VaultReadError> {
-        let index = self.catalog(vault_id)?;
-        let Some(entry) = self.visible_entry(&index, slug) else {
+        let Some((entry, content)) = self.visible_note_file(vault_id, slug)? else {
             return Ok(None);
         };
-        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
-            unavailable(
-                vault_id,
-                "note_unreadable",
-                format!("failed to read note '{}': {error}", entry.relative_path),
-                false,
-            )
-        })?;
         let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
         let metadata = crate::cache::parse::parse_frontmatter_metadata(&content)
             .map_err(|message| unavailable(vault_id, "invalid_frontmatter", message, false))?;
@@ -1283,6 +1371,62 @@ impl<'a> VaultReadCore<'a> {
             has_frontmatter,
             metadata,
         }))
+    }
+
+    /// One Note's outline (#502): its hash, its sizes and its headings, with
+    /// no body text. `Ok(None)` is a Note this caller may not see. A Note
+    /// with no headings answers with an empty list.
+    pub fn note_outline(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<NoteOutline>, VaultReadError> {
+        Ok(self
+            .visible_note_file(vault_id, slug)?
+            .map(|(entry, content)| sections::note_outline(vault_id, &entry, &content)))
+    }
+
+    /// Whole sections of one Note, picked by heading text or heading path
+    /// (#502), from one read of its file. Each string that selects no single
+    /// heading gets an error in its own entry and the rest still answer; only
+    /// a malformed `headings` list refuses the call, before any Vault is
+    /// resolved. `Ok(None)` is a Note this caller may not see.
+    pub fn note_sections(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+        headings: &[String],
+    ) -> Result<Option<NoteSectionsResponse>, VaultReadError> {
+        sections::validate_headings(headings).map_err(|message| VaultReadError {
+            code: "invalid_heading_selection".to_string(),
+            message,
+            vault_id: None,
+            retryable: false,
+        })?;
+        Ok(self
+            .visible_note_file(vault_id, slug)?
+            .map(|(entry, content)| sections::note_sections(vault_id, &entry, &content, headings)))
+    }
+
+    /// The Note `slug` names on this surface and its file's text, read now.
+    fn visible_note_file(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<(crate::vault::NoteEntry, String)>, VaultReadError> {
+        let index = self.catalog(vault_id)?;
+        let Some(entry) = self.visible_entry(&index, slug) else {
+            return Ok(None);
+        };
+        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
+            unavailable(
+                vault_id,
+                "note_unreadable",
+                format!("failed to read note '{}': {error}", entry.relative_path),
+                false,
+            )
+        })?;
+        Ok(Some((entry, content)))
     }
 
     /// The existing attachments one Note references, on this core's browse
@@ -1657,6 +1801,39 @@ pub(crate) fn selected_vaults(
             vault_name: vault.name.clone(),
         })
         .collect())
+}
+
+/// Refuse a text match naming a layer no participating Vault declares, the
+/// way `search_notes` refuses one (`invalid_layer_selection`): each name is
+/// checked on its own, a name one Vault declares and another lacks is fine,
+/// and nothing is refused while a Vault that might declare it cannot be read.
+fn validate_named_layers<'a>(
+    selection: &LayerSelection,
+    declared: impl Iterator<Item = &'a String>,
+    some_participant_unavailable: bool,
+) -> Result<(), VaultReadError> {
+    let names = selection.named_layers();
+    if names.is_empty() || some_participant_unavailable {
+        return Ok(());
+    }
+    let declared: BTreeSet<&str> = declared.map(String::as_str).collect();
+    let missing: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !declared.contains(name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(VaultReadError {
+        code: "invalid_layer_selection".to_string(),
+        message: format!(
+            "the requested named layer(s) are absent from every usable Vault: {}",
+            missing.join(", ")
+        ),
+        vault_id: None,
+        retryable: false,
+    })
 }
 
 fn unavailable_participant(
@@ -2783,9 +2960,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        NoteDownload, NoteQuery, NoteQueryCondition, PropertyOperator, TreeScope,
-        VaultExplorerFolder, VaultParticipantState, VaultReadCore, VaultScope,
-        clamp_tree_max_depth,
+        BrowseSurface, NoteDownload, NoteQuery, NoteQueryCondition, PropertyOperator,
+        TextMatchPlace, TextMatchPlaces, TextMatchRequest, TextMatchResponse, TextMatchSnippet,
+        TextMatchUnread, TextMatchUnreadReason, TreeScope, VaultExplorerFolder,
+        VaultParticipantState, VaultReadCore, VaultScope, clamp_tree_max_depth,
     };
     use crate::cache::SqliteCache;
     use crate::embed::StubEmbedder;
@@ -2867,6 +3045,530 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             std::fs::write(path, contents).expect("write note");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Text match: every Note containing one literal string (#500, ADR-46)
+    // -----------------------------------------------------------------------
+
+    fn text(needle: &str) -> TextMatchRequest {
+        TextMatchRequest {
+            text: needle.to_string(),
+            ..TextMatchRequest::default()
+        }
+    }
+
+    fn found(
+        reads: &VaultReadCore<'_>,
+        scope: VaultScope,
+        request: &TextMatchRequest,
+    ) -> TextMatchResponse {
+        reads.find_text(scope, request).expect("text match").data
+    }
+
+    fn found_paths(response: &TextMatchResponse) -> Vec<&str> {
+        response
+            .notes
+            .iter()
+            .map(|note| note.relative_path.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_text_match_returns_only_the_notes_that_contain_the_whole_string() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Rename.md", "# Rename\n\nSee old-name.md for the plan."),
+                (
+                    "Other.md",
+                    "# Other\n\nThis mentions new-name.md and old habits.",
+                ),
+                ("Plain.md", "# Plain\n\nNothing relevant."),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let projection = reads
+            .find_text(VaultScope::All, &text("old-name.md"))
+            .expect("text match");
+
+        assert!(!projection.partial);
+        let response = projection.data;
+        assert_eq!(found_paths(&response), ["Rename"]);
+        assert_eq!(response.total_notes, 1);
+        assert_eq!(response.total_occurrences, 1);
+        assert!(!response.truncated);
+        let note = &response.notes[0];
+        assert_eq!(note.vault_id, workspace.vault_ids[0]);
+        assert_eq!(
+            (note.title.as_str(), note.slug.as_str()),
+            ("Rename", "rename")
+        );
+        assert_eq!(note.layer, None);
+        assert_eq!(
+            note.snippets,
+            [TextMatchSnippet {
+                place: TextMatchPlace::Body,
+                line: Some(3),
+                text: "See old-name.md for the plan.".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_text_match_counts_every_occurrence_and_keeps_true_totals_past_the_limit() {
+        let workspace = workspace(&[
+            (
+                "First",
+                &[
+                    ("a/Five.md", "kiwi kiwi\nkiwi\n\nkiwi and kiwi"),
+                    ("c/One.md", "one kiwi"),
+                ],
+            ),
+            ("Second", &[("b/Two.md", "kiwi\nkiwi")]),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let all = found(&reads, VaultScope::All, &text("kiwi"));
+        // Path first, across Vaults, so the second Vault's Note sits between
+        // the first Vault's two.
+        assert_eq!(found_paths(&all), ["a/Five", "b/Two", "c/One"]);
+        assert_eq!(all.notes[0].occurrences, 5);
+        assert_eq!((all.total_notes, all.total_occurrences), (3, 8));
+        assert!(!all.truncated);
+
+        let cut = found(
+            &reads,
+            VaultScope::All,
+            &TextMatchRequest {
+                limit: Some(2),
+                ..text("kiwi")
+            },
+        );
+        assert_eq!(found_paths(&cut), ["a/Five", "b/Two"]);
+        assert_eq!((cut.total_notes, cut.total_occurrences), (3, 8));
+        assert!(cut.truncated);
+
+        assert_eq!(all, found(&reads, VaultScope::All, &text("kiwi")));
+    }
+
+    #[test]
+    fn a_text_match_labels_frontmatter_and_path_matches_with_their_place() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                (
+                    "Aliased.md",
+                    "---\naliases: [Zebra crossing]\nowner: quokka\n---\n# Aliased\n\nbody",
+                ),
+                ("zebra-notes/Plan.md", "# Plan\n\nnothing here"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let response = found(&reads, VaultScope::All, &text("zebra"));
+        assert_eq!(found_paths(&response), ["Aliased", "zebra-notes/Plan"]);
+        let aliased = &response.notes[0];
+        assert_eq!(
+            aliased.places,
+            TextMatchPlaces {
+                body: 0,
+                frontmatter: 1,
+                path: 0
+            }
+        );
+        assert_eq!(aliased.snippets[0].place, TextMatchPlace::Frontmatter);
+        assert_eq!(aliased.snippets[0].line, Some(2));
+        let plan = &response.notes[1];
+        assert_eq!(plan.places.path, 1);
+        assert_eq!(
+            plan.snippets,
+            [TextMatchSnippet {
+                place: TextMatchPlace::Path,
+                line: None,
+                text: "zebra-notes/Plan.md".to_string(),
+            }]
+        );
+
+        // The property value is frontmatter too, and the body's line numbers
+        // count from the top of the file.
+        let property = found(&reads, VaultScope::All, &text("quokka"));
+        assert_eq!(property.notes[0].places.frontmatter, 1);
+        let body = found(&reads, VaultScope::All, &text("body"));
+        assert_eq!(body.notes[0].snippets[0].line, Some(7));
+        assert_eq!(body.notes[0].snippets[0].place, TextMatchPlace::Body);
+    }
+
+    #[test]
+    fn a_text_match_ignores_case_unless_asked_and_always_counts_accents() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Upper.md", "The Résumé is ready"),
+                ("Lower.md", "the resume is not"),
+                // The decomposed form: `e` followed by a combining acute.
+                ("Decomposed.md", "cafe\u{301} menu"),
+                ("Composed.md", "caf\u{e9} list"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let paths = |request: &TextMatchRequest| {
+            found(&reads, VaultScope::All, request)
+                .notes
+                .into_iter()
+                .map(|note| note.relative_path)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(paths(&text("résumé")), ["Upper"]);
+        assert_eq!(paths(&text("resume")), ["Lower"]);
+        let strict = TextMatchRequest {
+            case_sensitive: true,
+            ..text("résumé")
+        };
+        assert!(paths(&strict).is_empty());
+        let strict = TextMatchRequest {
+            case_sensitive: true,
+            ..text("Résumé")
+        };
+        assert_eq!(paths(&strict), ["Upper"]);
+
+        // Either form of the query finds both forms of the text, strict or not.
+        for needle in ["caf\u{e9}", "cafe\u{301}"] {
+            assert_eq!(
+                paths(&text(needle)),
+                ["Composed", "Decomposed"],
+                "{needle:?}"
+            );
+            let strict = TextMatchRequest {
+                case_sensitive: true,
+                ..text(needle)
+            };
+            assert_eq!(paths(&strict), ["Composed", "Decomposed"], "{needle:?}");
+        }
+        assert!(paths(&text("cafe m")).is_empty());
+    }
+
+    #[test]
+    fn a_text_match_covers_every_layer_unless_layers_are_named() {
+        let workspace = workspace(&[(
+            "Layered",
+            &[
+                ("sources/.hatchdoor-layer", "sources"),
+                ("sources/Clipping.md", "needle in a clipping"),
+                ("Home.md", "needle at home"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let layers = |names: &[&str]| TextMatchRequest {
+            layers: names.iter().map(|name| name.to_string()).collect(),
+            ..text("needle")
+        };
+
+        let everything = found(&reads, VaultScope::All, &text("needle"));
+        assert_eq!(found_paths(&everything), ["Home", "sources/Clipping"]);
+        assert_eq!(everything.notes[0].layer, None);
+        assert_eq!(everything.notes[1].layer.as_deref(), Some("sources"));
+
+        let sources = found(&reads, VaultScope::All, &layers(&["sources"]));
+        assert_eq!(found_paths(&sources), ["sources/Clipping"]);
+        let default = found(&reads, VaultScope::All, &layers(&["default"]));
+        assert_eq!(found_paths(&default), ["Home"]);
+
+        let error = reads
+            .find_text(VaultScope::All, &layers(&["sources", "ghost"]))
+            .expect_err("a layer no Vault declares is refused");
+        assert_eq!(error.code, "invalid_layer_selection");
+
+        // #109: a demo cannot reach a demoted Note by any selector.
+        let demo = VaultReadCore::new(&workspace.cache, &workspace.vaults)
+            .on_surface(BrowseSurface::DefaultOnly);
+        for request in [text("needle"), layers(&["sources"]), layers(&["all"])] {
+            assert_eq!(
+                found_paths(&found(&demo, VaultScope::All, &request)),
+                ["Home"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_match_narrows_by_folder_the_way_a_query_does() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("notes/A.md", "needle"),
+                ("notes-archive/B.md", "needle"),
+                ("Top.md", "needle"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let narrowed = found(
+            &reads,
+            VaultScope::All,
+            &TextMatchRequest {
+                path_prefix: Some("/Notes/".to_string()),
+                ..text("needle")
+            },
+        );
+        assert_eq!(found_paths(&narrowed), ["notes/A"]);
+        assert_eq!(narrowed.total_notes, 1);
+    }
+
+    #[test]
+    fn a_text_match_reads_the_file_on_disk_not_the_indexed_copy() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[("Edited.md", "before the edit"), ("Gone.md", "before too")],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let root = &workspace.vault_paths[0];
+        std::fs::write(root.join("Edited.md"), "after the edit").expect("edit");
+        std::fs::remove_file(root.join("Gone.md")).expect("delete");
+
+        let response = found(&reads, VaultScope::All, &text("after the edit"));
+        assert_eq!(found_paths(&response), ["Edited"]);
+
+        // The deleted Note is reported, not passed off as a clean one.
+        let response = found(&reads, VaultScope::All, &text("before"));
+        assert!(response.notes.is_empty());
+        assert_eq!(response.total_unread, 1);
+        assert_eq!(
+            response.unread,
+            [TextMatchUnread {
+                vault_id: workspace.vault_ids[0],
+                slug: "gone".to_string(),
+                relative_path: "Gone".to_string(),
+                reason: TextMatchUnreadReason::Missing,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_text_match_reads_a_file_with_invalid_utf8() {
+        let workspace = workspace(&[("Notes", &[("Binary.md", "placeholder")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        std::fs::write(
+            workspace.vault_paths[0].join("Binary.md"),
+            b"valid start \xff\xfe then needle here",
+        )
+        .expect("write bytes");
+
+        let response = found(&reads, VaultScope::All, &text("needle"));
+        assert_eq!(found_paths(&response), ["Binary"]);
+        assert_eq!(response.total_unread, 0);
+    }
+
+    #[test]
+    fn a_text_match_takes_every_character_literally() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Literal.md", "see [[a.b]] and 2 * (3) and a\\d+"),
+                ("Decoy.md", "see [[axb]] and 2  3 and a11"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        for needle in ["[[a.b]]", "*", "(", "a\\d+", "] and 2 * ("] {
+            let response = found(&reads, VaultScope::All, &text(needle));
+            assert_eq!(found_paths(&response), ["Literal"], "{needle:?}");
+        }
+    }
+
+    #[test]
+    fn a_text_match_shows_as_many_snippets_as_asked_for_and_trims_long_lines() {
+        let long_line = format!("{}needle{}", "a".repeat(400), "b".repeat(400));
+        let content =
+            format!("needle one\nneedle two needle\nneedle three\nneedle four\n{long_line}");
+        let workspace = workspace(&[("Notes", &[("Many.md", content.as_str())])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let with = |snippets: Option<usize>, needle: &str| {
+            found(
+                &reads,
+                VaultScope::All,
+                &TextMatchRequest {
+                    snippets_per_note: snippets,
+                    ..text(needle)
+                },
+            )
+            .notes
+            .remove(0)
+        };
+
+        let default = with(None, "needle");
+        assert_eq!(default.occurrences, 6);
+        // One snippet per matched line, so the second line's two matches
+        // take one of the three.
+        assert_eq!(
+            default
+                .snippets
+                .iter()
+                .map(|snippet| (snippet.line, snippet.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(1), "needle one"),
+                (Some(2), "needle two needle"),
+                (Some(3), "needle three"),
+            ]
+        );
+
+        let none = with(Some(0), "needle");
+        assert_eq!(none.occurrences, 6);
+        assert!(none.snippets.is_empty());
+        assert_eq!(with(Some(1), "needle").snippets.len(), 1);
+        assert_eq!(with(Some(9), "needle").snippets.len(), 3);
+
+        let long = with(None, "aneedleb");
+        let snippet = &long.snippets[0];
+        assert_eq!(snippet.line, Some(5));
+        assert!(snippet.text.contains("aneedleb"), "{}", snippet.text);
+        assert!(snippet.text.starts_with('…') && snippet.text.ends_with('…'));
+        assert!(snippet.text.chars().count() <= 202, "{}", snippet.text);
+    }
+
+    /// The list of Notes is the published one, so a Note too new for the
+    /// index is absent, and the envelope says the Vault's part may be behind.
+    #[test]
+    fn a_text_match_reports_a_vault_whose_note_list_may_be_behind_as_stale() {
+        let workspace = workspace(&[("Notes", &[("Old.md", "needle")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        std::fs::write(workspace.vault_paths[0].join("New.md"), "needle").expect("new note");
+        workspace
+            .cache
+            .mark_vault_snapshot_stale(workspace.vault_ids[0])
+            .expect("mark stale");
+
+        let projection = reads
+            .find_text(VaultScope::All, &text("needle"))
+            .expect("text match");
+
+        assert!(projection.partial);
+        assert_eq!(
+            projection.participants[0].state,
+            VaultParticipantState::Stale
+        );
+        assert_eq!(found_paths(&projection.data), ["Old"]);
+    }
+
+    #[test]
+    fn a_text_match_ignores_case_inside_a_longer_greek_word() {
+        // A capital sigma lowercases differently at the end of a word, which
+        // must not stop a string matching inside a longer one.
+        let workspace = workspace(&[("Notes", &[("Greek.md", "ΦΟΣΦΟΡΟΣ και φως")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        assert_eq!(
+            found(&reads, VaultScope::All, &text("ΦΟΣ")).total_occurrences,
+            1
+        );
+        assert_eq!(
+            found(&reads, VaultScope::All, &text("φοσφ")).total_occurrences,
+            1
+        );
+    }
+
+    #[test]
+    fn a_text_match_counts_a_string_that_runs_from_the_frontmatter_into_the_body() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[("Spanning.md", "---\nstatus: done\n---\n# Spanning\n")],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let response = found(&reads, VaultScope::All, &text("done\n---\n# Spanning"));
+        let note = &response.notes[0];
+        assert_eq!(
+            note.places,
+            TextMatchPlaces {
+                body: 0,
+                frontmatter: 1,
+                path: 0
+            }
+        );
+        assert_eq!(note.snippets[0].line, Some(2));
+        assert_eq!(note.snippets[0].text, "status: done");
+    }
+
+    #[test]
+    fn a_text_match_snippet_holds_the_match_on_a_long_line_of_decomposed_text() {
+        // 300 decomposed letters fold to 300 characters but are written as
+        // 600, so the match's column as written is not its folded column.
+        let line = format!("{}needle{}", "e\u{301}".repeat(300), "x".repeat(300));
+        let workspace = workspace(&[("Notes", &[("Long.md", line.as_str())])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let response = found(&reads, VaultScope::All, &text("needle"));
+        let snippet = &response.notes[0].snippets[0].text;
+        assert!(snippet.contains("needle"), "{snippet}");
+    }
+
+    #[test]
+    fn a_text_match_treats_blank_layer_names_as_no_layer_names() {
+        let workspace = workspace(&[(
+            "Layered",
+            &[
+                ("sources/.hatchdoor-layer", "sources"),
+                ("sources/Clipping.md", "needle"),
+                ("Home.md", "needle"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let response = found(
+            &reads,
+            VaultScope::All,
+            &TextMatchRequest {
+                layers: vec![String::new(), " ".to_string()],
+                ..text("needle")
+            },
+        );
+        assert_eq!(response.total_notes, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_text_match_does_not_follow_a_link_that_replaced_an_indexed_folder() {
+        let workspace = workspace(&[("Notes", &[("inside/Note.md", "harmless")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let root = &workspace.vault_paths[0];
+        let outside = root.parent().expect("parent").join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("Note.md"), "secret outside the Vault").expect("outside note");
+        std::fs::remove_dir_all(root.join("inside")).expect("remove folder");
+        std::os::unix::fs::symlink(&outside, root.join("inside")).expect("link");
+
+        let response = found(&reads, VaultScope::All, &text("secret"));
+        assert!(response.notes.is_empty());
+        assert_eq!(response.total_unread, 1);
+        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
+    }
+
+    #[test]
+    fn a_text_match_refuses_an_empty_string_and_an_empty_folder() {
+        let workspace = workspace(&[("Notes", &[("Home.md", "home")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        for request in [
+            text(""),
+            TextMatchRequest {
+                path_prefix: Some(" / ".to_string()),
+                ..text("home")
+            },
+        ] {
+            let error = reads
+                .find_text(VaultScope::One(workspace.vault_ids[0]), &request)
+                .expect_err("refused");
+            assert_eq!(error.code, "invalid_text_match");
+            assert!(!error.retryable);
+        }
+        // Whitespace is a string like any other.
+        assert_eq!(
+            found(&reads, VaultScope::All, &text(" ")).total_notes,
+            0,
+            "a one-word note holds no space"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3629,6 +4331,77 @@ mod tests {
             .exact_note_for_download(first, "does-not-exist")
             .expect("lookup succeeds");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn an_exact_note_read_carries_the_frontmatter_the_frontmatter_read_reports() {
+        let broken = "---\ntags: [unclosed\n---\n# Broken\n";
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Tagged.md",
+                    "---\ntags: [Project/Active, status/on-track]\naliases: [Base]\ndue: 2026-09-01\n---\n# Tagged\n\n#inline",
+                ),
+                ("Plain.md", "# Plain"),
+                ("Broken.md", broken),
+                ("Scalar.md", "---\njust a string\n---\n# Scalar"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        let metadata = |slug: &str| {
+            reads
+                .exact_note(first, slug)
+                .expect("note read")
+                .expect("note")
+                .note
+                .metadata
+        };
+
+        let tagged = metadata("tagged").expect("frontmatter that parses");
+        assert_eq!(tagged.tags, ["project/active", "status/on-track"]);
+        assert_eq!(tagged.aliases, ["Base"]);
+        assert_eq!(tagged.properties, serde_json::json!({"due": "2026-09-01"}));
+        let frontmatter = reads
+            .exact_note_frontmatter(first, "tagged")
+            .expect("frontmatter read")
+            .expect("tagged")
+            .metadata;
+        assert_eq!(tagged.tags, frontmatter.tags);
+        assert_eq!(tagged.aliases, frontmatter.aliases);
+        assert_eq!(
+            tagged.properties,
+            serde_json::Value::Object(frontmatter.properties)
+        );
+
+        let plain = metadata("plain").expect("no frontmatter is not a parse failure");
+        assert!(plain.tags.is_empty());
+        assert!(plain.aliases.is_empty());
+        assert_eq!(plain.properties, serde_json::json!({}));
+
+        // Bad frontmatter never fails the read: reading the note is how an
+        // agent repairs it. `None` says "could not parse", not "no tags".
+        let note = reads
+            .exact_note(first, "broken")
+            .expect("note read")
+            .expect("broken")
+            .note;
+        assert_eq!(note.metadata, None);
+        assert_eq!(note.content, broken);
+        assert_eq!(note.content_hash, crate::cache::parse::content_hash(broken));
+        assert_eq!(
+            metadata("scalar"),
+            None,
+            "frontmatter that is not a mapping"
+        );
+        assert_eq!(
+            reads
+                .exact_note_frontmatter(first, "broken")
+                .expect_err("the frontmatter read still refuses")
+                .code,
+            "invalid_frontmatter"
+        );
     }
 
     /// Reading one Note must not read every other one (#361). The counter is
@@ -4728,5 +5501,144 @@ mod tests {
                 .expect("read")
                 .is_none()
         );
+    }
+    #[test]
+    fn the_outline_and_a_section_read_report_the_hash_an_exact_read_does() {
+        let content = "---\ntitle: Home\n---\nintro\n# A\na\n## B\nb\n";
+        let workspace = workspace(&[("Notes", &[("Home.md", content)])]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let note = reads.exact_note(vault_id, "home").unwrap().unwrap();
+        let outline = reads.note_outline(vault_id, "home").unwrap().unwrap();
+        let sections = reads
+            .note_sections(vault_id, "home", &["B".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(outline.content_hash, note.note.content_hash);
+        assert_eq!(sections.content_hash, note.note.content_hash);
+        assert_eq!(outline.vault_id, vault_id);
+        assert_eq!(sections.slug, "home");
+        assert_eq!(outline.size_bytes, content.len());
+
+        // Both read the file as it is now, not as it was indexed.
+        std::fs::write(workspace.vault_paths[0].join("Home.md"), "# A\nnew\n").unwrap();
+        let after = reads.note_outline(vault_id, "home").unwrap().unwrap();
+        assert_eq!(after.size_bytes, "# A\nnew\n".len());
+        assert_eq!(
+            after.content_hash,
+            crate::cache::parse::content_hash("# A\nnew\n")
+        );
+    }
+
+    #[test]
+    fn an_outline_or_section_read_of_a_missing_or_withheld_note_is_none() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Home.md", "# A\n"),
+                ("sources/.hatchdoor-layer", "sources"),
+                ("sources/Clip.md", "# A\n"),
+            ],
+        )]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let headings = ["A".to_string()];
+        assert!(reads.note_outline(vault_id, "ghost").unwrap().is_none());
+        assert!(
+            reads
+                .note_sections(vault_id, "ghost", &headings)
+                .unwrap()
+                .is_none()
+        );
+        let clip = VaultIndex::build(&workspace.vault_paths[0])
+            .unwrap()
+            .ordered_entries()
+            .into_iter()
+            .find(|note| note.relative_path == "sources/Clip")
+            .expect("the demoted note")
+            .slug;
+        assert!(reads.note_outline(vault_id, &clip).unwrap().is_some());
+
+        // #109: a demo is told a demoted Note is absent.
+        let demo = VaultReadCore::new(&workspace.cache, &workspace.vaults)
+            .on_surface(BrowseSurface::DefaultOnly);
+        assert!(demo.note_outline(vault_id, &clip).unwrap().is_none());
+        assert!(
+            demo.note_sections(vault_id, &clip, &headings)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_malformed_heading_list_is_refused_before_the_note_is_looked_up() {
+        let workspace = workspace(&[("Notes", &[("Home.md", "# A\n")])]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        for headings in [Vec::new(), vec![String::new()], vec!["A".to_string(); 11]] {
+            // Refused for a Note that does not exist too: the list is checked
+            // first.
+            for slug in ["home", "ghost"] {
+                let error = reads
+                    .note_sections(vault_id, slug, &headings)
+                    .expect_err("malformed list");
+                assert_eq!(error.public_code(), "invalid_heading_selection");
+                assert!(!error.retryable);
+            }
+        }
+    }
+
+    #[test]
+    fn a_section_read_is_the_span_replace_section_overwrites() {
+        let content = "---\nk: v\n---\nintro\n# A\na\n## B\nb\n```\n# fenced\n```\n### C\nc\n## D\r\nd\r\n# E\ne";
+        let workspace = workspace(&[("Notes", &[("Home.md", content)])]);
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let path = workspace.vault_paths[0].join("Home.md");
+        let outline = reads.note_outline(vault_id, "home").unwrap().unwrap();
+        assert_eq!(outline.headings.len(), 5);
+
+        for heading in &outline.headings {
+            std::fs::write(&path, content).unwrap();
+            let read = reads
+                .note_sections(
+                    vault_id,
+                    "home",
+                    std::slice::from_ref(&heading.heading_path),
+                )
+                .unwrap()
+                .unwrap();
+            let super::NoteSectionEntry::Found(section) = &read.sections[0] else {
+                panic!("no section for {}", heading.heading_path);
+            };
+            let entry = VaultIndex::build(&workspace.vault_paths[0])
+                .unwrap()
+                .find_by_slug("home")
+                .cloned()
+                .unwrap();
+            // Replacing a section with nothing removes exactly the bytes
+            // `replace_section` takes the section to be.
+            crate::vault::replace_section(
+                &entry,
+                &format!("{} {}", "#".repeat(heading.level.into()), heading.text),
+                crate::vault::SectionMode::Replace,
+                "",
+                &read.content_hash,
+            )
+            .expect("replace");
+            let remaining = std::fs::read_to_string(&path).unwrap();
+            let start = content.find(section.section.as_str()).unwrap();
+            assert_eq!(
+                remaining,
+                format!(
+                    "{}{}",
+                    &content[..start],
+                    &content[start + section.section.len()..]
+                ),
+                "{}",
+                heading.heading_path
+            );
+        }
     }
 }

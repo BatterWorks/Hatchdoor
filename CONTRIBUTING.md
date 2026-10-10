@@ -22,6 +22,9 @@ just check
 It runs these, stopping at the first failure:
 
 ```bash
+node scripts/check-module-map.mjs
+node scripts/check-docs-freshness.mjs --validate-table
+node --test scripts/*.test.mjs
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
@@ -89,7 +92,7 @@ just docs-freshness
 It reports which user-facing surfaces the branch changed and which notes claim
 to document each one. The surfaces cover MCP tools, the HTTP API, settings,
 Git-backed Vaults, vault lifecycle, search and indexing, layers, attachments,
-Markdown, note mutations, security, starter content, startup, the Web UI, and
+Markdown, note mutations, security, startup, the Web UI, and
 deployment; the authoritative list is the table in the script. It exits
 non-zero, because it cannot tell you whether a note still reads true; only
 reading it can.
@@ -133,6 +136,9 @@ Before implementation:
 
 1. Find the relevant boundary in
    [`docs/architecture/module-map.md`](docs/architecture/module-map.md).
+   `node scripts/check-module-map.mjs --owner <path>...` prints the sections
+   that own the given files, so the map need not be read whole. A path no
+   module owns falls under the map's `## Auxiliary repository paths`.
 2. Read the applicable records in
    [`docs/adr/`](docs/adr/README.md), including any linked record containing the
    full decision.
@@ -163,7 +169,8 @@ shortcuts. A task may change one when its work packet states the precise
 integration required.
 
 When adding, moving, deleting, or reclassifying production source files, update
-the module map and verify its structural coverage:
+the module map and verify its structural coverage. `just check` runs this and
+the two test commands below; each is listed for a quick run on its own:
 
 ```bash
 node scripts/check-module-map.mjs
@@ -179,6 +186,22 @@ When changing the checker itself, run its isolated regression tests:
 ```bash
 node --test scripts/check-module-map.test.mjs
 ```
+
+When changing the image labels in the `Dockerfile`, or the `description`, `license` or `repository` field in `Cargo.toml` that they repeat, run:
+
+```bash
+node --test scripts/dockerfile-labels.test.mjs
+```
+
+When changing the Docker Hub overview or short description under `docs/maintenance/docker-hub/`, run:
+
+```bash
+node --test scripts/docker-hub-overview.test.mjs
+```
+
+## Review standards
+
+[`CODING_STANDARDS.md`](CODING_STANDARDS.md) holds the rules a reviewer applies to a finished diff: the judgement calls no check can make. Anything a machine can enforce belongs in `just check` instead.
 
 ## Architecture decisions
 
@@ -205,9 +228,7 @@ Do not open a public issue for a vulnerability. Follow the process in
 ## The local `vault/` directory
 
 `vault/` is the default vault path (`VAULT_PATH` defaults to `./vault`) and is
-gitignored — it is not committed. You do not need to create it: on first boot
-the app runs `seed_empty_vault`, which creates the directory and, if it has no
-Markdown yet, populates it with the starter vault from `docs/starter-vault/`.
+gitignored — it is not committed. Hatchdoor neither creates nor fills it: create the folder yourself before pointing a Vault at it, and it stays as empty as you leave it.
 Everything else vault-shaped is gitignored too: `demo-vaults/` (read-only demo
 content — one folder per vault, e.g. `demo-vaults/para/`), `data/` (generated
 cache), and `.fastembed_cache/` (downloaded model weights).

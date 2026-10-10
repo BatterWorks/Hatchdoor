@@ -1,0 +1,1 @@
+Self-hosted, agent-native web app + MCP server for your Obsidian-style Markdown vault.

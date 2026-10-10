@@ -1,13 +1,13 @@
 # Inline note editing (live preview) — Design
 
 **Date:** 2026-07-28
-**Status:** Approved, pending implementation plan.
+**Status:** Implemented in 2.5.0, then superseded on 2026-10-09. The one-block-at-a-time editor this design describes was replaced by one CodeMirror editor over the whole note (issue #540, pull requests #543 and #545). Kept as a record of the earlier design.
 **Revised 2026-07-28** after an adversarial spec review that found one fatal and nine serious
 issues. **Revised again 2026-07-29** after a design review against the design system, which
 found the appearance of the feature almost entirely unspecified. See "Review corrections" at
 the end for what changed and why.
-**Issues covered:** [#14 — Live editing content](https://github.com/BattermanZ/Hatchdoor/issues/14),
-partially [#7 — Improve attachment UX](https://github.com/BattermanZ/Hatchdoor/issues/7)
+**Issues covered:** [#14 — Live editing content](https://github.com/BatterWorks/Hatchdoor/issues/14),
+partially [#7 — Improve attachment UX](https://github.com/BatterWorks/Hatchdoor/issues/7)
 (the PDF drop stage)
 **Roadmap horizon:** v2.5.0 ("Polished, publishable UI/UX")
 

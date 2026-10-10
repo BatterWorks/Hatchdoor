@@ -54,9 +54,9 @@ impl ExcludeMatcher {
     /// tests only the path's own final component, so a directory pattern like
     /// `.obsidian/` would match the directory and then report `.obsidian/
     /// workspace.json` as *not* excluded. Inside a `filter_entry` walk the
-    /// pruned directory hides its children anyway, but the seeder, the
-    /// diagnostic surface and any future per-path caller ask about a single
-    /// path with no walk context, and they must get the right answer.
+    /// pruned directory hides its children anyway, but the diagnostic surface
+    /// and any future per-path caller ask about a single path with no walk
+    /// context, and they must get the right answer.
     pub fn is_excluded(&self, relative: &Path, is_dir: bool) -> bool {
         if relative.file_name().and_then(|n| n.to_str()) == Some(MARKER_FILE_NAME) {
             return false;
