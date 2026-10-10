@@ -1121,8 +1121,8 @@
   .toc-link[data-level="3"] { padding-left: 1rem; color: var(--muted); }
 
   /* Body & blocks */
-  /* Uncapped: see the Reading measure note in §07. */
-  .note-body { max-width: 100%; }
+  /* Capped by the column: see the Reading measure note in §10. */
+  .note-body { max-width: 38rem; }
   .note-body p { font-family: var(--font-serif); font-size: 1.18rem; line-height: 1.62; color: var(--ink); margin: 0 0 1.2rem; }
   .note-body h1 { font-family: var(--font-display); font-variation-settings: "wdth" 88, "wght" 700; font-size: 1.7rem; text-transform: uppercase; letter-spacing: -0.012em; margin: 2.4rem 0 0.8rem; }
   .note-body h2 { font-family: var(--font-serif); font-style: italic; font-weight: 500; font-size: 1.85rem; line-height: 1.18; letter-spacing: -0.012em; margin: 2.6rem 0 0.5rem; }
@@ -1635,12 +1635,9 @@
     gap: 0.5rem;
   }
 
-  /* Body demos are shown at the width the app actually gives a note. That
-     width is not a max-width on .note-body: it is what remains of
-     .note-page-layout's grid once the 220px table of contents and its gap are
-     taken, which is 798px at a 1440px window and caps at 1120px. Demoing prose
-     at the full doc column would show a measure the app never renders. */
-  .stage-note > .note-body { max-width: 798px; }
+  /* Body demos are shown at the width the app actually gives a note: the
+     38rem reading measure that .note-page-layout caps its note column at. */
+  .stage-note > .note-body { max-width: 38rem; }
 
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Live editor
@@ -2260,7 +2257,7 @@
     <section class="doc-section" id="body-text">
       <div class="doc-section-num">§10</div>
       <h2>Prose &amp; inline elements</h2>
-      <p class="blurb"><b>Reading measure: uncapped.</b> This document previously specified <code>max-width: 36rem</code> on the note body; the app has always rendered full width, about 100 characters at 1440px. Capping was considered and rejected. Nearly every non-prose block here is a bordered box &mdash; <span class="key">.table-wrap</span>, <span class="key">.callout</span>, <span class="key">.code-block</span> &mdash; so a narrow text column beside full-width boxes reads as broken alignment rather than as hierarchy, and capping every block uniformly instead pushes tables and diagrams into horizontal scrolling much sooner. The app is authoritative; this document was stale.</p>
+      <p class="blurb"><b>Reading measure: 38rem, about 75 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
       <div class="stage stage-note paper">
         <div class="note-body">
