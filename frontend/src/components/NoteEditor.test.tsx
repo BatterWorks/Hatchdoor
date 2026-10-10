@@ -7,9 +7,28 @@ import {
 } from "@testing-library/react";
 import { useState } from "react";
 import type { ComponentProps } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fetchAttachmentMaxBytes } from "../api/writeApi";
 import { NoteEditor, type UploadedAttachment } from "./NoteEditor";
+
+vi.mock("../api/writeApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/writeApi")>()),
+  fetchAttachmentMaxBytes: vi.fn(),
+}));
+
+const mockedMaxBytes = vi.mocked(fetchAttachmentMaxBytes);
+const MB = 1024 * 1024;
+
+function pdfOfSize(name: string, bytes: number) {
+  const file = new File(["%PDF-1.7"], name, { type: "application/pdf" });
+  Object.defineProperty(file, "size", { value: bytes });
+  return file;
+}
+
+beforeEach(() => {
+  mockedMaxBytes.mockResolvedValue(10 * MB);
+});
 
 afterEach(() => {
   cleanup();
@@ -172,6 +191,71 @@ describe("NoteEditor attachment uploads", () => {
     expect(textarea).toHaveValue("# Body\n![[Attachments/report.pdf]]");
   });
 
+  it("uploads a file over the default limit when the configured limit allows it (#558)", async () => {
+    mockedMaxBytes.mockResolvedValue(20 * MB);
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: "Attachments/big.pdf",
+      embed: "![[Attachments/big.pdf]]",
+    });
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Markdown content" });
+    const file = pdfOfSize("big.pdf", 15 * MB);
+    fireEvent.paste(textarea, { clipboardData: { files: [file] } });
+
+    await screen.findByText("Inserted attachment: Attachments/big.pdf");
+    expect(uploadAttachment).toHaveBeenCalledWith(file);
+  });
+
+  it("refuses a file over the configured limit before uploading, quoting that limit (#558)", async () => {
+    mockedMaxBytes.mockResolvedValue(20 * MB);
+    const uploadAttachment = vi.fn();
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Markdown content" });
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [pdfOfSize("huge.pdf", 25 * MB)] },
+    });
+
+    await screen.findByText("That file is 25 MB. The limit is 20 MB.");
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("sends an oversized file and shows the server's refusal when the limit is unknown (#558)", async () => {
+    mockedMaxBytes.mockResolvedValue(null);
+    const uploadAttachment = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("The file is larger than the upload limit."),
+      );
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Markdown content" });
+    const file = pdfOfSize("huge.pdf", 25 * MB);
+    fireEvent.paste(textarea, { clipboardData: { files: [file] } });
+
+    await screen.findByText("The file is larger than the upload limit.");
+    expect(uploadAttachment).toHaveBeenCalledWith(file);
+  });
+
   it("defers a demo_read_only upload refusal to onDemoRefusal instead of its own inline notice (#152)", async () => {
     const demoError = new Error(
       "This is a public read-only demo instance; mutations and Vault-control operations are disabled.",
@@ -273,7 +357,9 @@ describe("NoteEditor attachment uploads", () => {
       },
     });
 
-    expect(screen.getByText("Drop an image or PDF to attach")).toBeInTheDocument();
+    expect(
+      screen.getByText("Drop an image or PDF to attach"),
+    ).toBeInTheDocument();
     expect(textarea.closest(".note-editor-input")).toHaveClass("drag-active");
   });
 });

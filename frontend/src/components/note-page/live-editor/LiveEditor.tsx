@@ -53,9 +53,10 @@ import {
 } from "@atomic-editor/editor";
 import "@atomic-editor/editor/styles.css";
 
+import { fetchAttachmentMaxBytes } from "../../../api/writeApi";
 import type { ExplorerNote } from "../../../types";
 import type { UploadedAttachment } from "../../NoteEditor";
-import { attachmentRejection } from "../attachmentDrop";
+import { attachmentRejectionAtCurrentLimit } from "../attachmentDrop";
 import { callouts } from "./callouts";
 import { markKeymap } from "./commands";
 import { focusTracking } from "./focusState";
@@ -168,7 +169,10 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
         if (!onUploadAttachment) {
           return;
         }
-        const rejection = attachmentRejection(file);
+        const rejection = await attachmentRejectionAtCurrentLimit(
+          file,
+          fetchAttachmentMaxBytes,
+        );
         if (rejection) {
           onUploadNotice?.(rejection);
           return;

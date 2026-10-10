@@ -1,10 +1,29 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EditorView } from "@codemirror/view";
 
+import { fetchAttachmentMaxBytes } from "../../../api/writeApi";
 import { LiveEditor, type LiveEditorHandle } from "./LiveEditor";
+
+vi.mock("../../../api/writeApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../api/writeApi")>()),
+  fetchAttachmentMaxBytes: vi.fn(),
+}));
+
+const mockedMaxBytes = vi.mocked(fetchAttachmentMaxBytes);
+const MB = 1024 * 1024;
+
+function pdfOfSize(name: string, bytes: number) {
+  const file = new File(["%PDF-1.7"], name, { type: "application/pdf" });
+  Object.defineProperty(file, "size", { value: bytes });
+  return file;
+}
+
+beforeEach(() => {
+  mockedMaxBytes.mockResolvedValue(10 * MB);
+});
 
 function mount(
   overrides: Partial<React.ComponentProps<typeof LiveEditor>> = {},
@@ -149,5 +168,50 @@ describe("LiveEditor", () => {
     });
     expect(onUploadAttachment).not.toHaveBeenCalled();
     expect(onUploadNotice).toHaveBeenCalledTimes(1);
+  });
+
+  it("uploads a file over the default limit when the configured limit allows it (#558)", async () => {
+    mockedMaxBytes.mockResolvedValue(20 * MB);
+    const onUploadAttachment = vi
+      .fn()
+      .mockResolvedValue({ path: "big.pdf", embed: "![[big.pdf]]" });
+    const onUploadNotice = vi.fn();
+    const { content } = mount({ onUploadAttachment, onUploadNotice });
+    const file = pdfOfSize("big.pdf", 15 * MB);
+    await act(async () => {
+      fireEvent.paste(content, { clipboardData: { files: [file], items: [] } });
+    });
+    expect(onUploadAttachment).toHaveBeenCalledWith(file);
+    expect(onUploadNotice).not.toHaveBeenCalled();
+  });
+
+  it("refuses a file over the configured limit before uploading, quoting that limit (#558)", async () => {
+    mockedMaxBytes.mockResolvedValue(20 * MB);
+    const onUploadAttachment = vi.fn();
+    const onUploadNotice = vi.fn();
+    const { content } = mount({ onUploadAttachment, onUploadNotice });
+    await act(async () => {
+      fireEvent.paste(content, {
+        clipboardData: { files: [pdfOfSize("huge.pdf", 25 * MB)], items: [] },
+      });
+    });
+    expect(onUploadAttachment).not.toHaveBeenCalled();
+    expect(onUploadNotice).toHaveBeenCalledWith(
+      "That file is 25 MB. The limit is 20 MB.",
+    );
+  });
+
+  it("sends an oversized file and hands on the server's refusal when the limit is unknown (#558)", async () => {
+    mockedMaxBytes.mockResolvedValue(null);
+    const refusal = new Error("The file is larger than the upload limit.");
+    const onUploadAttachment = vi.fn().mockRejectedValue(refusal);
+    const onUploadError = vi.fn();
+    const { content } = mount({ onUploadAttachment, onUploadError });
+    const file = pdfOfSize("huge.pdf", 25 * MB);
+    await act(async () => {
+      fireEvent.paste(content, { clipboardData: { files: [file], items: [] } });
+    });
+    expect(onUploadAttachment).toHaveBeenCalledWith(file);
+    expect(onUploadError).toHaveBeenCalledWith(refusal);
   });
 });

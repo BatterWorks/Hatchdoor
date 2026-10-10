@@ -52,6 +52,7 @@
 - A note is now set in a narrower column, about 75 characters a line, where it used to run the full width of the page, about 120 characters on a wide screen. Long lines are tiring to read: the usual guidance for a single column is 45 to 75 characters. The title, the Properties line, tables, callouts, code blocks and diagrams keep to the same column, so the page has one edge, and the outline stays beside it. A table wider than the column scrolls sideways inside its frame, in both views. **Source** and the conflict review keep the wide layout. A screen narrower than the column, such as a phone held upright, is unchanged; a tablet or a phone on its side now gets the column too. [#557]
 
 ### Fixed
+- Dropping or pasting a file into a note now follows the upload limit you set. The browser refused every attachment over 10 MB before sending it, so with **Settings** → **Uploads** → **Largest file from this app** (`HATCHDOOR_MAX_ATTACHMENT_BYTES`) raised to 20 MB, a 15 MB PDF was still turned away with "The limit is 10 MB", although an agent could upload the same file. The browser now reads the limit from the server for each file, so a raised limit works at once, without a restart or a reload, and the message for a file that is too large quotes the real limit. Where the browser cannot read the limit, it sends the file and shows the server's answer. [#558]
 - The Docker verification stage now includes the link-preview image, so the test checks the real asset's dimensions and size. [#552]
 - Inline code is readable again while editing a note in the light theme. In the Editing view a span such as `` `npm run build` `` showed as a solid black box, black text on a black fill, and in other places as orange or grey text on that same box. It now looks as it does in the Reading view in both themes: dark monospace text on a pale chip with square corners, in paragraphs, lists, headings, quotes and callouts. Fenced code blocks are unchanged. [#550]
 - A Vault with Git sync no longer stays marked `stale` when its index is current. Saving a commit while the index was being rebuilt counted as an edit to the notes, so the rebuild labelled its own result out of date, and since no file had changed nothing queued the rebuild that would clear the label. The web app then showed `stale` beside the Vault, `list_vaults` reported `"search": "stale"` and collection reads came back `partial: true`, until an unrelated edit, a sync or `refresh_vault`. A commit, a sync that pulls nothing and a recovery branch publish no longer count as edits. A sync that pulls remote changes still marks the index `stale` and queues the rebuild that brings it up to date, and its line in the server log now reads `outcome=Pulled`. A sync that fails during a rebuild queues the next one itself. [#549]
@@ -141,6 +142,7 @@
 [#555]: https://github.com/BatterWorks/Hatchdoor/issues/555
 [#556]: https://github.com/BatterWorks/Hatchdoor/issues/556
 [#557]: https://github.com/BatterWorks/Hatchdoor/issues/557
+[#558]: https://github.com/BatterWorks/Hatchdoor/issues/558
 
 ## v2.7.0 - 2026-10-02
 

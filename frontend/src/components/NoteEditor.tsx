@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { fetchAttachmentMaxBytes } from "../api/writeApi";
 import type { ExplorerNote } from "../types";
 import {
   applyWikilinkSelection,
@@ -18,7 +19,7 @@ import {
   matchNoteCandidates,
   type WikilinkTrigger,
 } from "./note-page/autocomplete";
-import { attachmentRejection } from "./note-page/attachmentDrop";
+import { attachmentRejectionAtCurrentLimit } from "./note-page/attachmentDrop";
 import { diffConflictLines } from "./note-page/conflictDiff";
 import {
   buildContentWithFrontmatter,
@@ -193,7 +194,10 @@ export function NoteEditor({
     if (!onUploadAttachment) {
       return;
     }
-    const rejection = attachmentRejection(file);
+    const rejection = await attachmentRejectionAtCurrentLimit(
+      file,
+      fetchAttachmentMaxBytes,
+    );
     if (rejection) {
       setAttachmentNotice({ tone: "error", message: rejection });
       return;
@@ -214,7 +218,7 @@ export function NoteEditor({
     }
   };
 
-  // Any file is a candidate; attachmentRejection decides, so an unsupported
+  // Any file is a candidate; attachmentRejectionAtCurrentLimit decides, so an unsupported
   // drop gets a message rather than being silently ignored.
   const firstAttachmentFile = (files: FileList | File[]) =>
     Array.from(files)[0];

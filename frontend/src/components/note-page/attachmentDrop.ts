@@ -24,14 +24,18 @@ export const ATTACHMENT_EXTENSIONS = [
   "pdf",
 ] as const;
 
-// Mirrors DEFAULT_MAX_ATTACHMENT_BYTES in src/mcp/config.rs. The server stays
-// authoritative; this only buys a useful message instead of a failed request.
-export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
-
 /**
  * Why this file cannot be attached, or null if it can.
+ *
+ * `maxBytes` is the server's configured upload limit (`fetchAttachmentMaxBytes`),
+ * or null when the browser could not learn it. The server stays authoritative;
+ * the size check only buys a useful message instead of a failed request, so
+ * with no known limit the file is sent and the server answers.
  */
-export function attachmentRejection(file: File): string | null {
+export function attachmentRejection(
+  file: File,
+  maxBytes: number | null,
+): string | null {
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   const hasExtension = file.name.includes(".");
 
@@ -42,13 +46,28 @@ export function attachmentRejection(file: File): string | null {
     return "Hatchdoor accepts images and PDFs.";
   }
 
-  if (file.size > ATTACHMENT_MAX_BYTES) {
+  if (maxBytes !== null && file.size > maxBytes) {
     return `That file is ${formatMegabytes(file.size)}. The limit is ${formatMegabytes(
-      ATTACHMENT_MAX_BYTES,
+      maxBytes,
     )}.`;
   }
 
   return null;
+}
+
+/**
+ * `attachmentRejection` against the server's current limit. The limit is read
+ * only once the extension has passed, so a file Hatchdoor never accepts is
+ * refused without a request.
+ */
+export async function attachmentRejectionAtCurrentLimit(
+  file: File,
+  readMaxBytes: () => Promise<number | null>,
+): Promise<string | null> {
+  return (
+    attachmentRejection(file, null) ??
+    attachmentRejection(file, await readMaxBytes())
+  );
 }
 
 function formatMegabytes(bytes: number): string {
