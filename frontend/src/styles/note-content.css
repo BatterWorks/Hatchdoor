@@ -1409,9 +1409,19 @@
   background: transparent;
   color: var(--ink);
 }
+/* Sticky: "next" scrolls the pane to a match far down the note, and the bar
+   has to still be there to press it again. A container, so the bar lays
+   itself out by the width it has and not by the window's. */
 .live-editor .cm-panels-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  container-type: inline-size;
   border-bottom: 1px solid var(--rule);
   margin-bottom: 1rem;
+  /* Covers the pane's own top padding, where the note would otherwise show
+     through above the stuck bar. */
+  box-shadow: 0 -3rem 0 var(--bg);
 }
 .live-editor .cm-panel.cm-search {
   position: relative;
@@ -1551,6 +1561,59 @@
 .live-editor .cm-searchMatch.cm-searchMatch-selected {
   background: var(--hot-soft);
   outline: 1px solid var(--hot);
+}
+
+/* A narrow bar: each field takes a full row and its buttons share the row
+   under it in equal parts, so Next, Previous and Select all sit together. */
+@container (max-width: 30rem) {
+  .live-editor .cm-panel.cm-search {
+    padding-right: 0.7rem;
+  }
+  .live-editor .cm-panel.cm-search .cm-textfield {
+    flex: 1 0 100%;
+    width: auto;
+  }
+  /* The close button keeps the corner beside the find field. */
+  .live-editor .cm-panel.cm-search .cm-textfield[name="search"] {
+    flex: 0 0 calc(100% - 2.6rem);
+  }
+  .live-editor .cm-panel.cm-search .cm-button {
+    flex: 1 1 0;
+    padding-inline: 0.3rem;
+    white-space: nowrap;
+  }
+  .live-editor .cm-panel.cm-search label {
+    margin-right: 0.3rem;
+  }
+  /* The full-width replace field already starts its own row. */
+  .live-editor .cm-panel.cm-search::before {
+    display: none;
+  }
+}
+/* Fingers: full-size targets, and 16px fields so iOS does not zoom the page
+   when one takes focus. */
+@media (pointer: coarse) {
+  .live-editor .cm-panel.cm-search .cm-textfield {
+    min-height: 2.75rem;
+    font-size: 1rem;
+  }
+  .live-editor .cm-panel.cm-search .cm-button {
+    min-height: 2.75rem;
+  }
+  .live-editor .cm-panel.cm-search label {
+    min-height: 2.75rem;
+    font-size: 0.9rem;
+  }
+  .live-editor .cm-panel.cm-search input[type="checkbox"] {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .live-editor .cm-panel.cm-search button[name="close"] {
+    top: 0.6rem;
+    right: 0.35rem;
+    width: 2.75rem;
+    height: 2.75rem;
+  }
 }
 
 /* The bar above a phone's keyboard. Lifted by the editor to clear iOS's

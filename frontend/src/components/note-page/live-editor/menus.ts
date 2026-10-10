@@ -23,6 +23,7 @@ import {
   type Tooltip,
 } from "@codemirror/view";
 
+import { searchPanelOpen } from "@codemirror/search";
 import type { ExplorerNote } from "../../../types";
 import {
   CODE_PATH,
@@ -193,6 +194,11 @@ const TOOLBAR_ITEMS: Array<{
 function selectionTooltip(state: EditorState): Tooltip | null {
   const range = state.selection.main;
   if (range.empty) {
+    return null;
+  }
+  // Stepping through matches selects each one; that is finding, not a
+  // selection to format.
+  if (searchPanelOpen(state)) {
     return null;
   }
   // A selection across lines is usually a cut or a move, not a format.
