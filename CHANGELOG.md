@@ -49,6 +49,7 @@
 - The access token prompt now looks like the rest of Hatchdoor and follows the light and dark themes. It used to be a dark grey panel with a blue button and rounded corners whatever the theme. It is now built like the other dialogs, with square corners and the same field and button, and it says and does what it did before. A few smaller colours moved onto the theme as well: in the source editor, the properties panel, the drop target, the highlighted autocomplete row, the two sides of the conflict view and the failed-attachment notice, and elsewhere the header strip of a code block and the graph's filter count badge, which lost its rounded corners. [#547]
 
 ### Fixed
+- The Docker verification stage now includes the link-preview image, so the test checks the real asset's dimensions and size. [#552]
 - Inline code is readable again while editing a note in the light theme. In the Editing view a span such as `` `npm run build` `` showed as a solid black box, black text on a black fill, and in other places as orange or grey text on that same box. It now looks as it does in the Reading view in both themes: dark monospace text on a pale chip with square corners, in paragraphs, lists, headings, quotes and callouts. Fenced code blocks are unchanged. [#550]
 - A Vault with Git sync no longer stays marked `stale` when its index is current. Saving a commit while the index was being rebuilt counted as an edit to the notes, so the rebuild labelled its own result out of date, and since no file had changed nothing queued the rebuild that would clear the label. The web app then showed `stale` beside the Vault, `list_vaults` reported `"search": "stale"` and collection reads came back `partial: true`, until an unrelated edit, a sync or `refresh_vault`. A commit, a sync that pulls nothing and a recovery branch publish no longer count as edits. A sync that pulls remote changes still marks the index `stale` and queues the rebuild that brings it up to date, and its line in the server log now reads `outcome=Pulled`. A sync that fails during a rebuild queues the next one itself. [#549]
 - Search results spell a numbered folder's path the right way round. A note at `30-areas/Homelab.md` was listed as `areas/Homelab.md-30`, because the path was laid out right to left to shorten it from the front. Snippets no longer show `[[` around wikilinks or the source of a fenced code block, and a result whose matching section sits under the note's own title no longer repeats the title on a second line. [#530]
@@ -130,6 +131,7 @@
 [#547]: https://github.com/BatterWorks/Hatchdoor/issues/547
 [#549]: https://github.com/BatterWorks/Hatchdoor/issues/549
 [#550]: https://github.com/BatterWorks/Hatchdoor/issues/550
+[#552]: https://github.com/BatterWorks/Hatchdoor/issues/552
 
 ## v2.7.0 - 2026-10-02
 
