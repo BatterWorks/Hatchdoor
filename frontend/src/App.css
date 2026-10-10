@@ -78,8 +78,8 @@
 }
 
 .note-editor-input.drag-active .note-editor-textarea {
-  border-color: var(--accent, var(--ink));
-  box-shadow: inset 0 0 0 1px var(--accent, var(--ink));
+  border-color: var(--hot);
+  box-shadow: inset 0 0 0 1px var(--hot);
 }
 
 .note-editor-drop-target {
@@ -87,7 +87,7 @@
   inset: 0;
   display: grid;
   place-items: center;
-  border: 1px dashed var(--accent, var(--ink));
+  border: 1px dashed var(--hot);
   border-radius: var(--radius-none);
   background: color-mix(in srgb, var(--paper) 86%, transparent);
   color: var(--ink);
@@ -104,7 +104,7 @@
   padding: 0.75rem;
   border: 1px solid var(--rule);
   border-radius: var(--radius-none);
-  background: var(--surface, rgba(127, 127, 127, 0.06));
+  background: var(--paper-2);
 }
 
 .note-editor-property {
@@ -138,7 +138,7 @@
   padding: 0.85rem;
   border: 1px solid var(--rule);
   border-radius: var(--radius-none);
-  background: var(--surface, rgba(127, 127, 127, 0.06));
+  background: var(--paper-2);
 }
 
 .note-editor-conflict-header {
@@ -194,12 +194,15 @@
   border-bottom: 0;
 }
 
+/* The two sides of a conflict. The version on disk is the one in the way, so
+   it takes the error surface. The draft takes the info callout's tint, mixed
+   the way a callout mixes its own. */
 .note-editor-conflict-line.disk {
-  background: rgba(190, 85, 75, 0.12);
+  background: var(--err-bg);
 }
 
 .note-editor-conflict-line.draft {
-  background: rgba(70, 120, 170, 0.12);
+  background: color-mix(in oklab, var(--co-info) 12%, var(--paper));
 }
 
 .note-editor-conflict-marker {
@@ -225,7 +228,7 @@
   border: 1px solid var(--rule);
   border-radius: var(--radius-none);
   background: var(--paper);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-float);
 }
 
 .note-editor-autocomplete-item {
@@ -242,7 +245,7 @@
 
 .note-editor-autocomplete-item.active,
 .note-editor-autocomplete-item:hover {
-  background: var(--hover, rgba(127, 127, 127, 0.15));
+  background: var(--paper-2);
 }
 
 .note-editor-preview {
@@ -330,8 +333,8 @@
 }
 
 .note-editor-notice.attachment-error {
-  border-color: rgba(190, 85, 75, 0.5);
-  background: rgba(190, 85, 75, 0.08);
+  border-color: var(--err-border);
+  background: var(--err-bg);
 }
 
 @media (max-width: 720px) {
@@ -378,7 +381,7 @@
   max-height: min(720px, calc(var(--visual-viewport-height, 100dvh) - 2rem));
   overflow: auto;
   border: 1px solid var(--rule-strong);
-  border-radius: 0;
+  border-radius: var(--radius-none);
   background: var(--paper);
   padding: 1rem;
 }
@@ -415,7 +418,7 @@
   width: 100%;
   box-sizing: border-box;
   border: 1px solid var(--rule-strong);
-  border-radius: 0;
+  border-radius: var(--radius-none);
   padding: 0.6rem 0.7rem;
   background: var(--paper);
   color: var(--ink);
@@ -456,4 +459,24 @@ textarea.field-input {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+/* The access token prompt is the dialog and field above, plus two things of
+   its own (#547). It sits over everything the app can draw except Help, which
+   it links to and which opens above it. */
+.modal-backdrop.token-prompt {
+  z-index: 1000;
+}
+
+.token-prompt-lede {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.token-prompt-help {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  font-size: 0.85rem;
 }

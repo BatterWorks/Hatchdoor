@@ -148,8 +148,9 @@ function tagHue(tag: string): number {
   return Math.abs(hash) % 360;
 }
 
-function nodeColor(tag: string | null, alpha = 1): string {
-  if (!tag) return `rgba(138, 134, 120, ${alpha})`;
+// An untagged node has no colour of its own: the canvas draws it in the
+// theme's --muted, read with the other theme colours.
+function nodeColor(tag: string, alpha = 1): string {
   const hue = tagHue(tag);
   return `hsla(${hue}, 60%, 58%, ${alpha})`;
 }

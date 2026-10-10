@@ -4224,6 +4224,8 @@ and cross-capability TypeScript representations of backend payloads. A feature
 may own its wire types when all consumers go through that feature's public
 entry point, as Search now does.
 
+The login prompt has no stylesheet of its own (#547). It is built from Shared UI: `UiButton`, and the `.modal-backdrop`, `.modal-panel`, `.field-input` and `.modal-actions` rules in `App.css`, so a change to any of those reaches it. Its three own rules (`.modal-backdrop.token-prompt`, `.token-prompt-lede`, `.token-prompt-help`) sit beside them in `App.css`. Its `z-index: 1000` is one below `.help-panel.is-above-dialogs` in `help.css`, because Help opens over the prompt; change the two together.
+
 **Consumers:** almost every data-backed frontend capability.
 
 **Coordination rule:** `types.ts` is not owned by whichever feature needs one

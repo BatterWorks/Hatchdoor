@@ -352,6 +352,14 @@
   position: relative;
 }
 
+/* A dash's worth of room, at every depth and inside an ordered list too. It is
+   set on the list itself, here beside the rule that reads it: declared anywhere
+   else it can be deleted with its neighbours, and an undefined inset is zero,
+   which puts the marker on top of the text (#547). */
+.note-body ul {
+  --li-inset: 1.4rem;
+}
+
 /* D25a: a wrapped list item is addressed one source line at a time, so each
    line is its own element. They are lines of one item, not separate blocks, so
    consecutive lines sit on their own baselines with no gap. The last line keeps
@@ -426,12 +434,6 @@
    times the width of "1.". */
 .note-body ol ol ol {
   --li-inset: 2.7rem;
-}
-
-/* A bullet nested inside an ordered list is still a bullet, and needs only a
-   dash's worth of room. */
-.note-body ol ul {
-  --li-inset: 1.4rem;
 }
 
 /* Use > so only direct ol children get the counter — prevents ul sub-items
@@ -662,7 +664,9 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: rgba(255, 255, 255, 0.06);
+  /* A faint lift off the slab, mixed from the code ink so it follows the
+     slab and not the page theme. */
+  background: color-mix(in oklab, var(--code-ink) 6%, transparent);
   padding: 0.3rem 0.7rem;
   border-bottom: 1px solid var(--code-rule);
 }
