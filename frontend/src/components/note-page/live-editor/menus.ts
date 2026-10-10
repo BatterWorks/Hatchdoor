@@ -264,7 +264,9 @@ function selectionTooltip(state: EditorState): Tooltip | null {
         });
         dom.appendChild(button);
       }
-      return { dom };
+      // Clear of the line it formats: flush against the selection it hid
+      // the ascenders of the words either side.
+      return { dom, offset: { x: 0, y: 10 } };
     },
   };
 }
