@@ -40,7 +40,7 @@ under close human review, with tests and a documented safety model.
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc">
     <img src="assets/screenshots/hero-light.png" width="900"
-      alt="Hatchdoor browsing a note: vault explorer on the left, rendered Markdown with wikilinks in the centre, and an on-this-page outline on the right">
+      alt="Hatchdoor editing a note: vault explorer on the left, the live editor in the centre with its formatting toolbar over a selected phrase, and an on-this-page outline on the right">
   </a>
 </p>
 
