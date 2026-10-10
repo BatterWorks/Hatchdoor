@@ -86,7 +86,9 @@ under close human review, with tests and a documented safety model.
   frontmatter, images, attachments, and broken-link styling.
 - Keyword search and semantic search.
 - Recent notes, backlinks, outbound links, stats, and graph views.
-- Browser write support when the vault mount is writable.
+- A live editor in the browser when the vault mount is writable: the note opens
+  ready to type in, Markdown syntax shows only on the line you are on, and
+  edits save by themselves. It works the way Obsidian's Live Preview does.
 - Attachment uploads, local asset serving, and inline previews for linked PDF
   vault assets.
 - A first-class MCP server so AI agents can read, search, create, edit, and link

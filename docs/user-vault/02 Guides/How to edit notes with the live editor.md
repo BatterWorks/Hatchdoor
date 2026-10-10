@@ -14,22 +14,26 @@ On a Vault Hatchdoor can write to, a note opens straight into its editor. There 
 
 ## Formatting
 
+On a Mac, press `Cmd` wherever this page says `Ctrl`.
+
 | Key | What it does |
 | --- | --- |
 | `Ctrl+B` / `Ctrl+I` | Bold / italic |
 | `Ctrl+E` | Inline code |
+| `Ctrl+Shift+X` | Strikethrough |
 | `Ctrl+K` | A link, with the address selected for typing over |
 | `Enter` in a list | Continues the list; `Enter` on an empty item ends it |
 | `Tab` / `Shift+Tab` in a list | Indent / outdent |
+| `Ctrl+F` | Find and replace within the note, in a bar above it |
 | `Escape` | Leaves the editor, which saves what you typed |
 
-Select a word or a phrase and a small toolbar appears over it with bold, italic, strikethrough, code, highlight and link.
+Select a word or a phrase and a small toolbar appears over it with bold, italic, strikethrough, code, highlight and link. A selection that runs over more than one line shows no toolbar; the keys above still work on it.
 
-Type `/` at the start of a line for a menu of what a line can be: a heading, a bulleted or numbered list, a to-do, a quote, a callout, a code block, a divider or a table. Keep typing to narrow it, and `Enter` picks.
+Type `/` at the start of a line for a menu of what a line can be: a heading, a bulleted or numbered list, a to-do, a quote, a callout, a code block, a divider or a table, or plain text again. Keep typing to narrow it, and `Enter` picks.
 
 Type `[[` and part of a note's title to link to it. Pick one with the arrow keys and `Enter`, and Hatchdoor writes the link in the Vault's link style: `[[Note Title]]` in a wikilink Vault, `[Note Title](path/to/Note%20Title.md)` in a Markdown-link Vault. Only notes in the same Vault are offered. A wikilink in the editor is looked up the way the Reading view looks it up, by title, alias or path, so it reads as resolved or missing the same in both, and clicking it opens that note, at the heading when the link names one. [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is worked out.
 
-Paste or drop an image or another attachment into the editor and Hatchdoor uploads it beside the note and writes the embed on the line after your caret. Images show under the line that embeds them. [[How to import and work with attachments]] covers where files land.
+Paste or drop an image or another attachment into the editor and Hatchdoor uploads it and writes the embed on a line of its own, under the line your caret is on or the line you dropped it on. Images show under the line that embeds them. [[How to import and work with attachments]] covers where files land.
 
 ## On a phone
 
@@ -37,7 +41,7 @@ Tap into the text to edit. There is no floating toolbar on a phone, because the 
 
 ## Properties
 
-You can also edit a note's properties, the frontmatter block with its tags, status and so on, in place above the note body, in either view.
+You can also edit a note's properties, the frontmatter block with its tags, status and so on, in place above the note body, in the Editing and Reading views. Source shows them as fields above the Markdown.
 
 ## Saving
 
