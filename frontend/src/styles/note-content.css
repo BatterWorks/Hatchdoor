@@ -9,15 +9,23 @@
   overflow-x: hidden;
 }
 
-/* Two-col layout: body + TOC
-   max-width = 1120px note + gap + 220px TOC, so the note column is exactly 1120px */
+/* Two-col layout: body + TOC. The note column is the reading measure: 38rem
+   holds about 75 characters of the body serif at 1.18rem, and the title,
+   properties, tables and diagrams all keep to it so the page has one edge. */
 .note-page-layout {
+  --note-measure: 38rem;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;
   gap: 1.4rem;
   align-items: start;
-  max-width: calc(1120px + 1.4rem + 220px);
+  max-width: calc(var(--note-measure) + 1.4rem + 220px);
   margin: 0 auto;
+}
+
+/* Source and the conflict review are Markdown in a monospace face, and the
+   review sets two versions side by side: they keep the wide column. */
+.note-page-layout:has(.note-editor) {
+  --note-measure: 1120px;
 }
 
 /* Article wrapper */
