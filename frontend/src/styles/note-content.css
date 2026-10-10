@@ -1345,11 +1345,14 @@
 }
 
 /* The floating toolbar over a selection (desktop only). Ink on paper
-   inverted, like the topbar menu, so it reads as a control over the text. */
-.live-editor-toolbar {
+   inverted, like the topbar menu, so it reads as a control over the text.
+   CodeMirror puts its own tooltip class on this same element, and the
+   library's theme styles that class, so the selector has to outrank it. */
+.live-editor .cm-tooltip.live-editor-toolbar {
   display: inline-flex;
   gap: 0.1rem;
   padding: 0.2rem;
+  border: 0;
   background: var(--ink);
   color: var(--bg);
   box-shadow: var(--shadow-float);
@@ -1372,10 +1375,6 @@
 .live-editor-toolbar button:hover {
   background: var(--ink-soft);
   color: var(--hot);
-}
-.cm-tooltip:has(> .live-editor-toolbar) {
-  border: 0;
-  background: transparent;
 }
 
 /* The `/` menu and `[[` completion, in the search dialog's idiom. */
