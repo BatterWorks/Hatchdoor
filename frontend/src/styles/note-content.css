@@ -1401,6 +1401,158 @@
   margin-left: 0.8rem;
 }
 
+/* The find and replace bar (Ctrl+F). The library ships it with its own dark
+   gradient buttons, rounded fields and the browser's serif; here it is the
+   system's field (§18) and default button (§25) on a paper strip. */
+.live-editor .cm-panels {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+}
+.live-editor .cm-panels-top {
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 1rem;
+}
+.live-editor .cm-panel.cm-search {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 2.4rem 0.6rem 0.7rem;
+  background: var(--paper);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+/* Three rows: find, replace, then the options. The library's own line break
+   is not a flex item, so the rows are made by ordering the controls around
+   two full-width spacers. */
+.live-editor .cm-panel.cm-search::before,
+.live-editor .cm-panel.cm-search::after {
+  content: "";
+  flex-basis: 100%;
+  order: 1;
+}
+.live-editor .cm-panel.cm-search [name="replace"],
+.live-editor .cm-panel.cm-search [name="replaceAll"] {
+  order: 2;
+}
+.live-editor .cm-panel.cm-search::after {
+  order: 3;
+}
+.live-editor .cm-panel.cm-search label {
+  order: 4;
+}
+.live-editor .cm-panel.cm-search .cm-textfield {
+  width: 14rem;
+  max-width: 100%;
+  margin: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-none);
+  padding: 0.35rem 0.55rem;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  transition: border-color var(--dur) var(--ease);
+}
+.live-editor .cm-panel.cm-search .cm-textfield::placeholder {
+  color: var(--muted);
+}
+.live-editor .cm-panel.cm-search .cm-textfield:focus {
+  outline: none;
+  border-color: var(--hot);
+}
+.live-editor .cm-panel.cm-search .cm-button {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-none);
+  padding: 0.4rem 0.7rem;
+  background: var(--bg);
+  background-image: none;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+@media (hover: hover) {
+  .live-editor .cm-panel.cm-search .cm-button:hover {
+    background: var(--paper-2);
+    border-color: var(--rule-strong);
+  }
+}
+.live-editor .cm-panel.cm-search .cm-button:active {
+  background: var(--hot);
+  background-image: none;
+  color: var(--bg);
+  border-color: var(--hot);
+}
+.live-editor .cm-panel.cm-search .cm-button:focus-visible,
+.live-editor .cm-panel.cm-search input[type="checkbox"]:focus-visible,
+.live-editor .cm-panel.cm-search button[name="close"]:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+.live-editor .cm-panel.cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0.6rem 0 0;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search input[type="checkbox"] {
+  appearance: none;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-none);
+  background: var(--bg);
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search input[type="checkbox"]:checked {
+  border-color: var(--hot);
+  background: var(--hot);
+  box-shadow: inset 0 0 0 2px var(--bg);
+}
+.live-editor .cm-panel.cm-search button[name="close"] {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.5rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search button[name="close"]:hover {
+  color: var(--ink);
+}
+.live-editor .cm-searchMatch {
+  background: var(--highlight);
+  color: var(--ink);
+}
+.live-editor .cm-searchMatch.cm-searchMatch-selected {
+  background: var(--hot-soft);
+  outline: 1px solid var(--hot);
+}
+
 /* The bar above a phone's keyboard. Lifted by the editor to clear iOS's
    overlaid keyboard; the safe-area inset covers the home indicator. */
 .live-editor-keyboard-bar {
