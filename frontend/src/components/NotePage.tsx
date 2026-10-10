@@ -1498,7 +1498,7 @@ export function NotePage({
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               This note changed on disk while your edit was waiting to save.
-              Open Edit to compare the two before writing over it.
+              Open Source to compare the two before writing over it.
             </div>
           </div>
         ) : null}
