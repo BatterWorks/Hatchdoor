@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "./api";
 import {
   archiveNote,
+  ATTACHMENT_LIMIT_FETCH_TIMEOUT_MS,
   createNote,
   deleteNote,
   describeWriteOutcome,
+  fetchAttachmentMaxBytes,
   getWriteCapabilities,
   isDemoReadOnlyError,
   moveNote,
@@ -318,5 +320,65 @@ describe("writeApi", () => {
       name: "WriteApiError",
       message: "413 Payload Too Large",
     });
+  });
+});
+
+describe("fetchAttachmentMaxBytes", () => {
+  it("reads the configured limit from the settings", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        settings: [
+          { key: "HATCHDOOR_PUBLIC_URL", value: "", locked: null },
+          {
+            key: "HATCHDOOR_MAX_ATTACHMENT_BYTES",
+            value: "20971520",
+            locked: null,
+          },
+        ],
+      }),
+    );
+
+    await expect(fetchAttachmentMaxBytes()).resolves.toBe(20 * 1024 * 1024);
+    expect(mockedApiFetch).toHaveBeenCalledWith("/api/settings", {
+      timeoutMs: ATTACHMENT_LIMIT_FETCH_TIMEOUT_MS,
+    });
+  });
+
+  it("reads the settings again for each file", async () => {
+    const withLimit = (value: string) =>
+      jsonResponse({
+        settings: [{ key: "HATCHDOOR_MAX_ATTACHMENT_BYTES", value }],
+      });
+    mockedApiFetch
+      .mockResolvedValueOnce(withLimit("10485760"))
+      .mockResolvedValueOnce(withLimit("20971520"));
+
+    await expect(fetchAttachmentMaxBytes()).resolves.toBe(10 * 1024 * 1024);
+    await expect(fetchAttachmentMaxBytes()).resolves.toBe(20 * 1024 * 1024);
+  });
+
+  it("is unknown where the settings do not exist, as in demo mode", async () => {
+    mockedApiFetch.mockResolvedValueOnce(new Response("", { status: 404 }));
+
+    await expect(fetchAttachmentMaxBytes()).resolves.toBeNull();
+  });
+
+  it("is unknown when the request fails", async () => {
+    mockedApiFetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await expect(fetchAttachmentMaxBytes()).resolves.toBeNull();
+  });
+
+  it("is unknown when the value is missing or not a byte count", async () => {
+    for (const value of [null, "", "0", "ten", "1.5"]) {
+      mockedApiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          settings: [{ key: "HATCHDOOR_MAX_ATTACHMENT_BYTES", value }],
+        }),
+      );
+      await expect(fetchAttachmentMaxBytes()).resolves.toBeNull();
+    }
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ settings: [] }));
+    await expect(fetchAttachmentMaxBytes()).resolves.toBeNull();
   });
 });

@@ -5118,7 +5118,7 @@ asks for in one pass into one request, which `NotePage` points at the
 reading view's `resolveNoteTargets`, so a link resolves by title, alias or
 path as it does in Reading view and a click on `[[Note#Heading]]` opens the
 note at the heading), autosave
-scheduling and save state, and attachment acceptance and insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
+scheduling and save state, and attachment acceptance and insertion (#558: `attachmentRejection` takes the upload limit, `null` for unknown, and both editors call `attachmentRejectionAtCurrentLimit`, which checks the extension first and then holds the file to the limit `writeApi.ts`'s `fetchAttachmentMaxBytes` reads). `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
 `UnsavedDrafts.tsx`; ordinary per-note and create drafts
@@ -5198,7 +5198,12 @@ message and carries no instruction either way).
 note candidates, backend HTTP write endpoints, and (#544) Note reading and
 rendering's `MermaidDiagram`, `PdfPreview`, `SavedQueryBlock`,
 `resolveNoteTargets` and `cachedAssetHref`, drawn or called as they are and
-never edited here.
+never edited here; and (#558) the `HATCHDOOR_MAX_ATTACHMENT_BYTES`
+record of Settings' `GET /api/settings` response, which
+`writeApi.ts`'s `fetchAttachmentMaxBytes` reads before each pasted or dropped
+file with an accepted extension, so the size check compares against the
+configured limit, and treats as unknown (no size check, the server answers)
+when it cannot be read within `ATTACHMENT_LIMIT_FETCH_TIMEOUT_MS`.
 
 **Coordination paths:** `App.tsx`, `NotePage.tsx`, `types.ts`,
 `noteEnhancements.css`, `vite.config.ts` and `src/test/setup.ts` (vitest

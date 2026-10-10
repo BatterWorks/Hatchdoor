@@ -6,7 +6,7 @@ import type {
   WriteOutcome,
 } from "../types";
 
-/** Uploads can carry files up to the server's 10 MB cap; on a slow uplink that
+/** Uploads can carry files up to the server's upload limit; on a slow uplink that
  * legitimately takes minutes, so they must not inherit the short read timeout. */
 export const UPLOAD_FETCH_TIMEOUT_MS = 300_000;
 /** Mutations rebuild the vault index server-side under the write lock, which on
@@ -185,6 +185,39 @@ export async function uploadAttachment(
     throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as AttachmentOutcome;
+}
+
+const MAX_ATTACHMENT_BYTES_KEY = "HATCHDOOR_MAX_ATTACHMENT_BYTES";
+/** The limit is read before a paste or drop goes anywhere, so a slow answer
+ * must give way to sending the file rather than hold it for the read timeout. */
+export const ATTACHMENT_LIMIT_FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * The largest attachment the server accepts, in bytes, as `GET /api/settings`
+ * reports it. Read fresh for each file, since Settings changes the limit
+ * without a restart. `null` when the browser cannot learn it: a failed or slow
+ * request, or demo mode, where the settings do not exist.
+ */
+export async function fetchAttachmentMaxBytes(): Promise<number | null> {
+  try {
+    const response = await apiFetch("/api/settings", {
+      timeoutMs: ATTACHMENT_LIMIT_FETCH_TIMEOUT_MS,
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await response.json()) as {
+      settings?: { key: string; value: string | null }[];
+    };
+    const raw =
+      payload.settings
+        ?.find((item) => item.key === MAX_ATTACHMENT_BYTES_KEY)
+        ?.value?.trim() ?? "";
+    const bytes = /^\d+$/.test(raw) ? Number(raw) : 0;
+    return bytes > 0 ? bytes : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
