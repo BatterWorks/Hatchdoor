@@ -2369,6 +2369,7 @@ struct GitWorkInsideAnEmbeddingPass {
     control_block: VaultControlBlock,
     worker: crate::vault_work::VaultWorkWorker,
     cache: Arc<SqliteCache>,
+    git_result: Result<(), VaultWorkError>,
 }
 
 impl GitWorkInsideAnEmbeddingPass {
@@ -2457,7 +2458,6 @@ impl GitWorkInsideAnEmbeddingPass {
         // unmet hangs the runtime on drop instead of reporting the failure.
         meet_barrier(&release).await;
         let index_result = index.await.expect("Index turn task").result;
-        git_result.unwrap_or_else(|error| panic!("{kind:?} turn fails: {error:?}"));
         index_result.expect("Index turn publishes");
 
         Self {
@@ -2467,7 +2467,30 @@ impl GitWorkInsideAnEmbeddingPass {
             control_block,
             worker,
             cache,
+            git_result,
         }
+    }
+
+    /// Run the Index turn the Git work left queued, and fail if it left none.
+    async fn run_queued_catch_up(&mut self) -> Arc<dyn Embedder> {
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let catch_up = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.worker.run_next({
+                let collection = self.collection.clone();
+                let cache = self.cache.clone();
+                let embedder = embedder.clone();
+                move |request| async move {
+                    assert_eq!(request.kind(), VaultWorkKind::Index);
+                    dispatch_vault_index_turn(&collection, cache, embedder, request).await
+                }
+            }),
+        )
+        .await
+        .expect("the sync queued the catch-up Index turn itself")
+        .expect("catch-up Index turn dequeued");
+        catch_up.result.expect("catch-up Index turn publishes");
+        embedder
     }
 
     fn snapshot_freshness(&self) -> Option<VaultSnapshotFreshness> {
@@ -2487,6 +2510,7 @@ impl GitWorkInsideAnEmbeddingPass {
 #[tokio::test]
 async fn a_commit_turn_with_nothing_to_commit_leaves_a_concurrent_index_turn_fresh() {
     let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Commit, |_, _| {}).await;
+    overlap.git_result.as_ref().expect("commit turn succeeds");
 
     assert_eq!(
         overlap.snapshot_freshness(),
@@ -2508,6 +2532,7 @@ async fn a_commit_turn_that_commits_leaves_a_concurrent_index_turn_fresh() {
         std::fs::write(checkout.join("vault/Mine.md"), "# mine\n").expect("write note");
     })
     .await;
+    overlap.git_result.as_ref().expect("commit turn succeeds");
 
     let checkout =
         git2::Repository::open(overlap.control_block.vault_path().parent().expect("root"))
@@ -2557,6 +2582,7 @@ async fn a_sync_that_pulls_markdown_inside_an_embedding_pass_is_followed_by_a_fr
             .expect("actor push");
     })
     .await;
+    overlap.git_result.as_ref().expect("sync succeeds");
 
     assert_eq!(
         overlap.snapshot_freshness(),
@@ -2568,23 +2594,7 @@ async fn a_sync_that_pulls_markdown_inside_an_embedding_pass_is_followed_by_a_fr
         VaultSearchStatus::Stale
     );
 
-    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-    let catch_up = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        overlap.worker.run_next({
-            let collection = overlap.collection.clone();
-            let cache = overlap.cache.clone();
-            let embedder = embedder.clone();
-            move |request| async move {
-                assert_eq!(request.kind(), VaultWorkKind::Index);
-                dispatch_vault_index_turn(&collection, cache, embedder, request).await
-            }
-        }),
-    )
-    .await
-    .expect("the sync queued the catch-up Index turn itself")
-    .expect("catch-up Index turn dequeued");
-    catch_up.result.expect("catch-up Index turn publishes");
+    let embedder = overlap.run_queued_catch_up().await;
 
     assert_eq!(
         overlap.snapshot_freshness(),
@@ -2612,6 +2622,97 @@ async fn a_sync_that_pulls_markdown_inside_an_embedding_pass_is_followed_by_a_fr
             .any(|hit| hit.note_slug == "theirs"),
         "the pulled note is in the published generation"
     );
+}
+
+/// A sync that pushes a local commit and pulls nothing rewrites no note, so
+/// the Index turn it overlapped is not behind anything.
+#[tokio::test]
+async fn a_sync_that_only_pushes_leaves_a_concurrent_index_turn_fresh() {
+    let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Git, |checkout, _| {
+        std::fs::write(checkout.join("vault/Mine.md"), "# mine\n").expect("write note");
+    })
+    .await;
+    overlap.git_result.as_ref().expect("sync succeeds");
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh),
+        "committing and pushing changes no file the Index turn read"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// A failed sync cannot say whether it rewrote a note: a merge can land
+/// before its push is refused. The Index turn it overlapped publishes stale,
+/// and because nothing else follows a failed sync with an Index turn, the
+/// sync queues the catch-up itself. Here the remote is gone, so nothing was
+/// rewritten and the catch-up settles the Vault `Ready`.
+#[tokio::test]
+async fn a_failed_sync_inside_an_embedding_pass_queues_its_own_catch_up_index_turn() {
+    let mut overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Git, |_, remote| {
+        std::fs::remove_dir_all(remote).expect("remove the remote");
+    })
+    .await;
+    overlap
+        .git_result
+        .as_ref()
+        .expect_err("precondition: the sync fails without its remote");
+
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Stale
+    );
+    overlap.run_queued_catch_up().await;
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh)
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// With no Index turn admitted there is no verdict for a failed sync to
+/// spoil, so it queues nothing: a Vault whose remote is down must not reindex
+/// on every retry.
+#[tokio::test]
+async fn a_failed_sync_with_no_index_turn_admitted_queues_no_index_turn() {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+    std::fs::remove_dir_all(remote_path).expect("remove the remote");
+    let (collection, registry, _control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Remote down",
+        repository_path,
+        VaultGitMode::TwoWay,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    coordinator.request(vault_id, VaultWorkKind::Git);
+
+    worker
+        .run_next(|request| {
+            dispatch_git_turn(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("Git turn dequeued")
+        .result
+        .expect_err("precondition: the sync fails without its remote");
+
+    assert!(!coordinator.has_work(vault_id, VaultWorkKind::Index));
 }
 
 /// The executor reads the author defaults from the snapshot bound to each

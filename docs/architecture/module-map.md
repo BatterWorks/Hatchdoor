@@ -590,18 +590,24 @@ whichever lane the turn ran in.
   was no longer reading anything, long enough for the caller's transport to
   give up on a write that had already landed (issue #223). The turn retakes
   the guard to publish and, when a foreground mutation or a sync that
-  reported `Synchronized` completed while it was
+  reported `ManagedGitOutcome::Pulled` completed while it was
   released, publishes that generation `VaultSnapshotFreshness::Stale` rather
   than `Fresh` and settles the runtime at `VaultSearchStatus::Stale` rather than
   `Ready` — the same pair `retained_snapshot_search_status` derives from that
   row after a restart. It still participates, still holds the search
   capability, and still answers search; the catch-up turn that makes it
   `Ready` is armed by the watcher's change intent for a write and by
-  `publish_managed_git_turn_outcome` for a sync. A commit turn, a recovery
-  turn, a sync that found nothing and a failed sync hold the guard without
-  advancing the generation, so they never make an Index turn publish stale:
-  none of them queues an Index turn, and a stale verdict with no turn behind
-  it stood until something unrelated reindexed the Vault (#549). Retaking the guard happens
+  `publish_managed_git_turn_outcome` for a sync, which requests one after
+  every success while the Vault is active and its files are readable. A
+  commit turn, a recovery turn, and a sync that found nothing or only
+  committed and pushed hold the guard without advancing the generation, so
+  they never make an Index turn publish stale: a stale verdict with no turn
+  behind it stood until something unrelated reindexed the Vault (#549). A
+  failed sync cannot say whether a merge landed before it failed, so
+  `sync_rewrote_markdown` advances the generation for it only while an Index
+  turn is admitted, and requests the catch-up Index turn itself under the
+  guard; with none admitted it advances nothing and queues nothing, so a
+  failing remote does not reindex the Vault on every retry. Retaking the guard happens
   while the cache's process-wide model epoch is held, so that acquisition is
   the one place the epoch waits on a per-Vault lock; the wait is bounded by one
   in-flight foreground mutation, and no mutation path takes the epoch, so the
@@ -2813,6 +2819,13 @@ the unique file count. Body: one `- ` line per caller-supplied summary. A
 commit whose batch is empty, which is what drift from outside Hatchdoor
 produces, keeps the generic `hatchdoor: vault update`. The ledger is bounded
 (`WriteLedger::CAPACITY`) because a `Local` Vault has no Git turn to take it.
+
+`ManagedGitOutcome` is what a finished Git or commit turn reports:
+`UpToDate`, `Synchronized` (it committed or pushed and left the working tree
+as it was) or `Pulled` (it brought the remote's commits into the working
+tree). The Vault work executor reads `Pulled` as the one success that rewrote
+Markdown under a concurrent Index turn (#549); the scheduler remembers
+`Synchronized` and `Pulled` alike as `GitTurnOutcome::Synchronized`.
 
 `ManagedGitTurnConfig`, `ManagedGitOutcome`, `run_managed_git_turn`,
 `ManagedGitScheduler`, `GitPollingClock`, `spawn_scheduler_tick`,

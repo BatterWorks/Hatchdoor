@@ -559,10 +559,11 @@ impl VaultCollectionRevisionEvent {
 #[derive(Clone)]
 pub(crate) struct VaultWriteExclusion {
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
-    /// How many foreground mutations have taken `mutation_lock`. Written once
-    /// per acquisition, by the acquirer, while it holds that lock — and read
-    /// only by the two accessors on the control block, each of which also
-    /// holds it. A holder therefore reads a value that cannot move until it
+    /// How many times this Vault's Markdown was rewritten under
+    /// `mutation_lock`: once per foreground mutation, counted as it acquires,
+    /// and once per Git turn that reports a rewrite. Written only by a holder
+    /// of that lock, and read only by the two Index accessors on the control
+    /// block, each of which also holds it. A holder therefore reads a value that cannot move until it
     /// releases, which is the only way to read it honestly. It travels with
     /// the lock: a generation taken before an edit must stay comparable with
     /// one taken after it, or an Index turn spanning the edit would conclude

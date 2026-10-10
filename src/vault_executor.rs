@@ -1142,19 +1142,43 @@ where
         }
     };
 
-    // `Synchronized` covers every sync that pulled, and `finish_git_turn`
-    // answers every success with an Index request, which is the catch-up turn
-    // the advance owes. A sync that only pushed is counted too and costs one
-    // Index turn that finds nothing changed. A failed sync is not counted:
-    // nothing queues an Index turn after it, so a stale verdict would stand
-    // with nothing behind it (#549). Where a failed sync did rewrite a note
-    // (a merge that landed before its push was refused), the watcher reports
-    // the changed files as it would any edit made outside Hatchdoor.
     let result = run_planned_turn(&control_block, managed_git, vault_id, plan, |result| {
-        matches!(result, Ok(ManagedGitOutcome::Synchronized))
+        sync_rewrote_markdown(coordinator, vault_id, result)
     })
     .await;
     finish_git_turn(&control_block, coordinator, managed_git, vault_id, result)
+}
+
+/// Whether a finished sync counts as having rewritten the Vault's Markdown
+/// under a concurrent Index turn. Asked under the mutation lock, so that
+/// Index turn cannot publish between this answer and the advance it causes.
+///
+/// A sync that pulled did, and `finish_git_turn` answers every success with
+/// an Index request while the Vault is active and its files are readable,
+/// which is the catch-up turn the advance owes. A sync that found nothing, or
+/// only committed and pushed, left every note as the Index turn read it.
+///
+/// A failed sync cannot say. A merge can land before its push is refused, and
+/// the error carries no trace of it. Nothing queues an Index turn after a
+/// failure, so one is requested here, and only while an Index turn is already
+/// admitted: that is the only turn the advance can reach, and without one a
+/// failing remote would reindex the Vault on every retry. With none admitted
+/// the generation stays put, and a note such a sync did rewrite reaches the
+/// index through the watcher, as an edit made outside Hatchdoor does (#549).
+fn sync_rewrote_markdown(
+    coordinator: &VaultWorkCoordinator,
+    vault_id: VaultId,
+    result: &Result<ManagedGitOutcome, VaultWorkError>,
+) -> bool {
+    match result {
+        Ok(ManagedGitOutcome::Pulled) => true,
+        Ok(ManagedGitOutcome::UpToDate | ManagedGitOutcome::Synchronized) => false,
+        Err(_) => {
+            coordinator.has_work(vault_id, VaultWorkKind::Index)
+                && coordinator.request(vault_id, VaultWorkKind::Index)
+                    != crate::vault_work::ScheduleResult::Rejected
+        }
+    }
 }
 
 /// Run one already-planned Git or commit turn: obtain the checkout lease if
@@ -1163,16 +1187,17 @@ where
 /// back. Publication is the caller's, because a Git turn and a commit turn
 /// conclude different things from the same result.
 ///
-/// `rewrote_markdown` reads the finished work's result and answers whether it
-/// rewrote the Vault's working-tree Markdown. Only then does the turn advance
-/// the mutation generation an overlapping Index turn compares, and the caller
-/// must then request the Index turn that catches up (#549).
+/// `rewrote_markdown` reads the finished work's result, still under the
+/// mutation lock, and answers whether it rewrote the Vault's working-tree
+/// Markdown. Only then does the turn advance the mutation generation an
+/// overlapping Index turn compares, and the caller owes the Index turn that
+/// catches up (#549).
 async fn run_planned_turn<T: Send + 'static>(
     control_block: &VaultControlBlock,
     managed_git: &ManagedGitScheduler,
     vault_id: VaultId,
     plan: GitTurnPlan<T>,
-    rewrote_markdown: fn(&Result<T, VaultWorkError>) -> bool,
+    rewrote_markdown: impl FnOnce(&Result<T, VaultWorkError>) -> bool,
 ) -> Result<T, VaultWorkError> {
     // Obtain this Vault's checkout lease — reused from a previous turn if
     // `ManagedGitScheduler` is already holding one, or freshly acquired
