@@ -664,7 +664,9 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: rgba(255, 255, 255, 0.06);
+  /* A faint lift off the slab, mixed from the code ink so it follows the
+     slab and not the page theme. */
+  background: color-mix(in oklab, var(--code-ink) 6%, transparent);
   padding: 0.3rem 0.7rem;
   border-bottom: 1px solid var(--code-rule);
 }

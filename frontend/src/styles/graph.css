@@ -307,7 +307,7 @@
   height: 1.1em;
   background: var(--hot);
   color: var(--bg);
-  border-radius: 2px;
+  border-radius: var(--radius-none);
   font-size: 0.7em;
   font-weight: 700;
   padding: 0 0.2em;

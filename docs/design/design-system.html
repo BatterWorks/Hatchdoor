@@ -1263,9 +1263,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(255,255,255,0.06);
+    background: color-mix(in oklab, var(--code-ink) 6%, transparent);
     padding: 0.3rem 0.7rem;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    border-bottom: 1px solid var(--code-rule);
   }
   .code-lang {
     font-family: var(--font-mono);
@@ -2384,7 +2384,7 @@
     <section class="doc-section" id="code">
       <div class="doc-section-num">§14</div>
       <h2>Code block</h2>
-      <p class="blurb">Inverted: dark surface always (even in light mode) for contrast. Optional header with language label and copy button.</p>
+      <p class="blurb">Inverted: dark surface always (even in light mode) for contrast. Optional header with language label and copy button. The header strip is lifted off the slab by mixing 6% of <span class="key">--code-ink</span> into it, so the tint follows the slab and not the page theme, and no raw white is involved (#547).</p>
       <div class="stage stage-note">
         <div class="code-block">
           <div class="code-block-head">
@@ -2625,6 +2625,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <p class="blurb">The path line is live: nothing else in the dialog says what is about to be created or where, and it surfaces the numeric folder prefixes at the moment they matter.</p>
+      <p class="blurb"><b>The access token prompt is this dialog</b> (#547): <span class="key">.modal-backdrop</span>, <span class="key">.modal-panel</span>, one <span class="key">.field-input</span> and a default button in <span class="key">.modal-actions</span>. It used to style itself inline from custom properties the app never defined, so it showed a grey panel and a blue button in both themes. Its only additions are a stacking order above everything except Help, which it links to, and a row for its two help links.</p>
       <div class="tag-row"><span class="key">.field</span><span class="key">.field-label</span><span class="key">.field-input</span><span class="key">.field-input:focus</span><span class="key">.field-path</span><span class="key">.modal-panel</span><span class="key">.modal-actions</span></div>
     </section>
 
@@ -2724,6 +2725,19 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.write-notice</span><span class="key">.note-editor-notice</span></div>
+
+      <h3 class="doc-sub">Source-mode tones</h3>
+      <p class="blurb">The source editor borrows surfaces that already mean something, and adds no colour of its own (#547). A failed attachment notice takes <span class="key">--err-bg</span> and <span class="key">--err-border</span>. In the conflict view, a line from the version on disk sits on <span class="key">--err-bg</span>, because that version is the one in the way, and a line from the draft sits on the info callout&rsquo;s tint, 12% of <span class="key">--co-info</span> mixed into <span class="key">--paper</span> exactly as &sect;13 mixes a callout. The properties panel, the conflict panel and a hovered autocomplete row fill with <span class="key">--paper-2</span>, the same raised fill a menu row gets. A drop target and a drag-active field are outlined in <span class="key">--hot</span>, like a focused field. The autocomplete list floats on <span class="key">--shadow-float</span>.</p>
+      <div class="stage" style="display:grid; gap:0.8rem;">
+        <div class="write-notice" style="border-color: var(--err-border); background: var(--err-bg);">
+          <div>Could not attach diagram.png.</div>
+        </div>
+        <div style="border: 1px solid var(--rule); background: var(--paper); font-family: var(--font-mono); font-size: 0.82rem;">
+          <div style="padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--rule); background: var(--err-bg);">disk &nbsp; Prune the old wood first.</div>
+          <div style="padding: 0.25rem 0.5rem; background: color-mix(in oklab, var(--co-info) 12%, var(--paper));">draft &nbsp; Prune the dead wood first.</div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.note-editor-notice.attachment-error</span><span class="key">.note-editor-conflict-line.disk</span><span class="key">.note-editor-conflict-line.draft</span><span class="key">.note-editor-properties</span><span class="key">.note-editor-drop-target</span><span class="key">.note-editor-autocomplete</span></div>
 
       <h3 class="doc-sub">Editable properties</h3>
       <p class="blurb">Frontmatter values edit in place for the same reason blocks do: changing a tag should not require dropping the whole note into source mode. The input follows <span class="key">.field-input</span>. Tag chips keep filtering; editing tags is a separate <b>Edit</b> affordance on the row, so a chip does not silently stop doing what it always did.</p>

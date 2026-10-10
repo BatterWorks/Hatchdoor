@@ -6,6 +6,7 @@ import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
 import noteContentCss from "./styles/note-content.css?raw";
 import noteEditorSource from "./components/NoteEditor.tsx?raw";
+import tokenPromptSource from "./components/TokenPrompt.tsx?raw";
 import wikilinksSource from "./components/note-page/wikilinks.ts?raw";
 import mainSource from "./main.tsx?raw";
 import graphCss from "./styles/graph.css?raw";
@@ -208,5 +209,51 @@ describe("client audit launch contracts", () => {
     expect(noteContentCss).toMatch(
       /\.note-body ul\s*{[^}]*--li-inset:\s*1\.4rem/s,
     );
+  });
+
+  // None of these five names is a Forge token. A rule that reads one always
+  // renders its fallback, so it ignores the theme (#547).
+  it("reads no custom property the design tokens do not define", () => {
+    const sources = import.meta.glob(
+      ["./**/*.{css,ts,tsx}", "!./**/*.test.*"],
+      {
+        query: "?raw",
+        import: "default",
+        eager: true,
+      },
+    ) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(50);
+    const offenders = Object.entries(sources)
+      .filter(([, source]) =>
+        /var\(--(accent|surface|hover|border|text)\s*[,)]/.test(source),
+      )
+      .map(([path]) => path);
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps raw colours and radii out of the token prompt and the app stylesheet", () => {
+    // Comments cite issues as "#547", which reads as a hex colour.
+    const withoutComments = (source: string) =>
+      source.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const source of [appCss, tokenPromptSource].map(withoutComments)) {
+      expect(source).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+      expect(source).not.toMatch(/\brgba?\(/);
+      const radii = [
+        ...source.matchAll(/border-?[rR]adius"?\s*:\s*"?([^;",]+)/g),
+      ].map((match) => match[1].trim());
+      expect(
+        radii.filter((radius) => !/^var\(--radius-[a-z]+\)$/.test(radius)),
+      ).toEqual([]);
+    }
+  });
+
+  it("keeps the strays on tokens: code block header, graph badge, untagged node", () => {
+    expect(noteContentCss).not.toMatch(
+      /\.code-block-head\s*{[^}]*background:\s*rgba?\(/s,
+    );
+    expect(graphCss).toMatch(
+      /\.graph-filter-badge\s*{[^}]*border-radius:\s*var\(--radius-none\)/s,
+    );
+    expect(graphPageSource).not.toMatch(/rgba\(138, 134, 120/);
   });
 });
