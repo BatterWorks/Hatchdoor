@@ -1219,6 +1219,21 @@
   border-left-color: var(--hot);
 }
 
+/* Inline code is the reading view's chip. The library fills it with
+   --atomic-editor-code-bg, the fenced block's dark slab, and leaves the text
+   to whichever syntax colour the line carries, so both are set here. */
+.live-editor .cm-atomic-inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--paper-2);
+  padding: 0.05rem 0.35rem;
+  color: var(--ink);
+  border-radius: var(--radius-none);
+}
+.live-editor .cm-atomic-inline-code * {
+  color: var(--ink);
+}
+
 /* Headings in the note's own faces, as the reading view draws them. */
 .live-editor .cm-line.cm-atomic-h1 {
   font-family: var(--font-display);
