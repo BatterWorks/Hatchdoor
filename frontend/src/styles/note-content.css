@@ -1353,11 +1353,14 @@
 }
 
 /* The floating toolbar over a selection (desktop only). Ink on paper
-   inverted, like the topbar menu, so it reads as a control over the text. */
-.live-editor-toolbar {
+   inverted, like the topbar menu, so it reads as a control over the text.
+   CodeMirror puts its own tooltip class on this same element, and the
+   library's theme styles that class, so the selector has to outrank it. */
+.live-editor .cm-tooltip.live-editor-toolbar {
   display: inline-flex;
   gap: 0.1rem;
   padding: 0.2rem;
+  border: 0;
   background: var(--ink);
   color: var(--bg);
   box-shadow: var(--shadow-float);
@@ -1381,9 +1384,12 @@
   background: var(--ink-soft);
   color: var(--hot);
 }
-.cm-tooltip:has(> .live-editor-toolbar) {
-  border: 0;
-  background: transparent;
+/* Between what the selection is and what its line is. */
+.live-editor-toolbar-gap {
+  align-self: stretch;
+  width: 1px;
+  margin: 0.25rem 0.2rem;
+  background: var(--ink-soft);
 }
 
 /* The `/` menu and `[[` completion, in the search dialog's idiom. */
@@ -1407,6 +1413,233 @@
   font-family: var(--font-mono);
   font-style: normal;
   margin-left: 0.8rem;
+}
+
+/* The find and replace bar (Ctrl+F). The library ships it with its own dark
+   gradient buttons, rounded fields and the browser's serif; here it is the
+   system's field (§18) and default button (§25) on a paper strip. */
+.live-editor .cm-panels {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+}
+/* CodeMirror already keeps the bar stuck to the top of the pane. A container,
+   so the bar lays itself out by the width it has and not by the window's. */
+.live-editor .cm-panels-top {
+  container-type: inline-size;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 1rem;
+}
+.live-editor .cm-panel.cm-search {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 2.4rem 0.6rem 0.7rem;
+  background: var(--paper);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+/* Three rows, in the order the controls come in the document, so Tab walks
+   them as they read: find, its options, then replace. The library's own line
+   break is not a usable flex item, so it is dropped and the rows are made by
+   two full-width spacers placed between the groups. */
+.live-editor .cm-panel.cm-search br {
+  display: none;
+}
+.live-editor .cm-panel.cm-search::before,
+.live-editor .cm-panel.cm-search::after {
+  content: "";
+  flex-basis: 100%;
+  order: 1;
+}
+.live-editor .cm-panel.cm-search label {
+  order: 2;
+}
+.live-editor .cm-panel.cm-search::after {
+  order: 3;
+}
+.live-editor .cm-panel.cm-search [name="replace"],
+.live-editor .cm-panel.cm-search [name="replaceAll"] {
+  order: 4;
+}
+.live-editor .cm-panel.cm-search .cm-textfield {
+  width: 14rem;
+  max-width: 100%;
+  margin: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-none);
+  padding: 0.35rem 0.55rem;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  transition: border-color var(--dur) var(--ease);
+}
+.live-editor .cm-panel.cm-search .cm-textfield::placeholder {
+  color: var(--muted);
+}
+.live-editor .cm-panel.cm-search .cm-textfield:focus {
+  outline: none;
+  border-color: var(--hot);
+}
+.live-editor .cm-panel.cm-search .cm-button {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-none);
+  padding: 0.4rem 0.7rem;
+  background: var(--bg);
+  background-image: none;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+@media (hover: hover) {
+  .live-editor .cm-panel.cm-search .cm-button:hover {
+    background: var(--paper-2);
+    border-color: var(--rule-strong);
+  }
+}
+.live-editor .cm-panel.cm-search .cm-button:active {
+  background: var(--hot);
+  background-image: none;
+  color: var(--bg);
+  border-color: var(--hot);
+}
+.live-editor .cm-panel.cm-search .cm-button:focus-visible,
+.live-editor .cm-panel.cm-search input[type="checkbox"]:focus-visible,
+.live-editor .cm-panel.cm-search button[name="close"]:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+.live-editor .cm-panel.cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0.6rem 0 0;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search input[type="checkbox"] {
+  appearance: none;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-none);
+  background: var(--bg);
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search input[type="checkbox"]:checked {
+  border-color: var(--hot);
+  background: var(--hot);
+  box-shadow: inset 0 0 0 2px var(--bg);
+}
+.live-editor .cm-panel.cm-search button[name="close"] {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.5rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-none);
+  color: var(--muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.live-editor .cm-panel.cm-search button[name="close"]:hover {
+  color: var(--ink);
+}
+.live-editor .cm-searchMatch {
+  border-radius: var(--radius-none);
+  background: var(--highlight);
+  color: var(--ink);
+}
+.live-editor .cm-searchMatch.cm-searchMatch-selected {
+  background: var(--hot-soft);
+  outline: 1px solid var(--hot);
+}
+
+/* A narrow bar: each field takes a full row and its buttons share the row
+   under it in equal parts, so Next, Previous and Select all sit together. */
+@container (max-width: 36rem) {
+  .live-editor .cm-panel.cm-search {
+    padding-right: 0.7rem;
+  }
+  .live-editor .cm-panel.cm-search .cm-textfield {
+    flex: 1 0 100%;
+    width: auto;
+  }
+  /* The close button keeps the corner beside the find field. */
+  .live-editor .cm-panel.cm-search .cm-textfield[name="search"] {
+    flex: 0 0 calc(100% - 2.6rem);
+  }
+  .live-editor .cm-panel.cm-search .cm-button {
+    flex: 1 1 0;
+    padding-inline: 0.3rem;
+    white-space: nowrap;
+  }
+  .live-editor .cm-panel.cm-search label {
+    margin-right: 0.3rem;
+  }
+  /* The full-width replace field already starts its own row. */
+  .live-editor .cm-panel.cm-search::after {
+    display: none;
+  }
+}
+/* Fingers: full-size targets, and 16px fields so iOS does not zoom the page
+   when one takes focus. */
+@media (pointer: coarse) {
+  .live-editor .cm-panel.cm-search .cm-textfield {
+    min-height: 2.75rem;
+    font-size: 1rem;
+  }
+  .live-editor .cm-panel.cm-search .cm-button {
+    min-height: 2.75rem;
+  }
+  .live-editor .cm-panel.cm-search label {
+    min-height: 2.75rem;
+    font-size: 0.9rem;
+  }
+  .live-editor .cm-panel.cm-search input[type="checkbox"] {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .live-editor .cm-panel.cm-search {
+    padding-right: 3.4rem;
+  }
+  .live-editor .cm-panel.cm-search button[name="close"] {
+    top: 0.6rem;
+    right: 0.35rem;
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+}
+@container (max-width: 36rem) {
+  @media (pointer: coarse) {
+    .live-editor .cm-panel.cm-search {
+      padding-right: 0.7rem;
+    }
+    .live-editor .cm-panel.cm-search .cm-textfield[name="search"] {
+      flex-basis: calc(100% - 3.1rem);
+    }
+  }
 }
 
 /* The bar above a phone's keyboard. Lifted by the editor to clear iOS's
