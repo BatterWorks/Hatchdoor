@@ -1376,6 +1376,13 @@
   background: var(--ink-soft);
   color: var(--hot);
 }
+/* Between what the selection is and what its line is. */
+.live-editor-toolbar-gap {
+  align-self: stretch;
+  width: 1px;
+  margin: 0.25rem 0.2rem;
+  background: var(--ink-soft);
+}
 
 /* The `/` menu and `[[` completion, in the search dialog's idiom. */
 .live-editor .cm-tooltip.cm-tooltip-autocomplete {

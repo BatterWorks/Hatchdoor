@@ -26,15 +26,18 @@ import {
 import { searchPanelOpen } from "@codemirror/search";
 import type { ExplorerNote } from "../../../types";
 import {
+  CHECKLIST_PATH,
   CODE_PATH,
   FORMAT_BOLD_PATH,
+  FORMAT_H2_PATH,
   FORMAT_INK_HIGHLIGHTER_PATH,
   FORMAT_ITALIC_PATH,
+  FORMAT_LIST_BULLETED_PATH,
   FORMAT_STRIKETHROUGH_PATH,
   LINK_PATH,
   createIconElement,
 } from "../../iconPaths";
-import { insertLink, wrapSelection } from "./commands";
+import { insertLink, setLinePrefix, wrapSelection } from "./commands";
 
 /* ── `/` menu ─────────────────────────────────────────────────────────── */
 
@@ -158,11 +161,14 @@ export function completionMenus(
 
 /* ── Floating toolbar ─────────────────────────────────────────────────── */
 
-const TOOLBAR_ITEMS: Array<{
-  icon: string;
-  title: string;
-  run: (view: EditorView) => boolean;
-}> = [
+const TOOLBAR_ITEMS: Array<
+  | {
+      icon: string;
+      title: string;
+      run: (view: EditorView) => boolean;
+    }
+  | "gap"
+> = [
   {
     icon: FORMAT_BOLD_PATH,
     title: "Bold (Ctrl+B)",
@@ -189,6 +195,26 @@ const TOOLBAR_ITEMS: Array<{
     run: (v) => wrapSelection(v, "=="),
   },
   { icon: LINK_PATH, title: "Link (Ctrl+K)", run: insertLink },
+  // What the line is, after what the selection is. The `/` menu only opens
+  // on a line being started, so a line already written had no way to become
+  // a heading or a to-do short of typing the marker (the keyboard bar on a
+  // phone has had these three all along).
+  "gap",
+  {
+    icon: FORMAT_H2_PATH,
+    title: "Heading",
+    run: (v) => setLinePrefix(v, "## "),
+  },
+  {
+    icon: FORMAT_LIST_BULLETED_PATH,
+    title: "Bullet",
+    run: (v) => setLinePrefix(v, "- "),
+  },
+  {
+    icon: CHECKLIST_PATH,
+    title: "To-do",
+    run: (v) => setLinePrefix(v, "- [ ] "),
+  },
 ];
 
 function selectionTooltip(state: EditorState): Tooltip | null {
@@ -219,6 +245,13 @@ function selectionTooltip(state: EditorState): Tooltip | null {
       dom.setAttribute("role", "toolbar");
       dom.setAttribute("aria-label", "Formatting");
       for (const item of TOOLBAR_ITEMS) {
+        if (item === "gap") {
+          const gap = document.createElement("span");
+          gap.className = "live-editor-toolbar-gap";
+          gap.setAttribute("aria-hidden", "true");
+          dom.appendChild(gap);
+          continue;
+        }
         const button = document.createElement("button");
         button.type = "button";
         button.appendChild(createIconElement(item.icon));

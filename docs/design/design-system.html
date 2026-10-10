@@ -2672,7 +2672,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb">The editor&rsquo;s scroller is <code>overflow: visible</code> and its height is auto, so it grows with the text and the note pane remains the one scroll container. A jump from the table of contents or a search hit is a CodeMirror scroll-into-view, which scrolls the pane.</p>
 
       <h3 class="doc-sub">Floating toolbar (desktop)</h3>
-      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, as the same Sharp icons the keyboard bar uses. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
+      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, then after a hairline of <span class="key">--ink-soft</span> the three things the line itself can become, heading, bullet and to-do. They are the same Sharp icons the keyboard bar uses. Indent, outdent, undo and redo stay on the keyboard, where a desktop already has them. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
       <div class="tag-row"><span class="key">.live-editor-toolbar</span><span class="key">background: --ink</span><span class="key">--shadow-float</span></div>
 
       <h3 class="doc-sub">Menus</h3>
@@ -2925,9 +2925,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">settings</td><td class="val">rail: settings</td></tr>
           <tr><td class="name">format_indent_decrease</td><td class="val">live editor keyboard bar: outdent</td></tr>
           <tr><td class="name">format_indent_increase</td><td class="val">live editor keyboard bar: indent</td></tr>
-          <tr><td class="name">format_list_bulleted</td><td class="val">live editor keyboard bar: bullet</td></tr>
-          <tr><td class="name">checklist</td><td class="val">live editor keyboard bar: to-do</td></tr>
-          <tr><td class="name">format_h2</td><td class="val">live editor keyboard bar: heading</td></tr>
+          <tr><td class="name">format_list_bulleted</td><td class="val">live editor: bullet (bar and toolbar)</td></tr>
+          <tr><td class="name">checklist</td><td class="val">live editor: to-do (bar and toolbar)</td></tr>
+          <tr><td class="name">format_h2</td><td class="val">live editor: heading (bar and toolbar)</td></tr>
           <tr><td class="name">format_bold</td><td class="val">live editor: bold (bar and toolbar)</td></tr>
           <tr><td class="name">format_italic</td><td class="val">live editor: italic (bar and toolbar)</td></tr>
           <tr><td class="name">format_strikethrough</td><td class="val">live editor: strikethrough (bar and toolbar)</td></tr>
