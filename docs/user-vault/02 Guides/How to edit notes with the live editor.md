@@ -27,7 +27,7 @@ On a Mac, press `Cmd` wherever this page says `Ctrl`.
 | `Ctrl+F` | Find and replace within the note, in a bar above it |
 | `Escape` | Leaves the editor, which saves what you typed |
 
-Select a word or a phrase and a small toolbar appears over it with bold, italic, strikethrough, code, highlight and link. A selection that runs over more than one line shows no toolbar; the keys above still work on it.
+Select a word or a phrase and a small toolbar appears over it with bold, italic, strikethrough, code, highlight and link. Three more buttons at its end turn the line you are on into a heading, a bullet or a to-do, and back again on a second press. A selection that runs over more than one line shows no toolbar; the keys above still work on it.
 
 Type `/` at the start of a line for a menu of what a line can be: a heading, a bulleted or numbered list, a to-do, a quote, a callout, a code block, a divider or a table, or plain text again. Keep typing to narrow it, and `Enter` picks.
 
