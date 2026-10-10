@@ -5090,7 +5090,10 @@ when it differs from its document, reports every change through `onChange`
 for the idle flush and the draft and the document through `onCommit` on blur
 or Escape, exposes `scrollToLine`/`scrollToHit`/`focus`/`blur` through its
 handle, and owns the `[[` completion in the Vault's link style, the `/` menu,
-the desktop-only selection toolbar, the touch keyboard bar, the image widgets
+the desktop-only selection toolbar (marks, then heading, bullet and to-do for
+the line; held down while the find bar is open), the touch keyboard bar,
+CodeMirror's find and replace bar on `Ctrl+F` with Hatchdoor's wording set
+through `EditorState.phrases`, the image widgets
 under their lines, paste/drop attachment uploads and the `?q=` highlight;
 undo is CodeMirror's own, so the page keeps no document history; #544: the
 blocks the reading view renders render here too, from `renderedBlocks.tsx`,

@@ -23,17 +23,21 @@ import {
   type Tooltip,
 } from "@codemirror/view";
 
+import { searchPanelOpen } from "@codemirror/search";
 import type { ExplorerNote } from "../../../types";
 import {
+  CHECKLIST_PATH,
   CODE_PATH,
   FORMAT_BOLD_PATH,
+  FORMAT_H2_PATH,
   FORMAT_INK_HIGHLIGHTER_PATH,
   FORMAT_ITALIC_PATH,
+  FORMAT_LIST_BULLETED_PATH,
   FORMAT_STRIKETHROUGH_PATH,
   LINK_PATH,
   createIconElement,
 } from "../../iconPaths";
-import { insertLink, wrapSelection } from "./commands";
+import { insertLink, setLinePrefix, wrapSelection } from "./commands";
 
 /* ── `/` menu ─────────────────────────────────────────────────────────── */
 
@@ -157,11 +161,14 @@ export function completionMenus(
 
 /* ── Floating toolbar ─────────────────────────────────────────────────── */
 
-const TOOLBAR_ITEMS: Array<{
-  icon: string;
-  title: string;
-  run: (view: EditorView) => boolean;
-}> = [
+const TOOLBAR_ITEMS: Array<
+  | {
+      icon: string;
+      title: string;
+      run: (view: EditorView) => boolean;
+    }
+  | "gap"
+> = [
   {
     icon: FORMAT_BOLD_PATH,
     title: "Bold (Ctrl+B)",
@@ -188,11 +195,36 @@ const TOOLBAR_ITEMS: Array<{
     run: (v) => wrapSelection(v, "=="),
   },
   { icon: LINK_PATH, title: "Link (Ctrl+K)", run: insertLink },
+  // What the line is, after what the selection is. The `/` menu only opens
+  // on a line being started, so a line already written had no way to become
+  // a heading or a to-do short of typing the marker (the keyboard bar on a
+  // phone has had these three all along).
+  "gap",
+  {
+    icon: FORMAT_H2_PATH,
+    title: "Heading",
+    run: (v) => setLinePrefix(v, "## "),
+  },
+  {
+    icon: FORMAT_LIST_BULLETED_PATH,
+    title: "Bullet",
+    run: (v) => setLinePrefix(v, "- "),
+  },
+  {
+    icon: CHECKLIST_PATH,
+    title: "To-do",
+    run: (v) => setLinePrefix(v, "- [ ] "),
+  },
 ];
 
 function selectionTooltip(state: EditorState): Tooltip | null {
   const range = state.selection.main;
   if (range.empty) {
+    return null;
+  }
+  // Stepping through matches selects each one; that is finding, not a
+  // selection to format.
+  if (searchPanelOpen(state)) {
     return null;
   }
   // A selection across lines is usually a cut or a move, not a format.
@@ -213,6 +245,13 @@ function selectionTooltip(state: EditorState): Tooltip | null {
       dom.setAttribute("role", "toolbar");
       dom.setAttribute("aria-label", "Formatting");
       for (const item of TOOLBAR_ITEMS) {
+        if (item === "gap") {
+          const gap = document.createElement("span");
+          gap.className = "live-editor-toolbar-gap";
+          gap.setAttribute("aria-hidden", "true");
+          dom.appendChild(gap);
+          continue;
+        }
         const button = document.createElement("button");
         button.type = "button";
         button.appendChild(createIconElement(item.icon));
@@ -225,7 +264,9 @@ function selectionTooltip(state: EditorState): Tooltip | null {
         });
         dom.appendChild(button);
       }
-      return { dom };
+      // Clear of the line it formats: flush against the selection it hid
+      // the ascenders of the words either side.
+      return { dom, offset: { x: 0, y: 10 } };
     },
   };
 }
