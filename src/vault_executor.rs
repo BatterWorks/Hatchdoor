@@ -1173,11 +1173,7 @@ fn sync_rewrote_markdown(
     match result {
         Ok(ManagedGitOutcome::Pulled) => true,
         Ok(ManagedGitOutcome::UpToDate | ManagedGitOutcome::Synchronized) => false,
-        Err(_) => {
-            coordinator.has_work(vault_id, VaultWorkKind::Index)
-                && coordinator.request(vault_id, VaultWorkKind::Index)
-                    != crate::vault_work::ScheduleResult::Rejected
-        }
+        Err(_) => coordinator.request_rerun_if_admitted(vault_id, VaultWorkKind::Index),
     }
 }
 

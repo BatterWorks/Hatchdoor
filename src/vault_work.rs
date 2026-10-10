@@ -479,6 +479,34 @@ impl VaultWorkCoordinator {
         self.shared.index_lane_changed(queued);
     }
 
+    /// Request a rerun of `kind` for a Vault only while that operation is
+    /// already active or pending for it, and answer whether one now follows.
+    ///
+    /// The mirror of [`Self::request_if_idle`], for a producer that must
+    /// correct a turn already admitted and has no reason to start one: a
+    /// failed sync that may have rewritten notes under an Index turn (#549).
+    /// The check and the enqueue share one lock for the same reason.
+    pub fn request_rerun_if_admitted(&self, vault_id: VaultId, kind: VaultWorkKind) -> bool {
+        let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        if !state.accepting_work
+            || state.drained_vaults.contains(&vault_id)
+            || !state.vault_has_work(vault_id, kind)
+        {
+            return false;
+        }
+        let pending = state
+            .vaults
+            .get(&vault_id)
+            .is_some_and(|vault| vault.lane(Lane::of(kind)).pending_kinds.contains(&kind));
+        if !pending {
+            state.enqueue(vault_id, kind);
+            drop(state);
+            self.shared.ready.notify_waiters();
+            self.shared.lane_changed_for(vault_id, kind);
+        }
+        true
+    }
+
     /// Whether `kind` is currently active or already pending for `vault_id`.
     ///
     /// A test-only observation of the queue's own per-Vault state. Production
@@ -1001,6 +1029,35 @@ mod tests {
             VaultWorkRequest::new(healthy, VaultWorkKind::Index)
         );
         next.result.expect("the other Vault's turn runs normally");
+    }
+
+    #[tokio::test]
+    async fn request_rerun_if_admitted_follows_an_active_turn_and_never_starts_one() {
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        assert!(
+            !coordinator.request_rerun_if_admitted(vault, VaultWorkKind::Index),
+            "an idle Vault gets no turn from a rerun request"
+        );
+        assert!(!coordinator.has_work(vault, VaultWorkKind::Index));
+
+        coordinator.request(vault, VaultWorkKind::Index);
+        assert!(
+            coordinator.request_rerun_if_admitted(vault, VaultWorkKind::Index),
+            "a pending turn already is the turn that follows"
+        );
+        let active = worker.next_turn().await.expect("Index turn admitted");
+        assert!(coordinator.request_rerun_if_admitted(vault, VaultWorkKind::Index));
+        assert!(coordinator.request_rerun_if_admitted(vault, VaultWorkKind::Index));
+        active.run(|_| async { Ok(()) }).await;
+
+        let rerun = worker.next_turn().await.expect("the rerun is admitted");
+        assert_eq!(rerun.request().kind(), VaultWorkKind::Index);
+        rerun.run(|_| async { Ok(()) }).await;
+        assert!(
+            !coordinator.has_work(vault, VaultWorkKind::Index),
+            "two requests during one active turn coalesce into one rerun"
+        );
     }
 
     #[tokio::test]

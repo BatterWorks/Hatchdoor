@@ -454,7 +454,12 @@ notion of "is this Vault busy" exists to drift out of agreement with it
 (issue #127, replacing the read-then-act `has_work` bridge added for #97's
 reopening finding 1). `has_work` remains only as a `#[cfg(test)]`
 observation. A user-driven request — a manual sync or retry — still uses
-`request` and its guaranteed rerun.
+`request` and its guaranteed rerun. `request_rerun_if_admitted` is the
+mirror, decided under the same lock: it adds the rerun only while that kind is
+already active or pending for the Vault, and never starts a turn on an idle
+one. Its one production caller is the Vault work executor's
+`sync_rewrote_markdown`, for a failed sync that may have rewritten notes
+under an Index turn (#549).
 
 **Consumed dependencies:** durable `VaultId` identity and Tokio notification.
 The queue owns no Markdown, SQLite, Git, or lifecycle state.
@@ -606,7 +611,7 @@ whichever lane the turn ran in.
   failed sync cannot say whether a merge landed before it failed, so
   `sync_rewrote_markdown` advances the generation for it only while an Index
   turn is admitted, and requests the catch-up Index turn itself under the
-  guard; with none admitted it advances nothing and queues nothing, so a
+  guard (`VaultWorkCoordinator::request_rerun_if_admitted`); with none admitted it advances nothing and queues nothing, so a
   failing remote does not reindex the Vault on every retry. Retaking the guard happens
   while the cache's process-wide model epoch is held, so that acquisition is
   the one place the epoch waits on a per-Vault lock; the wait is bounded by one
