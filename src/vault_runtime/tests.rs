@@ -3123,6 +3123,60 @@ async fn the_mutation_generation_survives_a_definition_edit() {
     );
 }
 
+/// Issue #549. A Git, commit or recovery turn takes the same lock a write
+/// takes, and taking it is not rewriting Markdown: only a holder that says it
+/// rewrote something moves the generation an Index turn compares.
+#[tokio::test]
+async fn a_git_turn_moves_the_mutation_generation_only_when_it_rewrote_markdown() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path);
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &enabled);
+    let control = collection.runtime(vault_id).expect("enabled runtime");
+    let (guard, read_phase) = control
+        .acquire_mutation_for_index_reads()
+        .await
+        .expect("index read phase");
+    drop(guard);
+
+    drop(
+        control
+            .acquire_mutation_for_git_turn()
+            .await
+            .expect("a turn that only commits"),
+    );
+    let (rewrote, guard) = tokio::task::spawn_blocking({
+        let control = control.clone();
+        move || control.blocking_retake_mutation_for_index(read_phase)
+    })
+    .await
+    .expect("retake");
+    drop(guard);
+    assert!(!rewrote, "holding the guard is not a rewrite");
+
+    let guard = control
+        .acquire_mutation_for_git_turn()
+        .await
+        .expect("a sync that pulls");
+    control.record_markdown_rewrite(&guard);
+    drop(guard);
+    let (rewrote, _guard) = tokio::task::spawn_blocking({
+        let control = control.clone();
+        move || control.blocking_retake_mutation_for_index(read_phase)
+    })
+    .await
+    .expect("retake");
+    assert!(rewrote, "a recorded rewrite is what an Index turn must see");
+}
+
 /// A managed Git Vault has no directory to probe when its runtime is first
 /// established, because the checkout lands later. The report has to be made
 /// again when the Vault becomes active, or a Vault provisioned from Git would

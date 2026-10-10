@@ -1175,8 +1175,34 @@ impl VaultControlBlock {
         Ok((guard, generation))
     }
 
-    /// The exclusion itself: everything both acquisitions above have in common,
-    /// minus what makes one a mutation and the other a read.
+    /// Take this Vault's foreground mutation guard for a Git, commit or
+    /// recovery turn. The same exclusion a Markdown write gets, so the turn
+    /// and a write never overlap, minus the generation advance: holding the
+    /// guard is not rewriting Markdown. A commit moves `HEAD` and leaves the
+    /// working tree alone, and counting it made an overlapping Index turn
+    /// publish stale with no changed file for the watcher to answer (#549).
+    /// A turn that does rewrite Markdown says so through
+    /// [`Self::record_markdown_rewrite`] before it lets the guard go.
+    pub(crate) async fn acquire_mutation_for_git_turn(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
+        self.acquire_mutation_exclusion().await
+    }
+
+    /// Advance the mutation generation for a holder of
+    /// [`Self::acquire_mutation_for_git_turn`] whose work rewrote this Vault's
+    /// Markdown. Takes the guard to keep the advance under the lock, where
+    /// [`Self::blocking_retake_mutation_for_index`] reads it. The caller owes
+    /// the Index turn that catches up: an Index turn that sees the advance
+    /// publishes stale and queues nothing itself.
+    pub(crate) fn record_markdown_rewrite(&self, _held: &tokio::sync::OwnedMutexGuard<()>) {
+        self.exclusion
+            .mutations_taken
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The exclusion itself: everything the acquisitions above have in common,
+    /// minus what makes one a mutation and the others not.
     async fn acquire_mutation_exclusion(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
@@ -1187,8 +1213,9 @@ impl VaultControlBlock {
     }
 
     /// Retake the foreground mutation guard from a blocking thread and answer,
-    /// under that one acquisition, whether a foreground mutation completed
-    /// since `since` (a generation from
+    /// under that one acquisition, whether this Vault's Markdown was rewritten
+    /// under the guard (a foreground mutation, or a sync that pulled) since
+    /// `since` (a generation from
     /// [`Self::acquire_mutation_for_index_reads`]).
     ///
     /// An Index turn releases the guard before its embedding pass and calls

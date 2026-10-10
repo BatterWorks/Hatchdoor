@@ -69,6 +69,35 @@ impl Embedder for BlockingEmbedder {
     }
 }
 
+/// [`BlockingEmbedder`] that parks on its first `embed` call only, for a
+/// Vault with more than one note to embed.
+struct OnceBlockingEmbedder {
+    inner: BlockingEmbedder,
+    parked: std::sync::atomic::AtomicBool,
+}
+
+impl Embedder for OnceBlockingEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        if !self.parked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.entered.wait();
+            self.inner.release.wait();
+        }
+        self.inner.inner.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.inner.inner.embedding_dim()
+    }
+
+    fn identity(&self) -> String {
+        self.inner.inner.identity()
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.inner.inner.token_count(text, add_special_tokens)
+    }
+}
+
 /// Parks a build inside its *read* phase. `token_count` is what the chunker
 /// calls while note content is still being read and chunked, before any vector
 /// work, so blocking the first call holds the turn exactly where its foreground
@@ -2329,6 +2358,260 @@ async fn a_vaults_git_work_waits_for_its_index_read_phase_but_not_its_embedding(
         }
         index.await.expect("Index turn task");
     }
+}
+
+/// A Two-way `ExistingGit` Vault whose first Index turn has published, with
+/// one Git-lane turn having run inside that turn's embedding pass.
+struct GitWorkInsideAnEmbeddingPass {
+    _directory: tempfile::TempDir,
+    vault_id: VaultId,
+    collection: VaultCollectionRuntime,
+    control_block: VaultControlBlock,
+    worker: crate::vault_work::VaultWorkWorker,
+    cache: Arc<SqliteCache>,
+}
+
+impl GitWorkInsideAnEmbeddingPass {
+    /// `prepare` gets the checkout and its bare remote before the Index turn
+    /// reads anything, so whatever it leaves on disk is in that turn's scan.
+    async fn run(kind: VaultWorkKind, prepare: impl FnOnce(&Path, &Path)) -> Self {
+        let directory = tempdir().expect("temporary state directory");
+        let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+        prepare(&repository_path, &remote_path);
+        let (collection, registry, control_block, vault_id) = existing_git_control_block(
+            directory.path(),
+            "Git inside embedding",
+            repository_path,
+            VaultGitMode::TwoWay,
+        );
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+        let cooldown = crate::git::CommitCooldown::new();
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let embedder: Arc<dyn Embedder> = Arc::new(OnceBlockingEmbedder {
+            inner: BlockingEmbedder {
+                inner: StubEmbedder::new(384),
+                entered: entered.clone(),
+                release: release.clone(),
+            },
+            parked: std::sync::atomic::AtomicBool::new(false),
+        });
+        coordinator.request(vault_id, VaultWorkKind::Index);
+        let index_turn = worker.next_turn().await.expect("Index turn admitted");
+        let index = tokio::spawn({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            async move {
+                index_turn
+                    .run(|request| dispatch_vault_index_turn(&collection, cache, embedder, request))
+                    .await
+            }
+        });
+        meet_barrier(&entered).await;
+
+        coordinator.request(vault_id, kind);
+        let git_turn = worker.next_turn().await.expect("Git-lane turn admitted");
+        assert_eq!(git_turn.request().kind(), kind);
+        let git_result = {
+            let (collection, registry, managed_git, cooldown, coordinator) = (
+                &collection,
+                &registry,
+                &managed_git,
+                &cooldown,
+                &coordinator,
+            );
+            git_turn
+                .run(|request| async move {
+                    if kind == VaultWorkKind::Commit {
+                        dispatch_commit_turn(
+                            collection,
+                            registry,
+                            managed_git,
+                            cooldown,
+                            "Hatchdoor",
+                            "hatchdoor@example.test",
+                            request,
+                        )
+                        .await
+                    } else {
+                        dispatch_git_turn(
+                            collection,
+                            registry,
+                            coordinator,
+                            managed_git,
+                            "Hatchdoor",
+                            "hatchdoor@example.test",
+                            request,
+                        )
+                        .await
+                    }
+                })
+                .await
+                .result
+        };
+
+        // Released before anything is asserted: a panic with the barrier
+        // unmet hangs the runtime on drop instead of reporting the failure.
+        meet_barrier(&release).await;
+        let index_result = index.await.expect("Index turn task").result;
+        git_result.unwrap_or_else(|error| panic!("{kind:?} turn fails: {error:?}"));
+        index_result.expect("Index turn publishes");
+
+        Self {
+            _directory: directory,
+            vault_id,
+            collection,
+            control_block,
+            worker,
+            cache,
+        }
+    }
+
+    fn snapshot_freshness(&self) -> Option<VaultSnapshotFreshness> {
+        self.cache
+            .snapshot_status(self.vault_id)
+            .expect("read snapshot status")
+            .map(|status| status.freshness)
+    }
+}
+
+/// Issue #549. A commit turn holds the Vault's mutation guard like a write
+/// does, and every holder used to count as a write. A commit turn that found
+/// nothing to commit inside an Index turn's embedding pass therefore made
+/// that turn publish stale, with no changed file for the watcher to answer
+/// with a catch-up turn. The Vault then reported `stale` over a current index
+/// until something unrelated reindexed it.
+#[tokio::test]
+async fn a_commit_turn_with_nothing_to_commit_leaves_a_concurrent_index_turn_fresh() {
+    let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Commit, |_, _| {}).await;
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh),
+        "a commit turn that changed no file must not make the Index turn publish stale"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// The same for a commit turn that does commit. The note was on disk before
+/// the Index turn scanned, so the published generation already holds it:
+/// committing moves `HEAD` and leaves the working tree as it was.
+#[tokio::test]
+async fn a_commit_turn_that_commits_leaves_a_concurrent_index_turn_fresh() {
+    let overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Commit, |checkout, _| {
+        std::fs::write(checkout.join("vault/Mine.md"), "# mine\n").expect("write note");
+    })
+    .await;
+
+    let checkout =
+        git2::Repository::open(overlap.control_block.vault_path().parent().expect("root"))
+            .expect("open checkout");
+    let head = checkout
+        .head()
+        .expect("HEAD")
+        .peel_to_commit()
+        .expect("HEAD commit");
+    assert!(
+        head.tree()
+            .expect("HEAD tree")
+            .get_path(Path::new("vault/Mine.md"))
+            .is_ok(),
+        "precondition: the commit turn committed the note"
+    );
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh),
+        "a commit rewrites no Markdown, so the generation is not behind it"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+}
+
+/// A sync that pulls a remote edit does rewrite Markdown, after the Index
+/// turn read it. That generation is behind and says so, and the sync has
+/// queued the Index turn that catches up, with no `refresh_vault`.
+#[tokio::test]
+async fn a_sync_that_pulls_markdown_inside_an_embedding_pass_is_followed_by_a_fresh_index() {
+    let mut overlap = GitWorkInsideAnEmbeddingPass::run(VaultWorkKind::Git, |_, remote| {
+        let actor_path = remote.parent().expect("fixture root").join("actor");
+        let actor = git2::Repository::clone(remote.to_str().expect("remote path"), &actor_path)
+            .expect("actor checkout");
+        commit_file(
+            &actor,
+            "vault/Theirs.md",
+            "# Theirs\n\nvalerian pulled from the remote\n",
+            "their commit",
+        );
+        actor
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("actor push");
+    })
+    .await;
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Stale),
+        "the generation was read before the pull and must not claim to be current"
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Stale
+    );
+
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+    let catch_up = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        overlap.worker.run_next({
+            let collection = overlap.collection.clone();
+            let cache = overlap.cache.clone();
+            let embedder = embedder.clone();
+            move |request| async move {
+                assert_eq!(request.kind(), VaultWorkKind::Index);
+                dispatch_vault_index_turn(&collection, cache, embedder, request).await
+            }
+        }),
+    )
+    .await
+    .expect("the sync queued the catch-up Index turn itself")
+    .expect("catch-up Index turn dequeued");
+    catch_up.result.expect("catch-up Index turn publishes");
+
+    assert_eq!(
+        overlap.snapshot_freshness(),
+        Some(VaultSnapshotFreshness::Fresh)
+    );
+    assert_eq!(
+        overlap.control_block.snapshot().search,
+        VaultSearchStatus::Ready
+    );
+    let response = VaultSearchCore::new(&overlap.cache, &overlap.collection, embedder.as_ref())
+        .search(VaultSearchRequest {
+            scope: VaultScope::One(overlap.vault_id),
+            query: "valerian".to_string(),
+            mode: SearchMode::Keyword,
+            limit: 10,
+            per_note_cap: 1,
+            layers: LayerSelection::default_surface(),
+        })
+        .expect("keyword search against the caught-up generation");
+    assert!(
+        response
+            .data
+            .results
+            .iter()
+            .any(|hit| hit.note_slug == "theirs"),
+        "the pulled note is in the published generation"
+    );
 }
 
 /// The executor reads the author defaults from the snapshot bound to each
