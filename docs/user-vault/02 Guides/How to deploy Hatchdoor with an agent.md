@@ -380,7 +380,7 @@ In the hand-over, replace the MCP token line under "Where your tokens live" with
 
 ## 7. Hand over
 
-End with one message that contains exactly this, filled in. It is the only place a token is ever shown to the user.
+End with one message that contains exactly this, filled in. It is the only place a token is ever shown to the user, and this message is that place. Read the web token's value from `.env` with the `sed` command of step 5 and put it on the `Web token:` line. Do not send the user to the file for it.
 
 ```text
 Hatchdoor is installed and running.
