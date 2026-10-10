@@ -594,7 +594,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
 
     expect(await screen.findByText("Body on disk.")).toBeInTheDocument();
     expect(
-      screen.getByText(/the note has changed since. Use Edit to review it/),
+      screen.getByText(/the note has changed since. Use Source to review it/),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("An edit based on an older version."),

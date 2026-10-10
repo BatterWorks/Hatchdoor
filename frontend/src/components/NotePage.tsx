@@ -995,7 +995,7 @@ export function NotePage({
     }
     if (stored.baseContentHash !== note.content_hash) {
       setRecoveredDraftNotice(
-        "An unsaved edit to this note is being held, but the note has changed since. Use Edit to review it against the current version.",
+        "An unsaved edit to this note is being held, but the note has changed since. Use Source to review it against the current version.",
       );
       return;
     }
