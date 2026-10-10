@@ -30,12 +30,12 @@ You can change both limits in **Settings → Uploads** without a restart. See [[
 
 ## From the Web UI
 
-Paste an image, or drag and drop an image or PDF, into the note editor. Hatchdoor:
+Paste or drop an image or a PDF into a note you are editing. Hatchdoor:
 
 1. Uploads it into an `Attachments/` folder at the Vault root. If a file with that name already exists, it numbers the new one (`report-1.pdf`, `report-2.pdf`, ...) and never overwrites.
-2. Inserts an embed at the cursor in the Vault's link style. A wikilink Vault gets `![[...]]` with a relative path that leads back to the Vault root, even from a note several folders deep. A Markdown-link Vault gets `![](...)`, with the path written in the Vault's path form. See [[Supported Markdown reference#Which link style Hatchdoor writes]].
+2. Writes an embed in the Vault's link style, on a line of its own: under the line your caret is on or the line you dropped the file on, or on that line if it is empty. **Source** writes it at the cursor instead. A wikilink Vault gets `![[...]]` with a relative path that leads back to the Vault root, even from a note several folders deep. A Markdown-link Vault gets `![](...)`, with the path written in the Vault's path form. See [[Supported Markdown reference#Which link style Hatchdoor writes]].
 
-A file of an unsupported type, or one over the limit, is refused in the editor with the reason: the wrong extension, or how many MB over the limit. No part of it is uploaded.
+A file of an unsupported type, or one over the limit, is refused in the editor with the reason: the wrong type, or the file's size and the limit. No part of it is uploaded.
 
 ## From an agent, over MCP or HTTP
 

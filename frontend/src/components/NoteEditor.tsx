@@ -398,7 +398,7 @@ export function NoteEditor({
           />
           {dragActive ? (
             <div className="note-editor-drop-target" aria-hidden="true">
-              Drop image to attach
+              Drop an image or PDF to attach
             </div>
           ) : null}
           {showAutocomplete ? (

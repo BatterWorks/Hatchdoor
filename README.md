@@ -40,7 +40,7 @@ under close human review, with tests and a documented safety model.
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc">
     <img src="assets/screenshots/hero-light.png" width="900"
-      alt="Hatchdoor browsing a note: vault explorer on the left, rendered Markdown with wikilinks in the centre, and an on-this-page outline on the right">
+      alt="Hatchdoor editing a note: vault explorer on the left, the live editor in the centre with its formatting toolbar over a selected phrase, and an on-this-page outline on the right">
   </a>
 </p>
 
@@ -86,7 +86,9 @@ under close human review, with tests and a documented safety model.
   frontmatter, images, attachments, and broken-link styling.
 - Keyword search and semantic search.
 - Recent notes, backlinks, outbound links, stats, and graph views.
-- Browser write support when the vault mount is writable.
+- A live editor in the browser when the vault mount is writable: the note opens
+  ready to type in, Markdown syntax shows only on the line you are on, and
+  edits save by themselves. It works the way Obsidian's Live Preview does.
 - Attachment uploads, local asset serving, and inline previews for linked PDF
   vault assets.
 - A first-class MCP server so AI agents can read, search, create, edit, and link

@@ -18,8 +18,9 @@ historical records.
 - [`architecture/collaboration-pilot-assessment.md`](architecture/collaboration-pilot-assessment.md)
   — evidence and limitations from the initial boundary pilots.
 - [`architecture/frontend-assessment.md`](architecture/frontend-assessment.md)
-  — 2026-08-30 review of the frontend stack, size, the bespoke block editor,
-  and the three oversized components with their split seams.
+  — 2026-08-30 review of the frontend stack, size, the block editor of the
+  time (replaced by the live editor on 2026-10-09), and the three oversized
+  components with their split seams.
 
 ## Product direction
 

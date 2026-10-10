@@ -273,7 +273,7 @@ describe("NoteEditor attachment uploads", () => {
       },
     });
 
-    expect(screen.getByText("Drop image to attach")).toBeInTheDocument();
+    expect(screen.getByText("Drop an image or PDF to attach")).toBeInTheDocument();
     expect(textarea.closest(".note-editor-input")).toHaveClass("drag-active");
   });
 });
