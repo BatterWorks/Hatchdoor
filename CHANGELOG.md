@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.8.0 - 2026-10-10
 
 ### ⚠️ Breaking changes — action required on upgrade
 - **A fresh install now starts with no Vaults, and installs from 2.4.x or earlier can no longer upgrade directly.** Hatchdoor no longer turns the folder `VAULT_PATH` names into a Vault by itself, whatever it holds: a start with no Vault registry writes an empty one and opens on **No Vaults Yet**, and every Vault is one you added in Settings, through `POST /api/v1/vaults` or with `create_vault`. Existing registries and their Vaults start exactly as before. The one-time import that turned a pre-registry single-Vault deployment into a Vault is gone, with its `legacy_migration_required` recovery, the **Start with no Vaults** action and its `POST /api/v1/vaults/start-with-no-vaults` route, the `legacy_migration_recovery` field of `GET /api/v1/vaults` and `list_vaults`, and the `legacy_migration_recovery_not_pending` and `legacy_environment_cleanup_required` codes. `HATCHDOOR_EXCLUDE` or `HATCHDOOR_GIT_*` variables left in `.env` no longer hold the instance in a restricted recovery screen; Hatchdoor names them in a startup warning instead, because they do nothing there.
