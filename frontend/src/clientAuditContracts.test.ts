@@ -110,6 +110,27 @@ describe("client audit launch contracts", () => {
     );
   });
 
+  it("draws the live editor's inline code as the reading view's chip", () => {
+    // The library fills inline code with --atomic-editor-code-bg, the fenced
+    // block's dark slab, under the body text colour: black on black in the
+    // light theme (#550).
+    const rule = /\.live-editor \.cm-atomic-inline-code\s*{([^}]*)}/s.exec(
+      noteContentCss,
+    )?.[1];
+    expect(rule).toMatch(/background:\s*var\(--paper-2\)/);
+    expect(rule).toMatch(/color:\s*var\(--ink\)/);
+    expect(rule).toMatch(/font-family:\s*var\(--font-mono\)/);
+    expect(rule).toMatch(/border-radius:\s*var\(--radius-none\)/);
+    expect(rule).not.toMatch(/code-surface|atomic-editor-code-bg/);
+    // The text sits in a syntax-highlight span that carries its own colour.
+    expect(noteContentCss).toMatch(
+      /\.live-editor \.cm-atomic-inline-code \*\s*{[^}]*color:\s*var\(--ink\)/s,
+    );
+    expect(noteContentCss).toMatch(
+      /--atomic-editor-code-bg:\s*var\(--code-surface\)/,
+    );
+  });
+
   it("adds trailing scroll space only once the reader jumps to a heading", () => {
     // Plain reading ends where the note's text ends; the space exists solely
     // so an end-of-note heading can reach the top of the pane, and only a

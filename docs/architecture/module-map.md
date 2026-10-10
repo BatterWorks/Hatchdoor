@@ -264,11 +264,16 @@ that production inventory are still checked for stale paths and duplicates.
   including through already-held handles; retirement waits for both its active
   coordinator turn and any already-admitted foreground mutation to reach their
   safe boundaries. The mutation lock also carries a per-Vault count of the
-  foreground mutations that have taken it. `acquire_mutation` advances it under
-  the lock; `acquire_mutation_for_index_reads` gives a background Index turn the
+  times the Vault's Markdown was rewritten under it. `acquire_mutation`
+  advances it under the lock, because a foreground mutation always rewrites;
+  `acquire_mutation_for_index_reads` gives a background Index turn the
   same exclusion without advancing it, and returns the generation it observed;
+  `acquire_mutation_for_git_turn` gives a Git, commit or recovery turn that
+  exclusion without advancing it either, and `record_markdown_rewrite` lets
+  the holder advance it once its work turned out to rewrite Markdown, which
+  obliges that holder to request the catch-up Index turn (#549);
   `blocking_retake_mutation_for_index` retakes the lock from a blocking thread
-  and answers whether a mutation intervened, under that one acquisition, so the
+  and answers whether a rewrite intervened, under that one acquisition, so the
   caller decides and acts without a window in between (issue #223, following the
   `request_if_idle` rule of issue #127). The count is never readable outside a
   holder of that lock, which is the only place its value means anything.
@@ -449,7 +454,12 @@ notion of "is this Vault busy" exists to drift out of agreement with it
 (issue #127, replacing the read-then-act `has_work` bridge added for #97's
 reopening finding 1). `has_work` remains only as a `#[cfg(test)]`
 observation. A user-driven request — a manual sync or retry — still uses
-`request` and its guaranteed rerun.
+`request` and its guaranteed rerun. `request_rerun_if_admitted` is the
+mirror, decided under the same lock: it adds the rerun only while that kind is
+already active or pending for the Vault, and never starts a turn on an idle
+one. Its one production caller is the Vault work executor's
+`sync_rewrote_markdown`, for a failed sync that may have rewritten notes
+under an Index turn (#549).
 
 **Consumed dependencies:** durable `VaultId` identity and Tokio notification.
 The queue owns no Markdown, SQLite, Git, or lifecycle state.
@@ -584,13 +594,25 @@ whichever lane the turn ran in.
   embedding pass parked every HTTP and MCP Markdown write behind a turn that
   was no longer reading anything, long enough for the caller's transport to
   give up on a write that had already landed (issue #223). The turn retakes
-  the guard to publish and, when a foreground mutation completed while it was
+  the guard to publish and, when a foreground mutation or a sync that
+  reported `ManagedGitOutcome::Pulled` completed while it was
   released, publishes that generation `VaultSnapshotFreshness::Stale` rather
   than `Fresh` and settles the runtime at `VaultSearchStatus::Stale` rather than
   `Ready` — the same pair `retained_snapshot_search_status` derives from that
   row after a restart. It still participates, still holds the search
-  capability, and still answers search; the watcher's change intent has already
-  armed the catch-up turn that makes it `Ready`. Retaking the guard happens
+  capability, and still answers search; the catch-up turn that makes it
+  `Ready` is armed by the watcher's change intent for a write and by
+  `publish_managed_git_turn_outcome` for a sync, which requests one after
+  every success while the Vault is active and its files are readable. A
+  commit turn, a recovery turn, and a sync that found nothing or only
+  committed and pushed hold the guard without advancing the generation, so
+  they never make an Index turn publish stale: a stale verdict with no turn
+  behind it stood until something unrelated reindexed the Vault (#549). A
+  failed sync cannot say whether a merge landed before it failed, so
+  `sync_rewrote_markdown` advances the generation for it only while an Index
+  turn is admitted, and requests the catch-up Index turn itself under the
+  guard (`VaultWorkCoordinator::request_rerun_if_admitted`); with none admitted it advances nothing and queues nothing, so a
+  failing remote does not reindex the Vault on every retry. Retaking the guard happens
   while the cache's process-wide model epoch is held, so that acquisition is
   the one place the epoch waits on a per-Vault lock; the wait is bounded by one
   in-flight foreground mutation, and no mutation path takes the epoch, so the
@@ -603,7 +625,7 @@ whichever lane the turn ran in.
   `spawn_blocking`, panic mapping, and outcome publication — and
   `plan_git_turn` supplies only what differs (issue #128). A `GitTurnPlan`
   names three variations: whether the turn holds
-  `VaultControlBlock::acquire_mutation`, the error code a panic is reported
+  `VaultControlBlock::acquire_mutation_for_git_turn`, the error code a panic is reported
   as, and its `GitTurnWork` — `Leased` (the managed checkout, which cannot be
   built or run without that Vault's lease) or `Unleased` (an operator-owned
   checkout, which never takes one).
@@ -618,7 +640,7 @@ whichever lane the turn ran in.
     exists at the Vault's `repository_path` — no checkout lease, see the Git
     synchronization boundary below for why `ManagedCheckoutLease` does not
     apply to an already-existing, operator-owned checkout — but under the same
-    `acquire_mutation` hold as the managed-Git path, so a foreground Markdown
+    `acquire_mutation_for_git_turn` hold as the managed-Git path, so a foreground Markdown
     write can never race either kind of turn's working-tree phases.
   - `ExistingGit` in `LocalHistory`: delegates to `plan_commit_turn`, because
     for a Vault with no remote the Git turn always was a commit and nothing
@@ -2803,6 +2825,13 @@ commit whose batch is empty, which is what drift from outside Hatchdoor
 produces, keeps the generic `hatchdoor: vault update`. The ledger is bounded
 (`WriteLedger::CAPACITY`) because a `Local` Vault has no Git turn to take it.
 
+`ManagedGitOutcome` is what a finished Git or commit turn reports:
+`UpToDate`, `Synchronized` (it committed or pushed and left the working tree
+as it was) or `Pulled` (it brought the remote's commits into the working
+tree). The Vault work executor reads `Pulled` as the one success that rewrote
+Markdown under a concurrent Index turn (#549); the scheduler remembers
+`Synchronized` and `Pulled` alike as `GitTurnOutcome::Synchronized`.
+
 `ManagedGitTurnConfig`, `ManagedGitOutcome`, `run_managed_git_turn`,
 `ManagedGitScheduler`, `GitPollingClock`, `spawn_scheduler_tick`,
 `DEFAULT_POLL_INTERVAL`, and `DEFAULT_TICK_INTERVAL` form the per-Vault managed-Git scheduling boundary —
@@ -3039,7 +3068,7 @@ never registered with `ManagedGitScheduler`, so this arm is its whole
 Git-turn responsibility. `run_existing_git_remote_turn` is consumed the same
 way by `plan_git_turn`'s `ExistingGit` + `VaultGitMode::PullOnly`/`TwoWay` arm
 (issue #96's reopening defect 1): no checkout lease, but the same
-`VaultControlBlock::acquire_mutation` hold across `spawn_blocking` that the
+`VaultControlBlock::acquire_mutation_for_git_turn` hold across `spawn_blocking` that the
 `ManagedGit` arm also takes (defect 2), and publication through the same
 `publish_managed_git_turn_outcome`.
 `VaultWorkKind::Commit` is consumed by the Vault work executor's
@@ -3082,7 +3111,7 @@ never deletes, overwrites, or silently adopts a checkout destination. The
 managed-Git scheduler adds no persisted queue, priority, or second execution
 lane (ADR-13); a Git turn's returned failure always completes that Vault's
 turn so the shared worker is released for the next Vault. A `ManagedGit` or
-`ExistingGit` `PullOnly`/`TwoWay` Git turn holds `VaultControlBlock::acquire_mutation`
+`ExistingGit` `PullOnly`/`TwoWay` Git turn holds `VaultControlBlock::acquire_mutation_for_git_turn`
 for its whole blocking duration (issue #96's reopening defect 2), so it can
 never race a foreground Markdown write's own hold of the same lock — this is
 the exception to "writes do not block on sync" above, scoped to exactly the
