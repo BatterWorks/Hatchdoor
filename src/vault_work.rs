@@ -1050,10 +1050,12 @@ mod tests {
         assert!(coordinator.request_rerun_if_admitted(vault, VaultWorkKind::Index));
         assert!(coordinator.request_rerun_if_admitted(vault, VaultWorkKind::Index));
         active.run(|_| async { Ok(()) }).await;
+        drop(active);
 
         let rerun = worker.next_turn().await.expect("the rerun is admitted");
         assert_eq!(rerun.request().kind(), VaultWorkKind::Index);
         rerun.run(|_| async { Ok(()) }).await;
+        drop(rerun);
         assert!(
             !coordinator.has_work(vault, VaultWorkKind::Index),
             "two requests during one active turn coalesce into one rerun"
