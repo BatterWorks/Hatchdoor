@@ -210,6 +210,19 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
             autoCloseCodeFence,
             EditorView.lineWrapping,
             search({ top: true }),
+            // The find bar's own wording is lowercase jargon ("regexp",
+            // "all"); these are the words a note app uses for the same things.
+            EditorState.phrases.of({
+              next: "Next",
+              previous: "Previous",
+              all: "Select all",
+              "match case": "Match case",
+              regexp: "Regex",
+              "by word": "Whole word",
+              replace: "Replace",
+              "replace all": "Replace all",
+              close: "Close",
+            }),
             // GitHub-flavored, to match the reading view's remark-gfm.
             markdown({ base: markdownLanguage, extensions: highlightMarkdown }),
             markdownLanguage.data.of({

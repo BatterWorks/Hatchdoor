@@ -1121,8 +1121,8 @@
   .toc-link[data-level="3"] { padding-left: 1rem; color: var(--muted); }
 
   /* Body & blocks */
-  /* Uncapped: see the Reading measure note in §07. */
-  .note-body { max-width: 100%; }
+  /* Capped by the column: see the Reading measure note in §10. */
+  .note-body { max-width: 38rem; }
   .note-body p { font-family: var(--font-serif); font-size: 1.18rem; line-height: 1.62; color: var(--ink); margin: 0 0 1.2rem; }
   .note-body h1 { font-family: var(--font-display); font-variation-settings: "wdth" 88, "wght" 700; font-size: 1.7rem; text-transform: uppercase; letter-spacing: -0.012em; margin: 2.4rem 0 0.8rem; }
   .note-body h2 { font-family: var(--font-serif); font-style: italic; font-weight: 500; font-size: 1.85rem; line-height: 1.18; letter-spacing: -0.012em; margin: 2.6rem 0 0.5rem; }
@@ -1635,12 +1635,9 @@
     gap: 0.5rem;
   }
 
-  /* Body demos are shown at the width the app actually gives a note. That
-     width is not a max-width on .note-body: it is what remains of
-     .note-page-layout's grid once the 220px table of contents and its gap are
-     taken, which is 798px at a 1440px window and caps at 1120px. Demoing prose
-     at the full doc column would show a measure the app never renders. */
-  .stage-note > .note-body { max-width: 798px; }
+  /* Body demos are shown at the width the app actually gives a note: the
+     38rem reading measure that .note-page-layout caps its note column at. */
+  .stage-note > .note-body { max-width: 38rem; }
 
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Live editor
@@ -2260,7 +2257,7 @@
     <section class="doc-section" id="body-text">
       <div class="doc-section-num">§10</div>
       <h2>Prose &amp; inline elements</h2>
-      <p class="blurb"><b>Reading measure: uncapped.</b> This document previously specified <code>max-width: 36rem</code> on the note body; the app has always rendered full width, about 100 characters at 1440px. Capping was considered and rejected. Nearly every non-prose block here is a bordered box &mdash; <span class="key">.table-wrap</span>, <span class="key">.callout</span>, <span class="key">.code-block</span> &mdash; so a narrow text column beside full-width boxes reads as broken alignment rather than as hierarchy, and capping every block uniformly instead pushes tables and diagrams into horizontal scrolling much sooner. The app is authoritative; this document was stale.</p>
+      <p class="blurb"><b>Reading measure: 38rem, about 75 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
       <div class="stage stage-note paper">
         <div class="note-body">
@@ -2672,12 +2669,16 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb">The editor&rsquo;s scroller is <code>overflow: visible</code> and its height is auto, so it grows with the text and the note pane remains the one scroll container. A jump from the table of contents or a search hit is a CodeMirror scroll-into-view, which scrolls the pane.</p>
 
       <h3 class="doc-sub">Floating toolbar (desktop)</h3>
-      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, as the same Sharp icons the keyboard bar uses. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
+      <p class="blurb">A selection on one line raises a toolbar over it: bold, italic, strikethrough, code, highlight, link, then after a hairline of <span class="key">--ink-soft</span> the three things the line itself can become, heading, bullet and to-do. They are the same Sharp icons the keyboard bar uses. Indent, outdent, undo and redo stay on the keyboard, where a desktop already has them. Ink on paper inverted, like the topbar menu, so it reads as a control over the text rather than part of it. No arrow, no radius. It rides 10px above the selected line, so it does not sit on the words it formats. A selection across lines is a cut or a move, not a format, and raises nothing.</p>
       <div class="tag-row"><span class="key">.live-editor-toolbar</span><span class="key">background: --ink</span><span class="key">--shadow-float</span></div>
 
       <h3 class="doc-sub">Menus</h3>
       <p class="blurb">The <code>/</code> menu at the start of a line and the <code>[[</code> completion share the search dialog&rsquo;s idiom: paper surface, <span class="key">--rule-strong</span> border, the selected row on <span class="key">--hot-soft</span>, the detail column in mono <span class="key">--muted</span>.</p>
       <div class="tag-row"><span class="key">.cm-tooltip-autocomplete</span><span class="key">.cm-completionDetail</span></div>
+
+      <h3 class="doc-sub">Find and replace bar</h3>
+      <p class="blurb"><code>Ctrl+F</code> opens the library&rsquo;s find panel above the note. Its stock look is dark gradient buttons, rounded fields and the browser&rsquo;s serif, in both themes, so every part is restyled: a <span class="key">--paper</span> strip closed by a <span class="key">--rule</span> line, the fields as <a href="#fields">§18</a> fields on <span class="key">--bg</span> with a hot border on focus, the buttons as the default button of <a href="#buttons">§25</a>, and square checkboxes that fill <span class="key">--hot</span> when ticked. Three rows, in the order the controls come in the document so Tab walks them as they read: find, its options, then replace. The bar is a container, and under 36rem of its own width each field takes a full row with its buttons sharing the row beneath in equal parts, so Next, Previous and Select all stay together. On a coarse pointer every control is 2.75rem tall and the fields are 16px, which stops iOS zooming the page on focus. CodeMirror keeps the bar stuck to the top of the pane while Next scrolls to a match far down the note; nothing here restates that. The library&rsquo;s wording is replaced through <code>EditorState.phrases</code> (Select all, Match case, Regex, Whole word), and the floating toolbar stays down while the bar is open, since stepping through matches selects each one. Matches take <span class="key">--highlight</span>, the same as a search hit, and the current match <span class="key">--hot-soft</span> with a hot outline.</p>
+      <div class="tag-row"><span class="key">.cm-panel.cm-search</span><span class="key">.cm-textfield</span><span class="key">.cm-button</span><span class="key">.cm-searchMatch</span></div>
 
       <h3 class="doc-sub">Touch: a bar above the keyboard, no floating toolbar</h3>
       <p class="blurb">A phone draws its own Cut / Copy / Paste callout over a selection, in exactly the place a floating toolbar would sit, and the two fight. On a coarse pointer the toolbar is not mounted at all, and the formatting lives in a fixed bar above the keyboard, each a Sharp icon from §26: indent, outdent, bullet, to-do, heading, bold, italic, strikethrough, code, highlight, link, undo, redo, and <b>Done</b> as a word in <span class="key">--hot</span>. The bar is lifted by the part of the layout viewport the keyboard hides (iOS overlays it; Android resizes), and pads the safe-area inset. Buttons act on <code>mousedown</code> and prevent it, so focus never leaves the editor and the keyboard stays up.</p>
@@ -2921,9 +2922,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">settings</td><td class="val">rail: settings</td></tr>
           <tr><td class="name">format_indent_decrease</td><td class="val">live editor keyboard bar: outdent</td></tr>
           <tr><td class="name">format_indent_increase</td><td class="val">live editor keyboard bar: indent</td></tr>
-          <tr><td class="name">format_list_bulleted</td><td class="val">live editor keyboard bar: bullet</td></tr>
-          <tr><td class="name">checklist</td><td class="val">live editor keyboard bar: to-do</td></tr>
-          <tr><td class="name">format_h2</td><td class="val">live editor keyboard bar: heading</td></tr>
+          <tr><td class="name">format_list_bulleted</td><td class="val">live editor: bullet (bar and toolbar)</td></tr>
+          <tr><td class="name">checklist</td><td class="val">live editor: to-do (bar and toolbar)</td></tr>
+          <tr><td class="name">format_h2</td><td class="val">live editor: heading (bar and toolbar)</td></tr>
           <tr><td class="name">format_bold</td><td class="val">live editor: bold (bar and toolbar)</td></tr>
           <tr><td class="name">format_italic</td><td class="val">live editor: italic (bar and toolbar)</td></tr>
           <tr><td class="name">format_strikethrough</td><td class="val">live editor: strikethrough (bar and toolbar)</td></tr>
