@@ -31,7 +31,7 @@ Unordered lists (`-`), ordered lists (`1.`), and nested lists at any depth are a
 | Callout | `> [!note]` |
 ```
 
-On a small screen a wide table scrolls sideways.
+A table wider than the note's column scrolls sideways inside its frame, on any screen.
 
 ## Blockquotes and callouts
 
