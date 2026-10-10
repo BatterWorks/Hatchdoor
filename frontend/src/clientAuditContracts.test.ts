@@ -213,7 +213,7 @@ describe("client audit launch contracts", () => {
 
   // None of these five names is a Forge token. A rule that reads one always
   // renders its fallback, so it ignores the theme (#547).
-  it("reads no custom property the design tokens do not define", () => {
+  it("reads none of the five undefined properties #547 removed", () => {
     const sources = import.meta.glob(
       ["./**/*.{css,ts,tsx}", "!./**/*.test.*"],
       {
@@ -247,7 +247,7 @@ describe("client audit launch contracts", () => {
     }
   });
 
-  it("keeps the strays on tokens: code block header, graph badge, untagged node", () => {
+  it("tints the code block header from a token, squares the graph badge, and has no fixed grey for an untagged node", () => {
     expect(noteContentCss).not.toMatch(
       /\.code-block-head\s*{[^}]*background:\s*rgba?\(/s,
     );
