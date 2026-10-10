@@ -1415,19 +1415,12 @@
   background: transparent;
   color: var(--ink);
 }
-/* Sticky: "next" scrolls the pane to a match far down the note, and the bar
-   has to still be there to press it again. A container, so the bar lays
-   itself out by the width it has and not by the window's. */
+/* CodeMirror already keeps the bar stuck to the top of the pane. A container,
+   so the bar lays itself out by the width it has and not by the window's. */
 .live-editor .cm-panels-top {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   container-type: inline-size;
   border-bottom: 1px solid var(--rule);
   margin-bottom: 1rem;
-  /* Covers the pane's own top padding, where the note would otherwise show
-     through above the stuck bar. */
-  box-shadow: 0 -3rem 0 var(--bg);
 }
 .live-editor .cm-panel.cm-search {
   position: relative;
@@ -1440,23 +1433,27 @@
   font-family: var(--font-sans);
   font-size: 0.9rem;
 }
-/* Three rows: find, replace, then the options. The library's own line break
-   is not a flex item, so the rows are made by ordering the controls around
-   two full-width spacers. */
+/* Three rows, in the order the controls come in the document, so Tab walks
+   them as they read: find, its options, then replace. The library's own line
+   break is not a usable flex item, so it is dropped and the rows are made by
+   two full-width spacers placed between the groups. */
+.live-editor .cm-panel.cm-search br {
+  display: none;
+}
 .live-editor .cm-panel.cm-search::before,
 .live-editor .cm-panel.cm-search::after {
   content: "";
   flex-basis: 100%;
   order: 1;
 }
-.live-editor .cm-panel.cm-search [name="replace"],
-.live-editor .cm-panel.cm-search [name="replaceAll"] {
+.live-editor .cm-panel.cm-search label {
   order: 2;
 }
 .live-editor .cm-panel.cm-search::after {
   order: 3;
 }
-.live-editor .cm-panel.cm-search label {
+.live-editor .cm-panel.cm-search [name="replace"],
+.live-editor .cm-panel.cm-search [name="replaceAll"] {
   order: 4;
 }
 .live-editor .cm-panel.cm-search .cm-textfield {
@@ -1552,6 +1549,7 @@
   padding: 0;
   border: 0;
   background: transparent;
+  border-radius: var(--radius-none);
   color: var(--muted);
   font-size: 1.2rem;
   line-height: 1;
@@ -1561,6 +1559,7 @@
   color: var(--ink);
 }
 .live-editor .cm-searchMatch {
+  border-radius: var(--radius-none);
   background: var(--highlight);
   color: var(--ink);
 }
@@ -1571,7 +1570,7 @@
 
 /* A narrow bar: each field takes a full row and its buttons share the row
    under it in equal parts, so Next, Previous and Select all sit together. */
-@container (max-width: 30rem) {
+@container (max-width: 36rem) {
   .live-editor .cm-panel.cm-search {
     padding-right: 0.7rem;
   }
@@ -1592,7 +1591,7 @@
     margin-right: 0.3rem;
   }
   /* The full-width replace field already starts its own row. */
-  .live-editor .cm-panel.cm-search::before {
+  .live-editor .cm-panel.cm-search::after {
     display: none;
   }
 }
@@ -1614,11 +1613,24 @@
     width: 1.25rem;
     height: 1.25rem;
   }
+  .live-editor .cm-panel.cm-search {
+    padding-right: 3.4rem;
+  }
   .live-editor .cm-panel.cm-search button[name="close"] {
     top: 0.6rem;
     right: 0.35rem;
     width: 2.75rem;
     height: 2.75rem;
+  }
+}
+@container (max-width: 36rem) {
+  @media (pointer: coarse) {
+    .live-editor .cm-panel.cm-search {
+      padding-right: 0.7rem;
+    }
+    .live-editor .cm-panel.cm-search .cm-textfield[name="search"] {
+      flex-basis: calc(100% - 3.1rem);
+    }
   }
 }
 
