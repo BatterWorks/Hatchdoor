@@ -4637,7 +4637,9 @@ MCP writes row or its "Managed outside this page" entry) and
 console, and the index's recovery blocks), and
 `features/settings/FolderPicker.tsx` (`folderOutsideMount`, #430, and
 `newFolderRefused`, #494), each
-passing a `CONTEXTUAL_HELP` entry and nothing else.
+passing a `CONTEXTUAL_HELP` entry and nothing else. The What's new pop-up
+reads one entry without opening it: `usageReport.page` names the line its
+usage report switch sits on (ADR-48), so renaming that page moves the switch.
 
 **Invariants:** Help never fetches or shows Vault content and calls no
 `/api/` route; it never needs the web token; a `base` block renders as its
@@ -4684,12 +4686,24 @@ moves left of it and stays unseen. "Got it" or Escape marks the running version
 seen; with Help open, Escape closes Help first. Nothing shows on a fresh
 install, when nothing is new, when the request fails, or when `localStorage`
 throws, since a dismissal that cannot be remembered would bring it back on
-every load. Highlight text renders as inline Markdown only.
+every load. Highlight text renders as inline Markdown only. One line carries
+a switch (ADR-48): the highlight of release 2.8.1 that links to the Usage
+report page shows `HATCHDOOR_USAGE_REPORT_ENABLED` as on or off, read from
+`GET /api/settings` only when that line is on screen, and a click sends one
+`PATCH /api/settings` for that key alone and leaves the dialog open. A key
+the configuration file holds shows as locked, and the line shows without a
+switch when the setting cannot be read. `src/handlers/whats_new.rs` holds
+the other side: its test `the_2_8_1_section_carries_the_usage_report_line`
+fails a 2.8.1 section that lacks that line.
 
 **Consumed dependencies:** the What's new endpoint (`src/handlers/whats_new.rs`)
 through `api/api.ts`'s `apiFetch`, `useHelp()` from the Help reader, and
-Shared UI's `UiButton`. It borrows the shell's `.modal-backdrop` and
-`.modal-panel` and Help's `.help-eyebrow` and `.help-link`, and sits beside
+Shared UI's `UiButton`. For the usage report switch: the settings HTTP
+contract (the same requests Settings sends, unchanged), Settings' public
+entry `features/settings/index.ts` (`patchSettings`), and the Help reader's
+`CONTEXTUAL_HELP`, whose `usageReport.page` names the line. It borrows the
+shell's `.modal-backdrop` and `.modal-panel`, Help's `.help-eyebrow` and
+`.help-link`, and Settings' `.settings-toggle`, and sits beside
 Help by matching `.help-panel`'s width and staying under its layer, so a
 change to any of those reaches it.
 
@@ -4697,7 +4711,8 @@ change to any of those reaches it.
 children in `AppSession`, signed in and never in demo mode) and `App.css`.
 
 **Invariants:** never shown in demo mode or on a fresh install; a storage
-failure never throws and never shows the dialog.
+failure never throws and never shows the dialog; the usage report switch
+shows on the 2.8.1 line only and never changes the setting without a click.
 
 **Validation:** `npx vitest run src/features/whats-new
 src/App.whats-new.test.tsx`, then full frontend checks.
@@ -5324,7 +5339,8 @@ features may import (#419): `FolderPicker`, `formatWhen`, `createVault`,
 `baseSourceForKind`, and `settingsApi.ts`'s `patchSettings` and
 `generateMcpTokenCandidate`, the one definition of the `PATCH /api/settings`
 and `POST /api/settings/mcp-token/generate` requests that the Settings page and
-the First-run checklist both send. The shell still imports `SettingsPage`
+the First-run checklist both send; the What's new pop-up sends the first for
+its usage report switch (ADR-48). The shell still imports `SettingsPage`
 directly. The Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and

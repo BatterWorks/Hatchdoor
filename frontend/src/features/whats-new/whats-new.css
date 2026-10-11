@@ -148,6 +148,41 @@
   outline-offset: 2px;
 }
 
+/* The usage report switch on its line (ADR-48): Settings' own toggle
+   (.settings-toggle) under the line's text, with its name beside it. */
+.whats-new-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+
+.whats-new-switch-label {
+  margin-right: auto;
+  font-weight: 600;
+}
+
+.whats-new-switch-locked {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.whats-new-switch .settings-toggle:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 2px;
+}
+
+.whats-new-switch-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--err-fg);
+  font-size: 0.85rem;
+}
+
 .whats-new-foot {
   display: flex;
   align-items: center;

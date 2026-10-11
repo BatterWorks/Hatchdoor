@@ -915,6 +915,9 @@
   .whats-new-demo .wn-tag { font-family: var(--font-mono); font-size: 0.75rem; }
   .whats-new-demo .wn-link { color: inherit; text-decoration: underline; text-decoration-color: var(--hot); text-underline-offset: 3px; }
   .whats-new-demo .wn-link::after { content: "\00a0\2192"; }
+  .whats-new-demo .wn-switch { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); margin-top: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--rule); background: var(--paper-2); }
+  .whats-new-demo .wn-switch-label { margin-right: auto; font-weight: 600; }
+  .whats-new-demo .wn-switch-state { display: inline-flex; align-items: center; gap: 0.5rem; font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.1em; }
   .whats-new-demo .wn-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--rule); }
   /* §36 folder picker */
   .folder-picker-demo { width: min(470px, 100%); display: grid; gap: var(--space-2); color: var(--ink); }
@@ -3538,6 +3541,9 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
               <ul>
                 <li>Help opens beside what you are doing. <a class="wn-link" href="#whats-new">Browse and review through the Web UI</a></li>
                 <li>A setup checklist takes a new install from empty to a working agent.</li>
+                <li>An optional usage report, off unless you turn it on. <a class="wn-link" href="#whats-new">Usage report reference</a>
+                  <div class="wn-switch"><span class="wn-switch-label">Send a usage report</span><span class="wn-switch-state"><span class="set-toggle-track" data-on="false"><span class="set-toggle-knob"></span></span>Off</span></div>
+                </li>
               </ul>
             </section>
           </div>
@@ -3551,6 +3557,12 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb"><b>The head names the version, the body lists releases newest first.</b> A hot eyebrow reading WHAT&rsquo;S NEW, the version as a display title, and one muted line saying how many releases were skipped. <b>Action-needed items from every listed release are pinned first</b> in one box on <span class="key">--warn-bg</span> with a <span class="key">--warn-border</span> edge and <span class="key">--warn-fg</span> text, each tagged with its version in mono. Each release then gets a section-label heading with its date in mono on the right, and its other lines as em-dash items in <span class="key">--hot</span>, the same device note lists use.</p>
 
       <p class="blurb"><b>Links open Help, not a new page.</b> A highlight&rsquo;s link and Full changelog are Help&rsquo;s own text-link buttons, <span class="key">.help-link</span>, underlined in <span class="key">--hot</span>, with a trailing arrow. The eyebrow is Help&rsquo;s <span class="key">.help-eyebrow</span>. Help (<a href="#side-panel">§34</a>) then opens above the dialog, and the backdrop shrinks to the space left of it so the dialog stays readable. <b>Below 920px</b> the backdrop pads by <span class="key">--space-2</span>, so the dialog fills a phone&rsquo;s width (still capped at 560px), scrolls inside, and keeps Got it in view; Help covers it until closed.</p>
+
+      <p class="blurb"><b>One line may carry a switch, and only the usage report&rsquo;s does</b> (ADR-48). The switch row sits under the line&rsquo;s text and link: a <span class="key">--rule</span> box on <span class="key">--paper-2</span>, padded <span class="key">--space-2</span> by <span class="key">--space-3</span>, with the switch&rsquo;s name in weight 600 on the left and Settings&rsquo; own <span class="key">.settings-toggle</span> (<a href="#settings">§33</a>) on the right. It shows the setting as it stands and changes it on a click; the dialog stays open. A value the configuration file holds replaces the toggle with one muted line, and a refused save adds a line in <span class="key">--err-fg</span> across the row&rsquo;s full width. The example above shows it on a 2.8.0 line for the picture only: in the app it is on the 2.8.1 line.</p>
+
+      <div class="tag-row">
+        <span class="key">.whats-new-switch</span><span class="key">.whats-new-switch-label</span><span class="key">.whats-new-switch-locked</span><span class="key">.whats-new-switch-error</span>
+      </div>
 
       <div class="tag-row">
         <span class="key">features/whats-new/WhatsNew.tsx</span><span class="key">features/whats-new/whats-new.css</span>
