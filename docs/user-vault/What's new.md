@@ -11,7 +11,8 @@ Agents read this page with `read_docs` and the page name `whats-new`.
 
 ## v2.8.1 - 2026-10-11
 
-- You can turn the optional usage report on straight from What's new.
+- **Optional usage report.** Hatchdoor can send its maintainer one small report a day of how your install is set up, and nothing about your notes, to decide which platforms to test and which parts of Hatchdoor people rely on. It is telemetry and stays off unless you turn it on. Settings shows the exact report under Usage report, and every field is listed in [[Usage report reference]]
+- The Docker and Podman images now describe themselves as a release in the usage report. The 2.8.0 images reported a development build from source.
 - An agent that installs Hatchdoor from the deploy page now always shows you the web token in its last message.
 
 ## v2.8.0 - 2026-10-10
