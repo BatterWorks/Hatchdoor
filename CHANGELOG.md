@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- An agent that installs Hatchdoor from the deploy page now always shows you the web token in its last message. In two test installs the agent ended by pointing to the `.env` file instead, which leaves a beginner without the password the browser asks for. The page's hand-over step now tells the agent to read the token and put it in that message. [#529]
+
+[#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
+
 ## v2.8.0 - 2026-10-10
 
 ### ⚠️ Breaking changes — action required on upgrade
