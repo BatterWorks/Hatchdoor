@@ -10,12 +10,12 @@ This page lists every field the report carries. **Settings** → **Usage report*
 
 ## Where you are asked
 
-Hatchdoor mentions the usage report in five places, once in each, and never reminds you afterwards. Wherever you meet it, the answer is the same: it is off until you turn it on.
+Hatchdoor asks about the usage report in five places. Four of them ask once. [[What's new]] asks twice, in 2.8.0 and again in 2.8.1, and never again after that: a later release mentions the report there only to say that a field was added to it. Wherever you meet it, the answer is the same: it is off until you turn it on.
 
 - **The setup checklist** of a new install has a switch for it, off, below the one for hearing about new releases.
 - **The README**, for people who install by hand, names the setting under Configuration. It is left out of `.env.example`, the settings file you copy, so that file never suggests an answer.
 - **An agent that installs Hatchdoor for you** asks about it with its other questions, following [[How to deploy Hatchdoor with an agent]]. It turns the report on only if you say yes.
-- **[[What's new]]** says so in the release that added it, for people who upgrade.
+- **[[What's new]]** says so in 2.8.0, the release that added it, for people who upgrade. 2.8.1 says it a second time, and in the pop-up you see after upgrading that line carries the switch itself, off unless you had already turned the report on. The pop-up shows only the switch: the exact report is in Settings, under Usage report.
 - **Your agent, once.** On an install that was upgraded to this release, the first agent to connect over MCP afterwards is told that the report exists, and asked to tell you. That is why an agent may bring it up unprompted. It is told one time only, whatever it does with it, and it cannot turn the report on: no MCP tool reads or changes this setting. An install where the report is already on, or set in `.env`, tells its agents nothing.
 
 ## What it is used for
