@@ -343,6 +343,32 @@ mod tests {
         }
     }
 
+    /// The pop-up puts the usage report switch on the 2.8.1 line that links
+    /// to the Usage report page (ADR-48), and on nothing else. A 2.8.1
+    /// section written without that line would ship the release with no
+    /// switch and no error, so it fails here. Nothing to check until
+    /// `just release-prepare 2.8.1` writes the section.
+    #[test]
+    fn the_2_8_1_section_carries_the_usage_report_line() {
+        let page = crate::docs_bundle::page(PAGE).expect("the manual has a What's new page");
+        let releases = parse_releases(&page.markdown).expect("the page parses");
+        let Some(release) = releases.iter().find(|release| release.version == "2.8.1") else {
+            return;
+        };
+        assert!(
+            release.highlights.iter().any(|highlight| {
+                !highlight.action_needed
+                    && highlight
+                        .link
+                        .as_ref()
+                        .is_some_and(|link| link.page == "reference/usage-report-reference")
+            }),
+            "the v2.8.1 section of docs/user-vault/What's new.md needs one line that is not \
+             action-needed and ends with [[Usage report reference]]: the pop-up shows the \
+             usage report switch on that line (ADR-48)"
+        );
+    }
+
     #[test]
     fn a_page_parses_into_releases_newest_first() {
         let releases = parse_releases(PAGE_FIXTURE).expect("parses");

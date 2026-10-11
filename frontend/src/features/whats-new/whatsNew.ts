@@ -3,6 +3,8 @@
 
 import { apiFetch } from "../../api/api";
 import { safeSetItem } from "../../lib/storage";
+import { CONTEXTUAL_HELP } from "../help";
+import { patchSettings } from "../settings";
 
 /** The last version this browser showed What's new for, as a base version. */
 export const SEEN_VERSION_KEY = "hatchdoor_whats_new_seen";
@@ -113,5 +115,93 @@ export async function fetchWhatsNew(
     return (await response.json()) as WhatsNewResponse;
   } catch {
     return null;
+  }
+}
+
+/** The one release whose usage report line carries the switch (ADR-48). No
+ * other release's line does, however it is worded. */
+const USAGE_REPORT_SWITCH_VERSION = "2.8.1";
+const USAGE_REPORT_SETTING = "HATCHDOOR_USAGE_REPORT_ENABLED";
+
+/** Whether `highlight`, in the release `version`, is the line the usage
+ * report switch sits on: the one that links to the report's manual page. */
+export function carriesUsageReportSwitch(
+  version: string,
+  highlight: Highlight,
+): boolean {
+  return (
+    version === USAGE_REPORT_SWITCH_VERSION &&
+    !highlight.action_needed &&
+    highlight.link?.page === CONTEXTUAL_HELP.usageReport.page
+  );
+}
+
+/** The usage report setting as Settings reports it. `locked` is a value held
+ * by the server's configuration file, which the switch then only reports. */
+export type UsageReportSetting = { on: boolean; locked: boolean };
+
+type SettingsPayload = {
+  /** `locked` names what holds the value, such as `environment`. */
+  settings?: { key: string; value?: string | null; locked?: string | null }[];
+  error?: string;
+  fields?: { message: string }[];
+};
+
+function usageReportSetting(
+  payload: SettingsPayload,
+): UsageReportSetting | null {
+  const setting = payload.settings?.find(
+    (item) => item.key === USAGE_REPORT_SETTING,
+  );
+  if (!setting) {
+    return null;
+  }
+  // The server's own truthy spellings, since a value from the configuration
+  // file arrives as written there.
+  const on = ["1", "true", "yes", "on"].includes(
+    (setting.value ?? "").trim().toLowerCase(),
+  );
+  return { on, locked: Boolean(setting.locked) };
+}
+
+/** The setting as it stands, or `null` when it could not be read. */
+export async function fetchUsageReportSetting(
+  signal?: AbortSignal,
+): Promise<UsageReportSetting | null> {
+  try {
+    const response = await apiFetch("/api/settings", { signal });
+    if (!response.ok) {
+      return null;
+    }
+    return usageReportSetting((await response.json()) as SettingsPayload);
+  } catch {
+    return null;
+  }
+}
+
+export type UsageReportSaved =
+  { ok: true; setting: UsageReportSetting } | { ok: false; message: string };
+
+/** Turn the usage report on or off. Changes that setting and no other, with
+ * the request Settings itself sends. */
+export async function saveUsageReport(on: boolean): Promise<UsageReportSaved> {
+  try {
+    const response = await patchSettings({
+      [USAGE_REPORT_SETTING]: on ? "true" : "false",
+    });
+    const payload = (await response.json()) as SettingsPayload;
+    if (!response.ok) {
+      const message =
+        payload.fields?.map((field) => field.message).join(" ") ||
+        payload.error ||
+        "Nothing was saved.";
+      return { ok: false, message };
+    }
+    const setting = usageReportSetting(payload);
+    return setting
+      ? { ok: true, setting }
+      : { ok: false, message: "Nothing was saved." };
+  } catch {
+    return { ok: false, message: "The setting could not be saved. Try again." };
   }
 }

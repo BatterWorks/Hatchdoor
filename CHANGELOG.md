@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+### Added
+- You can turn the optional usage report on straight from What's new. The pop-up you see after upgrading to 2.8.1 mentions the report a second time, and this time the line carries the switch itself, so saying yes takes one click and no trip to Settings. The switch is off unless you had already turned the report on, nothing changes until you click it, and a value set in `.env` shows as locked. The exact report is still shown in Settings under Usage report, and the line says so. This is the one release that repeats the question: 2.8.0 said What's new would mention the report once, so the manual's Usage report page now says what happens instead, and no later release asks again. Help and agents read the same line without a switch. ADR-48 records the change. [#563]
+
 ### Fixed
 - An agent that installs Hatchdoor from the deploy page now always shows you the web token in its last message. In two test installs the agent ended by pointing to the `.env` file instead, which leaves a beginner without the password the browser asks for. The page's hand-over step now tells the agent to read the token and put it in that message. [#529]
 
 [#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
+[#563]: https://github.com/BatterWorks/Hatchdoor/issues/563
 
 ## v2.8.0 - 2026-10-10
 
