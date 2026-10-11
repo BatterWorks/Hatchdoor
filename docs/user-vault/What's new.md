@@ -9,6 +9,11 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.8.1 - 2026-10-11
+
+- You can turn the optional usage report on straight from What's new.
+- An agent that installs Hatchdoor from the deploy page now always shows you the web token in its last message.
+
 ## v2.8.0 - 2026-10-10
 
 - **Action needed:** An install on 2.4.x or earlier must upgrade to a 2.5.0 to 2.7.x release first, and only then to 2.8.0. [[How to upgrade Hatchdoor#Coming from 2.4.x or earlier]]
