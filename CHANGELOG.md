@@ -1,15 +1,17 @@
 # Changelog
 
-## Unreleased
+## v2.8.1 - 2026-10-11
 
 ### Added
 - You can turn the optional usage report on straight from What's new. The pop-up you see after upgrading to 2.8.1 mentions the report a second time, and this time the line carries the switch itself, so saying yes takes one click and no trip to Settings. The switch is off unless you had already turned the report on, nothing changes until you click it, and a value set in `.env` shows as locked. The exact report is still shown in Settings under Usage report, and the line says so. This is the one release that repeats the question: 2.8.0 said What's new would mention the report once, so the manual's Usage report page now says what happens instead, and no later release asks again. Help and agents read the same line without a switch. ADR-48 records the change. [#563]
 
 ### Fixed
 - An agent that installs Hatchdoor from the deploy page now always shows you the web token in its last message. In two test installs the agent ended by pointing to the `.env` file instead, which leaves a beginner without the password the browser asks for. The page's hand-over step now tells the agent to read the token and put it in that message. [#529]
+- The Docker and Podman images now describe themselves as a release in the usage report. The 2.8.0 images reported `channel: dev` and `image: source`, the values of a copy built from source, because the release build passed the Dockerfile neither `VERSION` nor `HATCHDOOR_IMAGE`. The 2.8.1 images report `stable` and `docker` or `podman`. Only installs that turned the usage report on sent the wrong values, and nothing else in the image differs. A published version is never rebuilt, so 2.8.0 stays as it is: upgrade to 2.8.1 for the correct report. [#565]
 
 [#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
 [#563]: https://github.com/BatterWorks/Hatchdoor/issues/563
+[#565]: https://github.com/BatterWorks/Hatchdoor/issues/565
 
 ## v2.8.0 - 2026-10-10
 
