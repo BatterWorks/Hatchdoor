@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- An agent that installs Hatchdoor from the deploy page now reads the whole page before it starts. The page is about 35 KB, and in a test install from its public address the agent printed only the first 30,000 bytes, never came back for the rest and so missed the last step, which tells it to show you the web token. A web-fetch tool can also return a summary with no commands in it. The page now opens its agent part by telling the agent to save the page to a file with `curl` and read that file to the end. [#529]
+
+[#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
+
 ## v2.8.1 - 2026-10-11
 
 ### Added
