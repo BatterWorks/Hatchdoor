@@ -44,6 +44,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use crate::git::WriteOrigin;
 use crate::handlers::vault_content::vault_read_error_response;
 use crate::handlers::vaults::{VaultApiError, parse_vault_id};
 use crate::vault::{AttachmentInfo, AttachmentOutcome};
@@ -284,7 +285,7 @@ pub async fn vault_scoped_create_note_handler(
         Err(error) => return respond(error),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .create_note(vault_id, &relative_path, &payload.content, false)
         .await
     {
@@ -308,7 +309,7 @@ pub async fn vault_scoped_update_note_handler(
         Err(error) => return respond(error),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .update_note(
             vault_id,
             &slug,
@@ -355,7 +356,7 @@ pub async fn vault_scoped_rename_note_handler(
         ));
     }
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .rename_note(vault_id, &slug, &new_title, &payload.expected_content_hash)
         .await
     {
@@ -379,7 +380,7 @@ pub async fn vault_scoped_move_note_handler(
         Err(error) => return respond(error),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .move_note(
             vault_id,
             &slug,
@@ -416,7 +417,7 @@ pub async fn vault_scoped_move_rename_note_handler(
         Err(error) => return respond(error),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .move_rename_note(
             vault_id,
             &slug,
@@ -445,7 +446,7 @@ pub async fn vault_scoped_archive_note_handler(
         Err(error) => return respond(error),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .archive_note(vault_id, &slug, &payload.expected_content_hash)
         .await
     {
@@ -469,7 +470,7 @@ pub async fn vault_scoped_delete_note_handler(
         Err(error) => return respond(error),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .delete_note(vault_id, &slug, &payload.expected_content_hash)
         .await
     {
@@ -527,7 +528,7 @@ pub async fn vault_scoped_upload_attachment_handler(
         _ => return respond(invalid_input_error(vault_id, "file")),
     };
 
-    match VaultMutationCore::from_state(&state)
+    match VaultMutationCore::from_state(&state, WriteOrigin::web())
         .import_attachment(
             vault_id,
             &target_relative_path,
@@ -676,7 +677,9 @@ pub async fn vault_scoped_write_capabilities_handler(
         Ok(vault_id) => vault_id,
         Err(error) => return respond(bad_request_error(error)),
     };
-    let capabilities = match VaultMutationCore::from_state(&state).write_capabilities(vault_id) {
+    let capabilities = match VaultMutationCore::from_state(&state, WriteOrigin::web())
+        .write_capabilities(vault_id)
+    {
         Ok(capabilities) => capabilities,
         Err(error) => return mutation_error_response(error),
     };

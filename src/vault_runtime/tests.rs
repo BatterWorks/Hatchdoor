@@ -598,6 +598,7 @@ fn editing_a_non_identity_field_carries_the_vaults_pending_write_records_across(
             target: "Home".to_string(),
             affected_paths: vec![std::path::PathBuf::from("/v/Home.md")],
             summary: Some("written before the edit".to_string()),
+            origin: crate::git::WriteOrigin::web(),
         });
 
     let edited = registry
@@ -3325,6 +3326,7 @@ async fn a_write_to_a_vault_without_a_watcher_marks_its_snapshot_stale_and_asks_
         &cache,
         &collection,
         crate::runtime_config::RuntimeConfig::for_tests().snapshot(),
+        crate::git::WriteOrigin::web(),
     )
     .create_note(vault_id, "New.md", "# New\n", false)
     .await
@@ -3381,6 +3383,7 @@ async fn a_refused_write_neither_stales_the_snapshot_nor_asks_for_turns() {
         &cache,
         &collection,
         crate::runtime_config::RuntimeConfig::for_tests().snapshot(),
+        crate::git::WriteOrigin::web(),
     )
     .create_note(vault_id, "Home.md", "# Clobber\n", false)
     .await
@@ -3535,6 +3538,7 @@ async fn every_hatchdoor_write_shows_on_the_next_links_read() {
         &cache,
         &collection,
         crate::runtime_config::RuntimeConfig::for_tests().snapshot(),
+        crate::git::WriteOrigin::web(),
     );
     let hash_of = |slug: &str| {
         crate::vault_read::VaultReadCore::new(&cache, &collection)
