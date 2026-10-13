@@ -135,6 +135,10 @@ _Avoid_: Exact search, keyword search, grep, literal query
 A short-lived address, handed to an agent by an authenticated call, that lets whoever holds it download one attachment or upload one file to one named location, without the agent's own token. It is narrower than the token that produced it: one file, one direction, a few minutes.
 _Avoid_: Presigned URL, signed URL, download URL (when meant as the credentialed link)
 
+**Origin**:
+Where a write came into a vault from, recorded with the change when the vault is Git-backed. It has four values: `web` for a write made through the web interface, `mcp/<name>` for a write made by an agent that gave a name, `mcp` for a write made by an agent that gave none, and `unknown` for a change Hatchdoor has no record of making, such as an edit made directly in the vault's folder. An origin is a label, not proof: an agent chooses its own name.
+_Avoid_: Actor, author, identity (an origin cannot say who made a change). Not the web address a request arrived on, which is a request's origin and a different thing.
+
 **Link preview**:
 The title, short description and picture a chat app or search engine shows for a shared Hatchdoor address, read from tags in the page the server returns. Only a demo instance sends one. A note address previews that note's title and its description, which is the note's `description` property or else its opening words; every other address previews Hatchdoor itself. The picture is the same for every address.
 _Avoid_: Unfurl, social card, Open Graph (when meant as the preview itself)

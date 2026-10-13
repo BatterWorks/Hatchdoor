@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+### Added
+- A Git-backed Vault's history now says where each change came from. Every commit Hatchdoor names from its own writes ends with one `Hatchdoor-Origin:` line per origin: `web` for the web UI, `mcp/<name>` for an agent with the name its client gave, `mcp` for an agent that gave none, and `unknown` when the commit holds a file Hatchdoor has no record of writing, such as an edit made in Obsidian. An upload through an upload link counts as the write of the agent that asked for the link. The name is a label the client chooses, not proof of who wrote, and the client's version is not recorded. The first line of the message and its summary lines are unchanged, so anything that reads only those is unaffected; a script that compares the whole message will see the new lines. See "Where each change came from" in the Git-backed Vault guide. [#570]
+
 ### Fixed
 - The deploy page now tells an installing agent to read the whole page before it starts. The page is about 35 KB, and in a test install from its public address the agent printed only the first 30,000 bytes, never came back for the rest and so missed the last step, which tells it to show you the web token. A web-fetch tool can also return a summary with no commands in it. The agent part of the page now opens with that instruction: save the page to a file with `curl` and read the file to the end. [#529]
 
 [#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
+[#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
 
 ## v2.8.1 - 2026-10-11
 

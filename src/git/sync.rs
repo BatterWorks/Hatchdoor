@@ -164,7 +164,8 @@ pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
 /// lock, which leaves a narrow window between taking the batch and
 /// `commit_local` staging the working tree. A write landing inside it has its
 /// content committed by this turn while its summary waits for the next one,
-/// so that line arrives one commit late. Deliberately not closed by taking
+/// so that line arrives one commit late, and so does its origin: this commit
+/// reads the write's file as an `unknown` origin (ADR-49). Deliberately not closed by taking
 /// the mutation lock: this turn commits already-settled drift and must not
 /// park foreground writes behind itself (ADR-18). A late line is the cheaper
 /// cost, and it is why `WriteLedger::restore` puts a batch back ahead of
@@ -188,8 +189,11 @@ pub fn run_local_history_git_turn(
     };
     validate_local_repo(&config).map_err(classify_local_history_error)?;
     let committed = ledger
-        .commit_batch(|message| {
-            commit_local(&config, &[], message).map(|outcome| outcome.committed)
+        .commit_batch(|batch| {
+            commit_local(&config, &[], |changed| {
+                batch.message(&config.vault_path, changed)
+            })
+            .map(|outcome| outcome.committed)
         })
         .map_err(classify_local_history_error)?;
     Ok(if committed {
@@ -427,10 +431,14 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// `paths` (the current write batch) is retained for the commit message, but
 /// staging covers all detected Vault-subtree drift, not merely the batch — see
 /// `commit_working_tree`.
+///
+/// `message` names the commit once the Vault's drift is staged. It receives
+/// the staged paths, relative to the Vault root, so a message built from a
+/// write batch can tell which of them the batch accounts for (ADR-49).
 pub fn commit_local(
     config: &GitConfig,
     paths: &[PathBuf],
-    message: &str,
+    message: impl FnOnce(&[PathBuf]) -> String,
 ) -> Result<CommitOutcome, GitError> {
     let _ = paths;
     let repo = Repository::discover(&config.vault_path)?;
@@ -445,7 +453,7 @@ pub fn commit_local(
 fn commit_working_tree(
     repo: &Repository,
     config: &GitConfig,
-    message: &str,
+    message: impl FnOnce(&[PathBuf]) -> String,
 ) -> Result<bool, GitError> {
     reject_unfinished_operation(repo)?;
     let mut index = repo.index()?;
@@ -457,7 +465,7 @@ fn commit_working_tree(
     } else {
         index.clear()?;
     }
-    stage_vault_drift(repo, &mut index, &vault_relative)?;
+    let changed = stage_vault_drift(repo, &mut index, &vault_relative)?;
     let tree_oid = index.write_tree_to(repo)?;
     let tree = repo.find_tree(tree_oid)?;
 
@@ -466,10 +474,17 @@ fn commit_working_tree(
             return Ok(false); // nothing staged differs from HEAD
         }
         let sig = signature(config)?;
-        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            &message(&changed),
+            &tree,
+            &[&parent],
+        )?;
     } else {
         let sig = signature(config)?;
-        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
+        repo.commit(Some("HEAD"), &sig, &sig, &message(&changed), &tree, &[])?;
     }
     // `commit` advances HEAD but does not update the index. Refresh precisely
     // the Vault subtree when it had no existing staging. If an operator did
@@ -561,18 +576,20 @@ fn has_staged_vault_changes(repo: &Repository, vault_relative: &Path) -> Result<
 
 /// Add or remove exactly the changed, non-ignored paths reported by Git inside
 /// the configured Vault. Working from status entries rather than a pathspec
-/// keeps special characters in the Vault directory literal.
+/// keeps special characters in the Vault directory literal. Returns the paths
+/// it staged, relative to the Vault root.
 fn stage_vault_drift(
     repo: &Repository,
     index: &mut git2::Index,
     vault_relative: &Path,
-) -> Result<(), GitError> {
+) -> Result<Vec<PathBuf>, GitError> {
     let mut options = git2::StatusOptions::new();
     options
         .include_untracked(true)
         .recurse_untracked_dirs(true)
         .renames_head_to_index(false)
         .renames_index_to_workdir(false);
+    let mut staged = Vec::new();
     for entry in repo.statuses(Some(&mut options))?.iter() {
         let path = entry.path().map_err(|error| {
             GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
@@ -590,8 +607,14 @@ fn stage_vault_drift(
         } else {
             index.remove_path(relative_path)?;
         }
+        staged.push(
+            relative_path
+                .strip_prefix(vault_relative)
+                .unwrap_or(relative_path)
+                .to_path_buf(),
+        );
     }
-    Ok(())
+    Ok(staged)
 }
 
 #[cfg(test)]
@@ -727,7 +750,8 @@ mod tests {
             author_email: "test@example.invalid".to_string(),
         };
 
-        let outcome = commit_local(&config, &[], "local Vault history").expect("commit subtree");
+        let outcome = commit_local(&config, &[], |_| "local Vault history".to_string())
+            .expect("commit subtree");
         assert!(
             outcome.committed,
             "Local history must finish without consulting a remote"
@@ -792,7 +816,8 @@ mod tests {
             author_email: "test@example.invalid".to_string(),
         };
 
-        commit_local(&config, &[], "local Vault history").expect("commit working tree");
+        commit_local(&config, &[], |_| "local Vault history".to_string())
+            .expect("commit working tree");
 
         let head = repo.head().expect("head").peel_to_commit().expect("commit");
         let committed = head
@@ -833,12 +858,16 @@ mod tests {
         fs::write(vault_path.join("Idea.md"), "# idea\n").expect("drift note");
 
         let ledger = WriteLedger::new();
-        ledger.record(WriteRecord {
-            op: "create".to_string(),
-            target: "Idea".to_string(),
-            affected_paths: vec![vault_path.join("Idea.md")],
-            summary: Some("capture the idea".to_string()),
-        });
+        let record_idea = || {
+            ledger.record(WriteRecord {
+                op: "create".to_string(),
+                target: "Idea".to_string(),
+                affected_paths: vec![vault_path.join("Idea.md")],
+                summary: Some("capture the idea".to_string()),
+                origin: super::super::message::WriteOrigin::web(),
+            });
+        };
+        record_idea();
 
         let outcome = run_local_history_git_turn(
             vault_path.clone(),
@@ -852,9 +881,29 @@ mod tests {
         let head = repo.head().expect("head").peel_to_commit().expect("commit");
         assert_eq!(
             head.message().expect("commit message"),
-            "hatchdoor: create \"Idea\" (1 file)\n\n- capture the idea"
+            "hatchdoor: create \"Idea\" (1 file)\n\n- capture the idea\n\n\
+             Hatchdoor-Origin: web"
         );
         assert!(ledger.take().is_empty(), "a committed batch is consumed");
+
+        // ADR-49: a path the batch does not account for, here an edit made
+        // outside Hatchdoor, is an unknown origin beside the recorded one.
+        fs::write(vault_path.join("Idea.md"), "# idea\n\nmore\n").expect("recorded edit");
+        fs::write(vault_path.join("By hand.md"), "# by hand\n").expect("outside edit");
+        record_idea();
+        run_local_history_git_turn(
+            vault_path.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &ledger,
+        )
+        .expect("second local history turn succeeds");
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        assert_eq!(
+            head.message().expect("commit message"),
+            "hatchdoor: create \"Idea\" (1 file)\n\n- capture the idea\n\n\
+             Hatchdoor-Origin: web\nHatchdoor-Origin: unknown"
+        );
     }
 
     #[test]
@@ -872,6 +921,7 @@ mod tests {
             target: "Idea".to_string(),
             affected_paths: vec![vault_path.join("Idea.md")],
             summary: Some("already committed by someone else".to_string()),
+            origin: super::super::message::WriteOrigin::web(),
         });
 
         let outcome = run_local_history_git_turn(
@@ -1133,8 +1183,10 @@ mod tests {
             .expect("initialize local history");
         std::fs::write(vault.join("Home.md"), "# Home\n").unwrap();
 
-        let outcome = commit_local(&config, &[vault.join("Home.md")], "hatchdoor: local Home")
-            .expect("commit locally");
+        let outcome = commit_local(&config, &[vault.join("Home.md")], |_| {
+            "hatchdoor: local Home".to_string()
+        })
+        .expect("commit locally");
         assert!(outcome.committed);
         assert!(vault.join(".git").exists());
         assert_eq!(
@@ -1197,7 +1249,7 @@ mod tests {
 
         // A first turn, so the batch below has a parent commit to hang from.
         std::fs::write(vault.join("Home.md"), "# Home\n").unwrap();
-        commit_local(&config, &[], "hatchdoor: seed").expect("seed commit");
+        commit_local(&config, &[], |_| "hatchdoor: seed".to_string()).expect("seed commit");
         let before = Repository::open(&vault)
             .unwrap()
             .head()
@@ -1216,7 +1268,8 @@ mod tests {
             std::fs::write(vault.join(path), contents).unwrap();
         }
 
-        let outcome = commit_local(&config, &[], "hatchdoor: batch").expect("commit the batch");
+        let outcome = commit_local(&config, &[], |_| "hatchdoor: batch".to_string())
+            .expect("commit the batch");
         assert!(outcome.committed);
 
         let repo = Repository::open(&vault).unwrap();
