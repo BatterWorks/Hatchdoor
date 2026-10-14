@@ -14,7 +14,7 @@ Raw HTML is not supported, apart from comments. Use Markdown syntax so a note re
 
 ## Comments
 
-Text between two `%%` marks is a comment, as in Obsidian, and so is an HTML comment, `<!-- like this -->`. Either can sit inside a line or run across several. The rendered page, the editor's preview and the snippets in search results leave comments out, along with any heading inside one, which also stays out of the table of contents. A comment that is never closed hides everything after it. The live editor shows comments, so you can edit them. Inside code and math, `%%` and `<!--` are shown as written.
+Text between two `%%` marks is a comment, as in Obsidian, and so is an HTML comment, `<!-- like this -->`. Either can sit inside a line or run across several. The rendered page, the editor's preview, Help and the snippets in search results leave comments out, along with any heading inside one, which also stays out of the table of contents. A comment that is never closed hides everything after it. The live editor shows comments, so you can edit them. Inside code and math, `%%` and `<!--` are shown as written.
 
 Hiding a comment only changes what the page draws. The text is still in the file, search still finds the note by it, and an agent or an API call that reads the note gets the comment with the rest. Don't keep anything in a comment that people who can read the note must not see.
 
