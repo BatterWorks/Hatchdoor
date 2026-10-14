@@ -11,14 +11,12 @@ Agents read this page with `read_docs` and the page name `whats-new`.
 
 ## v2.8.2 - 2026-10-14
 
-- The deploy page now tells an installing agent to read the whole page before it starts.
-- Transfer links no longer reach the logs under any `RUST_LOG` setting.
-- Changing the MCP token now strands every transfer link.
-- A transfer link for a path spelled with `./`, such as `./Media/a shot.png`, now works.
-- What's new now shows every release since your browser last opened Hatchdoor.
-- Settings now shows an on/off setting as On whenever Hatchdoor treats it as on.
-- The note page no longer shows a note's comments.
-- Help hides comments too.
+- The note page and Help no longer show a note's comments, the text between `%%` marks or inside `<!-- -->`, so visitors to a read-only or demo Vault never see them. [[Supported Markdown reference#Comments]]
+- An embedded note, `![[Other note]]`, now shows as a link to that note instead of a broken image.
+- What's new now shows every release you missed while away from Hatchdoor, not only the newest one.
+- Settings now shows an on/off setting as On whenever it is on, including one set in `.env` as `1`, `yes` or `on`.
+- Attachment download and upload links now work for a path that starts with `./`, stop working as soon as you change the MCP token, and never appear in the logs.
+- An agent installing Hatchdoor from the deploy page now reads the whole page, so it no longer misses the last step that shows you the web token.
 
 ## v2.8.1 - 2026-10-11
 
