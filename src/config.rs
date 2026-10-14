@@ -6,6 +6,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{FilterExt, LevelFilter, filter_fn};
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::vault_runtime::VaultSource;
 
@@ -242,40 +246,44 @@ pub fn parse_exclude_patterns(raw: &str) -> Vec<String> {
 }
 
 pub fn init_logging() {
-    let filter =
-        capped_log_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn")
-        }));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn"));
+    log_subscriber(filter, std::io::stdout).init();
+}
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .init();
+/// The process's log output under `filter`, written to `writer`, with the
+/// MCP library capped by `within_mcp_library_cap`. `init_logging` and the
+/// cap's test both build it here, so the test checks what ships.
+fn log_subscriber<W>(filter: EnvFilter, writer: W) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
+    // The cap only ever drops events, so the `EnvFilter`'s level hint still
+    // holds for both. Without it the pair reports none, and every disabled
+    // `debug!` and `trace!` call site is checked instead of skipped.
+    let max_level = filter.max_level_hint().unwrap_or(LevelFilter::TRACE);
+    let cap = filter_fn(within_mcp_library_cap).with_max_level_hint(max_level);
+    tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .compact()
+            .with_writer(writer)
+            .with_filter(filter.and(cap)),
+    )
 }
 
 /// The MCP library logs every message it sends, tool results included, at
 /// debug and trace. A tool result can carry a transfer link (ADR-27), whose
-/// credential must never reach a log, so the library is held at info whatever
-/// `RUST_LOG` asks for. A directive for a more specific target wins in an
-/// `EnvFilter`, so the two modules that log messages are capped by name as
-/// well as the crate. Its info-level lines carry no messages.
-const MESSAGE_LOGGING_TARGETS: &[&str] = &[
-    "rmcp",
-    "rmcp::service",
-    "rmcp::transport::streamable_http_server",
-];
-
-fn capped_log_filter(filter: EnvFilter) -> EnvFilter {
-    MESSAGE_LOGGING_TARGETS
-        .iter()
-        .fold(filter, |filter, target| {
-            filter.add_directive(
-                format!("{target}=info")
-                    .parse()
-                    .expect("a static log directive parses"),
-            )
-        })
+/// credential must never reach a log, so nothing the library logs below info
+/// is let through, whatever `RUST_LOG` asks for. The cap sits beside the
+/// `EnvFilter` rather than inside it: a directive for a more specific target
+/// wins in an `EnvFilter`, so a cap written as directives can be outranked by
+/// one naming a deeper module (#587). The library's info-level lines carry no
+/// messages.
+fn within_mcp_library_cap(metadata: &tracing::Metadata<'_>) -> bool {
+    let target = metadata.target();
+    let from_mcp_library = target == "rmcp" || target.starts_with("rmcp::");
+    !from_mcp_library || *metadata.level() <= tracing::Level::INFO
 }
 
 /// Captures log lines the way `init_logging` formats them (compact, without
@@ -419,18 +427,49 @@ mod tests {
         assert_eq!(build_channel(), "dev");
     }
 
+    /// A tool result can carry a transfer link, so no MCP library line below
+    /// info reaches the output, whichever library module `RUST_LOG` names
+    /// (#587). Everything else still follows `RUST_LOG`.
     #[test]
-    fn message_logging_stays_at_info_even_under_a_trace_filter() {
-        let filter = capped_log_filter(EnvFilter::new(
-            "trace,rmcp=trace,rmcp::service=trace,rmcp::transport::streamable_http_server=debug",
-        ))
-        .to_string();
-        for target in MESSAGE_LOGGING_TARGETS {
-            assert!(filter.contains(&format!("{target}=info")), "{filter}");
-            for noisy in ["trace", "debug"] {
-                assert!(!filter.contains(&format!("{target}={noisy}")), "{filter}");
-            }
-        }
+    fn the_mcp_library_logs_nothing_below_info_whatever_rust_log_names() {
+        let logs = log_capture::CapturedLogs::default();
+        let filter = EnvFilter::new(
+            "trace,rmcp=trace,rmcp::service=trace,rmcp::transport::streamable_http_server::tower=trace",
+        );
+        let sink = logs.clone();
+        let dispatch = tracing::Dispatch::new(log_subscriber(filter, move || sink.clone()));
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::trace!(
+                target: "rmcp::transport::streamable_http_server::tower",
+                "tower trace credential"
+            );
+            tracing::debug!(
+                target: "rmcp::transport::streamable_http_server::tower",
+                "tower debug credential"
+            );
+            tracing::trace!(target: "rmcp::service", "service trace credential");
+            tracing::debug!(target: "rmcp::service", "service debug credential");
+            tracing::trace!(target: "rmcp::some::later::module", "later trace credential");
+            tracing::info!(
+                target: "rmcp::transport::streamable_http_server::tower",
+                "library info line"
+            );
+            tracing::trace!(target: "hatchdoor::anything", "own trace line");
+        });
+
+        let lines = logs.lines();
+        assert!(
+            !lines.iter().any(|line| line.contains("credential")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("library info line")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("own trace line")),
+            "{lines:?}"
+        );
     }
 
     #[test]
