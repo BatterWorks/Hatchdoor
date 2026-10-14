@@ -3356,6 +3356,59 @@ mod tests {
         assert!(bytes.as_ref() == manual.as_slice(), "byte for byte");
     }
 
+    /// A `./` spelling the tools accept mints links with no `.` segment, which
+    /// a client such as curl would remove before sending (#586), and an upload
+    /// form that repeats the original spelling still names the link's target.
+    #[tokio::test]
+    async fn a_dot_slash_path_mints_links_a_client_can_redeem() {
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Dotted", 0).await;
+        std::fs::create_dir_all(vault_root.join("Media")).expect("dir");
+        std::fs::write(vault_root.join("Media/a shot.png"), b"png bytes").expect("png");
+
+        let answer = mcp_tool_call(
+            &app,
+            "mcp-secret",
+            "get_attachment",
+            serde_json::json!({"vault_id": vault_id, "relative_path": "./Media/a shot.png"}),
+        )
+        .await;
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .unwrap_or_else(|| panic!("download_url in {answer:#}"));
+        assert!(
+            url.contains("/transfers/Media/a%20shot.png?"),
+            "no dot segment: {url}"
+        );
+        let response = fetch_link(&app, link_target(url)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), b"png bytes");
+
+        let answer = mint_upload_link(&app, &vault_id, "./Inbox/scan.pdf", false, None).await;
+        let url = minted_url(&answer);
+        assert!(
+            url.contains("/transfers/Inbox/scan.pdf?"),
+            "no dot segment: {url}"
+        );
+        let uploaded = app
+            .clone()
+            .oneshot(upload_link_request(url, Some("./Inbox/scan.pdf"), b"pdf"))
+            .await
+            .expect("response");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(vault_root.join("Inbox/scan.pdf")).expect("written"),
+            b"pdf"
+        );
+    }
+
     /// Behind a TLS-terminating proxy the link carries the scheme and host the
     /// proxy reports (ADR-34), and it still redeems: the signature covers the
     /// path and query, not the origin, so the test sends it back to the router
