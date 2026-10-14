@@ -1342,8 +1342,10 @@ mod tests {
         assert!(carries_the_notice(&initialize_result(&state).await));
     }
 
+    /// Checks the advertised definitions only. A generic settings tool, or one
+    /// returning the setting under another name, would pass (#581).
     #[tokio::test]
-    async fn no_tool_reads_or_changes_the_usage_report_setting() {
+    async fn no_tool_definition_mentions_the_usage_report() {
         let (state, _tmp) = write_state();
         let body = tools_list_result(&state).await;
         let tools = body["result"]["tools"].as_array().expect("tools array");

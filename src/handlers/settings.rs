@@ -430,9 +430,16 @@ fn settings_response(
                 None
             };
             let secret = kind == "secret";
+            // A switch reaches the page as the value the server acts on, so
+            // `1`, `yes` or `on` pinned by `.env` reads as On (#581).
+            let value = if kind == "switch" {
+                crate::runtime_config::is_truthy(&setting.value).to_string()
+            } else {
+                setting.value.clone()
+            };
             Some(SettingResponse {
                 key,
-                value: (!secret).then(|| setting.value.clone()),
+                value: (!secret).then_some(value),
                 configured: secret.then(|| !setting.value.trim().is_empty()),
                 source: match setting.source {
                     SettingSource::Environment => "environment",
@@ -860,6 +867,78 @@ mod tests {
             .unwrap();
         assert_eq!(token.value, None);
         assert_eq!(token.configured, Some(true));
+    }
+
+    /// Settings shows a switch as On only for the exact text `"true"`, so a
+    /// switch pinned by `.env` as `1`, `yes` or `on` must reach it as the
+    /// value the server acts on, not the raw text (#581).
+    #[test]
+    fn every_switch_reports_the_value_the_server_acts_on() {
+        let switches: Vec<&str> = SETTINGS
+            .iter()
+            .filter(|(_, _, kind)| *kind == "switch")
+            .map(|(key, _, _)| *key)
+            .collect();
+        assert!(switches.contains(&"HATCHDOOR_USAGE_REPORT_ENABLED"));
+        let cases = [
+            ("1", "true"),
+            ("yes", "true"),
+            ("on", "true"),
+            ("TRUE", "true"),
+            (" true ", "true"),
+            ("0", "false"),
+            ("no", "false"),
+            ("off", "false"),
+        ];
+        for (raw, expected) in cases {
+            let directory = tempdir().expect("test settings directory");
+            let mut environment: Vec<(String, String)> = switches
+                .iter()
+                .map(|key| (key.to_string(), raw.to_string()))
+                .collect();
+            environment.push(("HATCHDOOR_ARCHIVE_PREFIX".into(), "env-archive/".into()));
+            environment.push(("HATCHDOOR_MAX_ATTACHMENT_BYTES".into(), "2048".into()));
+            environment.push(("HATCHDOOR_MCP_BEARER_TOKEN".into(), "secret".into()));
+            let snapshot = RuntimeConfig::load(
+                directory.path().join("settings.json"),
+                Environment::from_values(environment),
+                live_settings_defaults(),
+            )
+            .expect("runtime config")
+            .snapshot();
+            let response = settings_response(
+                &snapshot,
+                false,
+                None,
+                Default::default(),
+                Default::default(),
+            );
+            let value = |key: &str| {
+                response
+                    .settings
+                    .iter()
+                    .find(|setting| setting.key == key)
+                    .unwrap_or_else(|| panic!("{key} present"))
+                    .value
+                    .clone()
+            };
+            for key in &switches {
+                assert_eq!(
+                    value(key).as_deref(),
+                    Some(expected),
+                    "{key} pinned as {raw:?}"
+                );
+            }
+            assert_eq!(
+                value("HATCHDOOR_ARCHIVE_PREFIX").as_deref(),
+                Some("env-archive/")
+            );
+            assert_eq!(
+                value("HATCHDOOR_MAX_ATTACHMENT_BYTES").as_deref(),
+                Some("2048")
+            );
+            assert_eq!(value("HATCHDOOR_MCP_BEARER_TOKEN"), None);
+        }
     }
 
     #[test]
