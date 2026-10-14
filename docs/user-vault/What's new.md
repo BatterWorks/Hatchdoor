@@ -12,7 +12,7 @@ Agents read this page with `read_docs` and the page name `whats-new`.
 ## v2.8.2 - 2026-10-14
 
 - The note page and Help no longer show a note's comments, the text between `%%` marks or inside `<!-- -->`, so visitors to a read-only or demo Vault never see them. [[Supported Markdown reference#Comments]]
-- An embedded note, `![[Other note]]`, now shows as a link to that note instead of a broken image.
+- A note embedded in another note now shows as a link to it instead of a broken image.
 - What's new now shows every release you missed while away from Hatchdoor, not only the newest one.
 - Settings now shows an on/off setting as On whenever it is on, including one set in `.env` as `1`, `yes` or `on`.
 - Attachment download and upload links now work for a path that starts with `./`, stop working as soon as you change the MCP token, and never appear in the logs.
