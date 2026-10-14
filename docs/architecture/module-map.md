@@ -1212,9 +1212,11 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Public contract:** `TransferLinks` (one instance in `AppState`), with `key`,
 `mint_download`, `mint_upload`, `mint_note_replace`, `verify_download`,
 `redeem_upload`, and `redeem_note_upload`; `SigningKey`, `MintedLink`, `Grant`,
-`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`, and
-`SIGNATURE_PARAM`. A link is an absolute URL on the Vault-scoped
-`/transfers/{*path}` route whose query carries `expires`, for uploads
+`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`,
+`SIGNATURE_PARAM`, and `link_path`. A link is an absolute URL on the
+Vault-scoped `/transfers/{*path}` route, its path spelled by `link_path`
+(trimmed, `.` and empty segments dropped, because a client removes `.`
+segments before sending; #586), whose query carries `expires`, for uploads
 `overwrite` and `nonce`, for a link that replaces a note
 `expected_content_hash`, and a BLAKE3 keyed-hash `signature` over the Vault ID,
 the relative path, the expiry, and the grant. A replacing note link is its own
@@ -1229,7 +1231,8 @@ admitted on a token that has since rotated mints links the new token will not
 accept. See ADR-27 and ADR-32.
 
 **Consumers:** the MCP `get_attachment` and `create_upload_link` tools mint;
-`src/handlers/transfer.rs` verifies and redeems; `src/auth.rs` redacts
+`src/handlers/transfer.rs` verifies and redeems, and compares an upload
+form's named target through `link_path`; `src/auth.rs` redacts
 `SIGNATURE_PARAM` from the request trace span.
 
 **Consumed dependencies:** `RuntimeConfig::value_revision` for the MCP token's
@@ -3166,7 +3169,9 @@ same paths. What `assets.rs` keeps is this route's own wire shaping.
 `vault_scoped_asset_handler` with the `McpAssetRead` ceiling after spending the
 transport's tool budget, and `POST` uploads through the mutation core's
 `import_attachment` with the upload route's own multipart form, read by the
-shared `vault_write::read_upload_form`. A `.md` target
+shared `vault_write::read_upload_form`; the form's optional
+`target_relative_path` must equal the link's path once spelled by
+`transfer_link::link_path`. A `.md` target
 (`is_note_upload_target`) is redeemed with `redeem_note_upload` and written
 through the core's `upload_note` instead, answering the note-write shape
 (`vault_write::note_write_response`); the part's declared content type is

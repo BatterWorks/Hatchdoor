@@ -328,6 +328,20 @@ fn fresh_nonce() -> [u8; NONCE_BYTES] {
     nonce
 }
 
+/// The spelling of `relative_path` a link signs and carries: trimmed, with
+/// `.` and empty segments dropped. The Vault reads and writes ignore them
+/// too, but a client removes `.` segments before sending (RFC 3986 5.2.4), so
+/// a link that kept one would be redeemed at a path it was not signed for.
+/// `..` is left alone: the tools refuse it before any link is minted.
+pub fn link_path(relative_path: &str) -> String {
+    relative_path
+        .trim()
+        .split('/')
+        .filter(|segment| !matches!(*segment, "" | "."))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn mint(
     key: &SigningKey,
     base: &str,
@@ -336,6 +350,7 @@ fn mint(
     grant: Grant,
     issued_at: u64,
 ) -> MintedLink {
+    let relative_path = &link_path(relative_path);
     let expires_at = issued_at + LINK_LIFETIME.as_secs();
     let signature = sign(key, vault_id, relative_path, &grant, expires_at);
     let mut query = format!("expires={expires_at}");
@@ -583,6 +598,45 @@ mod tests {
         assert!(
             (before + lifetime..=now() + lifetime).contains(&link.expires_at),
             "a link lives five minutes"
+        );
+    }
+
+    /// curl and browsers remove `.` segments before sending (RFC 3986 5.2.4),
+    /// so a link must not carry one: the request would name a path the
+    /// signature was not made over (#586).
+    #[test]
+    fn a_link_drops_dot_and_empty_segments_so_a_client_requests_the_signed_path() {
+        let config = RuntimeConfig::for_tests();
+        let links = TransferLinks::new();
+        let key = links.key(&config, TOKEN);
+        let route = format!("{BASE}/api/v1/vaults/{}/transfers/", vault());
+
+        for spelling in [
+            "./Media/a shot.png",
+            "Media/./a shot.png",
+            "Media//a shot.png",
+        ] {
+            let link = links.mint_download(&key, BASE, vault(), spelling);
+            assert_eq!(path_of(&link), format!("{route}Media/a%20shot.png"));
+            assert_eq!(
+                links.verify_download(&key, vault(), "Media/a shot.png", Some(&query_of(&link))),
+                Ok(())
+            );
+        }
+
+        let upload = links.mint_upload(&key, BASE, vault(), "./in/scan.png", false);
+        assert_eq!(path_of(&upload), format!("{route}in/scan.png"));
+        assert_eq!(
+            links.redeem_upload(&key, vault(), "in/scan.png", Some(&query_of(&upload))),
+            Ok(false)
+        );
+
+        let replace = links.mint_note_replace(&key, BASE, vault(), "./Notes/a.md", "abc123");
+        assert_eq!(path_of(&replace), format!("{route}Notes/a.md"));
+        assert!(
+            links
+                .redeem_note_upload(&key, vault(), "Notes/a.md", Some(&query_of(&replace)))
+                .is_ok()
         );
     }
 
