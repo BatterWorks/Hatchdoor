@@ -730,6 +730,34 @@ At last, prose.
         assert_eq!(prose(content), Some("At last, prose.".to_string()));
     }
 
+    /// The page hides comments by the same rule (`hideComments` in
+    /// `frontend/src/lib/noteComments.ts`), tested against the same cases, so
+    /// the preview card and the note never disagree about what is a comment.
+    #[test]
+    fn strip_comments_agrees_with_the_page() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../frontend/src/lib/noteComments.cases.json"
+        ))
+        .unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let mut comment = Comment::None;
+            let stripped = case["input"]
+                .as_str()
+                .unwrap()
+                .split('\n')
+                .map(|line| strip_comments(line, &mut comment).trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                stripped,
+                case["output"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     #[test]
     fn opening_prose_reads_quotes_callouts_and_lists() {
         assert_eq!(

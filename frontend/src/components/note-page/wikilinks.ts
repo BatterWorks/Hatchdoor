@@ -112,6 +112,29 @@ export function rewriteWikilinks(
     const parsed = parseWikilinkTarget(body);
 
     if (bang === "!") {
+      // A note embed draws as a link to the note (#573). Showing the note's
+      // content inline is #578. A name that reads as a note is tried as one
+      // first; any other name only when no file answered to it, so
+      // `![[Release 2.8]]` still finds its note.
+      const [pathPart] = splitPathSuffix(parsed.target);
+      const noteName = isNoteEmbedTarget(pathPart);
+      const filePath = resolvedAssets.get(pathPart);
+      if (noteName || !filePath) {
+        const hit = resolved.get(parsed.target) ?? null;
+        if (hit) {
+          // A block id is not yet a place to land, so `#^id` opens the note
+          // at the top (#578).
+          const anchor = parsed.target.includes("#^")
+            ? ""
+            : extractAnchor(parsed.target);
+          const href = noteRouteHref(vaultId, hit, anchor);
+          const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
+          return `[${escapeMarkdownLabel(label)}](${href})`;
+        }
+        if (noteName && !filePath) {
+          return `[${escapeMarkdownLabel(parsed.label)}](${missingNoteHref(parsed.target)})`;
+        }
+      }
       const source = assetHref(
         vaultId,
         parsed.target,
@@ -236,11 +259,14 @@ export function useResolvedWikilinks(
 
     void (async () => {
       const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
-      const isAsset = (match: RegExpMatchArray) =>
-        match[1] === "!" ||
+      const isPdf = (match: RegExpMatchArray) =>
         isPdfAssetTarget(parseWikilinkTarget(match[2]).target);
+      const isAsset = (match: RegExpMatchArray) =>
+        match[1] === "!" || isPdf(match);
+      // Embeds go out as note targets too, PDFs aside: one that names no file
+      // may name a note, and is then drawn as a link to it (#573).
       const rawTargets = matches
-        .filter((m) => !isAsset(m))
+        .filter((m) => !isPdf(m))
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
@@ -522,6 +548,16 @@ function assetUrl(vaultId: VaultId, vaultPath: string, suffix: string): string {
   return withAccessToken(
     `/api/v1/vaults/${encodeURIComponent(vaultId)}/assets/${encoded}${suffix}`,
   );
+}
+
+/**
+ * Whether an embed's path reads as a note rather than a file: a `.md` path,
+ * or a last segment with no extension, the way Obsidian reads
+ * `![[Other note]]`.
+ */
+function isNoteEmbedTarget(pathPart: string): boolean {
+  const name = pathPart.replace(/\\/g, "/").split("/").pop() ?? "";
+  return /\.md$/i.test(name) || !/\.[A-Za-z0-9]+$/.test(name);
 }
 
 function isPdfAssetTarget(target: string): boolean {

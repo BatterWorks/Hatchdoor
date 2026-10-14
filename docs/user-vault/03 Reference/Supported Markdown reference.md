@@ -10,7 +10,13 @@ The Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` 
 
 Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, `inline code`, and links such as <https://example.com>.
 
-Raw HTML is not supported. Use Markdown syntax so a note reads the same in other apps.
+Raw HTML is not supported, apart from comments. Use Markdown syntax so a note reads the same in other apps.
+
+## Comments
+
+Text between two `%%` marks is a comment, as in Obsidian, and so is an HTML comment, `<!-- like this -->`. Either can sit inside a line or run across several. The rendered page, the editor's preview and the snippets in search results leave comments out, along with any heading inside one, which also stays out of the table of contents. A comment that is never closed hides everything after it. The live editor shows comments, so you can edit them. Inside code and math, `%%` and `<!--` are shown as written.
+
+Hiding a comment only changes what the page draws. The text is still in the file, search still finds the note by it, and an agent or an API call that reads the note gets the comment with the rest. Don't keep anything in a comment that people who can read the note must not see.
 
 ## Headings
 
@@ -214,6 +220,15 @@ Write it as `#not/a-tag` in your note.
 ````
 
 An agent renaming a tag across the Vault with `rename_tag` goes by these same rules, so a hashtag in code is left as written. `delete_tag` does too: a hashtag in code is not an inline use of the tag, so it does not block a delete.
+
+## Obsidian syntax Hatchdoor does not handle
+
+Obsidian reads a few things Hatchdoor does not draw yet. Here is what you see instead:
+
+- **An embedded note**, `![[Other note]]` or `![[Other note#Heading]]`, shows as a link to that note, or to that heading, rather than the note's content. An embedded block, `![[Other note#^id]]`, links to the note. A note that does not exist shows as a missing link. Embedded images and PDFs work as described under [[#Images and PDFs]].
+- **A link to a block**, `[[Other note#^id]]`, opens the note at the top rather than at that paragraph.
+- **An inline footnote**, `text^[a note]`, shows as written. Use a standard footnote, `text[^1]` with `[^1]: a note` on a line of its own, which works.
+- **A canvas file** (`.canvas`) and **a standalone Bases file** (`.base`) are not listed in the explorer and do not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
 
 ---
 

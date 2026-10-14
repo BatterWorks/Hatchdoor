@@ -169,6 +169,93 @@ describe("rewriteWikilinks asset resolution", () => {
   });
 });
 
+describe("rewriteWikilinks with note embeds (#573)", () => {
+  const other = { slug: "other-note", archived: false };
+  const embed = (
+    markdown: string,
+    notes: [string, { slug: string; archived: boolean } | null][],
+    assets: [string, string | null][] = [],
+  ) =>
+    rewriteWikilinks(
+      VAULT_ID,
+      markdown,
+      "Home.md",
+      new Map(notes),
+      new Map(assets),
+    );
+
+  it("draws an embedded note as a link to it, not an image", () => {
+    const output = embed("![[Other note]]", [["Other note", other]]);
+    expect(output).toBe("[Other note](/v/vault-1/n/other-note)");
+    expect(output.startsWith("!")).toBe(false);
+  });
+
+  it("links a heading embed to the heading and a block embed to the note", () => {
+    expect(
+      embed("![[Other note#Some Heading]]", [
+        ["Other note#Some Heading", other],
+      ]),
+    ).toBe("[Other note](/v/vault-1/n/other-note#some-heading)");
+    expect(
+      embed("![[Other note#^abc123]]", [["Other note#^abc123", other]]),
+    ).toBe("[Other note](/v/vault-1/n/other-note)");
+  });
+
+  it("labels and routes an embed the way the same wikilink is", () => {
+    const archived = { slug: "Old/Other note.md", archived: true };
+    expect(embed("![[Old/Other note]]", [["Old/Other note", archived]])).toBe(
+      embed("[[Old/Other note]]", [["Old/Other note", archived]]),
+    );
+    expect(embed("![[Other note|alias]]", [["Other note", other]])).toBe(
+      "[alias](/v/vault-1/n/other-note)",
+    );
+  });
+
+  it("draws an embed of a missing note as the missing-note link", () => {
+    expect(embed("![[Missing note]]", [["Missing note", null]])).toBe(
+      embed("[[Missing note]]", [["Missing note", null]]),
+    );
+  });
+
+  it("tries a .md embed as a note even when a file answered to it", () => {
+    expect(
+      embed(
+        "![[Other note.md]]",
+        [["Other note.md", other]],
+        [["Other note.md", "Other note.md"]],
+      ),
+    ).toBe("[Other note\\.md](/v/vault-1/n/other-note)");
+  });
+
+  it("finds a note whose name ends like an extension when no file matches", () => {
+    expect(embed("![[Release 2.8]]", [["Release 2.8", other]])).toBe(
+      "[Release 2\\.8](/v/vault-1/n/other-note)",
+    );
+  });
+
+  it("keeps image and PDF embeds as they were", () => {
+    expect(
+      embed(
+        "![[picture.png]] ![[report.pdf]]",
+        [
+          ["picture.png", null],
+          ["report.pdf", null],
+        ],
+        [
+          ["picture.png", "Attachments/picture.png"],
+          ["report.pdf", "Attachments/report.pdf"],
+        ],
+      ),
+    ).toBe(
+      "![picture\\.png](/api/v1/vaults/vault-1/assets/Attachments/picture.png) ![report\\.pdf](/api/v1/vaults/vault-1/assets/Attachments/report.pdf)",
+    );
+    // A file name nothing resolved keeps the note-relative reading.
+    expect(
+      embed("![[shot.png]]", [["shot.png", null]], [["shot.png", null]]),
+    ).toBe("![shot\\.png](/api/v1/vaults/vault-1/assets/shot.png)");
+  });
+});
+
 describe("rewriteWikilinks with an escaped alias pipe", () => {
   it("renders a table-cell link as a resolved link labelled with its alias", () => {
     const resolved = new Map([
