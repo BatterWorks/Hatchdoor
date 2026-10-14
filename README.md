@@ -292,7 +292,7 @@ version you are running.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.8.1
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.8.2
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
