@@ -9,6 +9,17 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.8.2 - 2026-10-14
+
+- The deploy page now tells an installing agent to read the whole page before it starts.
+- Transfer links no longer reach the logs under any `RUST_LOG` setting.
+- Changing the MCP token now strands every transfer link.
+- A transfer link for a path spelled with `./`, such as `./Media/a shot.png`, now works.
+- What's new now shows every release since your browser last opened Hatchdoor.
+- Settings now shows an on/off setting as On whenever Hatchdoor treats it as on.
+- The note page no longer shows a note's comments.
+- Help hides comments too.
+
 ## v2.8.1 - 2026-10-11
 
 - **Optional usage report.** Hatchdoor can send its maintainer one small report a day of how your install is set up, and nothing about your notes, to decide which platforms to test and which parts of Hatchdoor people rely on. It is telemetry and stays off unless you turn it on. Settings shows the exact report under Usage report, and every field is listed in [[Usage report reference]]

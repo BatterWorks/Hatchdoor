@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.8.2 - 2026-10-14
 
 ### Fixed
 - The deploy page now tells an installing agent to read the whole page before it starts. The page is about 35 KB, and in a test install from its public address the agent printed only the first 30,000 bytes, never came back for the rest and so missed the last step, which tells it to show you the web token. A web-fetch tool can also return a summary with no commands in it. The agent part of the page now opens with that instruction: save the page to a file with `curl` and read the file to the end. [#529]
