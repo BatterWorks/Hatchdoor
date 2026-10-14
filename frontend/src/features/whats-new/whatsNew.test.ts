@@ -46,9 +46,39 @@ describe("baseVersion", () => {
 });
 
 describe("releasesToShow", () => {
-  it("shows what the server lists when the browser has no record", () => {
-    const shown = releasesToShow(response(), { available: true, seen: null });
-    expect(shown.map((r) => r.version)).toEqual(["2.8.0"]);
+  it("shows only the releases after the previous version when the browser has no record", () => {
+    const shown = releasesToShow(
+      response({
+        version: "2.9.0",
+        previous_version: "2.8.0",
+        releases: [release("2.9.0"), release("2.8.0"), release("2.7.0")],
+      }),
+      { available: true, seen: null },
+    );
+    expect(shown.map((r) => r.version)).toEqual(["2.9.0"]);
+  });
+
+  it("shows nothing without a record or a previous version to start from", () => {
+    expect(
+      releasesToShow(response({ previous_version: null }), {
+        available: true,
+        seen: null,
+      }),
+    ).toEqual([]);
+  });
+
+  it("shows every release since this browser last looked, though the server skipped some", () => {
+    // The browser saw 2.8.0; the server then ran 2.9.0 and 2.10.0 without
+    // this browser opening it, so its record only knows 2.9.0 came before.
+    const shown = releasesToShow(
+      response({
+        version: "2.10.0",
+        previous_version: "2.9.0",
+        releases: [release("2.10.0"), release("2.9.0"), release("2.8.0")],
+      }),
+      { available: true, seen: "2.8.0" },
+    );
+    expect(shown.map((r) => r.version)).toEqual(["2.10.0", "2.9.0"]);
   });
 
   it("shows nothing once this browser has seen the running version", () => {
@@ -57,12 +87,16 @@ describe("releasesToShow", () => {
     ).toEqual([]);
   });
 
-  it("compares a development build by its base version", () => {
+  it("treats a dismissal on a development build as seeing its base version", () => {
+    markSeen("2.8.0 (dev abc123)");
     expect(
-      releasesToShow(response({ version: "2.8.0 (dev abc123)" }), {
-        available: true,
-        seen: "2.8.0",
-      }),
+      releasesToShow(
+        response({
+          version: "2.8.0 (dev abc123)",
+          releases: [release("2.8.0"), release("2.7.0")],
+        }),
+        readSeen(),
+      ),
     ).toEqual([]);
   });
 
@@ -121,11 +155,11 @@ describe("releasesToShow", () => {
     ).toEqual([]);
   });
 
-  it("ignores a stored value that is not a version", () => {
-    const shown = releasesToShow(response(), {
-      available: true,
-      seen: "garbage",
-    });
+  it("treats a stored value that is not a version as no record", () => {
+    const shown = releasesToShow(
+      response({ releases: [release("2.8.0"), release("2.7.0")] }),
+      { available: true, seen: "garbage" },
+    );
     expect(shown.map((r) => r.version)).toEqual(["2.8.0"]);
   });
 });

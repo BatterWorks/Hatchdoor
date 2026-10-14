@@ -1,5 +1,6 @@
 //! `GET /api/v1/whats-new`: which versions this instance has run and the
-//! release highlights between them (ADR-42), for the signed-in app.
+//! release highlights up to the running one (ADR-42), for the signed-in app.
+//! The browser picks the ones it has not shown yet.
 //!
 //! The highlights live in the bundled manual's What's new page, one section
 //! per release, newest first:
@@ -28,7 +29,6 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::app_state::AppState;
-use crate::instance_state::VersionRecord;
 
 /// The What's new page's name in the bundled manual.
 pub const PAGE: &str = "whats-new";
@@ -253,21 +253,17 @@ fn trailing_link(line: &str) -> Option<(&str, HighlightLink)> {
     ))
 }
 
-/// The releases after `previous` up to and including `current`, newest
-/// first. None when there is no previous version, which is a fresh install.
-fn releases_between<'a>(releases: &'a [Release], record: &VersionRecord) -> Vec<&'a Release> {
-    let Some(previous) = record.previous.as_deref().and_then(parse_version) else {
-        return Vec::new();
-    };
-    let Some(current) = parse_version(&record.current) else {
+/// Every release up to and including `current`, newest first. Which of them
+/// a reader has not seen is the browser's call: it remembers the last version
+/// it showed, and `previous` alone would drop the releases this instance ran
+/// between two of that browser's visits.
+fn releases_up_to<'a>(releases: &'a [Release], current: &str) -> Vec<&'a Release> {
+    let Some(current) = parse_version(current) else {
         return Vec::new();
     };
     releases
         .iter()
-        .filter(|release| {
-            parse_version(&release.version)
-                .is_some_and(|version| version > previous && version <= current)
-        })
+        .filter(|release| parse_version(&release.version).is_some_and(|version| version <= current))
         .collect()
 }
 
@@ -275,11 +271,14 @@ fn releases_between<'a>(releases: &'a [Release], record: &VersionRecord) -> Vec<
 struct WhatsNewResponse<'a> {
     /// The running version as the binary reports it, dev suffix included.
     version: String,
+    /// The version that ran before this one, where a browser with no record
+    /// of its own starts.
     previous_version: Option<&'a str>,
     /// Whether this instance was first started with nothing in place and
     /// still runs the version it started on. False again after its first
     /// upgrade, so an instance that began fresh still hears what changed.
     fresh_install: bool,
+    /// Every release up to and including the running version, newest first.
     releases: Vec<&'a Release>,
 }
 
@@ -289,7 +288,7 @@ pub async fn whats_new_handler(State(state): State<AppState>) -> Response {
         version: crate::config::version_string(),
         previous_version: record.previous.as_deref(),
         fresh_install: record.fresh_install.as_deref() == Some(record.current.as_str()),
-        releases: releases_between(releases(), record),
+        releases: releases_up_to(releases(), &record.current),
     })
     .into_response();
     response
@@ -313,14 +312,6 @@ mod tests {
 - A `code` span and an [outside link](https://example.com) stay in the text.\n\n\
 ## v2.8.0 - 2026-10-20\n\n\
 - One.\n- Two.\n- Three. [Install](get-started/install-hatchdoor-with-docker-compose)\n";
-
-    fn record(current: &str, previous: Option<&str>) -> VersionRecord {
-        VersionRecord {
-            current: current.into(),
-            previous: previous.map(Into::into),
-            fresh_install: None,
-        }
-    }
 
     #[test]
     fn versions_parse_as_three_numbers_only() {
@@ -476,25 +467,19 @@ mod tests {
     }
 
     #[test]
-    fn only_releases_after_the_previous_version_are_listed() {
+    fn every_release_up_to_the_running_version_is_listed() {
         let releases = parse_releases(PAGE_FIXTURE).expect("parses");
-        let versions = |record: &VersionRecord| {
-            releases_between(&releases, record)
+        let versions = |current: &str| {
+            releases_up_to(&releases, current)
                 .iter()
                 .map(|release| release.version.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            versions(&record("2.9.0", Some("2.7.0"))),
-            ["2.9.0", "2.8.0"]
-        );
-        assert_eq!(versions(&record("2.9.0", Some("2.8.0"))), ["2.9.0"]);
-        assert_eq!(versions(&record("2.8.0", Some("2.7.0"))), ["2.8.0"]);
-        assert!(versions(&record("2.9.0", Some("2.9.0"))).is_empty());
-        assert!(
-            versions(&record("2.9.0", None)).is_empty(),
-            "a fresh install"
-        );
+        // Whatever ran before: the browser decides what is new to it.
+        assert_eq!(versions("2.9.0"), ["2.9.0", "2.8.0"]);
+        assert_eq!(versions("2.8.3"), ["2.8.0"]);
+        assert!(versions("2.7.0").is_empty());
+        assert!(versions("not a version").is_empty());
     }
 
     async fn get(uri: &str, token: Option<&str>) -> (StatusCode, String) {

@@ -119,9 +119,10 @@ that production inventory are still checked for stale paths and duplicates.
 - `record_web_activity` (ADR-45) is the one middleware that tells the usage
   report a web request arrived. `build_router` layers it inside the web-token
   check of the five route groups that check alone protects (model setup,
-  settings, `vaults_v1`, folders, What's new), so it runs only for a request
-  that was let in and runs the same on an install with no token. The asset
-  and attachment routes are left out because the MCP token opens them too.
+  settings, `vaults_v1`, folders, What's new and the app manual address), so
+  it runs only for a request that was let in and runs the same on an install
+  with no token. The asset and attachment routes are left out because the MCP
+  token opens them too.
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -1212,9 +1213,11 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Public contract:** `TransferLinks` (one instance in `AppState`), with `key`,
 `mint_download`, `mint_upload`, `mint_note_replace`, `verify_download`,
 `redeem_upload`, and `redeem_note_upload`; `SigningKey`, `MintedLink`, `Grant`,
-`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`, and
-`SIGNATURE_PARAM`. A link is an absolute URL on the Vault-scoped
-`/transfers/{*path}` route whose query carries `expires`, for uploads
+`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`,
+`SIGNATURE_PARAM`, and `link_path`. A link is an absolute URL on the
+Vault-scoped `/transfers/{*path}` route, its path spelled by `link_path`
+(trimmed, `.` and empty segments dropped, because a client removes `.`
+segments before sending; #586), whose query carries `expires`, for uploads
 `overwrite` and `nonce`, for a link that replaces a note
 `expected_content_hash`, and a BLAKE3 keyed-hash `signature` over the Vault ID,
 the relative path, the expiry, and the grant. A replacing note link is its own
@@ -1229,7 +1232,8 @@ admitted on a token that has since rotated mints links the new token will not
 accept. See ADR-27 and ADR-32.
 
 **Consumers:** the MCP `get_attachment` and `create_upload_link` tools mint;
-`src/handlers/transfer.rs` verifies and redeems; `src/auth.rs` redacts
+`src/handlers/transfer.rs` verifies and redeems, and compares an upload
+form's named target through `link_path`; `src/auth.rs` redacts
 `SIGNATURE_PARAM` from the request trace span.
 
 **Consumed dependencies:** `RuntimeConfig::value_revision` for the MCP token's
@@ -1239,9 +1243,10 @@ and `auth::constant_time_eq`.
 **Coordination paths:** `src/app_state.rs` (the field), `src/lib.rs`,
 `src/server.rs` (the `/transfers/{*path}` route and the span's `traced_uri`),
 `src/handlers/mod.rs`, `src/mcp/tools/mod.rs` (`transfer_link_signer`), and
-`src/config.rs` (`capped_log_filter`, which holds the `rmcp` crate and its two
-message-logging modules at info whatever `RUST_LOG` asks for, because a tool
-result can carry a link).
+`src/config.rs` (`within_mcp_library_cap`, a filter beside the `EnvFilter`
+that drops every event from the `rmcp` target tree below info whatever
+`RUST_LOG` asks for, because a tool result can carry a link; a cap written as
+`EnvFilter` directives is outranked by any directive naming a deeper module).
 
 **Invariants:** a link names one Vault and one path and one direction and is
 refused for anything else; it expires five minutes after minting, checked when
@@ -3165,7 +3170,9 @@ same paths. What `assets.rs` keeps is this route's own wire shaping.
 `vault_scoped_asset_handler` with the `McpAssetRead` ceiling after spending the
 transport's tool budget, and `POST` uploads through the mutation core's
 `import_attachment` with the upload route's own multipart form, read by the
-shared `vault_write::read_upload_form`. A `.md` target
+shared `vault_write::read_upload_form`; the form's optional
+`target_relative_path` must equal the link's path once spelled by
+`transfer_link::link_path`. A `.md` target
 (`is_note_upload_target`) is redeemed with `redeem_note_upload` and written
 through the core's `upload_note` instead, answering the note-write shape
 (`vault_write::note_write_response`); the part's declared content type is
@@ -3190,8 +3197,9 @@ when one is configured and refused with `403 demo_read_only` in demo mode,
 because it names the running version (ADR-38 decision 6). It answers
 `no-store` JSON: `version` (`config::version_string`), `previous_version`,
 `fresh_install` (true only while the instance runs the version it was freshly
-installed on) and `releases`, the sections of the bundled What's new page
-after `previous_version` up to the running version, newest first, each with
+installed on) and `releases`, every section of the bundled What's new page
+up to and including the running version, newest first (#582: the browser
+picks the ones newer than the version it last showed), each with
 `version`, `date` and `highlights` (`text`, `action_needed`, `link` with
 `label`, `page` and `heading`). It also owns the page's format,
 `parse_releases`: `## v<version> - <YYYY-MM-DD>` sections, newest first, of 3
@@ -3201,8 +3209,9 @@ malformed page from shipping; `scripts/release-common.mjs` drafts and checks
 the same shape at release time. `PAGE` (`whats-new`, re-exported as
 `WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite.
 `settings.rs` owns the additive `/api/settings` document: effective
-value/provenance/lock/class/kind metadata and partial PATCH saves returning the
-full refreshed document, plus the read-only `last_agent` (#426) and
+value/provenance/lock/class/kind metadata, a `switch`-kind value always sent
+as `"true"` or `"false"` by `is_truthy` on the resolved value (#581), and
+partial PATCH saves returning the full refreshed document, plus the read-only `last_agent` (#426) and
 `update_check` (#425, `update_check::status` read from the instance state file
 beside the registry) fields, and the read-only `usage_report` (#477,
 `usage_report::status`: whether the report is on, the install ID while it is,
@@ -3441,6 +3450,10 @@ surface, so any note that read refuses previews as the general wording.
 The `<title>` wording has a second copy in the web app,
 `frontend/src/app/pageTitle.ts` (#514), which takes the tab over once the page
 loads: change the two together.
+The opening prose skips comments by `strip_comments`, the rule the note page's
+`hideComments` (`frontend/src/lib/noteComments.ts`, #573) follows outside code
+and math; a test reads the shared `frontend/src/lib/noteComments.cases.json`,
+so a change to either side's rule fails it.
 `og:url` and `og:image` are built on `HATCHDOOR_PUBLIC_URL` alone and are left
 out when it is empty; no request header is read. The picture is
 `frontend/public/link-preview.png`. `docs.rs` (#422, ADR-38) exports
@@ -3453,6 +3466,13 @@ plain-text `404`. A private page (`private: true` in its frontmatter) answers
 only a caller holding the web token, `401` otherwise, and is left out of the
 index, search and its links' destinations for anyone else and out of
 `llms.txt` always; with no web token configured it is never served there.
+`docs.rs` also exports `app_docs_page_handler` (#582), which `src/server.rs`
+mounts at `GET /api/v1/docs/<page>.md` beside the What's new route and under
+its guard (the web token when one is configured, `403 demo_read_only` in demo
+mode). It answers the same body and content type as the public address, with
+private pages served and linked, and its links still point at the public
+addresses. It is how Help reads a private page on an instance with no web
+token.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth (`docs.rs` uses
@@ -3648,7 +3668,8 @@ Once #170 lands, the modern surface advertises `tools.listChanged: true`
 honestly: modern clients receive tool-list change events via
 `subscriptions/listen` backed by the existing `mcp_tools_changed` broadcast,
 capped at four live subscriptions per bearer token (`subscriptions.rs` owns
-the per-token registry and the validated-token request extension), with
+the per-token registry and the validated-token request extension, which
+`call_tool` also uses as the token a transfer link is signed under, #587), with
 acknowledgment, subscription metadata, rmcp SSE keep-alives, and disconnect
 cancellation. The legacy handshake keeps advertising `tools.listChanged:
 false`, so legacy clients continue reissuing `tools/list`. Layered resource protection (#171) exempts protocol/discovery/
@@ -3676,8 +3697,9 @@ instructions with `USAGE_REPORT_NOTICE` (`config.rs`) (#479, ADR-45), ahead of
 the standing text because a client may cut long instructions short (#480): the
 two handlers ask the Usage report module's `take_notice`, never `get_info`,
 and a `discover` answer that carries the sentence has `ttlMs` 0 so no client
-replays it. No tool reads or changes the usage report setting
-(`no_tool_reads_or_changes_the_usage_report_setting`). `McpConfig`, server instructions, tool
+replays it. No tool reads or changes the usage report setting;
+`no_tool_definition_mentions_the_usage_report` checks only that no tool
+definition names it. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
 with its authorization/body-limit middleware) remain the boundary's public
 surface; `adapter.rs` implements rmcp's `ServerHandler` seam over the
@@ -4535,7 +4557,8 @@ loading/error/empty rendering only — the facet rail and results list underneat
 **Consumed dependencies:** shared API/error utilities, shared UI components
 (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`), the shared
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
-`lib/vaultParticipants.ts`, router navigation supplied by the shell,
+`lib/vaultParticipants.ts`, `lib/noteComments.ts`'s `hideComments` (result
+snippets drop comments, #573), router navigation supplied by the shell,
 `startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
@@ -4609,16 +4632,23 @@ unless a dialog above it owns the key, and focus returns to where it was. Pages
 come from `/docs/<page>.md` and search from `/docs/search`, through plain
 `fetch` with the web token attached when one is stored, never `apiFetch`: a
 401 there means a private page, not a lost session, so it must not raise the
-token prompt. Links resolve against the page's own `/docs/` address and stay
+token prompt. A page the public address refuses with 401 is asked for once
+more at `/api/v1/docs/<page>.md` (#582), the same way; a 401 or 403 there
+means a private page too, which is what a signed-out reader and demo mode
+get. Links resolve against the page's own `/docs/` address and stay
 inside Help; other links open in a new tab. Pages render through
-`createManualMarkdownComponents`, so the manual looks like a note.
+`createManualMarkdownComponents`, so the manual looks like a note, and
+through `hideComments`, so a comment is hidden in a page and in a search
+excerpt the way it is on the note page (#573).
 
-**Consumed dependencies:** the public manual routes (`src/handlers/docs.rs`),
+**Consumed dependencies:** the public manual routes and the app manual
+address (`src/handlers/docs.rs`),
 `types.ts`'s `VaultSummary` (whose `activation`, `git`, `search` and `*_error`
 codes `vaultConditionHelp` and `gitConsoleHelp` read, including ADR-30's
 `managed_git_conflict`), the shared `test/fixtures/vaults.ts` builders (tests
 only), `api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
-`lib/noteHeadings.ts` from Note reading and rendering, and the icons in
+`lib/noteHeadings.ts` and `lib/noteComments.ts` from Note reading and
+rendering, and the icons in
 `components/icons.tsx`. It also borrows other modules' CSS classes, so a change
 there reaches Help: the Search dialog's result rows (`.search-results`,
 `.search-group`, `.search-result--primary`, `.result-title`,
@@ -4641,8 +4671,10 @@ passing a `CONTEXTUAL_HELP` entry and nothing else. The What's new pop-up
 reads one entry without opening it: `usageReport.page` names the line its
 usage report switch sits on (ADR-48), so renaming that page moves the switch.
 
-**Invariants:** Help never fetches or shows Vault content and calls no
-`/api/` route; it never needs the web token; a `base` block renders as its
+**Invariants:** Help never fetches or shows Vault content, and its one
+`/api/` route is the app manual address, tried only after a public address
+refused a page; it never needs the web token for a public page; a `base`
+block renders as its
 source. Heading ids inside Help carry a `help-` prefix so they never collide
 with the note open underneath.
 
@@ -4677,8 +4709,10 @@ for under the `localStorage` key `hatchdoor_whats_new_seen`, as a base version
 (`2.8.0`, never the ` (dev …)` suffix). CSS is integrated through the `App.css`
 stylesheet aggregation seam.
 
-**Behaviour:** the releases shown are the server's list, newer than the stored
-version when there is one, newest first. Action-needed items from every
+**Behaviour:** the server lists every release up to the running version; the
+ones shown are those newer than the stored version, or with none stored newer
+than `previous_version`, newest first (#582), and nothing when neither is a
+version. Action-needed items from every
 listed release are pinned in one box at the top, each tagged with its version;
 each release then lists its other items. A highlight's link and "Full
 changelog" open Help through `useHelp()`; Help sits above the dialog, which
@@ -4864,6 +4898,7 @@ src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 - `frontend/src/components/note-page/text.ts`
 - `frontend/src/components/note-page/wikilinks.ts`
 - `frontend/src/lib/markdown.ts`
+- `frontend/src/lib/noteComments.ts`
 - `frontend/src/lib/noteHeadings.ts`
 - `frontend/src/lib/noteSearch.ts`
 - `frontend/src/noteEnhancements.css`
@@ -4890,7 +4925,19 @@ cache the hook fills, one `resolve-batch` per call, for the live editor's
 links, and `cachedAssetHref` (#544) gives one embed target the href the
 rendered body would draw now, the server's path once the hook's batch has
 filled the cache and the note-relative reading before, for the editor's image
-and PDF widgets — heading/search-hit navigation, Markdown transformations,
+and PDF widgets. A note embed (#573), `![[Other note]]`, goes out as a
+note target as well as an asset target (PDF embeds aside) and is rewritten to
+the link the same wikilink gets, `#^id` dropped to the note itself, when its
+name reads as a note (`.md` or no extension) or no file answered to it; one
+that reads as a note and resolved as neither gets the `/__missing__/` link.
+`hideComments` (`lib/noteComments.ts`, #573) removes `%%` and HTML comments
+from the body before the reading view, the source-mode preview, the table
+of contents and the Help reader see it, line-count preserving like `rewriteWikilinks`, by the
+link preview's `strip_comments` rule (shared cases in
+`lib/noteComments.cases.json`, run by both test suites) except that code,
+math and a whole-line `hatchdoor-query` marker are kept; the search dialog's
+snippets consume it too. The live editor still shows comments. The contract
+also covers heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the reading view's component map produced by
 `createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
 `NotePage` shows the live editor on a writable Vault unless the browser's
@@ -5051,7 +5098,8 @@ hides only the panel.
 **Validation:** note-page unit tests, `NotePage.test.tsx` (saving through every
 Vault condition, read escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
 fragment jump, in the reading view and from the live editor's wikilinks),
-`wikilinks.hook.test.ts` (`resolveNoteTargets`), Markdown/heading/search/state tests,
+`wikilinks.hook.test.ts` (`resolveNoteTargets`), `NotePage.comments.test.tsx` and
+`noteComments.test.ts` (comment hiding and note embeds, #573), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 

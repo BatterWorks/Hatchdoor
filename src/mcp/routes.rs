@@ -182,9 +182,11 @@ async fn authorize_mcp_transport(
         return *response;
     }
 
-    // Attach the validated credential so long-lived subscriptions can be
-    // attributed (and capped) per bearer token without re-reading headers in
-    // the adapter. rmcp exposes these request extensions to handlers.
+    // Attach the validated credential so the adapter can attribute (and cap)
+    // long-lived subscriptions per bearer token, and sign a tool call's
+    // transfer links under the token it was admitted on (#587), without
+    // re-reading headers or the live configuration. rmcp exposes these
+    // request extensions to handlers.
     if let Some(token) = &config.bearer_token {
         parts
             .extensions
@@ -1340,8 +1342,10 @@ mod tests {
         assert!(carries_the_notice(&initialize_result(&state).await));
     }
 
+    /// Checks the advertised definitions only. A generic settings tool, or one
+    /// returning the setting under another name, would pass (#581).
     #[tokio::test]
-    async fn no_tool_reads_or_changes_the_usage_report_setting() {
+    async fn no_tool_definition_mentions_the_usage_report() {
         let (state, _tmp) = write_state();
         let body = tools_list_result(&state).await;
         let tools = body["result"]["tools"].as_array().expect("tools array");
@@ -4042,6 +4046,103 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("None needed")
+        );
+    }
+
+    /// A tool call admitted on a token that rotates before its body has
+    /// arrived mints its link under the token it was admitted on, so the link
+    /// does not outlive the rotation (#587).
+    #[tokio::test]
+    async fn a_link_minted_across_a_token_rotation_is_signed_with_the_admitting_token() {
+        use std::convert::Infallible;
+        use tokio_stream::StreamExt;
+
+        let (state, _tmp) = test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .expect("registered test Vault");
+        let vault_path = registered_vault_path(&state);
+        std::fs::create_dir_all(vault_path.join("Sources")).expect("sources dir");
+        std::fs::write(vault_path.join("Sources/diagram.png"), b"png-bytes").expect("attachment");
+
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+        let payload = json!({
+            "jsonrpc":"2.0","id":92,"method":"tools/call",
+            "params":{"name":"get_attachment","arguments":scoped_arguments(
+                &state, "get_attachment", json!({"relative_path": "Sources/diagram.png"}))}
+        })
+        .to_string();
+        // The body arrives only after admission, and rotates the token on
+        // its way in.
+        let rotating = state.runtime_config.clone();
+        let body = tokio_stream::once(()).then(move |()| {
+            rotating
+                .save([(
+                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+                    "rotated".to_string(),
+                )])
+                .expect("rotate");
+            let payload = payload.clone();
+            async move { Ok::<_, Infallible>(axum::body::Bytes::from(payload)) }
+        });
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("mcp-session-id", session.id.clone())
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
+        for (name, value) in auth_headers(TEST_TOKEN) {
+            request = request.header(name, value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from_stream(body)).expect("request"))
+            .await
+            .expect("response");
+        let answer = response_message(response).await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        assert_eq!(
+            state
+                .runtime_config
+                .snapshot()
+                .required("HATCHDOOR_MCP_BEARER_TOKEN")
+                .unwrap(),
+            "rotated"
+        );
+
+        let url = answer["result"]["structuredContent"]["content"]["download_url"]
+            .as_str()
+            .expect("download_url");
+        let query = url.split_once('?').map(|(_, query)| query);
+        let links = &state.transfer_links;
+        assert!(
+            links
+                .verify_download(
+                    &links.key(&state.runtime_config, "rotated"),
+                    vault_id,
+                    "Sources/diagram.png",
+                    query,
+                )
+                .is_err(),
+            "a link minted on the old token must not redeem under the new one: {url}"
+        );
+        assert!(
+            links
+                .verify_download(
+                    &links.key(&state.runtime_config, TEST_TOKEN),
+                    vault_id,
+                    "Sources/diagram.png",
+                    query,
+                )
+                .is_ok(),
+            "the link is signed under the token the call was admitted on: {url}"
         );
     }
 

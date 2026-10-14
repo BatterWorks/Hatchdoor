@@ -15,7 +15,7 @@ pub(crate) mod vaults;
 mod whats_new;
 
 pub use api::health_handler;
-pub use docs::docs_router;
+pub use docs::{app_docs_page_handler, docs_router};
 pub use folders::{create_folder_handler, list_folders_handler};
 // No asset re-export: the contained-resource seam the MCP `get_attachment`
 // tool used to consume from here moved to the read core in #188, so no MCP

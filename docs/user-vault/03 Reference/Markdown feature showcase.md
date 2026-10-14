@@ -10,6 +10,8 @@ This page uses every Markdown feature Hatchdoor renders, so you can see what eac
 
 Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, `inline code`, and links such as <https://example.com>.
 
+A comment is in the file but not on the page. This sentence has one between its two halves %%this comment only shows in the editor%% and reads straight through.
+
 Raw HTML is not part of the supported Markdown contract. Keep notes portable by using Markdown syntax where possible.
 
 ## Headings

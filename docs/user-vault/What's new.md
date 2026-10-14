@@ -9,6 +9,15 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.8.2 - 2026-10-14
+
+- The note page and Help no longer show a note's comments, the text between `%%` marks or inside `<!-- -->`, so visitors to a read-only or demo Vault never see them. [[Supported Markdown reference#Comments]]
+- A note embedded in another note now shows as a link to it instead of a broken image.
+- What's new now shows every release you missed while away from Hatchdoor, not only the newest one.
+- Settings now shows an on/off setting as On whenever it is on, including one set in `.env` as `1`, `yes` or `on`.
+- Attachment download and upload links now work for a path that starts with `./`, stop working as soon as you change the MCP token, and never appear in the logs.
+- An agent installing Hatchdoor from the deploy page now reads the whole page, so it no longer misses the last step that shows you the web token.
+
 ## v2.8.1 - 2026-10-11
 
 - **Optional usage report.** Hatchdoor can send its maintainer one small report a day of how your install is set up, and nothing about your notes, to decide which platforms to test and which parts of Hatchdoor people rely on. It is telemetry and stays off unless you turn it on. Settings shows the exact report under Usage report, and every field is listed in [[Usage report reference]]

@@ -27,7 +27,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode**. The route exists there, so the answer is never `404` |
 | `/api/v1/vaults/{vault_id}/attachments` (upload) | Web bearer token **or** a live MCP bearer token; same demo-mode refusal as other writes |
 | `/api/v1/folders` (`GET` and `POST`) | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
-| `/api/v1/whats-new` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
+| `/api/v1/whats-new`, `/api/v1/docs/*` | Web bearer token (if configured); **refused with `403 demo_read_only` in demo mode** |
 | `/api/v1/vaults/{vault_id}/transfers/{*path}` | No token: the transfer link's own signed query string is the credential, and only while MCP is enabled, see [[#Transfer links]] |
 
 > [!warning]
@@ -56,6 +56,10 @@ The manual built into the running version, as plain Markdown. These routes never
 | GET | `/llms.txt` | A plain-text list of every page in the [llms.txt](https://llmstxt.org) format, the deploy page first. |
 
 A page marked `private: true` in its frontmatter answers `/docs/<page>.md` only with the web token, `401` without it, and appears in the index and search only for a caller who sends the token. It never appears in `/llms.txt`. On an instance with no web token there is no token to send, so these routes never serve a private page. Signed-in Help and the MCP docs tools still serve them.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/docs/<page>.md` | The same page as `/docs/<page>.md`, private pages included, for the signed-in browser app. It takes the web token when one is configured, needs nothing when none is, and answers `403 demo_read_only` in demo mode. Its links point at the `/docs/` addresses. Help reads a private page here after `/docs/<page>.md` refuses it, so [[What's new]] opens on an instance with no web token. |
 
 ## Browser app
 
@@ -98,7 +102,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/settings` | Every known setting: `key`, current `value` (secrets redacted), `configured`, `source`, `locked`, `class` (`instant`/`reindex`), `kind` (text/switch/secret/number/mode). Beside the list, read-only `last_agent`: the last MCP client that called a tool, as `{"name": "Claude Code", "connected_at": "2026-10-03T09:00:00Z"}`, or `null` when no agent has connected yet. Also read-only `update_check`: `{"enabled": true, "checked_at": "2026-10-03T09:00:00Z", "update_available": {"version": "2.9.0", "release_url": "https://github.com/BatterWorks/Hatchdoor/releases/tag/v2.9.0"}}`, where `checked_at` is the last daily check (`null` before the first) and `update_available` is `null` unless the check is on and its last answer is newer than the running version (see [[How to upgrade Hatchdoor#Hear about new releases]]). Also read-only `usage_report`: `{"enabled": false, "install_id": null, "report": "{ ... }", "last_sent_at": null}`, where `report` is the exact usage report the next send would carry, as indented JSON text, `install_id` is `null` while the report is off, and `last_sent_at` is the time the last report got through, such as `"2026-10-07T09:00:00Z"`, or `null` while the report is off or before the first one (see [[Usage report reference]]). |
+| GET | `/api/settings` | Every known setting: `key`, current `value` (secrets redacted), `configured`, `source`, `locked`, `class` (`instant`/`reindex`), `kind` (text/switch/secret/number/mode). A switch's `value` is always `"true"` or `"false"`, the value Hatchdoor acts on, even when `.env` spells it `1`, `yes` or `on`. Beside the list, read-only `last_agent`: the last MCP client that called a tool, as `{"name": "Claude Code", "connected_at": "2026-10-03T09:00:00Z"}`, or `null` when no agent has connected yet. Also read-only `update_check`: `{"enabled": true, "checked_at": "2026-10-03T09:00:00Z", "update_available": {"version": "2.9.0", "release_url": "https://github.com/BatterWorks/Hatchdoor/releases/tag/v2.9.0"}}`, where `checked_at` is the last daily check (`null` before the first) and `update_available` is `null` unless the check is on and its last answer is newer than the running version (see [[How to upgrade Hatchdoor#Hear about new releases]]). Also read-only `usage_report`: `{"enabled": false, "install_id": null, "report": "{ ... }", "last_sent_at": null}`, where `report` is the exact usage report the next send would carry, as indented JSON text, `install_id` is `null` while the report is off, and `last_sent_at` is the time the last report got through, such as `"2026-10-07T09:00:00Z"`, or `null` while the report is off or before the first one (see [[Usage report reference]]). |
 | PATCH | `/api/settings` | Update one or more settings. Body: `{"updates": {"KEY": "value", ...}, "confirm": ["reindex", ...]}`. |
 | POST | `/api/settings/web-token/reveal` | Returns the current web bearer token, `{"value": "..."}`. `404` if none is set. |
 | POST | `/api/settings/mcp-token/generate` | Returns a freshly generated candidate token, `{"value": "..."}`. Not saved or made live by this call alone. |
@@ -286,7 +290,7 @@ Exactly one directory is made and nothing is written into it. The parent is reac
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/whats-new` | Which version runs, which ran before it, and the release highlights in between, from [[What's new]]. `Cache-Control: no-store`. |
+| GET | `/api/v1/whats-new` | Which version runs, which ran before it, and the release highlights up to the running version, from [[What's new]]. `Cache-Control: no-store`. |
 
 ```json
 {
@@ -316,7 +320,7 @@ Exactly one directory is made and nothing is written into it. The parent is reac
 - `version` is the running version as the binary reports it. A development build that was built with its commit adds ` (dev <commit>)`; a release never does.
 - `previous_version` is the version this instance ran before the current one, or `null` when it has run no other. An install that was already set up before it started keeping this record counts as coming from `2.7.0`, unless it runs 2.7.0 itself.
 - `fresh_install` is `true` when the instance was first started with no Vault list and no stored settings and still runs the version it started on. It turns `false` at its first upgrade.
-- `releases` lists the releases after `previous_version` up to the running version, newest first. It is empty on a fresh install that has not been upgraded yet. Each highlight's `text` is Markdown. `action_needed` lines come first, and `link`, when present, names the manual page (`read_docs` and `/docs/<page>.md` take the same name) and heading that explain it.
+- `releases` lists every release up to and including the running version, newest first, fresh install or not. The browser decides which are new to it: those newer than the version it last showed What's new for, or with no such record those after `previous_version`, and none on a fresh install. Each highlight's `text` is Markdown. `action_needed` lines come first, and `link`, when present, names the manual page (`read_docs` and `/docs/<page>.md` take the same name) and heading that explain it.
 
 Hatchdoor keeps the version record in `instance.json`, beside the Vault list in its state folder. It updates the record once at startup, and only when the version changes. Deleting the file makes the next start count as an upgrade from `2.7.0` when a Vault list or settings exist, and as a fresh install otherwise.
 

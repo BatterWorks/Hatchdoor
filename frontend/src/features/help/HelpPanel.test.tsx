@@ -52,6 +52,12 @@ const PAGES: Record<string, string> = {
     "| --- | --- |",
     "| `**a**` | bold |",
     "",
+    "Shown %%hidden%% text, and `%%kept%%` code.",
+    "",
+    "%%",
+    "## Hidden heading",
+    "%%",
+    "",
     "```base",
     "filters:",
     '  - file.inFolder("Projects")',
@@ -246,6 +252,22 @@ describe("Help panel", () => {
     for (const url of requestedUrls()) {
       expect(url.startsWith("/docs/")).toBe(true);
     }
+  });
+
+  it("hides comments the way the note page does (#573)", async () => {
+    const { panel } = renderHelp({
+      page: "reference/supported-markdown-reference",
+    });
+
+    await within(panel).findByRole("heading", {
+      name: "Supported Markdown reference",
+    });
+    expect(panel.textContent).toMatch(/Shown\s+text/);
+    expect(panel.textContent).toContain("%%kept%%");
+    expect(panel.textContent).not.toContain("hidden");
+    expect(
+      within(panel).queryByRole("heading", { name: "Hidden heading" }),
+    ).toBeNull();
   });
 
   it("toggles full width", async () => {
