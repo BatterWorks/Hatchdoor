@@ -3207,8 +3207,9 @@ malformed page from shipping; `scripts/release-common.mjs` drafts and checks
 the same shape at release time. `PAGE` (`whats-new`, re-exported as
 `WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite.
 `settings.rs` owns the additive `/api/settings` document: effective
-value/provenance/lock/class/kind metadata and partial PATCH saves returning the
-full refreshed document, plus the read-only `last_agent` (#426) and
+value/provenance/lock/class/kind metadata, a `switch`-kind value always sent
+as `"true"` or `"false"` by `is_truthy` on the resolved value (#581), and
+partial PATCH saves returning the full refreshed document, plus the read-only `last_agent` (#426) and
 `update_check` (#425, `update_check::status` read from the instance state file
 beside the registry) fields, and the read-only `usage_report` (#477,
 `usage_report::status`: whether the report is on, the install ID while it is,
@@ -3683,8 +3684,9 @@ instructions with `USAGE_REPORT_NOTICE` (`config.rs`) (#479, ADR-45), ahead of
 the standing text because a client may cut long instructions short (#480): the
 two handlers ask the Usage report module's `take_notice`, never `get_info`,
 and a `discover` answer that carries the sentence has `ttlMs` 0 so no client
-replays it. No tool reads or changes the usage report setting
-(`no_tool_reads_or_changes_the_usage_report_setting`). `McpConfig`, server instructions, tool
+replays it. No tool reads or changes the usage report setting;
+`no_tool_definition_mentions_the_usage_report` checks only that no tool
+definition names it. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
 with its authorization/body-limit middleware) remain the boundary's public
 surface; `adapter.rs` implements rmcp's `ServerHandler` seam over the

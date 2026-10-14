@@ -10521,15 +10521,33 @@ mod tests {
 
     #[tokio::test]
     async fn a_web_request_is_not_recorded_while_the_usage_report_is_off() {
-        let (app, tmp, _state) = app_for_tests_with_state();
+        // A real store, so a recorded request would land on disk: the
+        // fixture's inert report has none and could never write one (#581).
+        let (_app, tmp, state) = app_for_tests_with_state();
+        let (state, store) = state_with_the_usage_report_on(state, &tmp);
+        assert!(
+            store.section::<serde_json::Value>("usage_report").is_some(),
+            "the install ID is saved while the report is on"
+        );
+        // Off the way a settings save turns it off, before any request
+        // arrives, so the record holds no web day yet.
+        state
+            .runtime_config
+            .save([(
+                crate::usage_report::USAGE_REPORT_SETTING.to_string(),
+                "false".to_string(),
+            )])
+            .expect("turn the usage report off");
+        state.usage_report.reconcile();
+        assert!(store.section::<serde_json::Value>("usage_report").is_none());
 
-        let response = app
+        let response = build_router(state, None)
             .oneshot(whats_new_request(None))
             .await
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!tmp.path().join("state/instance.json").exists());
+        assert!(store.section::<serde_json::Value>("usage_report").is_none());
     }
 }
