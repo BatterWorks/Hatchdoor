@@ -31,7 +31,7 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::GitConfig;
 use crate::handlers::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, create_folder_handler, create_vault_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, app_docs_page_handler, create_folder_handler, create_vault_handler,
     demo_read_only_response, disable_vault_handler, disconnect_vault_handler, docs_router,
     download_transfer_handler, edit_vault_handler, enable_vault_handler,
     generate_mcp_token_handler, get_settings_handler, health_handler, list_folders_handler,
@@ -595,20 +595,23 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         None => folders,
     };
 
-    // ADR-42: the version record and the release highlights since the last
-    // version. The answer names the running version, so it sits behind the
-    // web token, and demo mode refuses it like the folder listing (ADR-38
-    // decision 6).
-    let whats_new = Router::new()
+    // ADR-42: the version record and the release highlights up to the
+    // running version. The answer names the running version, so it sits
+    // behind the web token, and demo mode refuses it like the folder listing
+    // (ADR-38 decision 6). The manual's private pages, What's new among them,
+    // share that guard at an app address for Help (#582): with no web token
+    // configured the public `/docs/` addresses never serve them.
+    let version_routes = Router::new()
         .route("/api/v1/whats-new", get(whats_new_handler))
+        .route("/api/v1/docs/{*path}", get(app_docs_page_handler))
         .layer(web_activity);
-    let whats_new = match web_bearer_token.clone() {
-        _ if state.demo_mode => whats_new.layer(demo_guard.clone()),
-        Some(token) => whats_new.layer(axum::middleware::from_fn_with_state(
+    let version_routes = match web_bearer_token.clone() {
+        _ if state.demo_mode => version_routes.layer(demo_guard.clone()),
+        Some(token) => version_routes.layer(axum::middleware::from_fn_with_state(
             WebToken(token),
             require_web_token,
         )),
-        None => whats_new,
+        None => version_routes,
     };
 
     // ADR-38: the bundled manual as public plain Markdown and `llms.txt`.
@@ -628,7 +631,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(vault_attachment)
         .merge(transfers)
         .merge(folders)
-        .merge(whats_new)
+        .merge(version_routes)
         .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
@@ -10345,8 +10348,82 @@ mod tests {
         assert!(body["releases"].is_array());
     }
 
+    fn app_docs_request(token: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder().uri("/api/v1/docs/whats-new.md");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::empty()).expect("request")
+    }
+
     #[tokio::test]
-    async fn whats_new_on_a_fresh_install_lists_no_release() {
+    async fn the_app_docs_address_serves_whats_new_on_an_instance_with_no_web_token() {
+        let (app, _tmp, _state) = app_for_tests_with_state();
+        let response = app
+            .clone()
+            .oneshot(app_docs_request(None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/markdown; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8_lossy(&body).starts_with("# What's new"));
+
+        // The public address keeps refusing it (ADR-38 decision 6).
+        let public = app
+            .oneshot(
+                Request::builder()
+                    .uri("/docs/whats-new.md")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(public.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_app_docs_address_needs_the_web_token_when_one_is_configured() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(app_docs_request(token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+        let response = app
+            .oneshot(app_docs_request(Some("web-secret")))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_app_docs_address_is_refused_in_demo_mode_with_or_without_a_token() {
+        for web_token in [None, Some(Arc::<str>::from("web-secret"))] {
+            let (app, _tmp, _state) =
+                app_for_tests_with_web_auth_and_demo_mode(web_token.clone(), true);
+            for token in [None, web_token.as_deref()] {
+                let response = app
+                    .clone()
+                    .oneshot(app_docs_request(token))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{token:?}");
+                assert_eq!(json_body(response).await["code"], "demo_read_only");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn whats_new_on_a_fresh_install_says_so() {
         let (_app, _tmp, mut state) = app_for_tests_with_state();
         state.instance_versions = Arc::new(crate::instance_state::VersionRecord {
             current: "2.8.0".into(),
@@ -10360,8 +10437,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["previous_version"], serde_json::Value::Null);
+        // The browser shows nothing on a fresh install, whatever is listed.
         assert_eq!(body["fresh_install"], true);
-        assert_eq!(body["releases"], serde_json::json!([]));
     }
 
     #[tokio::test]
