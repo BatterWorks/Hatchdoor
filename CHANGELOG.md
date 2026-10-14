@@ -7,10 +7,12 @@
 - Transfer links no longer reach the logs under any `RUST_LOG` setting. Hatchdoor kept the MCP library's message logging off by naming three of its modules, so a `RUST_LOG` that named a deeper one, such as `rmcp::transport::streamable_http_server::tower=trace`, logged tool results with their download and upload links. Nothing the library logs below info gets through now, whatever `RUST_LOG` says. [#587]
 - Changing the MCP token now strands every transfer link. A tool call that arrived just before the change and finished just after got a link that worked under the new token. The link is now signed with the token the call came in on, so the new token refuses it. [#587]
 - A transfer link for a path spelled with `./`, such as `./Media/a shot.png`, now works. `get_attachment` and `create_upload_link` accept that spelling, but the link kept the `./`, and curl removes it before sending the request, so Hatchdoor refused the link as invalid and told the agent to ask for a new one that failed the same way. Links now carry the path without `.` segments or doubled slashes, and an upload form that repeats the original spelling still matches. [#586]
+- What's new now shows every release since your browser last opened Hatchdoor. If the server moved from 2.8.0 to 2.9.0 to 2.10.0 while that browser stayed away, the pop-up listed 2.10.0 alone and marked it read, so 2.9.0's highlights, Action needed items included, never showed. Its Full changelog button also opens again on an instance with no web token, where Help used to say the page is only shown after signing in. [#582]
 - Settings now shows an on/off setting as On whenever Hatchdoor treats it as on. A value set in `.env` as `1`, `yes`, `on` or `TRUE` turned the setting on but showed as Off, so `HATCHDOOR_USAGE_REPORT_ENABLED=1` read Off above the install ID it had created. The settings response now sends every on/off setting as `true` or `false`, the value the server acts on. [#581]
 
 [#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
 [#581]: https://github.com/BatterWorks/Hatchdoor/issues/581
+[#582]: https://github.com/BatterWorks/Hatchdoor/issues/582
 [#586]: https://github.com/BatterWorks/Hatchdoor/issues/586
 [#587]: https://github.com/BatterWorks/Hatchdoor/issues/587
 

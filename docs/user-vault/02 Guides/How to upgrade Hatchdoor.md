@@ -34,7 +34,7 @@ If you skip the first step, an install that used Git sync refuses to start and c
 
 ## What you see after an upgrade
 
-The first time you open Hatchdoor in a browser after an upgrade, a **What's new** window lists what changed in every release since the version you had, with anything that needs action pinned at the top. Click **Got it** and it stays away in that browser until the next upgrade. A fresh install never shows it.
+The first time you open Hatchdoor in a browser after an upgrade, a **What's new** window lists what changed in every release since that browser last showed it, with anything that needs action pinned at the top. Click **Got it** and it stays away in that browser until the next upgrade. A fresh install never shows it.
 
 The same list is in Help, on the [[What's new]] page, whenever you want to read it again.
 

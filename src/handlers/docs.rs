@@ -75,8 +75,20 @@ async fn page_handler(
     Path(path): Path<String>,
     request: Request,
 ) -> Response {
-    let reveals_private = state.reveals_private(&request);
-    let manual = state.manual;
+    page_response(state.manual, &path, state.reveals_private(&request))
+}
+
+/// `GET /api/v1/docs/<page>.md`: the same page as `/docs/<page>.md`, private
+/// pages included, for Help in the signed-in app. With no web token
+/// configured the public address can never serve a private page, What's new
+/// among them, so Help asks here. `src/server.rs` gives it the What's new
+/// route's guard: the web token when one is configured, refused in demo mode.
+/// Its links point at the public addresses, the way Help resolves them.
+pub async fn app_docs_page_handler(Path(path): Path<String>) -> Response {
+    page_response(crate::docs_bundle::manual(), &path, true)
+}
+
+fn page_response(manual: &Manual, path: &str, reveals_private: bool) -> Response {
     // Links are written relative to the address asked for, so they resolve
     // from wherever the page was fetched.
     let depth = path.matches('/').count();
@@ -581,6 +593,25 @@ mod tests {
         );
         let (_, body, _) = get_text(&app, "/llms.txt", Some(TOKEN)).await;
         assert!(!body.contains("secret"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_app_address_serves_a_private_page_as_the_public_one_does_with_the_token() {
+        let app = Router::new().route("/api/v1/docs/{*path}", get(app_docs_page_handler));
+        let (status, body, response) = get_text(&app, "/api/v1/docs/whats-new.md", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type(&response), MARKDOWN);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache control"),
+            "private, no-store"
+        );
+        // Same body, so its links resolve against the public addresses.
+        let (_, public, _) =
+            get_text(&bundled(Some(TOKEN)), "/docs/whats-new.md", Some(TOKEN)).await;
+        assert_eq!(body, public);
     }
 
     #[tokio::test]

@@ -36,7 +36,8 @@ export type WhatsNewResponse = {
   version: string;
   previous_version: string | null;
   fresh_install: boolean;
-  /** Newest first, after `previous_version` up to the running version. */
+  /** Every release up to and including the running version, newest first.
+   * Which of them are new is the browser's call: see `releasesToShow`. */
   releases: Release[];
 };
 
@@ -62,10 +63,11 @@ function compareVersions(a: Semver, b: Semver): number {
 }
 
 /**
- * The releases to show, newest first, or none. Nothing shows on a fresh
- * install, or when storage is blocked: a dismissal that cannot be remembered
- * would bring the pop-up back on every load. With no record the server's own
- * list stands, which starts after the version it ran before.
+ * The releases to show, newest first, or none: every release newer than the
+ * one this browser last saw, however many versions the server ran meanwhile.
+ * A browser with no record starts after the version the server ran before.
+ * Nothing shows on a fresh install, or when storage is blocked: a dismissal
+ * that cannot be remembered would bring the pop-up back on every load.
  */
 export function releasesToShow(
   response: WhatsNewResponse,
@@ -74,11 +76,16 @@ export function releasesToShow(
   if (response.fresh_install || !record.available) {
     return [];
   }
-  const seen = record.seen ? parseVersion(record.seen) : null;
+  const floor =
+    (record.seen && parseVersion(record.seen)) ||
+    (response.previous_version && parseVersion(response.previous_version));
+  if (!floor) {
+    return [];
+  }
   return response.releases
     .flatMap((release) => {
       const version = parseVersion(release.version);
-      if (!version || (seen && compareVersions(version, seen) <= 0)) {
+      if (!version || compareVersions(version, floor) <= 0) {
         return [];
       }
       return [{ release, version }];

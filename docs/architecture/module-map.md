@@ -119,9 +119,10 @@ that production inventory are still checked for stale paths and duplicates.
 - `record_web_activity` (ADR-45) is the one middleware that tells the usage
   report a web request arrived. `build_router` layers it inside the web-token
   check of the five route groups that check alone protects (model setup,
-  settings, `vaults_v1`, folders, What's new), so it runs only for a request
-  that was let in and runs the same on an install with no token. The asset
-  and attachment routes are left out because the MCP token opens them too.
+  settings, `vaults_v1`, folders, What's new and the app manual address), so
+  it runs only for a request that was let in and runs the same on an install
+  with no token. The asset and attachment routes are left out because the MCP
+  token opens them too.
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -3196,8 +3197,9 @@ when one is configured and refused with `403 demo_read_only` in demo mode,
 because it names the running version (ADR-38 decision 6). It answers
 `no-store` JSON: `version` (`config::version_string`), `previous_version`,
 `fresh_install` (true only while the instance runs the version it was freshly
-installed on) and `releases`, the sections of the bundled What's new page
-after `previous_version` up to the running version, newest first, each with
+installed on) and `releases`, every section of the bundled What's new page
+up to and including the running version, newest first (#582: the browser
+picks the ones newer than the version it last showed), each with
 `version`, `date` and `highlights` (`text`, `action_needed`, `link` with
 `label`, `page` and `heading`). It also owns the page's format,
 `parse_releases`: `## v<version> - <YYYY-MM-DD>` sections, newest first, of 3
@@ -3460,6 +3462,13 @@ plain-text `404`. A private page (`private: true` in its frontmatter) answers
 only a caller holding the web token, `401` otherwise, and is left out of the
 index, search and its links' destinations for anyone else and out of
 `llms.txt` always; with no web token configured it is never served there.
+`docs.rs` also exports `app_docs_page_handler` (#582), which `src/server.rs`
+mounts at `GET /api/v1/docs/<page>.md` beside the What's new route and under
+its guard (the web token when one is configured, `403 demo_read_only` in demo
+mode). It answers the same body and content type as the public address, with
+private pages served and linked, and its links still point at the public
+addresses. It is how Help reads a private page on an instance with no web
+token.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth (`docs.rs` uses
@@ -4618,11 +4627,15 @@ unless a dialog above it owns the key, and focus returns to where it was. Pages
 come from `/docs/<page>.md` and search from `/docs/search`, through plain
 `fetch` with the web token attached when one is stored, never `apiFetch`: a
 401 there means a private page, not a lost session, so it must not raise the
-token prompt. Links resolve against the page's own `/docs/` address and stay
+token prompt. A page the public address refuses with 401 is asked for once
+more at `/api/v1/docs/<page>.md` (#582), the same way; a 401 or 403 there
+means a private page too, which is what a signed-out reader and demo mode
+get. Links resolve against the page's own `/docs/` address and stay
 inside Help; other links open in a new tab. Pages render through
 `createManualMarkdownComponents`, so the manual looks like a note.
 
-**Consumed dependencies:** the public manual routes (`src/handlers/docs.rs`),
+**Consumed dependencies:** the public manual routes and the app manual
+address (`src/handlers/docs.rs`),
 `types.ts`'s `VaultSummary` (whose `activation`, `git`, `search` and `*_error`
 codes `vaultConditionHelp` and `gitConsoleHelp` read, including ADR-30's
 `managed_git_conflict`), the shared `test/fixtures/vaults.ts` builders (tests
@@ -4650,8 +4663,10 @@ passing a `CONTEXTUAL_HELP` entry and nothing else. The What's new pop-up
 reads one entry without opening it: `usageReport.page` names the line its
 usage report switch sits on (ADR-48), so renaming that page moves the switch.
 
-**Invariants:** Help never fetches or shows Vault content and calls no
-`/api/` route; it never needs the web token; a `base` block renders as its
+**Invariants:** Help never fetches or shows Vault content, and its one
+`/api/` route is the app manual address, tried only after a public address
+refused a page; it never needs the web token for a public page; a `base`
+block renders as its
 source. Heading ids inside Help carry a `help-` prefix so they never collide
 with the note open underneath.
 
@@ -4686,8 +4701,10 @@ for under the `localStorage` key `hatchdoor_whats_new_seen`, as a base version
 (`2.8.0`, never the ` (dev …)` suffix). CSS is integrated through the `App.css`
 stylesheet aggregation seam.
 
-**Behaviour:** the releases shown are the server's list, newer than the stored
-version when there is one, newest first. Action-needed items from every
+**Behaviour:** the server lists every release up to the running version; the
+ones shown are those newer than the stored version, or with none stored newer
+than `previous_version`, newest first (#582), and nothing when neither is a
+version. Action-needed items from every
 listed release are pinned in one box at the top, each tagged with its version;
 each release then lists its other items. A highlight's link and "Full
 changelog" open Help through `useHelp()`; Help sits above the dialog, which
