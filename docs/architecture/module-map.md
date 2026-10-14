@@ -4637,7 +4637,9 @@ more at `/api/v1/docs/<page>.md` (#582), the same way; a 401 or 403 there
 means a private page too, which is what a signed-out reader and demo mode
 get. Links resolve against the page's own `/docs/` address and stay
 inside Help; other links open in a new tab. Pages render through
-`createManualMarkdownComponents`, so the manual looks like a note.
+`createManualMarkdownComponents`, so the manual looks like a note, and
+through `hideComments`, so a comment is hidden in a page and in a search
+excerpt the way it is on the note page (#573).
 
 **Consumed dependencies:** the public manual routes and the app manual
 address (`src/handlers/docs.rs`),
@@ -4645,7 +4647,8 @@ address (`src/handlers/docs.rs`),
 codes `vaultConditionHelp` and `gitConsoleHelp` read, including ADR-30's
 `managed_git_conflict`), the shared `test/fixtures/vaults.ts` builders (tests
 only), `api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
-`lib/noteHeadings.ts` from Note reading and rendering, and the icons in
+`lib/noteHeadings.ts` and `lib/noteComments.ts` from Note reading and
+rendering, and the icons in
 `components/icons.tsx`. It also borrows other modules' CSS classes, so a change
 there reaches Help: the Search dialog's result rows (`.search-results`,
 `.search-group`, `.search-result--primary`, `.result-title`,
@@ -4928,8 +4931,8 @@ the link the same wikilink gets, `#^id` dropped to the note itself, when its
 name reads as a note (`.md` or no extension) or no file answered to it; one
 that reads as a note and resolved as neither gets the `/__missing__/` link.
 `hideComments` (`lib/noteComments.ts`, #573) removes `%%` and HTML comments
-from the body before the reading view, the source-mode preview and the table
-of contents see it, line-count preserving like `rewriteWikilinks`, by the
+from the body before the reading view, the source-mode preview, the table
+of contents and the Help reader see it, line-count preserving like `rewriteWikilinks`, by the
 link preview's `strip_comments` rule (shared cases in
 `lib/noteComments.cases.json`, run by both test suites) except that code,
 math and a whole-line `hatchdoor-query` marker are kept; the search dialog's

@@ -80,6 +80,12 @@ describe("plainExcerpt", () => {
       ),
     ).toBe("git from the Settings screen, see How to deploy");
   });
+
+  it("drops comments but keeps code that looks like one (#573)", () => {
+    expect(plainExcerpt("Before %%hidden%% after, `%%kept%%`.")).toBe(
+      "Before after, %%kept%%.",
+    );
+  });
 });
 
 describe("fetchHelpPage", () => {
