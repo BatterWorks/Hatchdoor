@@ -27,6 +27,7 @@ import {
   slugifyHeading,
   type NoteHeading,
 } from "../lib/noteHeadings";
+import { hideComments } from "../lib/noteComments";
 import { detectLineEnding, frontmatterLineOffset } from "../lib/sourceMap";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
@@ -743,7 +744,10 @@ export function NotePage({
     });
   }, [note, onActiveNoteChange, parsed.body, vaultId]);
 
-  const renderInput = stripBlockIds(parsed.body);
+  // What a reader sees of the body: comments hidden (#573), lines kept, so
+  // every rendered block still maps to its line in the file.
+  const visibleBody = useMemo(() => hideComments(parsed.body), [parsed.body]);
+  const renderInput = stripBlockIds(visibleBody);
   const noteRelativePath = note?.relative_path ?? "";
   const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
     vaultId,
@@ -771,8 +775,8 @@ export function NotePage({
     [location.search],
   );
   const tocHeadings = useMemo(
-    () => extractMarkdownHeadings(parsed.body),
-    [parsed.body],
+    () => extractMarkdownHeadings(visibleBody),
+    [visibleBody],
   );
   headingLinesRef.current = new Map(
     tocHeadings.map(({ id, sourceLine }) => [id, sourceLine]),
@@ -783,8 +787,8 @@ export function NotePage({
   // neither drawn nor listed. Only the first heading qualifies, and only
   // when nothing but blank lines precede it.
   const hiddenHeadingLine = useMemo(
-    () => duplicateTitleHeadingLine(parsed.body, tocHeadings, note?.title),
-    [parsed.body, tocHeadings, note?.title],
+    () => duplicateTitleHeadingLine(visibleBody, tocHeadings, note?.title),
+    [visibleBody, tocHeadings, note?.title],
   );
   const visibleHeadings = useMemo(
     () =>

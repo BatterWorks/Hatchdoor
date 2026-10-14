@@ -1,0 +1,47 @@
+[
+  {
+    "name": "an Obsidian comment inside a line",
+    "input": "Visible %%secret%% tail",
+    "output": "Visible  tail"
+  },
+  {
+    "name": "an HTML comment inside a line",
+    "input": "Visible <!-- secret --> tail",
+    "output": "Visible  tail"
+  },
+  {
+    "name": "an Obsidian comment across lines",
+    "input": "before %%start\nmiddle\nend%% after\nnext",
+    "output": "before\n\n after\nnext"
+  },
+  {
+    "name": "an HTML comment across lines",
+    "input": "<!-- start\nmiddle\nend -->\nnext",
+    "output": "\n\n\nnext"
+  },
+  {
+    "name": "several comments on one line",
+    "input": "x %%one%% y <!-- two --> z %%three%%",
+    "output": "x  y  z"
+  },
+  {
+    "name": "an HTML opener inside an Obsidian comment",
+    "input": "%%a <!-- b%% c -->",
+    "output": " c -->"
+  },
+  {
+    "name": "an Obsidian marker inside an HTML comment",
+    "input": "<!-- a %% b --> c %%",
+    "output": " c"
+  },
+  {
+    "name": "a comment that is never closed hides the rest of the note",
+    "input": "kept %%never closed\nhidden\nhidden too",
+    "output": "kept\n\n"
+  },
+  {
+    "name": "a heading inside a comment",
+    "input": "%%\n## Hidden heading\n%%\n## Shown heading",
+    "output": "\n\n\n## Shown heading"
+  }
+]

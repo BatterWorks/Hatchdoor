@@ -3450,6 +3450,10 @@ surface, so any note that read refuses previews as the general wording.
 The `<title>` wording has a second copy in the web app,
 `frontend/src/app/pageTitle.ts` (#514), which takes the tab over once the page
 loads: change the two together.
+The opening prose skips comments by `strip_comments`, the rule the note page's
+`hideComments` (`frontend/src/lib/noteComments.ts`, #573) follows outside code
+and math; a test reads the shared `frontend/src/lib/noteComments.cases.json`,
+so a change to either side's rule fails it.
 `og:url` and `og:image` are built on `HATCHDOOR_PUBLIC_URL` alone and are left
 out when it is empty; no request header is read. The picture is
 `frontend/public/link-preview.png`. `docs.rs` (#422, ADR-38) exports
@@ -4553,7 +4557,8 @@ loading/error/empty rendering only — the facet rail and results list underneat
 **Consumed dependencies:** shared API/error utilities, shared UI components
 (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`), the shared
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
-`lib/vaultParticipants.ts`, router navigation supplied by the shell,
+`lib/vaultParticipants.ts`, `lib/noteComments.ts`'s `hideComments` (result
+snippets drop comments, #573), router navigation supplied by the shell,
 `startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
@@ -4890,6 +4895,7 @@ src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 - `frontend/src/components/note-page/text.ts`
 - `frontend/src/components/note-page/wikilinks.ts`
 - `frontend/src/lib/markdown.ts`
+- `frontend/src/lib/noteComments.ts`
 - `frontend/src/lib/noteHeadings.ts`
 - `frontend/src/lib/noteSearch.ts`
 - `frontend/src/noteEnhancements.css`
@@ -4916,7 +4922,19 @@ cache the hook fills, one `resolve-batch` per call, for the live editor's
 links, and `cachedAssetHref` (#544) gives one embed target the href the
 rendered body would draw now, the server's path once the hook's batch has
 filled the cache and the note-relative reading before, for the editor's image
-and PDF widgets — heading/search-hit navigation, Markdown transformations,
+and PDF widgets. A note embed (#573), `![[Other note]]`, goes out as a
+note target as well as an asset target (PDF embeds aside) and is rewritten to
+the link the same wikilink gets, `#^id` dropped to the note itself, when its
+name reads as a note (`.md` or no extension) or no file answered to it; one
+that reads as a note and resolved as neither gets the `/__missing__/` link.
+`hideComments` (`lib/noteComments.ts`, #573) removes `%%` and HTML comments
+from the body before the reading view, the source-mode preview and the table
+of contents see it, line-count preserving like `rewriteWikilinks`, by the
+link preview's `strip_comments` rule (shared cases in
+`lib/noteComments.cases.json`, run by both test suites) except that code,
+math and a whole-line `hatchdoor-query` marker are kept; the search dialog's
+snippets consume it too. The live editor still shows comments. The contract
+also covers heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the reading view's component map produced by
 `createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
 `NotePage` shows the live editor on a writable Vault unless the browser's
@@ -5077,7 +5095,8 @@ hides only the panel.
 **Validation:** note-page unit tests, `NotePage.test.tsx` (saving through every
 Vault condition, read escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
 fragment jump, in the reading view and from the live editor's wikilinks),
-`wikilinks.hook.test.ts` (`resolveNoteTargets`), Markdown/heading/search/state tests,
+`wikilinks.hook.test.ts` (`resolveNoteTargets`), `NotePage.comments.test.tsx` and
+`noteComments.test.ts` (comment hiding and note embeds, #573), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 
