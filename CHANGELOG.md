@@ -4,8 +4,11 @@
 
 ### Fixed
 - The deploy page now tells an installing agent to read the whole page before it starts. The page is about 35 KB, and in a test install from its public address the agent printed only the first 30,000 bytes, never came back for the rest and so missed the last step, which tells it to show you the web token. A web-fetch tool can also return a summary with no commands in it. The agent part of the page now opens with that instruction: save the page to a file with `curl` and read the file to the end. [#529]
+- Transfer links no longer reach the logs under any `RUST_LOG` setting. Hatchdoor kept the MCP library's message logging off by naming three of its modules, so a `RUST_LOG` that named a deeper one, such as `rmcp::transport::streamable_http_server::tower=trace`, logged tool results with their download and upload links. Nothing the library logs below info gets through now, whatever `RUST_LOG` says. [#587]
+- Changing the MCP token now strands every transfer link. A tool call that arrived just before the change and finished just after got a link that worked under the new token. The link is now signed with the token the call came in on, so the new token refuses it. [#587]
 
 [#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
+[#587]: https://github.com/BatterWorks/Hatchdoor/issues/587
 
 ## v2.8.1 - 2026-10-11
 

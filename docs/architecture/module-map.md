@@ -1239,9 +1239,10 @@ and `auth::constant_time_eq`.
 **Coordination paths:** `src/app_state.rs` (the field), `src/lib.rs`,
 `src/server.rs` (the `/transfers/{*path}` route and the span's `traced_uri`),
 `src/handlers/mod.rs`, `src/mcp/tools/mod.rs` (`transfer_link_signer`), and
-`src/config.rs` (`capped_log_filter`, which holds the `rmcp` crate and its two
-message-logging modules at info whatever `RUST_LOG` asks for, because a tool
-result can carry a link).
+`src/config.rs` (`within_mcp_library_cap`, a filter beside the `EnvFilter`
+that drops every event from the `rmcp` target tree below info whatever
+`RUST_LOG` asks for, because a tool result can carry a link; a cap written as
+`EnvFilter` directives is outranked by any directive naming a deeper module).
 
 **Invariants:** a link names one Vault and one path and one direction and is
 refused for anything else; it expires five minutes after minting, checked when
@@ -3648,7 +3649,8 @@ Once #170 lands, the modern surface advertises `tools.listChanged: true`
 honestly: modern clients receive tool-list change events via
 `subscriptions/listen` backed by the existing `mcp_tools_changed` broadcast,
 capped at four live subscriptions per bearer token (`subscriptions.rs` owns
-the per-token registry and the validated-token request extension), with
+the per-token registry and the validated-token request extension, which
+`call_tool` also uses as the token a transfer link is signed under, #587), with
 acknowledgment, subscription metadata, rmcp SSE keep-alives, and disconnect
 cancellation. The legacy handshake keeps advertising `tools.listChanged:
 false`, so legacy clients continue reissuing `tools/list`. Layered resource protection (#171) exempts protocol/discovery/
