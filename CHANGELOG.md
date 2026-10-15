@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them. [#596]
+
+[#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
+
 ## v2.8.2 - 2026-10-14
 
 ### Fixed
