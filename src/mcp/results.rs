@@ -549,6 +549,7 @@ mod schema_tests {
             rate_limits_enabled: true,
             public_url: None,
             request_origin: None,
+            client_name: None,
         };
         let mut names: Vec<String> = crate::mcp::tools::setup_tools_list()
             .into_iter()

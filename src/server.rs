@@ -3792,6 +3792,7 @@ mod tests {
                     parsed_vault_id(&vault_id),
                     target,
                     false,
+                    None,
                 )
                 .url
         };
@@ -3977,6 +3978,7 @@ mod tests {
             parsed_vault_id(&vault_id),
             "big.png",
             false,
+            None,
         );
         let refused = app
             .clone()
@@ -3985,6 +3987,73 @@ mod tests {
             .expect("response");
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
         assert!(!vault_root.join("big.png").exists());
+    }
+
+    /// ADR-49: a write through the web API is recorded with the `web` origin.
+    #[tokio::test]
+    async fn a_write_through_the_web_api_has_the_web_origin() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
+        let created = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"relative_path":"Idea.md","content":"idea"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(created.status().is_success(), "{}", created.status());
+
+        let origins: Vec<_> = state
+            .vaults
+            .runtime(parsed_vault_id(&vault_id))
+            .expect("Vault runtime")
+            .write_ledger()
+            .take()
+            .into_iter()
+            .map(|record| record.origin)
+            .collect();
+        assert_eq!(origins, vec![crate::git::WriteOrigin::web()]);
+    }
+
+    /// ADR-49: an upload through a link is the write of the client that asked
+    /// for the link, exactly as if that client had written over MCP.
+    #[tokio::test]
+    async fn an_upload_through_a_link_has_the_origin_of_the_client_that_asked_for_it() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Origin", 0).await;
+        let ledger = state
+            .vaults
+            .runtime(parsed_vault_id(&vault_id))
+            .expect("Vault runtime")
+            .write_ledger();
+        ledger.take();
+
+        // `mcp_tool_call` initializes as a client named "t".
+        for target in ["scan.png", "Imports/Report.md"] {
+            let answer = mint_upload_link(&app, &vault_id, target, false, None).await;
+            let uploaded = post_upload(&app, minted_url(&answer), b"# report\n").await;
+            assert!(uploaded.status().is_success(), "{target}");
+            assert!(vault_root.join(target).exists());
+        }
+
+        let origins: Vec<_> = ledger
+            .take()
+            .into_iter()
+            .map(|record| record.origin)
+            .collect();
+        let asking_client = crate::git::WriteOrigin::mcp(Some("t"));
+        assert_eq!(origins, vec![asking_client.clone(), asking_client]);
     }
 
     /// `create_upload_link` called over MCP for one target, with optional
@@ -4266,6 +4335,7 @@ mod tests {
                     vault_id,
                     "b.png",
                     false,
+                    None,
                 )
                 .url,
         ] {

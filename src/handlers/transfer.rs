@@ -23,6 +23,7 @@ use axum::response::Response;
 
 use crate::app_state::AppState;
 use crate::auth::{McpAssetRead, too_many_requests};
+use crate::git::WriteOrigin;
 use crate::handlers::vault_content::vault_scoped_asset_handler;
 use crate::handlers::vault_write::{
     UploadForm, attachment_outcome_response, invalid_input_error, mutation_error_response,
@@ -31,7 +32,7 @@ use crate::handlers::vault_write::{
 use crate::handlers::vaults::{VaultApiError, internal_error_response, parse_vault_id};
 use crate::mcp::limits::RateLimiter;
 use crate::mcp::subscriptions::McpBearerToken;
-use crate::transfer_link::{LinkRefusal, NoteUploadRule, SigningKey, link_path};
+use crate::transfer_link::{LinkRefusal, NoteUploadRule, RedeemedLink, SigningKey, link_path};
 use crate::vault_mutation::{VaultMutationCore, is_note_upload_target};
 use crate::vault_registry::VaultId;
 
@@ -112,14 +113,17 @@ pub async fn upload_transfer_handler(
     let kind = if is_note_upload_target(&path) {
         links
             .redeem_note_upload(&live.key, vault_id, &path, uri.query())
-            .map(RedeemedUpload::Note)
+            .map(|redeemed| redeemed.map_rule(RedeemedUpload::Note))
     } else {
         links
             .redeem_upload(&live.key, vault_id, &path, uri.query())
-            .map(|overwrite| RedeemedUpload::Attachment { overwrite })
+            .map(|redeemed| redeemed.map_rule(|overwrite| RedeemedUpload::Attachment { overwrite }))
     };
-    let kind = match kind {
-        Ok(kind) => kind,
+    let RedeemedLink {
+        rule: kind,
+        client_name,
+    } = match kind {
+        Ok(redeemed) => redeemed,
         Err(refusal) => return link_refusal(refusal, Some(vault_id)),
     };
 
@@ -151,7 +155,9 @@ pub async fn upload_transfer_handler(
         }
     };
 
-    let core = VaultMutationCore::from_state(&state);
+    // The upload is the write of the client that asked for the link, exactly
+    // as if it had written over MCP (ADR-49).
+    let core = VaultMutationCore::from_state(&state, WriteOrigin::mcp(client_name.as_deref()));
     let written = match kind {
         RedeemedUpload::Attachment { overwrite } => core
             .import_attachment(

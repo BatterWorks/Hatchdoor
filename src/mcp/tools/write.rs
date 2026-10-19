@@ -32,6 +32,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::git::WriteOrigin;
 use crate::mcp::results::UploadKind;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{AttachmentOutcome, SectionMode};
@@ -54,6 +55,10 @@ pub(super) struct McpVault {
     /// mutation core reads the same instance-wide defaults (the archive
     /// folder) the rest of this call does.
     settings: Arc<ConfigSnapshot>,
+    /// The origin of every write this call makes: MCP, with the name the
+    /// calling client sent (ADR-49). One per call, so every item of a
+    /// `batch` shares it.
+    origin: WriteOrigin,
 }
 
 impl McpVault {
@@ -69,6 +74,7 @@ impl McpVault {
             self.vault_id,
             self.control.clone(),
             Arc::clone(&self.settings),
+            self.origin.clone(),
         )
         .with_commit_summary(commit_summary)
     }
@@ -95,17 +101,18 @@ impl McpVault {
 /// Resolve the explicit `vault_id` without asserting anything about the
 /// Vault's write posture, so [`scoped_vault`] can apply the capability check
 /// separately and report it as its own outcome.
-fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonRpcFailure> {
-    readable_vault_by_id(state, parse_vault_id(arguments)?)
-}
-
-fn readable_vault_by_id(state: &AppState, vault_id: VaultId) -> Result<McpVault, JsonRpcFailure> {
+fn readable_vault_by_id(
+    state: &AppState,
+    vault_id: VaultId,
+    config: &McpConfig,
+) -> Result<McpVault, JsonRpcFailure> {
     let core = VaultReadCore::new(&state.startup_sqlite, &state.vaults);
     let control = core.control_block(vault_id).map_err(vault_error)?;
     Ok(McpVault {
         vault_id,
         control,
         settings: state.runtime_snapshot(),
+        origin: WriteOrigin::mcp(config.client_name.as_deref()),
     })
 }
 
@@ -124,15 +131,17 @@ pub(super) fn parse_vault_id(arguments: &Value) -> Result<VaultId, JsonRpcFailur
 pub(super) fn scoped_vault(
     state: &AppState,
     arguments: &Value,
+    config: &McpConfig,
 ) -> Result<McpVault, JsonRpcFailure> {
-    scoped_vault_by_id(state, parse_vault_id(arguments)?)
+    scoped_vault_by_id(state, parse_vault_id(arguments)?, config)
 }
 
 pub(super) fn scoped_vault_by_id(
     state: &AppState,
     vault_id: VaultId,
+    config: &McpConfig,
 ) -> Result<McpVault, JsonRpcFailure> {
-    let vault = readable_vault_by_id(state, vault_id)?;
+    let vault = readable_vault_by_id(state, vault_id, config)?;
     crate::vault_mutation::ensure_mutable(vault.vault_id, &vault.control)
         .map_err(mutation_error)?;
     Ok(vault)
@@ -641,6 +650,7 @@ pub(super) async fn create_upload_link_tool(
             vault.vault_id,
             &target_relative_path,
             hash,
+            vault.origin.client_name(),
         ),
         None => state.transfer_links.mint_upload(
             &key,
@@ -648,6 +658,7 @@ pub(super) async fn create_upload_link_tool(
             vault.vault_id,
             &target_relative_path,
             overwrite,
+            vault.origin.client_name(),
         ),
     };
     let usage = match upload_kind {

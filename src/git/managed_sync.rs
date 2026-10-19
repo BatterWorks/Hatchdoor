@@ -611,7 +611,7 @@ fn commit_vault_drift(
     } else {
         index.clear().map_err(|_| ManagedSyncError::Validation)?;
     }
-    stage_vault_drift(repository, &mut index, vault_relative)?;
+    let changed = stage_vault_drift(repository, &mut index, vault_relative)?;
     let tree = repository
         .find_tree(
             index
@@ -631,13 +631,13 @@ fn commit_vault_drift(
     let parents = parent.iter().collect::<Vec<_>>();
     // Reached only once this commit is certain, so a turn that found no drift
     // has already returned above with the batch untouched (issue #249).
-    ledger.commit_batch(|message| {
+    ledger.commit_batch(|batch| {
         repository
             .commit(
                 Some("HEAD"),
                 &signature,
                 &signature,
-                message,
+                &batch.message(&config.vault_path, &changed),
                 &tree,
                 &parents,
             )
@@ -693,17 +693,20 @@ fn has_staged_vault_changes(
         })
 }
 
+/// Stage every changed path under the Vault into `index`, and return those
+/// paths relative to the Vault root.
 fn stage_vault_drift(
     repository: &Repository,
     index: &mut git2::Index,
     vault_relative: &Path,
-) -> Result<(), ManagedSyncError> {
+) -> Result<Vec<PathBuf>, ManagedSyncError> {
     let mut options = git2::StatusOptions::new();
     options
         .include_untracked(true)
         .recurse_untracked_dirs(true)
         .renames_head_to_index(false)
         .renames_index_to_workdir(false);
+    let mut staged = Vec::new();
     for entry in repository
         .statuses(Some(&mut options))
         .map_err(|_| ManagedSyncError::Validation)?
@@ -711,9 +714,9 @@ fn stage_vault_drift(
     {
         let path = entry.path().map_err(|_| ManagedSyncError::Validation)?;
         let path = Path::new(path);
-        if !path.starts_with(vault_relative) {
+        let Ok(vault_path) = path.strip_prefix(vault_relative) else {
             continue;
-        }
+        };
         if repository
             .workdir()
             .ok_or(ManagedSyncError::Validation)?
@@ -728,8 +731,9 @@ fn stage_vault_drift(
                 .remove_path(path)
                 .map_err(|_| ManagedSyncError::Validation)?;
         }
+        staged.push(vault_path.to_path_buf());
     }
-    Ok(())
+    Ok(staged)
 }
 
 fn fetch(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), ManagedSyncError> {
@@ -1324,6 +1328,7 @@ mod tests {
             target: "Home".to_string(),
             affected_paths: vec![config.vault_path.join("Home.md")],
             summary: Some("tighten the intro".to_string()),
+            origin: super::super::message::WriteOrigin::web(),
         });
 
         synchronize_managed_checkout(&config, &ledger).expect("two-way sync");
@@ -1337,7 +1342,8 @@ mod tests {
         let message = head.message().expect("commit message");
         assert_eq!(
             message,
-            "hatchdoor: update \"Home\" (1 file)\n\n- tighten the intro"
+            "hatchdoor: update \"Home\" (1 file)\n\n- tighten the intro\n\n\
+             Hatchdoor-Origin: web"
         );
         assert!(
             ledger.take().is_empty(),
@@ -1354,6 +1360,7 @@ mod tests {
             target: "Home".to_string(),
             affected_paths: vec![config.vault_path.join("Home.md")],
             summary: Some("not committed yet".to_string()),
+            origin: super::super::message::WriteOrigin::web(),
         });
 
         synchronize_managed_checkout(&config, &ledger).expect("two-way sync");
@@ -1361,6 +1368,37 @@ mod tests {
         let batch = ledger.take();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].summary.as_deref(), Some("not committed yet"));
+    }
+
+    #[test]
+    fn a_two_way_commit_with_a_path_no_write_recorded_also_has_an_unknown_origin() {
+        let (_root, config) = fixture(ManagedSyncMode::TwoWay);
+        std::fs::write(config.vault_path.join("Home.md"), "# Home\n\ntightened\n")
+            .expect("recorded edit");
+        std::fs::write(config.vault_path.join("By hand.md"), "# by hand\n")
+            .expect("edit made outside Hatchdoor");
+        let ledger = WriteLedger::new();
+        ledger.record(WriteRecord {
+            op: "update".to_string(),
+            target: "Home".to_string(),
+            affected_paths: vec![config.vault_path.join("Home.md")],
+            summary: None,
+            origin: super::super::message::WriteOrigin::mcp(Some("claude-code")),
+        });
+
+        synchronize_managed_checkout(&config, &ledger).expect("two-way sync");
+
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        let head = checkout
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        assert_eq!(
+            head.message().expect("commit message"),
+            "hatchdoor: update \"Home\" (1 file)\n\n\
+             Hatchdoor-Origin: mcp/claude-code\nHatchdoor-Origin: unknown"
+        );
     }
 
     #[test]
@@ -1382,7 +1420,7 @@ mod tests {
             .expect("commit");
         assert_eq!(
             head.message().expect("commit message"),
-            "hatchdoor: vault update"
+            "hatchdoor: vault update\n\nHatchdoor-Origin: unknown"
         );
     }
 

@@ -4323,6 +4323,7 @@ mod tests {
                 &McpConfig {
                     bearer_token: Some(TEST_TOKEN.to_string()),
                     request_origin: Some("http://localhost".to_string()),
+                    client_name: None,
                     ..McpConfig::disabled()
                 },
             )
@@ -4902,6 +4903,91 @@ mod tests {
         assert_eq!(batch[0].op, "edit");
         assert_eq!(batch[0].target, "Home");
         assert_eq!(batch[0].summary.as_deref(), Some("shout the token"));
+        assert_eq!(
+            batch[0].origin,
+            crate::git::WriteOrigin::mcp(Some("golden-test")),
+            "the name the client sent at initialize, and nothing of its version (ADR-49)"
+        );
+    }
+
+    fn only_vaults_pending_writes(state: &AppState) -> Vec<crate::git::WriteRecord> {
+        let vault_id = *state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .expect("test Vault");
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("Vault runtime")
+            .write_ledger()
+            .take()
+    }
+
+    /// ADR-49: every operation inside one `batch` call has the origin of that
+    /// call.
+    #[tokio::test]
+    async fn every_write_in_a_batch_call_has_the_origin_of_that_call() {
+        let (state, _tmp) = write_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .expect("test Vault")
+            .to_string();
+        let answer = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "One.md", "content": "# One\n"}},
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "Two.md", "content": "# Two\n"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+
+        let origins: Vec<_> = only_vaults_pending_writes(&state)
+            .into_iter()
+            .map(|record| record.origin)
+            .collect();
+        let golden = crate::git::WriteOrigin::mcp(Some("golden-test"));
+        assert_eq!(origins, vec![golden.clone(), golden]);
+    }
+
+    /// ADR-49: a client that sends no name still writes over MCP, and its
+    /// write says so without one.
+    #[tokio::test]
+    async fn a_write_from_a_client_that_sent_no_name_has_the_bare_mcp_origin() {
+        let (state, _tmp) = write_state();
+        let arguments = scoped_arguments(
+            &state,
+            "create_note",
+            json!({"relative_path": "Nameless.md", "content": "# Nameless\n"}),
+        );
+        let raw = modern_post(
+            transport(&state),
+            "tools/call",
+            Some("create_note"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"_meta": modern_meta("2026-07-28", true),
+                          "name":"create_note", "arguments": arguments}
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(message["result"]["isError"], false, "{message}");
+
+        let batch = only_vaults_pending_writes(&state);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].origin, crate::git::WriteOrigin::mcp(None));
     }
 
     /// Issue #242: the plan call writes nothing and records nothing; the

@@ -370,7 +370,7 @@ async fn lock_touched_vaults(
 
     locks.held.reserve(vault_ids.len());
     for vault_id in vault_ids {
-        match lock_one_vault(state, vault_id).await {
+        match lock_one_vault(state, vault_id, config).await {
             Ok(locked) => locks.held.push(locked),
             Err(failure) => locks.unlocked.push(UnlockedVault {
                 vault_id,
@@ -396,12 +396,13 @@ const MUTATION_ACQUIRE_ATTEMPTS: usize = 4;
 async fn lock_one_vault(
     state: &AppState,
     vault_id: VaultId,
+    config: &McpConfig,
 ) -> Result<LockedVault, JsonRpcFailure> {
     let mut last = None;
     for _ in 0..MUTATION_ACQUIRE_ATTEMPTS {
         // Resolved inside the loop: after a retirement the live block is a
         // different one, and it is the live block this call must run on.
-        let vault = write::scoped_vault_by_id(state, vault_id)?;
+        let vault = write::scoped_vault_by_id(state, vault_id, config)?;
         match write::acquire_mutation(&vault).await {
             Ok(guard) => {
                 return Ok(LockedVault {
@@ -468,7 +469,7 @@ async fn dispatch_one(
                 // disabled, or now refuses writes reports that for itself,
                 // and one whose replacement does *not* share the exclusion is
                 // refused outright — running it would be an unlocked write.
-                let fresh = write::scoped_vault_by_id(&state, vault_id)?;
+                let fresh = write::scoped_vault_by_id(&state, vault_id, config)?;
                 if !fresh.shares_write_exclusion(&locked.vault) {
                     return Err(write::exclusion_lost_error(vault_id));
                 }
@@ -701,6 +702,7 @@ mod tests {
             rate_limits_enabled: true,
             public_url: None,
             request_origin: None,
+            client_name: None,
         };
         let advertised: Vec<String> = super::super::tools_list(&config)
             .iter()

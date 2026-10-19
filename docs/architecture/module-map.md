@@ -1050,8 +1050,8 @@ connection added by #426.
 history), `base_version`, which reads `2.8.0 (dev abc123)` as `2.8.0`,
 `InstanceStateStore::remove_section`, which drops one section and writes
 nothing when it is not there (#477), `AgentConnection` (`name`, `connected_at` in RFC 3339 UTC),
-and `AgentConnectionLog` (`load`, `latest`, `observe`, `save`, and a
-`Default` that keeps the record in memory only). The versioned `state/instance.json` format: a
+`AgentConnectionLog` (`load`, `latest`, `observe`, `save`, and a
+`Default` that keeps the record in memory only), and `clean_client_name`, the cleaning a stored client name gets, answering `None` when nothing is left, which Git synchronization uses for a write's origin (#570). The versioned `state/instance.json` format: a
 `schema_version` beside named sections, each a JSON value owned by one
 feature. `versions` is this module's own: `current`, `previous` and
 `fresh_install`, all base versions. `previous` moves only when the base
@@ -1213,7 +1213,7 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Public contract:** `TransferLinks` (one instance in `AppState`), with `key`,
 `mint_download`, `mint_upload`, `mint_note_replace`, `verify_download`,
 `redeem_upload`, and `redeem_note_upload`; `SigningKey`, `MintedLink`, `Grant`,
-`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`,
+`RedeemedLink`, `NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`,
 `SIGNATURE_PARAM`, and `link_path`. A link is an absolute URL on the
 Vault-scoped `/transfers/{*path}` route, its path spelled by `link_path`
 (trimmed, `.` and empty segments dropped, because a client removes `.`
@@ -1230,6 +1230,8 @@ replacing note link. `key` derives the
 token's revision, and the token the request was admitted on, so a tool call
 admitted on a token that has since rotated mints links the new token will not
 accept. See ADR-27 and ADR-32.
+
+Since #570 (ADR-49) `mint_upload` and `mint_note_replace` take the asking client's name, and both redemptions answer a `RedeemedLink` carrying the link's rule and that name. The name is kept in memory by nonce until the link is redeemed or expires, and never enters the URL, the `Grant` or the signature. `None` means the client sent no name or the name is no longer remembered.
 
 **Consumers:** the MCP `get_attachment` and `create_upload_link` tools mint;
 `src/handlers/transfer.rs` verifies and redeems, and compares an upload
@@ -2099,7 +2101,7 @@ off the async runtime; recording what that write did in the Vault's
 (#249); marking the Vault's published snapshot stale and asking for its Index
 and commit turns itself, rather than relying on a watcher (#324); and returning `NoteWriteOutcome` or a structured
 `VaultOperationError`. `VaultMutation::with_commit_summary` carries the
-caller's one-line description of the change into that record; the private
+caller's one-line description of the change into that record. Since #570 (ADR-49) `VaultMutationCore::new`, `VaultMutationCore::from_state` and `VaultMutation::gated` each take a `git::WriteOrigin`, which every record they make carries; the parameter has no default, so an adapter that does not state where its writes come from does not compile. The web handlers pass `WriteOrigin::web()`, and the MCP tools and the transfer handler pass `WriteOrigin::mcp` with the client's name. The private
 `RecordedWrite` trait is what lets `run_write` build the record once for all
 seventeen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
 resolved from the `LayerMap` the write's own pre-write index build already
@@ -2687,8 +2689,8 @@ check-full` for the model-loading tests.
 
 **Public contract:** `GitMode` (`off`/`local`, carried only by the legacy
 first-boot import — the instance-wide runtime lane is gone, #185), `GitConfig`,
-write-record/message types (`WriteRecord`, `WriteLedger`,
-`build_commit_message`), commit outcomes and errors (including
+write-record/message types (`WriteRecord`, `WriteOrigin`, `WriteLedger`,
+`PendingBatch`, `build_commit_message`), commit outcomes and errors (including
 `GitError::ManualRecovery` for repository operations that cannot be proven
 Hatchdoor-owned), and the local repository operations `validate_repo`,
 `validate_local_repo`, `init_local_repo`, `commit_local`,
@@ -2829,6 +2831,8 @@ the unique file count. Body: one `- ` line per caller-supplied summary. A
 commit whose batch is empty, which is what drift from outside Hatchdoor
 produces, keeps the generic `hatchdoor: vault update`. The ledger is bounded
 (`WriteLedger::CAPACITY`) because a `Local` Vault has no Git turn to take it.
+
+Since #570 (ADR-49) every `WriteRecord` carries a `WriteOrigin`, built only by `WriteOrigin::web()` or `WriteOrigin::mcp(client_name)`, which cleans the name, and the message ends with a trailer block: one blank line, then one `Hatchdoor-Origin: <value>` line per distinct origin in order of first appearance, with `unknown` last. `unknown` means the commit changes a path no record in the batch accounts for, and a commit from an empty batch carries it alone. To decide that, `WriteLedger::commit_batch` hands the commit path a `PendingBatch` instead of a finished message, and the commit path calls `PendingBatch::message` with the Vault root and the Vault-relative paths `stage_vault_drift` staged. `commit_local` takes its message as a closure over those paths for the same reason. The title and summary lines are unchanged. The trailer name and the four values are a permanent, externally visible format.
 
 `ManagedGitOutcome` is what a finished Git or commit turn reports:
 `UpToDate`, `Synchronized` (it committed or pushed and left the working tree
@@ -3045,7 +3049,7 @@ and push. Only that selected remote and its optional push URL are constrained to
 the same credential-free HTTPS identity; unrelated operator-owned remotes in an
 `ExistingGit` checkout are ignored and never contacted.
 
-**Consumed dependencies:** local Git repository through `git2`, the live
+**Consumed dependencies:** local Git repository through `git2`, Instance state's `clean_client_name` for the client name in a `WriteOrigin` (#570), the live
 configuration snapshot for startup parsing, and the registry's shared
 credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
 `https_credentials` accessor (managed-Git turns only; never exposed further).
@@ -3176,7 +3180,7 @@ shared `vault_write::read_upload_form`; the form's optional
 (`is_note_upload_target`) is redeemed with `redeem_note_upload` and written
 through the core's `upload_note` instead, answering the note-write shape
 (`vault_write::note_write_response`); the part's declared content type is
-ignored. Both re-read the live configuration per
+ignored. The upload is written with the origin `WriteOrigin::mcp` of the client name the redeemed link remembered (#570, ADR-49). Both re-read the live configuration per
 request: MCP disabled refuses every link (`mcp_disabled`), write mode off every
 upload (`mcp_write_disabled`), and a link that does not verify is `403` with
 `transfer_link_invalid`, `transfer_link_expired`, or `transfer_link_spent`. The
@@ -3635,6 +3639,8 @@ call's structured error when its `code` is one the manual explains
 finished result, so `batch` item errors, `VaultOperationError` and HTTP bodies
 never carry it, and errors for other codes, the writes-off `-32602` refusal and
 the plain-text setup refusals are unchanged. Additive. #502 adds `get_note_outline` and `get_note_section`, the seventeenth and eighteenth read tools and both `READ_OPS` entries (so `batch` may carry them): mappings onto `VaultReadCore::note_outline` and `note_sections`, answering `GetNoteOutlineResult` (`NoteOutline`) and `GetNoteSectionResult` (`NoteSectionsResponse`) with hand-written input schemas. They refuse a malformed `vault_id` and a missing Note exactly as `get_note` does, and every limit and matching rule is the core's: the adapter does not check `headings`, and its schema takes `maxItems` from the core's `MAX_SECTION_HEADINGS`. `get_note`'s description gains one sentence pointing to them, and its reply does not change. Catalogue grows to 51, purely additive. #521 changes `get_note`'s reply and no mapping: `note.metadata`, empty on every note until then, carries the frontmatter the read core now fills, and its `outputSchema` (generated from `Note`) allows `null` there for frontmatter that does not parse. `properties` is an object whenever `metadata` is, where it was always `null`. The description gains one sentence saying so. Behavior-changing for a client that assumed an object.
+
+The adapter also records the name the calling client sent in `McpConfig::client_name` (#570, ADR-49), `None` when the request carried no client identity, which the SDK reports as its own placeholder name and version. Every write tool builds its `WriteOrigin` from that name, one per call, so each item of a `batch` shares it, and `create_upload_link` passes it to the transfer link it mints.
 
 **Kind:** adapter/security surface.
 

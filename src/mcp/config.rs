@@ -68,6 +68,11 @@ pub struct McpConfig {
     /// Transfer links fall back to it when `public_url` is unset. `None`
     /// outside a live MCP request.
     pub request_origin: Option<String>,
+    /// Not configuration either: the name the calling client sent with the
+    /// current MCP request, as sent, filled in per call by the adapter. A
+    /// write tool records it as the write's origin (ADR-49). `None` when the
+    /// client sent no name, and outside a live MCP request.
+    pub client_name: Option<String>,
 }
 
 impl McpConfig {
@@ -106,6 +111,7 @@ impl McpConfig {
             rate_limits_enabled,
             public_url,
             request_origin: None,
+            client_name: None,
         })
     }
 
@@ -122,6 +128,7 @@ impl McpConfig {
             rate_limits_enabled: true,
             public_url: None,
             request_origin: None,
+            client_name: None,
         }
     }
 

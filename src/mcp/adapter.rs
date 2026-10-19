@@ -112,6 +112,16 @@ impl HatchdoorMcpHandler {
     }
 }
 
+/// The name the calling client sent, or `None` when it sent none. For a
+/// request that carries no client identity the SDK answers with its own
+/// placeholder, its crate name and version, which is nobody's name: recording
+/// it would label every nameless client `rmcp`.
+fn sent_client_name(client: Option<rmcp::model::Implementation>) -> Option<String> {
+    client
+        .filter(|client| *client != rmcp::model::Implementation::from_build_env())
+        .map(|client| client.name)
+}
+
 /// The `scheme://host:port` the client reached this MCP endpoint on, which
 /// transfer links fall back to when no public address is configured (ADR-34).
 /// Scheme and host are each taken from the first source that gives a usable
@@ -405,6 +415,9 @@ impl ServerHandler for HatchdoorMcpHandler {
     ) -> Result<CallToolResponse, ErrorData> {
         self.record_agent_connection(&context);
         let mut config = self.config().map_err(internal_config_error)?;
+        // The name and not the display title: a write's origin records what
+        // the client sent, and never its version (ADR-49).
+        config.client_name = sent_client_name(context.client_info());
         let parts = context.extensions.get::<axum::http::request::Parts>();
         config.request_origin = parts.and_then(request_origin);
         // A transfer link is signed under the token the call was admitted

@@ -38,7 +38,8 @@ const VERSIONS_SECTION: &str = "versions";
 const LAST_AGENT_SECTION: &str = "last_agent";
 
 /// The longest client name kept, in characters. Real clients send a few words;
-/// anything longer is cut rather than stored whole.
+/// anything longer is cut rather than stored whole. Also the cap on the name
+/// in a commit's origin trailer, which ADR-49 fixes at 100.
 const AGENT_NAME_MAX_CHARS: usize = 100;
 
 /// What a client that sends no usable name is recorded as.
@@ -144,17 +145,20 @@ pub struct AgentConnection {
 /// [`AGENT_NAME_MAX_CHARS`] characters. A name with nothing left becomes
 /// [`UNNAMED_AGENT`].
 fn clean_agent_name(raw: &str) -> String {
+    clean_client_name(raw).unwrap_or_else(|| UNNAMED_AGENT.to_string())
+}
+
+/// The cleaning behind [`clean_agent_name`], for a caller with its own word
+/// for a client that sent no usable name: `None` when nothing is left. The
+/// result is one line, which is what lets a commit trailer carry it (ADR-49).
+pub fn clean_client_name(raw: &str) -> Option<String> {
     let cleaned: String = raw
         .chars()
         .filter(|&character| !character.is_control() && !is_invisible_format(character))
         .collect();
     let cleaned: String = cleaned.trim().chars().take(AGENT_NAME_MAX_CHARS).collect();
     let cleaned = cleaned.trim_end();
-    if cleaned.is_empty() {
-        UNNAMED_AGENT.to_string()
-    } else {
-        cleaned.to_string()
-    }
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
 }
 
 /// Zero-width, bidi, line-separator and tag characters, which render as
