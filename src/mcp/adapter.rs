@@ -418,10 +418,16 @@ impl ServerHandler for HatchdoorMcpHandler {
         // The name and not the display title: a write's origin records what
         // the client sent, and never its version (ADR-49).
         config.client_name = sent_client_name(context.client_info());
-        config.request_origin = context
-            .extensions
-            .get::<axum::http::request::Parts>()
-            .and_then(request_origin);
+        let parts = context.extensions.get::<axum::http::request::Parts>();
+        config.request_origin = parts.and_then(request_origin);
+        // A transfer link is signed under the token the call was admitted
+        // on, not the live one: the token can rotate while the body arrives,
+        // and a call admitted on the old token must not mint a link the new
+        // one accepts (#587). The marker is absent only for direct handler
+        // tests.
+        if let Some(admitted) = parts.and_then(admitted_token) {
+            config.bearer_token = Some(admitted.0.to_string());
+        }
         let params = json!({
             "name": request.name.as_ref(),
             "arguments": Value::from(request.arguments.unwrap_or_default()),
@@ -459,7 +465,7 @@ impl ServerHandler for HatchdoorMcpHandler {
             .request_context()
             .extensions
             .get::<axum::http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<McpBearerToken>())
+            .and_then(admitted_token)
             .map(|marker| marker.0.clone())
             .unwrap_or_else(|| Arc::from(""));
         let slot = self.subscriptions.try_acquire(&token).ok_or_else(|| {
@@ -545,6 +551,11 @@ fn dispatcher_failure_to_error_data(failure: JsonRpcFailure) -> ErrorData {
         return ErrorData::new(ErrorCode::INTERNAL_ERROR, "Internal server error", None);
     }
     ErrorData::new(ErrorCode(failure.code as i32), failure.message, None)
+}
+
+/// The bearer token the transport middleware admitted the request on.
+fn admitted_token(parts: &axum::http::request::Parts) -> Option<&McpBearerToken> {
+    parts.extensions.get::<McpBearerToken>()
 }
 
 #[cfg(test)]

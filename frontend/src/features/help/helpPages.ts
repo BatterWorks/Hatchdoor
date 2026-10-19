@@ -1,8 +1,11 @@
-// The bundled manual as Help reads it: the public `/docs/` addresses (ADR-38).
-// These requests never go through `apiFetch`. A 401 here only means a private
-// page, and must not raise the token prompt the way a Vault request does.
+// The bundled manual as Help reads it: the public `/docs/` addresses (ADR-38),
+// and for a private page the app address `/api/v1/docs/`, which shares the
+// What's new route's guard (#582). These requests never go through
+// `apiFetch`. A 401 or 403 here only means a private page, and must not raise
+// the token prompt the way a Vault request does.
 
 import { getToken } from "../../api/api";
+import { hideComments } from "../../lib/noteComments";
 
 /** The manual's front page plus a list of every page the reader may open. */
 export const HELP_HOME = "index";
@@ -77,7 +80,8 @@ export function helpPageTitle(markdown: string, fallback = ""): string {
 
 /** A search excerpt as plain words: search hits quote raw Markdown. */
 export function plainExcerpt(excerpt: string): string {
-  return excerpt
+  // Comments first, as the note page hides them (#573).
+  return hideComments(excerpt)
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/`|\*\*|__/g, "")
     .replace(/\|/g, " ")
@@ -93,13 +97,30 @@ function docsRequest(signal?: AbortSignal): RequestInit {
   };
 }
 
+/**
+ * A page from its public address. A private page refused there is asked for
+ * again at the app address, which serves it to the signed-in app even on an
+ * instance with no web token, where the public address never can. It refuses
+ * a signed-out reader and demo mode, so the page stays private there.
+ */
 export async function fetchHelpPage(
   page: string,
   signal?: AbortSignal,
 ): Promise<HelpPageResult> {
+  const result = await fetchPageAt(`/docs/${page}.md`, signal);
+  if (result.kind !== "private") {
+    return result;
+  }
+  return fetchPageAt(`/api/v1/docs/${page}.md`, signal);
+}
+
+async function fetchPageAt(
+  address: string,
+  signal?: AbortSignal,
+): Promise<HelpPageResult> {
   let response: Response;
   try {
-    response = await fetch(`/docs/${page}.md`, docsRequest(signal));
+    response = await fetch(address, docsRequest(signal));
   } catch (error) {
     if (signal?.aborted) {
       throw error;
@@ -112,7 +133,7 @@ export async function fetchHelpPage(
   if (response.status === 404) {
     return { kind: "missing" };
   }
-  if (response.status === 401) {
+  if (response.status === 401 || response.status === 403) {
     return { kind: "private" };
   }
   return { kind: "error" };

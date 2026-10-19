@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import { parseFrontmatter, stripBlockIds } from "../../lib/markdown";
+import { hideComments } from "../../lib/noteComments";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import { NoteProperties } from "./sections";
 import { createNoteMarkdownComponents } from "./renderers";
@@ -34,20 +35,22 @@ export function NotePreview({
   relativePath: string;
 }) {
   const parsed = useMemo(() => parseFrontmatter(content), [content]);
+  // Comments hidden the way the Reading view hides them (#573).
+  const visibleBody = useMemo(() => hideComments(parsed.body), [parsed.body]);
   const { resolved: markdown } = useResolvedWikilinks(
     vaultId,
-    stripBlockIds(parsed.body),
+    stripBlockIds(visibleBody),
     relativePath,
   );
   const headingIdsBySourceLine = useMemo(
     () =>
       new Map(
-        extractMarkdownHeadings(parsed.body).map(({ sourceLine, id }) => [
+        extractMarkdownHeadings(visibleBody).map(({ sourceLine, id }) => [
           sourceLine,
           id,
         ]),
       ),
-    [parsed.body],
+    [visibleBody],
   );
   const components = useMemo(
     () =>

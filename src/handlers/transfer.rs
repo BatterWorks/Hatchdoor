@@ -32,7 +32,7 @@ use crate::handlers::vault_write::{
 use crate::handlers::vaults::{VaultApiError, internal_error_response, parse_vault_id};
 use crate::mcp::limits::RateLimiter;
 use crate::mcp::subscriptions::McpBearerToken;
-use crate::transfer_link::{LinkRefusal, NoteUploadRule, RedeemedLink, SigningKey};
+use crate::transfer_link::{LinkRefusal, NoteUploadRule, RedeemedLink, SigningKey, link_path};
 use crate::vault_mutation::{VaultMutationCore, is_note_upload_target};
 use crate::vault_registry::VaultId;
 
@@ -134,8 +134,10 @@ pub async fn upload_transfer_handler(
         Ok(form) => form,
         Err((status, error)) => return error.respond(status),
     };
+    // Compared as the link spells it, so the `./` spelling the agent asked
+    // for still names the link's own target.
     if let Some(named) = target_relative_path
-        && named.trim() != path
+        && link_path(&named) != path
     {
         return VaultApiError::new(
             LinkRefusal::Invalid.code(),

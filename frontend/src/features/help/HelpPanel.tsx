@@ -21,6 +21,7 @@ import {
   OpenInFullIcon,
 } from "../../components/icons";
 import { createManualMarkdownComponents } from "../../components/note-page/renderers";
+import { hideComments } from "../../lib/noteComments";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import {
   HELP_HOME,
@@ -187,10 +188,9 @@ export function HelpPanel({
 
   const components = useMemo(() => {
     const headingIds = new Map(
-      extractMarkdownHeadings(markdown).map(({ sourceLine, id }) => [
-        sourceLine,
-        HEADING_ID_PREFIX + id,
-      ]),
+      extractMarkdownHeadings(hideComments(markdown)).map(
+        ({ sourceLine, id }) => [sourceLine, HEADING_ID_PREFIX + id],
+      ),
     );
     const renderLink = (href: string | undefined, children: ReactNode) => {
       const target = resolveHelpLink(href, location.page);
@@ -376,7 +376,8 @@ function HelpPage({
           rehypePlugins={REHYPE_PLUGINS}
           components={components}
         >
-          {state.markdown}
+          {/* Comments hidden the way the note page hides them (#573). */}
+          {hideComments(state.markdown)}
         </ReactMarkdown>
       </div>
     </>

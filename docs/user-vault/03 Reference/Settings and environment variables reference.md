@@ -106,7 +106,7 @@ These configured a single-Vault deployment before the Vault registry existed. Re
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RUST_LOG` | `hatchdoor=info,tower_http=info,axum::rejection=warn` | How much each part of Hatchdoor logs, in the standard `tracing` `EnvFilter` syntax. |
+| `RUST_LOG` | `hatchdoor=info,tower_http=info,axum::rejection=warn` | How much each part of Hatchdoor logs, in the standard `tracing` `EnvFilter` syntax. The MCP library (`rmcp`) never logs below info, whatever this says, because its detailed lines carry tool results and the transfer links in them. |
 
 ---
 

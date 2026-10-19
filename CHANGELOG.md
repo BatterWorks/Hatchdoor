@@ -6,10 +6,29 @@
 - A Git-backed Vault's history now says where each change came from. Every commit Hatchdoor names from its own writes ends with one `Hatchdoor-Origin:` line per origin: `web` for the web UI, `mcp/<name>` for an agent with the name its client gave, `mcp` for an agent that gave none, and `unknown` when the commit holds a file Hatchdoor has no record of writing, such as an edit made in Obsidian. An upload through an upload link counts as the write of the agent that asked for the link. The name is a label the client chooses, not proof of who wrote, and the client's version is not recorded. The first line of the message and its summary lines are unchanged, so anything that reads only those is unaffected; a script that compares the whole message will see the new lines. See "Where each change came from" in the Git-backed Vault guide. [#570]
 
 ### Fixed
+- The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them. [#596]
+
+[#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
+[#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
+
+## v2.8.2 - 2026-10-14
+
+### Fixed
 - The deploy page now tells an installing agent to read the whole page before it starts. The page is about 35 KB, and in a test install from its public address the agent printed only the first 30,000 bytes, never came back for the rest and so missed the last step, which tells it to show you the web token. A web-fetch tool can also return a summary with no commands in it. The agent part of the page now opens with that instruction: save the page to a file with `curl` and read the file to the end. [#529]
+- Transfer links no longer reach the logs under any `RUST_LOG` setting. Hatchdoor kept the MCP library's message logging off by naming three of its modules, so a `RUST_LOG` that named a deeper one, such as `rmcp::transport::streamable_http_server::tower=trace`, logged tool results with their download and upload links. Nothing the library logs below info gets through now, whatever `RUST_LOG` says. [#587]
+- Changing the MCP token now strands every transfer link. A tool call that arrived just before the change and finished just after got a link that worked under the new token. The link is now signed with the token the call came in on, so the new token refuses it. [#587]
+- A transfer link for a path spelled with `./`, such as `./Media/a shot.png`, now works. `get_attachment` and `create_upload_link` accept that spelling, but the link kept the `./`, and curl removes it before sending the request, so Hatchdoor refused the link as invalid and told the agent to ask for a new one that failed the same way. Links now carry the path without `.` segments or doubled slashes, and an upload form that repeats the original spelling still matches. [#586]
+- What's new now shows every release since your browser last opened Hatchdoor. If the server moved from 2.8.0 to 2.9.0 to 2.10.0 while that browser stayed away, the pop-up listed 2.10.0 alone and marked it read, so 2.9.0's highlights, Action needed items included, never showed. Its Full changelog button also opens again on an instance with no web token, where Help used to say the page is only shown after signing in. [#582]
+- Settings now shows an on/off setting as On whenever Hatchdoor treats it as on. A value set in `.env` as `1`, `yes`, `on` or `TRUE` turned the setting on but showed as Off, so `HATCHDOOR_USAGE_REPORT_ENABLED=1` read Off above the install ID it had created. The settings response now sends every on/off setting as `true` or `false`, the value the server acts on. [#581]
+- The note page no longer shows a note's comments. Text between `%%` marks, which Obsidian shows only while you edit, and HTML comments `<!-- -->` both appeared in full on the rendered page, and a read-only or demo Vault always opens on that page, so its visitors read remarks the author meant to keep to themselves. The rendered page, the editor's preview and search result snippets now leave comments out, and a heading inside one stays out of the table of contents. The live editor still shows them. An embedded note, `![[Other note]]`, now shows as a link to that note instead of a broken image. Hiding is a display rule only: search and agents still read the comment. The Supported Markdown reference now lists the Obsidian syntax Hatchdoor does not handle. [#573]
+- Help hides comments too. A page in the manual, and a search excerpt in Help, showed `%%` and HTML comments that the note page hides, so the Markdown feature showcase's new comment example would have printed its comment there. Both now leave comments out, by the same rule as the note page. [#573]
 
 [#529]: https://github.com/BatterWorks/Hatchdoor/issues/529
-[#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
+[#573]: https://github.com/BatterWorks/Hatchdoor/issues/573
+[#581]: https://github.com/BatterWorks/Hatchdoor/issues/581
+[#582]: https://github.com/BatterWorks/Hatchdoor/issues/582
+[#586]: https://github.com/BatterWorks/Hatchdoor/issues/586
+[#587]: https://github.com/BatterWorks/Hatchdoor/issues/587
 
 ## v2.8.1 - 2026-10-11
 

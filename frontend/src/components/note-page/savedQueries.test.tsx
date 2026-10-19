@@ -12,6 +12,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
+import { hideComments } from "../../lib/noteComments";
 import { createNoteMarkdownComponents } from "./renderers";
 import { SavedQueryProvider } from "./SavedQueryBlock";
 import {
@@ -89,6 +90,8 @@ function ready(
   return { status: "ready", results, markerProblems };
 }
 
+// The note page hides comments before the marker plugin runs (#573), so the
+// markers here go through that step too.
 function renderNote(markdown: string, state: SavedQueryState | null) {
   const body = (
     <ReactMarkdown
@@ -99,7 +102,7 @@ function renderNote(markdown: string, state: SavedQueryState | null) {
         new Map(),
       )}
     >
-      {markdown}
+      {hideComments(markdown)}
     </ReactMarkdown>
   );
   return render(
@@ -205,11 +208,13 @@ describe("saved query blocks on the note page", () => {
     expect(screen.getByText(/Too many saved queries/)).toBeInTheDocument();
   });
 
-  it("hides only the marker, leaving other raw HTML as it always rendered", () => {
-    renderNote("<!-- a comment of the author's own -->\n\ntext", null);
-    expect(document.body.textContent).toContain(
-      "a comment of the author's own",
+  it("hides the author's own comments along with the marker, leaving other raw HTML as it always rendered", () => {
+    renderNote(
+      "<!-- a comment of the author's own -->\n\n<b>bold</b> text",
+      null,
     );
+    expect(document.body.textContent).not.toContain("a comment");
+    expect(document.body.textContent).toContain("<b>bold</b> text");
   });
 
   it("keeps refused, stopped, empty and populated visibly different", () => {

@@ -80,6 +80,12 @@ describe("plainExcerpt", () => {
       ),
     ).toBe("git from the Settings screen, see How to deploy");
   });
+
+  it("drops comments but keeps code that looks like one (#573)", () => {
+    expect(plainExcerpt("Before %%hidden%% after, `%%kept%%`.")).toBe(
+      "Before after, %%kept%%.",
+    );
+  });
 });
 
 describe("fetchHelpPage", () => {
@@ -110,11 +116,53 @@ describe("fetchHelpPage", () => {
     expect(new Headers(init?.headers).has("Authorization")).toBe(false);
   });
 
+  it("reads a private page from the app address, which needs no token on an instance without one", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response("# What's new", { status: 200 }));
+
+    const result = await fetchHelpPage("whats-new");
+
+    expect(result).toEqual({ kind: "page", markdown: "# What's new" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/docs/whats-new.md",
+      "/api/v1/docs/whats-new.md",
+    ]);
+  });
+
+  it("sends the web token to the app address too", async () => {
+    setToken("web-token");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response("# What's new", { status: 200 }));
+
+    await fetchHelpPage("whats-new");
+
+    const [, init] = fetchMock.mock.calls[1];
+    expect(new Headers(init?.headers).get("Authorization")).toBe(
+      "Bearer web-token",
+    );
+  });
+
+  it("calls a page private when the app address refuses it as well", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    for (const refusal of [401, 403]) {
+      fetchMock
+        .mockResolvedValueOnce(new Response("", { status: 401 }))
+        .mockResolvedValueOnce(new Response("", { status: refusal }));
+      expect(await fetchHelpPage("whats-new")).toEqual({ kind: "private" });
+    }
+  });
+
   it("names a missing page, a private page and a failure apart", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     fetchMock.mockResolvedValueOnce(new Response("", { status: 404 }));
     expect(await fetchHelpPage("nope")).toEqual({ kind: "missing" });
-    fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
+    fetchMock
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response("", { status: 401 }));
     expect(await fetchHelpPage("whats-new")).toEqual({ kind: "private" });
     fetchMock.mockResolvedValueOnce(new Response("", { status: 500 }));
     expect(await fetchHelpPage("index")).toEqual({ kind: "error" });

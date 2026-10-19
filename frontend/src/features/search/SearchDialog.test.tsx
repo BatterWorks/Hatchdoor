@@ -843,6 +843,24 @@ describe("SearchDialog result rows read cleanly (#530)", () => {
     expect(snippet?.textContent).not.toContain("tags:");
   });
 
+  it("drops comments from the snippet but keeps code that looks like one (#573)", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({
+          content:
+            "The fleet %%hidden%% sails <!-- hidden -->on. Type `%%x%%` to comment.",
+        }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet");
+    expect(snippet).toHaveTextContent(
+      "The fleet sails on. Type %%x%% to comment.",
+    );
+    expect(snippet?.textContent).not.toContain("hidden");
+  });
+
   it("omits the heading line when it only repeats the note's title", () => {
     renderDialog({
       query: "homelab",
