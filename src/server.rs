@@ -874,6 +874,7 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
     tokio::spawn(async move {
         let model_dir = state.model_setup.model_cache_dir(selected);
         let runtime = state.runtime_embedder.clone();
+        let sqlite = state.startup_sqlite.clone();
         let model_setup = state.model_setup.clone();
         let download_tracker = tracker.clone();
         let load_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -920,6 +921,12 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                 })();
                 match loaded {
                     Ok(embedder) => {
+                        // Before the model is installed, so no search reaches
+                        // a cache still waiting for its migration (ADR-50).
+                        // An Index turn retries the same check on failure.
+                        if let Err(error) = sqlite.prepare_for_embedder(embedder.as_ref()) {
+                            warn!("Could not prepare the search cache for the model: {error}");
+                        }
                         runtime.set(embedder, selected == SelectedModel::Gemma);
                         return Ok(());
                     }

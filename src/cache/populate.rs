@@ -20,8 +20,8 @@ use crate::vault_registry::VaultId;
 
 use super::SqliteCache;
 use super::parse::{
-    FileSnapshot, content_hash, current_unix_timestamp, extract_headings, extract_tags,
-    file_snapshot, parse_frontmatter_metadata,
+    FileSnapshot, content_hash, current_unix_timestamp, extract_tags, file_snapshot,
+    parse_frontmatter_metadata,
 };
 use super::vault_snapshots::SavedEmbeddings;
 
@@ -41,8 +41,8 @@ pub struct BuildOptions {
     /// Production keeps the conservative one-input default; eval can raise this
     /// to measure whether ONNX batching improves build throughput.
     pub embedding_batch_size: usize,
-    /// When false, build every structural row (notes, links, tags, headings,
-    /// chunk text) but embed nothing. This is the structure-only pass that
+    /// When false, build every structural row (notes, links, tags, chunk
+    /// text) but embed nothing. This is the structure-only pass that
     /// publishes a browsable Vault ahead of its vectors; it reuses the existing
     /// per-note `embed` path rather than adding a second build.
     pub embed: bool,
@@ -1607,32 +1607,10 @@ fn rebuild_note_details(
     content: &str,
 ) -> Result<(), String> {
     tx.execute(
-        "DELETE FROM headings WHERE note_slug = ?1",
-        params![&entry.slug],
-    )
-    .map_err(|error| format!("failed deleting old headings for '{}': {error}", entry.slug))?;
-    tx.execute(
         "DELETE FROM tags WHERE note_slug = ?1",
         params![&entry.slug],
     )
     .map_err(|error| format!("failed deleting old tags for '{}': {error}", entry.slug))?;
-
-    for heading in extract_headings(content) {
-        tx.execute(
-            r#"
-            INSERT OR IGNORE INTO headings(note_slug, level, text, anchor, position)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            "#,
-            params![
-                &entry.slug,
-                heading.level as i64,
-                &heading.text,
-                &heading.anchor,
-                heading.position as i64
-            ],
-        )
-        .map_err(|error| format!("failed caching heading for '{}': {error}", entry.slug))?;
-    }
 
     for tag in extract_tags(content) {
         tx.execute(

@@ -1,4 +1,5 @@
 mod chunk_ops;
+mod migrate;
 pub mod parse;
 mod populate;
 mod queries;
