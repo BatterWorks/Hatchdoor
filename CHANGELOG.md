@@ -6,10 +6,12 @@
 - A Git-backed Vault's history now says where each change came from. Every commit Hatchdoor names from its own writes ends with one `Hatchdoor-Origin:` line per origin: `web` for the web UI, `mcp/<name>` for an agent with the name its client gave, `mcp` for an agent that gave none, and `unknown` when the commit holds a file Hatchdoor has no record of writing, such as an edit made in Obsidian. An upload through an upload link counts as the write of the agent that asked for the link. The name is a label the client chooses, not proof of who wrote, and the client's version is not recorded. The first line of the message and its summary lines are unchanged, so anything that reads only those is unaffected; a script that compares the whole message will see the new lines. See "Where each change came from" in the Git-backed Vault guide. [#570]
 
 ### Fixed
+- Hatchdoor's memory no longer grows with every index update. The search index filed each vector under its Vault's ID as text, and the vector library Hatchdoor uses never frees the memory it uses to write or delete such a value, so every index pass that changed something kept about 1.6 MB on a 5,000-chunk Vault, and a long-running container grew by around 0.6 GB a day until the system killed it. Vectors are now filed under a number. Upgrading keeps your existing index: once the embedding model has loaded, Hatchdoor migrates the index in place, checks the result, and re-indexes from your notes only if a check fails. [#600]
 - The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them. [#596]
 
 [#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
 [#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
+[#600]: https://github.com/BatterWorks/Hatchdoor/issues/600
 
 ## v2.8.2 - 2026-10-14
 

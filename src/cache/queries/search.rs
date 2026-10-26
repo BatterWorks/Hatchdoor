@@ -12,13 +12,37 @@ use crate::vault_registry::VaultId;
 /// inline so the plan-guard test EXPLAINs exactly what production executes: a
 /// copy of this string in the test could drift back to a full scan unnoticed,
 /// which is the failure the guard exists to catch.
-fn default_layer_knn_sql(ids: &str) -> String {
+fn default_layer_knn_sql(keys: &str) -> String {
     format!(
         "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
          FROM vault_chunk_vectors v JOIN vault_chunks c ON c.id = v.chunk_id \
-         WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_id IN ({ids}) \
+         WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_key IN ({keys}) \
          ORDER BY v.distance"
     )
+}
+
+/// The integer keys the vector tables file these Vaults' rows under, as a SQL
+/// list. A Vault that has never published has no key and no vectors.
+fn vault_key_list(conn: &Connection, vault_ids: &[VaultId]) -> Result<String, String> {
+    let ids = vault_ids
+        .iter()
+        .map(|vault_id| format!("'{}'", vault_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT vault_key FROM vault_keys WHERE vault_id IN ({ids}) ORDER BY vault_key"
+        ))
+        .map_err(|error| format!("prepare Vault vector keys: {error}"))?;
+    let keys = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+        .map_err(|error| format!("read Vault vector keys: {error}"))?;
+    Ok(keys
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 /// The default-surface semantic KNN query (against `chunk_vectors`), used by
@@ -82,11 +106,10 @@ impl SqliteCache {
             return Ok(Vec::new());
         }
         let query_bytes: &[u8] = bytemuck::cast_slice(query_vec);
-        let ids = vault_ids
-            .iter()
-            .map(|vault_id| format!("'{}'", vault_id))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let keys = vault_key_list(conn, vault_ids)?;
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut hits = Vec::new();
         let mut collect = |sql: String| -> Result<(), String> {
             let mut statement = conn
@@ -122,13 +145,13 @@ impl SqliteCache {
         };
 
         if selection.includes_default() {
-            collect(default_layer_knn_sql(&ids))?;
+            collect(default_layer_knn_sql(&keys))?;
         }
         if selection.is_all() {
             collect(format!(
                 "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
                  FROM vault_chunk_vectors_demoted v JOIN vault_chunks c ON c.id = v.chunk_id \
-                 WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_id IN ({ids}) \
+                 WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_key IN ({keys}) \
                  ORDER BY v.distance"
             ))?;
         } else {
@@ -137,7 +160,7 @@ impl SqliteCache {
                     "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
                      FROM vault_chunk_vectors_demoted v JOIN vault_chunks c ON c.id = v.chunk_id \
                      WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.layer = '{}' \
-                       AND v.vault_id IN ({ids}) ORDER BY v.distance",
+                       AND v.vault_key IN ({keys}) ORDER BY v.distance",
                     layer.replace('\'', "''"),
                 ))?;
             }
@@ -377,7 +400,7 @@ mod semantic_search_tests {
             .query_row(
                 &format!(
                     "EXPLAIN QUERY PLAN {}",
-                    super::default_layer_knn_sql("'12345678-1234-4567-89ab-1234567890ab'")
+                    super::default_layer_knn_sql("1, 2")
                 ),
                 rusqlite::params![bytemuck::cast_slice(&vec![0.0f32; 384]) as &[u8], 10_i64],
                 |row| row.get(3),

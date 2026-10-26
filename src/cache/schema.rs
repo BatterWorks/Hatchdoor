@@ -1,12 +1,15 @@
 use rusqlite::OptionalExtension;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::SqliteCache;
+use super::migrate::{PREVIOUS_SCHEMA_VERSION, migrate_from_previous_schema};
 use crate::embed::{Embedder, PENDING_IDENTITY};
 
-// Bump this when the schema structure or data-population logic changes to force
-// a full cache rebuild on next startup.
-const SCHEMA_VERSION: &str = "11";
+// Bump this when the schema structure or data-population logic changes. A
+// cache on any other version is wiped and rebuilt from Markdown on startup,
+// except one on `PREVIOUS_SCHEMA_VERSION` while a migration from it exists
+// (ADR-50).
+pub(super) const SCHEMA_VERSION: &str = "12";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -17,6 +20,17 @@ impl SqliteCache {
         match existing_schema_version(&conn)? {
             SchemaState::Current => {
                 create_schema(&conn, embedding_dim)?;
+                Ok(())
+            }
+            // Left as it is: the migration runs only after the model check,
+            // which needs the loaded embedder (`reset_if_embedder_changed`).
+            SchemaState::Previous => {
+                info!(
+                    old = PREVIOUS_SCHEMA_VERSION,
+                    new = SCHEMA_VERSION,
+                    "SQLite cache is one schema version behind; migrating it once the \
+                     embedding model is loaded"
+                );
                 Ok(())
             }
             SchemaState::VersionMismatch(version) => {
@@ -92,8 +106,53 @@ impl SqliteCache {
             let conn = self.connection()?;
             wipe_schema(&conn)?;
             create_schema(&conn, embedder.embedding_dim())?;
+            return Ok(());
         }
-        Ok(())
+        self.migrate_if_previous_schema(embedder.embedding_dim())
+    }
+
+    /// Run the model check, and so any pending migration, as soon as a model
+    /// has loaded and before it serves a search. Index turns run the same
+    /// check, but a search arriving before the first one would otherwise
+    /// query a cache still on the previous schema. Holds the model epoch, as
+    /// every snapshot builder does.
+    pub fn prepare_for_embedder(&self, embedder: &dyn Embedder) -> Result<(), String> {
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reset_if_embedder_changed(embedder)
+    }
+
+    /// Bring a cache written by the previous schema version up to date,
+    /// keeping its vectors (ADR-50). Runs only after the model check, so a
+    /// migration never carries vectors from one model to another. Any failure
+    /// wipes and rebuilds, and the log names the check that failed.
+    fn migrate_if_previous_schema(&self, embedding_dim: usize) -> Result<(), String> {
+        let mut conn = self.connection()?;
+        if !matches!(existing_schema_version(&conn)?, SchemaState::Previous) {
+            return Ok(());
+        }
+        match migrate_from_previous_schema(&mut conn, embedding_dim) {
+            Ok(()) => {
+                info!(
+                    old = PREVIOUS_SCHEMA_VERSION,
+                    new = SCHEMA_VERSION,
+                    "migrated the SQLite cache and kept its vectors"
+                );
+                Ok(())
+            }
+            Err(failure) => {
+                warn!(
+                    old = PREVIOUS_SCHEMA_VERSION,
+                    new = SCHEMA_VERSION,
+                    failure = %failure,
+                    "SQLite cache migration failed; wiping cache for full rebuild"
+                );
+                wipe_schema(&conn)?;
+                create_schema(&conn, embedding_dim)
+            }
+        }
     }
 }
 
@@ -103,6 +162,8 @@ enum SchemaState {
     Fresh,
     /// Fully initialised and on the current schema version.
     Current,
+    /// Fully initialised and one version behind, which migrates (ADR-50).
+    Previous,
     /// Fully initialised but on an older/newer schema version → rebuild.
     VersionMismatch(String),
     /// Half-initialised (objects but no metadata, or metadata but no
@@ -148,6 +209,7 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<SchemaState, S
 
     match version {
         Some(version) if version == SCHEMA_VERSION => Ok(SchemaState::Current),
+        Some(version) if version == PREVIOUS_SCHEMA_VERSION => Ok(SchemaState::Previous),
         Some(version) => Ok(SchemaState::VersionMismatch(version)),
         None => Ok(SchemaState::Corrupt(
             "metadata table exists but schema_version row is missing".to_string(),
@@ -175,6 +237,9 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         DROP TABLE IF EXISTS vault_snapshot_metadata;
         DROP TABLE IF EXISTS vault_snapshots;
         DROP TABLE IF EXISTS vault_embedding_progress;
+        DROP TABLE IF EXISTS vault_keys;
+        DROP TABLE IF EXISTS vault_vector_migration_default;
+        DROP TABLE IF EXISTS vault_vector_migration_demoted;
         DROP TRIGGER IF EXISTS chunk_fts_au;
         DROP TRIGGER IF EXISTS chunk_fts_ad;
         DROP TRIGGER IF EXISTS chunk_fts_ai;
@@ -189,6 +254,30 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("failed to wipe stale SQLite cache: {e}"))
+}
+
+/// The per-Vault vector tables. `vault_key` is an INTEGER metadata column, so
+/// a KNN query filters by Vault inside sqlite-vec and stays on the KNN plan.
+/// It must never be TEXT: sqlite-vec leaks the SQL it formats to write or
+/// delete every text metadata value longer than 12 bytes
+/// (asg017/sqlite-vec#265), and publication rewrites every vector (#600).
+pub(super) fn vault_vector_tables_sql(embedding_dim: usize) -> String {
+    format!(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_vectors USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding FLOAT[{embedding_dim}],
+            vault_key INTEGER
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_vectors_demoted USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding FLOAT[{embedding_dim}],
+            layer TEXT PARTITION KEY,
+            vault_key INTEGER
+        );
+        "#
+    )
 }
 
 fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<(), String> {
@@ -238,15 +327,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             PRIMARY KEY (source_slug, target_slug)
         );
 
-        CREATE TABLE IF NOT EXISTS headings (
-            note_slug TEXT NOT NULL REFERENCES notes(slug) ON DELETE CASCADE ON UPDATE CASCADE,
-            level INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            anchor TEXT NOT NULL,
-            position INTEGER NOT NULL,
-            PRIMARY KEY (note_slug, anchor, position)
-        );
-
         CREATE TABLE IF NOT EXISTS tags (
             note_slug TEXT NOT NULL REFERENCES notes(slug) ON DELETE CASCADE ON UPDATE CASCADE,
             tag TEXT NOT NULL,
@@ -259,8 +339,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             ON notes(normalized_relative_path);
         CREATE INDEX IF NOT EXISTS idx_note_links_target_slug
             ON note_links(target_slug);
-        CREATE INDEX IF NOT EXISTS idx_headings_note_slug
-            ON headings(note_slug);
         CREATE INDEX IF NOT EXISTS idx_tags_tag
             ON tags(tag);
 
@@ -376,18 +454,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
                 REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS vault_headings (
-            vault_id TEXT NOT NULL,
-            note_slug TEXT NOT NULL,
-            level INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            anchor TEXT NOT NULL,
-            position INTEGER NOT NULL,
-            PRIMARY KEY (vault_id, note_slug, anchor, position),
-            FOREIGN KEY (vault_id, note_slug)
-                REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
-        );
-
         CREATE TABLE IF NOT EXISTS vault_tags (
             vault_id TEXT NOT NULL,
             note_slug TEXT NOT NULL,
@@ -403,8 +469,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             ON vault_notes(vault_id, normalized_relative_path);
         CREATE INDEX IF NOT EXISTS idx_vault_note_links_target
             ON vault_note_links(vault_id, target_slug);
-        CREATE INDEX IF NOT EXISTS idx_vault_headings_note
-            ON vault_headings(vault_id, note_slug);
         CREATE INDEX IF NOT EXISTS idx_vault_tags_tag
             ON vault_tags(vault_id, tag);
 
@@ -454,18 +518,15 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
                 VALUES (new.id, new.vault_id, new.content);
         END;
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_vectors USING vec0(
-            chunk_id INTEGER PRIMARY KEY,
-            embedding FLOAT[{dim}],
-            vault_id TEXT AUXILIARY
+        -- The integer each Vault's vectors are filed under. Kept apart from
+        -- `vault_snapshots`, whose row every publication deletes and
+        -- re-inserts, so a Vault keeps its key for the life of the cache.
+        CREATE TABLE IF NOT EXISTS vault_keys (
+            vault_key INTEGER PRIMARY KEY,
+            vault_id TEXT NOT NULL UNIQUE
         );
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_vectors_demoted USING vec0(
-            chunk_id INTEGER PRIMARY KEY,
-            embedding FLOAT[{dim}],
-            layer TEXT PARTITION KEY,
-            vault_id TEXT AUXILIARY
-        );
+        {vector_tables}
 
         -- Vectors an Index turn has embedded but not yet published (ADR-35),
         -- saved as the turn goes so an interrupted turn resumes instead of
@@ -493,6 +554,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         COMMIT;
         "#,
         dim = embedding_dim,
+        vector_tables = vault_vector_tables_sql(embedding_dim),
         version = SCHEMA_VERSION
     );
     conn.execute_batch(&sql)
@@ -699,9 +761,56 @@ mod tests {
                 )
                 .expect("vector table DDL");
             assert!(
-                sql.contains("vault_id TEXT AUXILIARY"),
+                sql.contains("vault_key INTEGER"),
                 "{table} must retain Vault identity alongside each vector"
             );
         }
+    }
+
+    /// sqlite-vec leaks the SQL it formats for every write and delete of a
+    /// text metadata value longer than 12 bytes (asg017/sqlite-vec#265, #600).
+    /// It gives each text metadata column a `_metadatatextNN` shadow table, so
+    /// their absence proves no vec0 table has one. Text stays allowed as a
+    /// partition key or a `+` auxiliary column, which take other paths.
+    #[test]
+    fn no_vector_table_has_a_text_metadata_column() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let conn = cache.connection().expect("conn");
+        let vector_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%USING vec0%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count vec0 tables");
+        assert_eq!(vector_tables, 4, "the guard must see every vec0 table");
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE name LIKE '%\\_metadatatext%' ESCAPE '\\'",
+            )
+            .expect("prepare");
+        let text_metadata = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read");
+        assert!(
+            text_metadata.is_empty(),
+            "vec0 text metadata leaks memory on every write; found {text_metadata:?}"
+        );
+    }
+
+    #[test]
+    fn fresh_cache_has_no_headings_tables() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let conn = cache.connection().expect("conn");
+        let headings: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('headings', 'vault_headings')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(headings, 0);
     }
 }

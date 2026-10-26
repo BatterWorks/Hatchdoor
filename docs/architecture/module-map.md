@@ -2351,6 +2351,7 @@ backend checks.
 
 - `src/cache/mod.rs`
 - `src/cache/chunk_ops.rs`
+- `src/cache/migrate.rs`
 - `src/cache/parse.rs`
 - `src/cache/populate.rs`
 - `src/cache/schema.rs`
@@ -2443,7 +2444,25 @@ and embedder identity/dimensions.
   runs before the search core takes its snapshot: holding a slot across the
   embedder's inference lock let four concurrent searches starve every other
   read. Waiters are woken one at a time and not in arrival order.
-- Schema or embedder identity mismatch rebuilds rather than mixing data.
+- Schema or embedder identity mismatch rebuilds rather than mixing data, with
+  one exception (ADR-50): a cache one schema version behind is left alone at
+  open and migrated by `migrate.rs` right after `reset_if_embedder_changed`
+  has found the same embedder identity. Runtime composition calls
+  `prepare_for_embedder` when a model loads and before it installs it, so no
+  search reaches a cache still waiting to migrate. If that call fails, the
+  model is installed anyway and semantic search reports `search_unavailable`
+  until an Index turn's own model check succeeds. The migration commits only
+  once its row-count, identical-vector, Vault-mapping, self-retrieval and
+  integrity checks pass, and any failure wipes and rebuilds. Seeding a
+  candidate never copies a snapshot's recorded `schema_version` over the
+  candidate's own. The next schema bump replaces the migration rather than
+  adding a second one.
+- No vec0 table has a TEXT metadata column: sqlite-vec leaks the SQL it
+  formats for every write and delete of one (#600). The per-Vault vector
+  tables file each vector under an integer `vault_key` from `vault_keys`,
+  which keeps a Vault's key across publications; text is allowed only as a
+  partition key or a `+` auxiliary column. The cache keeps no headings
+  table (#308).
 - A refresh commits a coherent new read snapshot.
 - Shared semantic vectors have one embedder identity and dimension; a mismatch
   wipes the disposable cache before any partial rebuild can participate.
