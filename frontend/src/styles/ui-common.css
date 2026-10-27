@@ -114,6 +114,30 @@
   color: var(--muted);
 }
 
+/* A state block that explains itself in parts (#583): a small label over
+   each part, and numbered steps set like the block's own text. */
+.state-block .state-block-label {
+  margin: 0.9rem 0 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+}
+
+.state-block-steps {
+  margin: 0 0 0.7rem;
+  padding-left: 1.2rem;
+  font-family: var(--font-sans);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.state-block-steps li {
+  margin: 0 0 0.2rem;
+}
+
 /* Loading skeleton */
 .skeleton-list {
   display: grid;

@@ -9,7 +9,14 @@
 //! The field is added to the tool result, never to `VaultOperationError`: that
 //! type also serialises into HTTP bodies (ADR-19) and into `batch` item
 //! errors, neither of which changes.
+//!
+//! The Vault-state codes, such as a Git sync failure or a folder Hatchdoor
+//! cannot open, never come back as a tool error: an agent meets them as a
+//! Vault's status error inside a successful `list_vaults` (#583). That result
+//! gains the same field on each such status error, through
+//! [`attach_to_vault_listing`], and the HTTP Vault list keeps its shape.
 
+use schemars::{JsonSchema, Schema};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -18,7 +25,7 @@ use super::protocol::tool_structured_error;
 /// What [`DOCS_FIELD`] holds. `page` is a name `read_docs` accepts; `heading`
 /// is a heading anchor on that page, in the note slug rule. Errors advertise
 /// no schema, since `outputSchema` describes the success shape alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ErrorDocs {
     pub page: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,6 +34,20 @@ pub struct ErrorDocs {
 
 /// The field a structured tool error carries its [`ErrorDocs`] in.
 pub const DOCS_FIELD: &str = "docs";
+
+/// Where each Vault in a `list_vaults` result holds a status error, in the
+/// `VaultRuntimeError` shape: four fields of its own, and the error of its
+/// latest recovery-branch request.
+const STATUS_ERROR_PATHS: &[&[&str]] = &[
+    &["activation_error"],
+    &["search_error"],
+    &["git_error"],
+    &["watcher_error"],
+    &["recovery_branch", "error"],
+];
+
+/// The name `list_vaults`' `outputSchema` gives the status error shape.
+const STATUS_ERROR_SCHEMA: &str = "VaultRuntimeError";
 
 const TROUBLESHOOTING: &str = "guides/how-to-troubleshoot-common-problems";
 const VAULT_STATES: &str = "concepts/vault-lifecycle-states";
@@ -135,8 +156,59 @@ pub fn attach(result: Value) -> Value {
     tool_structured_error(payload)
 }
 
+/// `listing`, a `list_vaults` payload, with [`DOCS_FIELD`] added to every
+/// Vault status error whose `code` names a page. Status errors for other
+/// codes, and everything else in the listing, come back unchanged.
+pub fn attach_to_vault_listing(mut listing: Value) -> Value {
+    let Some(vaults) = listing.get_mut("vaults").and_then(Value::as_array_mut) else {
+        return listing;
+    };
+    for vault in vaults {
+        for path in STATUS_ERROR_PATHS {
+            let error = path
+                .iter()
+                .try_fold(&mut *vault, |value, field| value.get_mut(*field));
+            let Some(error) = error.and_then(Value::as_object_mut) else {
+                continue;
+            };
+            let Some(docs) = error.get("code").and_then(Value::as_str).and_then(for_code) else {
+                continue;
+            };
+            error.insert(
+                DOCS_FIELD.to_string(),
+                serde_json::to_value(docs).expect("ErrorDocs serializes"),
+            );
+        }
+    }
+    listing
+}
+
+/// `schema`, `list_vaults`' generated `outputSchema`, made to describe the
+/// optional [`DOCS_FIELD`] [`attach_to_vault_listing`] adds. The status error
+/// type is shared with the HTTP Vault list, which never carries the field, so
+/// the description is added here rather than to the type.
+pub fn describe_in_vault_listing_schema(schema: &mut Schema) {
+    let mut docs = schemars::schema_for!(ErrorDocs);
+    docs.remove("$schema");
+    docs.insert(
+        "description".to_string(),
+        Value::from(
+            "Present when the manual explains this code: the page, as a name read_docs accepts, and the heading on it.",
+        ),
+    );
+    let properties = schema
+        .get_mut("$defs")
+        .and_then(|defs| defs.get_mut(STATUS_ERROR_SCHEMA))
+        .and_then(|error| error.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .expect("list_vaults' schema defines the status error with properties");
+    properties.insert(DOCS_FIELD.to_string(), docs.to_value());
+}
+
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use serde_json::json;
 
     use super::*;
@@ -203,6 +275,78 @@ mod tests {
         );
     }
 
+    /// Every code a standalone tool call can be refused with that this table
+    /// could name: the closed lists of the management and read cores, and
+    /// whatever the mutation core makes of each kind of write failure.
+    fn tool_error_codes() -> Vec<String> {
+        use crate::vault::WriteError;
+
+        let vault_id =
+            crate::vault_registry::VaultId::from_str("12345678-1234-4567-89ab-1234567890ab")
+                .expect("Vault ID");
+        let mut codes: Vec<String> = crate::vault_management::MANAGEMENT_ERROR_CODES
+            .iter()
+            .map(|code| code.to_string())
+            .collect();
+        codes.extend(POINTERS.iter().filter_map(|(code, _)| {
+            let read = crate::vault_read::VaultReadError {
+                code: code.to_string(),
+                message: String::new(),
+                vault_id: None,
+                retryable: false,
+            };
+            (read.public_code() == *code).then(|| code.to_string())
+        }));
+        for error in [
+            WriteError::Conflict(String::new()),
+            WriteError::InvalidInput(String::new()),
+            WriteError::Io(String::new()),
+            WriteError::recovery_required(String::new()),
+            WriteError::LinkRewriteUnsupported(Vec::new()),
+        ] {
+            codes.push(crate::vault_mutation::write_operation_error(vault_id, error).code);
+        }
+        codes
+    }
+
+    /// The producers of a Vault's status errors, which `list_vaults` reports,
+    /// without their tests. Status codes have no closed list, so a code
+    /// counts as one when a producer spells it.
+    fn status_error_producers() -> Vec<&'static str> {
+        [
+            include_str!("../vault_runtime.rs"),
+            include_str!("../vault_executor.rs"),
+            include_str!("../vault_management.rs"),
+            include_str!("../git/managed_task.rs"),
+            include_str!("../git/sync.rs"),
+        ]
+        .into_iter()
+        .map(|source| {
+            source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(source)
+        })
+        .collect()
+    }
+
+    /// A pointer for a code no agent can be sent is a promise the manual
+    /// cannot keep (#583): each code must reach an agent as a standalone tool
+    /// error or as a Vault status error in `list_vaults`.
+    #[test]
+    fn every_pointer_can_reach_an_agent() {
+        let tool_codes = tool_error_codes();
+        let producers = status_error_producers();
+        for (code, _) in POINTERS {
+            let quoted = format!("\"{code}\"");
+            assert!(
+                tool_codes.iter().any(|tool| tool == code)
+                    || producers.iter().any(|source| source.contains(&quoted)),
+                "{code} is neither a tool error code nor a Vault status error code"
+            );
+        }
+    }
+
     #[test]
     fn no_code_is_listed_twice() {
         let mut codes: Vec<&str> = POINTERS.iter().map(|(code, _)| *code).collect();
@@ -253,5 +397,38 @@ mod tests {
         ] {
             assert_eq!(attach(result.clone()), result);
         }
+    }
+
+    #[test]
+    fn a_listed_status_error_gains_the_docs_field_wherever_it_sits() {
+        let listing = attach_to_vault_listing(json!({
+            "collection_revision": 3,
+            "vaults": [
+                {
+                    "activation_error": {"code": "vault_path_unreadable", "message": "m", "retryable": true},
+                    "git_error": {"code": "managed_git_conflict", "message": "m", "retryable": false},
+                    "recovery_branch": {"error": {"code": "managed_git_push_rejected", "message": "m", "retryable": false}},
+                    "watcher_error": {"code": "watcher_failed", "message": "m", "retryable": true},
+                },
+                {"name": "healthy"},
+            ],
+        }));
+
+        let vault = &listing["vaults"][0];
+        assert_eq!(
+            vault["activation_error"][DOCS_FIELD]["heading"],
+            "permission-denied-reading-or-writing-the-vault"
+        );
+        assert_eq!(
+            vault["git_error"][DOCS_FIELD]["heading"],
+            "resolving-a-sync-conflict"
+        );
+        assert_eq!(
+            vault["recovery_branch"]["error"][DOCS_FIELD]["heading"],
+            "git-sync-is-failing"
+        );
+        assert!(vault["watcher_error"].get(DOCS_FIELD).is_none());
+        assert_eq!(listing["vaults"][1], json!({"name": "healthy"}));
+        assert_eq!(listing["collection_revision"], 3);
     }
 }

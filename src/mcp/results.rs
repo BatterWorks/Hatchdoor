@@ -442,17 +442,28 @@ pub struct BatchResult {
 
 macro_rules! output_schemas {
     ($($name:literal => $ty:ty),* $(,)?) => {
-        /// The `outputSchema` a tool advertises, generated from the same Rust
-        /// structure its success responses serialize from. Returns `None` for
-        /// a tool name outside this catalogue (never happens for an advertised
-        /// tool).
-        pub fn output_schema_for(tool_name: &str) -> Option<Schema> {
+        /// The schema generated from the Rust structure a tool's success
+        /// responses serialize from, or `None` for a tool name outside this
+        /// catalogue.
+        fn generated_output_schema(tool_name: &str) -> Option<Schema> {
             match tool_name {
                 $($name => Some(schemars::schema_for!($ty)),)*
                 _ => None,
             }
         }
     };
+}
+
+/// The `outputSchema` a tool advertises: the generated one, plus the `docs`
+/// field `list_vaults` adds to a Vault status error the manual explains
+/// (#583). Returns `None` for a tool name outside this catalogue (never
+/// happens for an advertised tool).
+pub fn output_schema_for(tool_name: &str) -> Option<Schema> {
+    let mut schema = generated_output_schema(tool_name)?;
+    if tool_name == "list_vaults" {
+        super::docs_pointers::describe_in_vault_listing_schema(&mut schema);
+    }
+    Some(schema)
 }
 
 output_schemas! {
