@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::cache::SqliteCache;
-use crate::git::WriteRecord;
+use crate::git::{WriteOrigin, WriteRecord};
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
     AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, TagDelete, TagDeleteError,
@@ -122,6 +122,12 @@ pub struct VaultMutationCore<'a> {
     cache: &'a SqliteCache,
     vaults: &'a VaultCollectionRuntime,
     settings: Arc<ConfigSnapshot>,
+    /// Where every write this core makes came in from (ADR-49). Stated by
+    /// the adapter that builds the core, which is the only party that knows.
+    origin: WriteOrigin,
+    /// The caller's summary of the change, given to every target
+    /// [`VaultMutationCore::open`] opens (#249, #598).
+    commit_summary: Option<String>,
 }
 
 impl<'a> VaultMutationCore<'a> {
@@ -129,20 +135,31 @@ impl<'a> VaultMutationCore<'a> {
         cache: &'a SqliteCache,
         vaults: &'a VaultCollectionRuntime,
         settings: Arc<ConfigSnapshot>,
+        origin: WriteOrigin,
     ) -> Self {
         Self {
             cache,
             vaults,
             settings,
+            origin,
+            commit_summary: None,
         }
     }
 
+    /// Carry `summary` into the commit that records each write this core
+    /// makes, filtered as [`VaultMutation::with_commit_summary`] filters it.
+    pub fn with_commit_summary(mut self, summary: Option<String>) -> Self {
+        self.commit_summary = summary;
+        self
+    }
+
     /// The core as an adapter holding an [`AppState`] builds it.
-    pub fn from_state(state: &'a AppState) -> Self {
+    pub fn from_state(state: &'a AppState, origin: WriteOrigin) -> Self {
         Self::new(
             &state.startup_sqlite,
             &state.vaults,
             state.runtime_snapshot(),
+            origin,
         )
     }
 
@@ -163,7 +180,9 @@ impl<'a> VaultMutationCore<'a> {
             vault_id,
             control,
             Arc::clone(&self.settings),
-        ))
+            self.origin.clone(),
+        )
+        .with_commit_summary(self.commit_summary.clone()))
     }
 
     /// Whether this Vault is worth offering a write surface for. Unlike every
@@ -787,6 +806,9 @@ pub struct VaultMutation {
     /// and a batch supplies a different one per item. `None` from a surface
     /// that has no such argument, which is every HTTP write route.
     commit_summary: Option<String>,
+    /// Where this target's writes came in from, recorded with each one and
+    /// carried into the trailers of the commit that records it (ADR-49).
+    origin: WriteOrigin,
 }
 
 impl VaultMutation {
@@ -801,12 +823,14 @@ impl VaultMutation {
         vault_id: VaultId,
         control: VaultControlBlock,
         settings: Arc<ConfigSnapshot>,
+        origin: WriteOrigin,
     ) -> Self {
         Self {
             vault_id,
             control,
             settings,
             commit_summary: None,
+            origin,
         }
     }
 
@@ -1578,6 +1602,7 @@ impl VaultMutation {
             target: outcome.written_path().unwrap_or(addressed).to_string(),
             affected_paths: outcome.affected_paths().to_vec(),
             summary: self.commit_summary.clone(),
+            origin: self.origin.clone(),
         });
         // After the record, so the commit this asks for can name the write.
         // The write path asks for its own Index and commit turns rather than
@@ -1810,6 +1835,7 @@ mod tests {
                 &self.cache,
                 &self.vaults,
                 std::sync::Arc::clone(&self.settings),
+                crate::git::WriteOrigin::web(),
             )
         }
 
@@ -1831,6 +1857,7 @@ mod tests {
                 self.vault_id,
                 control,
                 std::sync::Arc::clone(&self.settings),
+                crate::git::WriteOrigin::mcp(Some("claude-code")),
             )
             .with_commit_summary(Some(summary.to_string()))
         }
@@ -1886,6 +1913,11 @@ mod tests {
         assert_eq!(batch[0].target, "Home");
         assert_eq!(batch[0].summary.as_deref(), Some("tighten the intro"));
         assert_eq!(
+            batch[0].origin,
+            crate::git::WriteOrigin::mcp(Some("claude-code")),
+            "the origin the target was built with is recorded with the write"
+        );
+        assert_eq!(
             batch[0].affected_paths,
             vec![workspace.vault_path.join("Home.md")]
         );
@@ -1936,6 +1968,7 @@ mod tests {
             "a delete is recorded where it was, not in the trash"
         );
         assert_eq!(batch[0].summary, None);
+        assert_eq!(batch[0].origin, crate::git::WriteOrigin::web());
     }
 
     /// A refused write changed nothing on disk, so there is nothing for a

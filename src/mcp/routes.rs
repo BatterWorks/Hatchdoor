@@ -2565,6 +2565,172 @@ mod tests {
         );
     }
 
+    /// A state with one managed Git Vault, as registered and reconciled
+    /// before any Git turn has run. Nothing here drives Git: a test publishes
+    /// the status it needs itself.
+    fn managed_git_state() -> (AppState, TempDir) {
+        use crate::vault_registry::{NewVaultDefinition, VaultGitMode, VaultSource};
+
+        let tmp = TempDir::new().expect("temp dir");
+        let state = base_state(&tmp);
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Remote notes".to_string(),
+                    enabled: true,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://git.example.invalid/notes.git".to_string(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::TwoWay,
+                        poll_interval_secs: 300,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("register test Vault");
+        state.vaults.reconcile(&state.vault_registry, &snapshot);
+        (state, tmp)
+    }
+
+    fn publish_git_error(state: &AppState, code: &str) {
+        state
+            .vaults
+            .runtime(vault_id_of(state))
+            .expect("live runtime")
+            .set_git_status(
+                crate::vault_runtime::VaultGitStatus::Unavailable,
+                Some(crate::vault_runtime::VaultRuntimeError {
+                    code: code.to_string(),
+                    message: "the remote refused".to_string(),
+                    retryable: false,
+                    detail: None,
+                }),
+            )
+            .expect("publish the Git status");
+    }
+
+    /// `list_vaults`' one Vault, after checking the whole result against the
+    /// advertised `outputSchema` and its text rendering against the payload.
+    async fn listed_vault(state: &AppState) -> Value {
+        let body = call_tool(state, "list_vaults", json!({})).await;
+        let payload = &body["result"]["structuredContent"];
+        let schema = serde_json::to_value(
+            crate::mcp::results::output_schema_for("list_vaults").expect("schema"),
+        )
+        .expect("schema JSON");
+        let validator = jsonschema::validator_for(&schema).expect("valid schema");
+        assert!(validator.is_valid(payload), "{body:#}");
+        let docs = &schema["$defs"]["VaultRuntimeError"]["properties"]["docs"];
+        assert_eq!(
+            docs["properties"]["page"]["type"], "string",
+            "the advertised schema describes docs: {schema:#}"
+        );
+        assert!(
+            !schema["$defs"]["VaultRuntimeError"]["required"]
+                .as_array()
+                .expect("required fields")
+                .contains(&json!("docs")),
+            "docs is optional"
+        );
+        let text: Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().expect("text"))
+                .expect("text is the payload");
+        assert_eq!(&text, payload);
+        payload["vaults"][0].clone()
+    }
+
+    /// The HTTP Vault list for the same state: ADR-19 keeps `docs` off it.
+    async fn http_vault_list(state: &AppState) -> Value {
+        let response =
+            crate::handlers::vaults::list_vaults_handler(axum::extract::State(state.clone())).await;
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Vault list body");
+        serde_json::from_slice(&bytes).expect("Vault list JSON")
+    }
+
+    /// The Vault-state codes never come back as a tool error, so an agent
+    /// meets them in `list_vaults` (#583): there they name their page, and
+    /// the HTTP list stays as it was.
+    #[tokio::test]
+    async fn a_folder_hatchdoor_cannot_open_names_its_page_in_list_vaults() {
+        let (state, _tmp) = unusable_local_content_write_state();
+
+        let vault = listed_vault(&state).await;
+        let error = &vault["activation_error"];
+        assert_eq!(error["code"], "vault_path_unavailable", "{vault:#}");
+        assert_eq!(
+            error["docs"],
+            json!({
+                "page": "guides/how-to-troubleshoot-common-problems",
+                "heading": "permission-denied-reading-or-writing-the-vault",
+            })
+        );
+
+        let http = http_vault_list(&state).await;
+        assert!(http["vaults"][0]["activation_error"].get("docs").is_none());
+        let mut without_docs = vault.clone();
+        without_docs["activation_error"]
+            .as_object_mut()
+            .expect("error object")
+            .remove("docs");
+        assert_eq!(http["vaults"][0], without_docs);
+    }
+
+    #[tokio::test]
+    async fn a_git_failure_names_its_page_in_list_vaults() {
+        for (code, heading) in [
+            ("managed_git_authentication_failed", "git-sync-is-failing"),
+            ("managed_git_conflict", "resolving-a-sync-conflict"),
+        ] {
+            let (state, _tmp) = managed_git_state();
+            publish_git_error(&state, code);
+
+            let vault = listed_vault(&state).await;
+            assert_eq!(vault["git_error"]["code"], code, "{vault:#}");
+            assert_eq!(
+                vault["git_error"]["docs"],
+                json!({
+                    "page": "guides/how-to-troubleshoot-common-problems",
+                    "heading": heading,
+                })
+            );
+            assert!(
+                !http_vault_list(&state)
+                    .await
+                    .to_string()
+                    .contains("\"docs\""),
+                "the HTTP list never carries docs"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_status_error_the_manual_does_not_explain_is_unchanged_in_list_vaults() {
+        let (state, _tmp) = managed_git_state();
+        publish_git_error(&state, "managed_git_unsafe_url");
+
+        let vault = listed_vault(&state).await;
+        assert_eq!(
+            vault["git_error"],
+            json!({
+                "code": "managed_git_unsafe_url",
+                "message": "the remote refused",
+                "retryable": false,
+            })
+        );
+        assert_eq!(
+            http_vault_list(&state).await["vaults"][0]["git_error"],
+            vault["git_error"]
+        );
+    }
+
     /// A code the manual does not explain, and the two refusals that are not
     /// structured errors, are untouched.
     #[tokio::test]
@@ -4323,6 +4489,7 @@ mod tests {
                 &McpConfig {
                     bearer_token: Some(TEST_TOKEN.to_string()),
                     request_origin: Some("http://localhost".to_string()),
+                    client_name: None,
                     ..McpConfig::disabled()
                 },
             )
@@ -4902,6 +5069,91 @@ mod tests {
         assert_eq!(batch[0].op, "edit");
         assert_eq!(batch[0].target, "Home");
         assert_eq!(batch[0].summary.as_deref(), Some("shout the token"));
+        assert_eq!(
+            batch[0].origin,
+            crate::git::WriteOrigin::mcp(Some("golden-test")),
+            "the name the client sent at initialize, and nothing of its version (ADR-49)"
+        );
+    }
+
+    fn only_vaults_pending_writes(state: &AppState) -> Vec<crate::git::WriteRecord> {
+        let vault_id = *state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .expect("test Vault");
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("Vault runtime")
+            .write_ledger()
+            .take()
+    }
+
+    /// ADR-49: every operation inside one `batch` call has the origin of that
+    /// call.
+    #[tokio::test]
+    async fn every_write_in_a_batch_call_has_the_origin_of_that_call() {
+        let (state, _tmp) = write_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .expect("test Vault")
+            .to_string();
+        let answer = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "One.md", "content": "# One\n"}},
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "Two.md", "content": "# Two\n"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+
+        let origins: Vec<_> = only_vaults_pending_writes(&state)
+            .into_iter()
+            .map(|record| record.origin)
+            .collect();
+        let golden = crate::git::WriteOrigin::mcp(Some("golden-test"));
+        assert_eq!(origins, vec![golden.clone(), golden]);
+    }
+
+    /// ADR-49: a client that sends no name still writes over MCP, and its
+    /// write says so without one.
+    #[tokio::test]
+    async fn a_write_from_a_client_that_sent_no_name_has_the_bare_mcp_origin() {
+        let (state, _tmp) = write_state();
+        let arguments = scoped_arguments(
+            &state,
+            "create_note",
+            json!({"relative_path": "Nameless.md", "content": "# Nameless\n"}),
+        );
+        let raw = modern_post(
+            transport(&state),
+            "tools/call",
+            Some("create_note"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"_meta": modern_meta("2026-07-28", true),
+                          "name":"create_note", "arguments": arguments}
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(message["result"]["isError"], false, "{message}");
+
+        let batch = only_vaults_pending_writes(&state);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].origin, crate::git::WriteOrigin::mcp(None));
     }
 
     /// Issue #242: the plan call writes nothing and records nothing; the

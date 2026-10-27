@@ -265,6 +265,7 @@
 /* Search highlights */
 .search-hit {
   background: var(--highlight);
+  color: var(--ink);
   padding: 0 0.1rem;
 }
 

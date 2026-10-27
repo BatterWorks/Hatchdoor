@@ -57,6 +57,9 @@ COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/user-vault ./docs/user-vault
 # The SPA regression test compares reserved routes with the real worker denylist.
 COPY --chown=builder:builder frontend/vite.config.ts ./frontend/vite.config.ts
+# The link-preview test compares comment stripping with the frontend's shared cases.
+COPY --chown=builder:builder frontend/src/lib/noteComments.cases.json \
+    ./frontend/src/lib/noteComments.cases.json
 # The link-preview test checks the real picture's dimensions and file size.
 COPY --chown=builder:builder frontend/public/link-preview.png ./frontend/public/link-preview.png
 ARG GIT_SHA=""

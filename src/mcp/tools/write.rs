@@ -32,8 +32,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::git::WriteOrigin;
 use crate::mcp::results::UploadKind;
 use crate::runtime_config::ConfigSnapshot;
+use crate::transfer_link::UploadRequest;
 use crate::vault::{AttachmentOutcome, SectionMode};
 use crate::vault_error::VaultOperationError;
 use crate::vault_mutation::{NoteWriteOutcome, VaultMutation, is_note_upload_target};
@@ -54,6 +56,10 @@ pub(super) struct McpVault {
     /// mutation core reads the same instance-wide defaults (the archive
     /// folder) the rest of this call does.
     settings: Arc<ConfigSnapshot>,
+    /// The origin of every write this call makes: MCP, with the name the
+    /// calling client sent (ADR-49). One per call, so every item of a
+    /// `batch` shares it.
+    origin: WriteOrigin,
 }
 
 impl McpVault {
@@ -69,6 +75,7 @@ impl McpVault {
             self.vault_id,
             self.control.clone(),
             Arc::clone(&self.settings),
+            self.origin.clone(),
         )
         .with_commit_summary(commit_summary)
     }
@@ -95,17 +102,18 @@ impl McpVault {
 /// Resolve the explicit `vault_id` without asserting anything about the
 /// Vault's write posture, so [`scoped_vault`] can apply the capability check
 /// separately and report it as its own outcome.
-fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonRpcFailure> {
-    readable_vault_by_id(state, parse_vault_id(arguments)?)
-}
-
-fn readable_vault_by_id(state: &AppState, vault_id: VaultId) -> Result<McpVault, JsonRpcFailure> {
+fn readable_vault_by_id(
+    state: &AppState,
+    vault_id: VaultId,
+    config: &McpConfig,
+) -> Result<McpVault, JsonRpcFailure> {
     let core = VaultReadCore::new(&state.startup_sqlite, &state.vaults);
     let control = core.control_block(vault_id).map_err(vault_error)?;
     Ok(McpVault {
         vault_id,
         control,
         settings: state.runtime_snapshot(),
+        origin: WriteOrigin::mcp(config.client_name.as_deref()),
     })
 }
 
@@ -124,15 +132,17 @@ pub(super) fn parse_vault_id(arguments: &Value) -> Result<VaultId, JsonRpcFailur
 pub(super) fn scoped_vault(
     state: &AppState,
     arguments: &Value,
+    config: &McpConfig,
 ) -> Result<McpVault, JsonRpcFailure> {
-    scoped_vault_by_id(state, parse_vault_id(arguments)?)
+    scoped_vault_by_id(state, parse_vault_id(arguments)?, config)
 }
 
 pub(super) fn scoped_vault_by_id(
     state: &AppState,
     vault_id: VaultId,
+    config: &McpConfig,
 ) -> Result<McpVault, JsonRpcFailure> {
-    let vault = readable_vault_by_id(state, vault_id)?;
+    let vault = readable_vault_by_id(state, vault_id, config)?;
     crate::vault_mutation::ensure_mutable(vault.vault_id, &vault.control)
         .map_err(mutation_error)?;
     Ok(vault)
@@ -634,6 +644,12 @@ pub(super) async fn create_upload_link_tool(
     };
 
     let (key, base) = super::transfer_link_signer(&state, config)?;
+    // Held by the server, not the link, and applied to the write when the
+    // upload lands (#598).
+    let request = UploadRequest {
+        client_name: vault.origin.client_name(),
+        commit_summary: args.commit_summary.as_deref(),
+    };
     let link = match &expected_content_hash {
         Some(hash) => state.transfer_links.mint_note_replace(
             &key,
@@ -641,6 +657,7 @@ pub(super) async fn create_upload_link_tool(
             vault.vault_id,
             &target_relative_path,
             hash,
+            request,
         ),
         None => state.transfer_links.mint_upload(
             &key,
@@ -648,6 +665,7 @@ pub(super) async fn create_upload_link_tool(
             vault.vault_id,
             &target_relative_path,
             overwrite,
+            request,
         ),
     };
     let usage = match upload_kind {
@@ -1034,7 +1052,8 @@ pub(super) fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png, or Imports/Report.md for a note."},
                     "overwrite": {"type": "boolean", "default": false, "description": "Allow the upload to replace an existing file at the target. For a note this also needs expected_content_hash."},
-                    "expected_content_hash": {"type": "string", "minLength": 1, "description": "Only for replacing a note (a .md target with overwrite true): the note's current content_hash from get_frontmatter or get_note."}
+                    "expected_content_hash": {"type": "string", "minLength": 1, "description": "Only for replacing a note (a .md target with overwrite true): the note's current content_hash from get_frontmatter or get_note."},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body, applied to the write when the upload arrives."}
                 },
                 "required": ["target_relative_path"],
                 "additionalProperties": false
@@ -1295,6 +1314,8 @@ struct CreateUploadLinkArgs {
     overwrite: Option<bool>,
     #[serde(default)]
     expected_content_hash: Option<String>,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1385,6 +1406,19 @@ mod scoped_tests {
                     .as_array()
                     .unwrap()
                     .contains(&json!("vault_id"))
+            );
+        }
+    }
+
+    /// The MCP tools reference says every write tool accepts a
+    /// `commit_summary`; `create_upload_link` once did not (#598).
+    #[test]
+    fn every_advertised_write_tool_takes_a_commit_summary() {
+        for tool in write_tools_list() {
+            assert_eq!(
+                tool["inputSchema"]["properties"]["commit_summary"]["type"], "string",
+                "{}",
+                tool["name"]
             );
         }
     }

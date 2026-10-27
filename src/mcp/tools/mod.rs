@@ -159,7 +159,7 @@ async fn dispatch_tools_call(
         }
         "refresh_vault" if config.write_enabled => read::refresh_vault_tool(state, arguments).await,
         write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
-            let vault = write::scoped_vault(&state, &arguments)?;
+            let vault = write::scoped_vault(&state, &arguments, config)?;
             // This is the same per-Vault mutation lock used by the V1 HTTP
             // adapter.  The legacy instance-wide AppState lock deliberately
             // does not participate in this scoped path.

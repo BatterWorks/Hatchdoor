@@ -36,6 +36,7 @@ use crate::vault_read::{
 use crate::vault_registry::VaultId;
 
 use super::super::config::McpConfig;
+use super::super::docs_pointers;
 use super::super::protocol::{JsonRpcFailure, tool_structured_error, tool_success};
 use super::read_only_tool_annotations;
 
@@ -909,7 +910,13 @@ pub(super) async fn list_vaults_tool(
             .map_err(|join_error| {
                 JsonRpcFailure::internal(format!("background task panicked: {join_error}"))
             })?;
-    management_result::<results::ListVaultsResult>(listing)
+    Ok(match listing {
+        // A Vault status error the manual explains names its page (#583).
+        Ok(listing) => tool_success(docs_pointers::attach_to_vault_listing(
+            results::result_to_value::<results::ListVaultsResult>(&listing),
+        )),
+        Err(error) => structured_error(error),
+    })
 }
 
 /// The code `read_docs` answers with when no bundled page has the name asked
@@ -1501,7 +1508,7 @@ fn find_text_tool_schema() -> Value {
                 "text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "The literal string to find. Punctuation, brackets and spaces are matched as written. An empty string is refused with the structured invalid_text_match error."},
                 "case_sensitive": {"type": "boolean", "default": false, "description": "true matches case exactly. The composed and decomposed Unicode forms of an accented letter are equal either way."},
                 "layers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Omit to cover every layer. Otherwise only the named layers, with default naming the default surface. A name no Vault in scope declares is the structured invalid_layer_selection error, as in search_notes."},
-                "path_prefix": {"type": "string", "minLength": 1, "description": "Only Notes at or under this Vault-relative folder, such as 40-reference/Parenting. Matched case-insensitively and by whole path segment, so notes never selects notes-archive."},
+                "path_prefix": {"type": "string", "minLength": 1, "description": "Only Notes inside this Vault-relative folder, at any depth, such as 40-reference/Parenting. Matched case-insensitively and by whole path segment, so notes never selects notes-archive or a note notes.md beside the folder."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum Notes to return. The totals count every match regardless."},
                 "snippets_per_note": {"type": "integer", "minimum": 0, "maximum": 3, "default": 3, "description": "Matched lines shown per Note, one per line, each cut to about 200 characters with its place and line number. 0 returns counts only."}
             },
@@ -1544,7 +1551,7 @@ fn query_notes_tool_schema() -> Value {
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "path_prefix"},
-                                    "prefix": {"type": "string", "minLength": 1, "description": "A Vault-relative folder, such as 40-reference/Parenting. Matched case-insensitively and by whole path segment, so notes never selects notes-archive."}
+                                    "prefix": {"type": "string", "minLength": 1, "description": "A Vault-relative folder, such as 40-reference/Parenting; selects the Notes inside it, at any depth. Matched case-insensitively and by whole path segment, so notes never selects notes-archive or a note notes.md beside the folder."}
                                 },
                                 "required": ["type", "prefix"],
                                 "additionalProperties": false

@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.9.0 - 2026-10-27
+
+### Added
+- A Git-backed Vault's history now says where each change came from. Every commit Hatchdoor names from its own writes ends with one `Hatchdoor-Origin:` line per origin: `web` for the web UI, `mcp/<name>` for an agent with the name its client gave, `mcp` for an agent that gave none, and `unknown` when the commit holds a file Hatchdoor has no record of writing, such as an edit made in Obsidian. An upload through an upload link counts as the write of the agent that asked for the link. The name is a label the client chooses, not proof of who wrote, and the client's version is not recorded. The first line of the message and its summary lines are unchanged, so anything that reads only those is unaffected; a script that compares the whole message will see the new lines. See "Where each change came from" in the Git-backed Vault guide. [#570]
+
+### Fixed
+- Hatchdoor's memory no longer grows with every index update. The search index filed each vector under its Vault's ID as text, and the vector library Hatchdoor uses never frees the memory it uses to write or delete such a value, so every index pass that changed something kept about 1.6 MB on a 5,000-chunk Vault, and a long-running container grew by around 0.6 GB a day until the system killed it. Vectors are now filed under a number. Upgrading keeps your existing index: once the embedding model has loaded, Hatchdoor migrates the index in place, checks the result, and re-indexes from your notes only if a check fails. [#600]
+- The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them. [#596]
+- A highlight now shows as one on the rendered page. The editor's Highlight button wraps text in `==`, Obsidian's highlight syntax, and the editor draws it on a tint, but the note page printed the equals signs instead, and a read-only or demo Vault always opens on that page. The note page, the editor's preview and Help now draw `==text==` with the editor's tint, and search snippets show the words without the signs. Equals signs in code, in math and in a comparison such as `a == b` stay as written. The Supported Markdown reference now lists highlights. [#572]
+- Search matches are readable in the dark theme, on the rendered note page and in the search dialog's results. The matched words were drawn in black on the dark yellow match colour; they now take the theme's text colour, as they already did in the editor. [#605]
+- A folder condition no longer picks up a note named after the folder. `file.inFolder("Subscriptions")` in a saved query, and a `path_prefix` of `Subscriptions` in `query_notes` and `find_text`, also returned a note `Subscriptions.md` sitting beside the folder; they now return only the notes inside it. [#584]
+- `today()` and `now()` in a saved query now follow the server's `TZ` setting. The Docker image runs on UTC, so for a reader east of UTC, `today()` named yesterday between their midnight and UTC's, and nothing said which zone applied. Set `TZ`, such as `TZ=Europe/Paris`, in `.env`. With `TZ` unset, a server run outside Docker now uses UTC too, instead of its host's zone. `.env.example`, `docker-compose.yml` and the Supported Markdown reference now show the setting. [#584]
+- An agent now gets the manual's page for a Git sync failure or a Vault folder Hatchdoor cannot open. 2.8.0 promised a `docs` pointer on these codes, but they never come back as a refused tool call: an agent meets them as a Vault's status in `list_vaults`, which carried no pointer. `list_vaults` now adds `docs` to each status error the manual explains, and the MCP tools reference says where `docs` appears. The HTTP Vault list is unchanged. [#583]
+- The web app's "Vaults Unavailable" screen now explains itself. Its Help link loads the manual from the server, which fails for the same reasons the screen appears, so a reader whose server was down only saw "The manual could not be loaded". The screen now says what the error means and what to try, with no network needed, and keeps the Help link for when the server is back. [#583]
+- Changed on disk and search no longer print a sentence with no Vault in it. When the only Vault short of fresh was a stale one, which still answered from its previous index, Changed on disk showed " did not answer." and search showed an empty red "Nothing Found" or a blank line under the results. Both now look as they do for a complete answer. A note opened from a search for its own title now lands on the first match you can see: the hidden copy of the title at the top of the body no longer counts as match 1. [#585]
+- `create_upload_link` now takes a `commit_summary`, like every other write tool. Uploading through a link, the recommended route for attachments and the only one for importing a Markdown file as a note, refused the argument, so the commit that recorded the upload had no line saying why the file was added. The summary given when the link is minted now reaches that commit, just as it does on `import_attachment`. It is held by the server, never put in the link. [#598]
+- A search match that makes up all the text of its piece of formatting, such as a heading that reads just `Homelab`, a bold or highlighted word, a link's text or a table cell holding only that word, is now highlighted on the note page when you arrive from a search. It was left unmarked, missing from the "Match N of M" count and never landed on, so a note whose only matches looked like that opened with no match navigator at all. [#609]
+- A search match on the note page is now marked on exactly the matched words when the text before it holds a letter such as the Turkish capital `İ`, which becomes two characters when lowercased. Each such letter shifted the mark one letter to the left, so a long note could mark the wrong words. [#612]
+
+[#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
+[#572]: https://github.com/BatterWorks/Hatchdoor/issues/572
+[#583]: https://github.com/BatterWorks/Hatchdoor/issues/583
+[#584]: https://github.com/BatterWorks/Hatchdoor/issues/584
+[#585]: https://github.com/BatterWorks/Hatchdoor/issues/585
+[#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
+[#598]: https://github.com/BatterWorks/Hatchdoor/issues/598
+[#600]: https://github.com/BatterWorks/Hatchdoor/issues/600
+[#605]: https://github.com/BatterWorks/Hatchdoor/issues/605
+[#609]: https://github.com/BatterWorks/Hatchdoor/issues/609
+[#612]: https://github.com/BatterWorks/Hatchdoor/issues/612
+
 ## v2.8.2 - 2026-10-14
 
 ### Fixed

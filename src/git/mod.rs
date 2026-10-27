@@ -28,7 +28,7 @@ pub use managed_task::{
     run_managed_git_commit_turn, run_managed_git_turn, run_managed_recovery_turn,
     spawn_scheduler_tick,
 };
-pub use message::{WriteLedger, WriteRecord, build_commit_message};
+pub use message::{PendingBatch, WriteLedger, WriteOrigin, WriteRecord, build_commit_message};
 pub use note_history::{FirstAdd, FirstAdds, HistoryRead, NoteHistory};
 pub use sync::{
     CommitOutcome, GitError, commit_local, has_uncommitted_changes, init_local_repo,

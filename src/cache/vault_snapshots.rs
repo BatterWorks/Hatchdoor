@@ -535,8 +535,8 @@ impl SqliteCache {
         result
     }
 
-    /// Publish this Vault's structural rows (notes, links, tags, headings,
-    /// chunk text) ahead of any embedding work, so browsing a Vault does not
+    /// Publish this Vault's structural rows (notes, links, tags, chunk
+    /// text) ahead of any embedding work, so browsing a Vault does not
     /// wait on the minutes of vector building that searching it does.
     ///
     /// Returns whether a generation was published: `false` too when a newer
@@ -1101,7 +1101,6 @@ impl SqliteCache {
             "INSERT INTO tags(note_slug, tag) VALUES (?1, ?2)",
             "snapshot tags",
         )?;
-        seed_headings(&tx, &source, &vault_id)?;
         seed_chunks_and_vectors(&tx, &source, &vault_id)?;
 
         tx.commit()
@@ -1157,9 +1156,9 @@ impl SqliteCache {
         copy_metadata(&tx, &source, &vault_id)?;
         copy_notes(&tx, &source, &vault_id)?;
         copy_links(&tx, &source, &vault_id)?;
-        copy_headings(&tx, &source, &vault_id)?;
         copy_tags(&tx, &source, &vault_id)?;
-        copy_chunks_and_vectors(&tx, &source, &vault_id)?;
+        let vault_key = assign_vault_key(&tx, &vault_id)?;
+        copy_chunks_and_vectors(&tx, &source, &vault_id, vault_key)?;
         // A searchable generation carries a vector for every chunk, so the
         // progress saved on the way to it has nothing left to resume. A
         // structure-only one does not, and the embedding pass that follows
@@ -1181,6 +1180,19 @@ impl SqliteCache {
         drop(attempts);
         result
     }
+}
+
+/// The integer this Vault's vectors are filed under, assigned on its first
+/// publication and kept for the life of the cache.
+fn assign_vault_key(tx: &Transaction<'_>, vault_id: &str) -> Result<i64, String> {
+    tx.query_row(
+        "INSERT INTO vault_keys(vault_id) VALUES (?1) \
+         ON CONFLICT(vault_id) DO UPDATE SET vault_id = excluded.vault_id \
+         RETURNING vault_key",
+        params![vault_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("look up the Vault's vector key: {error}"))
 }
 
 fn delete_vault_snapshot(tx: &Transaction<'_>, vault_id: &str) -> Result<(), String> {
@@ -1331,7 +1343,10 @@ fn seed_metadata(
     vault_id: &str,
 ) -> Result<(), String> {
     let mut statement = source
-        .prepare("SELECT key, value FROM vault_snapshot_metadata WHERE vault_id = ?1")
+        .prepare(
+            "SELECT key, value FROM vault_snapshot_metadata \
+             WHERE vault_id = ?1 AND key != 'schema_version'",
+        )
         .map_err(|error| format!("prepare snapshot metadata: {error}"))?;
     let rows = statement
         .query_map(params![vault_id], |row| {
@@ -1341,8 +1356,10 @@ fn seed_metadata(
     for row in rows {
         let (key, value) = row.map_err(|error| format!("read snapshot metadata: {error}"))?;
         // The build reads back marker-set and embed-layer metadata to decide
-        // whether every note needs a forced refresh; a fresh candidate already
-        // carries its own schema_version, so replace rather than insert.
+        // whether every note needs a forced refresh. The candidate keeps its
+        // own schema_version: a snapshot published before a schema change
+        // records the old one, and the build's model check would take the
+        // candidate for a cache waiting to migrate (ADR-50) and wipe it.
         tx.execute(
             "INSERT INTO metadata(key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1436,41 +1453,6 @@ fn seed_notes(
             params![note_id, title, relative_path, content, slug],
         )
         .map_err(|error| format!("seed snapshot note FTS: {error}"))?;
-    }
-    Ok(())
-}
-
-fn seed_headings(
-    tx: &Transaction<'_>,
-    source: &rusqlite::Connection,
-    vault_id: &str,
-) -> Result<(), String> {
-    let mut statement = source
-        .prepare(
-            "SELECT note_slug, level, text, anchor, position FROM vault_headings \
-             WHERE vault_id = ?1",
-        )
-        .map_err(|error| format!("prepare snapshot headings: {error}"))?;
-    let rows = statement
-        .query_map(params![vault_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(|error| format!("query snapshot headings: {error}"))?;
-    for row in rows {
-        let (note_slug, level, text, anchor, position) =
-            row.map_err(|error| format!("read snapshot heading: {error}"))?;
-        tx.execute(
-            "INSERT INTO headings(note_slug, level, text, anchor, position) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![note_slug, level, text, anchor, position],
-        )
-        .map_err(|error| format!("seed snapshot heading: {error}"))?;
     }
     Ok(())
 }
@@ -1640,42 +1622,11 @@ fn copy_two_string_rows(
     Ok(())
 }
 
-fn copy_headings(
-    tx: &Transaction<'_>,
-    source: &rusqlite::Connection,
-    vault_id: &str,
-) -> Result<(), String> {
-    let mut statement = source
-        .prepare("SELECT note_slug, level, text, anchor, position FROM headings")
-        .map_err(|error| format!("prepare candidate headings: {error}"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(|error| format!("query candidate headings: {error}"))?;
-    for row in rows {
-        let (note_slug, level, text, anchor, position) =
-            row.map_err(|error| format!("read candidate heading: {error}"))?;
-        tx.execute(
-            "INSERT INTO vault_headings(vault_id, note_slug, level, text, anchor, position) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![vault_id, note_slug, level, text, anchor, position],
-        )
-        .map_err(|error| format!("copy candidate heading: {error}"))?;
-    }
-    Ok(())
-}
-
 fn copy_chunks_and_vectors(
     tx: &Transaction<'_>,
     source: &rusqlite::Connection,
     vault_id: &str,
+    vault_key: i64,
 ) -> Result<(), String> {
     let mut statement = source
         .prepare(
@@ -1744,16 +1695,16 @@ fn copy_chunks_and_vectors(
             .map_err(|error| format!("copy candidate chunk: {error}"))?;
         if let Some(embedding) = default_embedding {
             tx.execute(
-                "INSERT INTO vault_chunk_vectors(chunk_id, embedding, vault_id) VALUES (?1, ?2, ?3)",
-                params![chunk_id, embedding, vault_id],
+                "INSERT INTO vault_chunk_vectors(chunk_id, embedding, vault_key) VALUES (?1, ?2, ?3)",
+                params![chunk_id, embedding, vault_key],
             )
             .map_err(|error| format!("copy candidate default vector: {error}"))?;
         }
         if let Some(embedding) = demoted_embedding {
             tx.execute(
-                "INSERT INTO vault_chunk_vectors_demoted(chunk_id, embedding, layer, vault_id) \
+                "INSERT INTO vault_chunk_vectors_demoted(chunk_id, embedding, layer, vault_key) \
                  VALUES (?1, ?2, ?3, ?4)",
-                params![chunk_id, embedding, demoted_layer, vault_id],
+                params![chunk_id, embedding, demoted_layer, vault_key],
             )
             .map_err(|error| format!("copy candidate demoted vector: {error}"))?;
         }
@@ -2100,6 +2051,80 @@ mod tests {
                 .expect("content")
                 .as_deref(),
             Some("# Home\n\nhome body\n\n[[Shared]]")
+        );
+    }
+
+    /// sqlite-vec never frees the SQL it formats to write or delete a text
+    /// metadata value longer than 12 bytes (asg017/sqlite-vec#265). Every
+    /// publication deletes and rewrites each of the Vault's vectors, so a
+    /// 36-byte Vault ID stored that way leaked two strings per chunk per
+    /// publication, without limit (#600).
+    ///
+    /// `sqlite3_memory_used` counts for the whole process and other tests run
+    /// beside this one, so the measurement runs alone in a child process.
+    #[test]
+    fn republishing_a_vault_does_not_grow_sqlite_memory() {
+        const ALONE: &str = "HATCHDOOR_TEST_PUBLISH_MEMORY_ALONE";
+        if std::env::var_os(ALONE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "cache::vault_snapshots::tests::republishing_a_vault_does_not_grow_sqlite_memory",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(ALONE, "1")
+                .output()
+                .expect("run the measurement in its own process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "the measurement failed or did not run:\n{stdout}\n{stderr}"
+            );
+            return;
+        }
+
+        let directory = tempdir().expect("tempdir");
+        let cache = SqliteCache::open(directory.path().join("cache.sqlite3"), 384).expect("open");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let notes = (0..200)
+            .map(|n| {
+                (
+                    format!("Note {n}.md"),
+                    format!("# Note {n}\n\nbody of note {n}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let files = notes
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_str()))
+            .collect::<Vec<_>>();
+        let (_vault, index) = index(&files);
+        let embedder = StubEmbedder::new(384);
+        let publish = || {
+            assert_eq!(
+                cache
+                    .replace_vault_snapshot(id, &index, &embedder)
+                    .expect("publish"),
+                SnapshotPublication::Published
+            );
+        };
+
+        for _ in 0..5 {
+            publish();
+        }
+        let warm = unsafe { rusqlite::ffi::sqlite3_memory_used() };
+        for _ in 0..20 {
+            publish();
+        }
+        let grown = unsafe { rusqlite::ffi::sqlite3_memory_used() } - warm;
+        println!("SQLite memory grew {grown} bytes over 20 publications");
+        // The leak this guards against costs about 4,000 strings here, over
+        // 400 KB. What remains is allocator and page-cache noise.
+        assert!(
+            grown < 64 * 1024,
+            "SQLite memory grew {grown} bytes over 20 publications of an unchanged Vault"
         );
     }
 

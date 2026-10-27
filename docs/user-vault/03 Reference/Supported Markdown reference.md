@@ -8,7 +8,9 @@ The Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` 
 
 ## Inline formatting
 
-Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, `inline code`, and links such as <https://example.com>.
+Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, ==highlighted text==, `inline code`, and links such as <https://example.com>.
+
+A highlight is Obsidian's syntax: two equals signs on each side, `==like this==`, which is also what the editor's **Highlight** button writes. Both pairs must sit in the same paragraph, with no space just inside them, so a comparison such as `total == 0` in a sentence stays as written. Inside code and math the signs are always shown as written. Hatchdoor draws every highlight in one colour; Obsidian's coloured highlights, picked with an emoji after the opening signs, show as an ordinary highlight with the emoji in it.
 
 Raw HTML is not supported, apart from comments. Use Markdown syntax so a note reads the same in other apps.
 
@@ -111,8 +113,8 @@ The table is worked out each time the note is read, from the Vault the note live
 What a saved query can contain:
 
 - `filters`, at the top and on the view, each either one expression in quotes or an `and`, `or` or `not` list of them. `not` means none of the listed conditions holds. The two sets of filters must both hold.
-- Expressions that compare a property with a value: `price > 10`, `status != "done"`, `finished == null`. A property is named bare (`price`), as `note.price`, or as `note["next-payment"]` when its name has a hyphen. The file itself is `file.name` (with `.md`), `file.basename` (without), `file.path` and `file.folder`. Values are quoted text, numbers, `true`, `false`, `null`, `now()` and `today()`. Comparisons are `==`, `!=`, `<`, `<=`, `>` and `>=`, combined with `&&`, `||`, `!` and parentheses. Dates are compared as written, so write them as `2026-09-18`.
-- `file.hasTag("a", "b")` for notes carrying any of those tags or one nested under them, `file.inFolder("projects")` for notes in that folder or below it, and `price.isEmpty()` for a property that is missing or blank.
+- Expressions that compare a property with a value: `price > 10`, `status != "done"`, `finished == null`. A property is named bare (`price`), as `note.price`, or as `note["next-payment"]` when its name has a hyphen. The file itself is `file.name` (with `.md`), `file.basename` (without), `file.path` and `file.folder`. Values are quoted text, numbers, `true`, `false`, `null`, `now()` and `today()`. Comparisons are `==`, `!=`, `<`, `<=`, `>` and `>=`, combined with `&&`, `||`, `!` and parentheses. Dates are compared as written, so write them as `2026-09-18`. `today()` and `now()` are the date and time in the zone the server's `TZ` setting names, such as `TZ=Europe/Paris` in `.env`, and in UTC when it is unset.
+- `file.hasTag("a", "b")` for notes carrying any of those tags or one nested under them, `file.inFolder("projects")` for notes in that folder or below it (a note named `projects.md` beside the folder is not in it), and `price.isEmpty()` for a property that is missing or blank.
 - One view, of `type: table`, with an optional `name` shown above the table, a `limit` on how many rows it shows, and `order`, the columns from left to right. Without `order` the table has one column, the file name. `file.tags` is also available as a column, listing the note's frontmatter and inline tags together, and so is `aliases` (or `note.aliases`). A `tags` or `note.tags` column is refused, because Hatchdoor keeps only the combined list and would show more than the frontmatter property holds; use `file.tags` instead.
 
 A property a note does not have counts as `null`: `finished == null` selects it, `status != "done"` selects it, and `price > 10` does not.

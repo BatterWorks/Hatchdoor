@@ -31,6 +31,7 @@ Hatchdoor reads these once, when it starts. The Compose file already sets most o
 | `PORT` | `42824` | The port the process listens on. |
 | `HATCHDOOR_SETTINGS_FILE` | next to `HATCHDOOR_CACHE_DB`, named `settings.json` | Relocates the live-settings file outside the default cache directory. |
 | `HATCHDOOR_VAULT_REGISTRY_PATH` | `/data/state/vaults.json` | Relocates the Vault registry. `just dev-start` points this at `.dev/state/vaults.json` for local development. `vault-runtime.json`, which remembers when each Git-backed Vault last checked its remote, is written beside it. Deleting that file costs one extra check per Vault at the next start and nothing else. `instance.json`, beside it too, remembers the version that ran before the current one and the last agent that connected over MCP, with when. Deleting it makes the next start count as an upgrade from 2.7.0, or as a fresh install when there is no Vault list and no stored settings, and Settings says no agent has connected until one calls again. |
+| `TZ` | unset (UTC) | The time zone a saved query's `today()` and `now()` follow, as a zone name such as `Europe/Paris`. Unset, they use UTC, so for a reader east of UTC `today()` names yesterday until UTC's midnight. Put it in `.env`; the Compose file passes `.env` to the container. A name the server does not know falls back to UTC in the Docker image. |
 
 ## Web access (environment-only)
 

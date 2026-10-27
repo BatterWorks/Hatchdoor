@@ -14,6 +14,9 @@ services:
       # nothing in this folder becomes one until you add it.
       VAULT_PATH: /data/vault
       HATCHDOOR_CACHE_DB: /data/cache/hatchdoor-cache.sqlite3
+      # The zone a saved query's today() and now() follow; UTC when unset.
+      # Set it here or in .env.
+      # TZ: Europe/Paris
     ports:
       - "42824:42824"
     volumes:

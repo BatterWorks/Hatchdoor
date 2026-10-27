@@ -1135,6 +1135,7 @@
   .note-body a:hover { background-color: var(--hot); color: var(--bg); }
   .note-body em { font-style: italic; }
   .note-body strong { font-weight: 600; }
+  .note-body mark.note-highlight { background: color-mix(in srgb, var(--hot) 20%, transparent); color: inherit; border-radius: var(--radius-none); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
   .note-body code { font-family: var(--font-mono); font-size: 0.86em; background: var(--paper-2); padding: 0.05rem 0.35rem; color: var(--ink); }
   .note-body ul, .note-body ol {
     padding-left: 0;
@@ -1407,7 +1408,7 @@
   }
 
   /* Search highlight inline */
-  .search-hit { background: var(--highlight); padding: 0 0.1rem; }
+  .search-hit { background: var(--highlight); color: var(--ink); padding: 0 0.1rem; }
   .search-hit.active { background: var(--highlight-active); }
 
   /* ════════════════════════════════════════════════════════════════
@@ -1555,6 +1556,23 @@
     color: var(--muted);
   }
   .state-block.error h2 { color: var(--err-fg); }
+  .state-block .state-block-label {
+    margin: 0.9rem 0 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink);
+  }
+  .state-block-steps {
+    margin: 0 0 0.7rem;
+    padding-left: 1.2rem;
+    font-family: var(--font-sans);
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .state-block-steps li { margin: 0 0 0.2rem; }
   .skeleton-list { display: grid; gap: 0.45rem; }
   .skeleton-line {
     height: 0.85rem;
@@ -2267,10 +2285,12 @@
           <p>The mornings have turned colder than they should be for May, and the cordons along the south wall are flowering anyway. I went out at half-six to see whether <a href="#">the frost</a> had taken the blossom — it had not — but the bees were absent and the wasps were already on the cherries.</p>
           <p>The rosemary planted along the path is doing more for the pollinator count than the lavender ever did. <em>The lavender is theatrical; the rosemary is reliable.</em> Use <code>secateurs</code> on spurs, <strong>not on the leader</strong>. See also <span class="ty-broken">→ missing note</span>.</p>
           <p>Search highlight: the word <span class="search-hit">orchard</span> appears 5 times, and <span class="search-hit active">this is the active match</span>.</p>
+          <p>Text highlight: <mark class="note-highlight">prune the cordons before the sap rises</mark>, and a search for <mark class="note-highlight">the <span class="search-hit">sap</span> rises</mark> lands inside one.</p>
         </div>
       </div>
+      <p class="blurb"><b>A text highlight is the author&rsquo;s mark; a search hit is the reader&rsquo;s.</b> <code>==text==</code> renders as a <span class="key">mark.note-highlight</span>: <span class="key">--hot</span> mixed to 20% over the page, the same tint the live editor draws, so the two views of a note match. Square, like everything else, and the text keeps its own ink. It never takes <span class="key">--highlight</span>, which belongs to search: a hit inside a highlight paints its yellow over the tint and still reads as the hit.</p>
       <p class="blurb"><b>A link shaped like a button must pay off the prose link rule.</b> <span class="key">.note-body a</span> outweighs a bare component class, so a button inside the body &mdash; the PDF preview&rsquo;s <span class="key">Open PDF</span> &mdash; inherits the 2px hot rail (wanted: it is still a link) along with a <span class="key">1px</span> bottom padding and the body&rsquo;s <span class="key">1.45</span> line-height (not wanted: together they set the label high in a box 5px taller than it should be). Any such button restores its own <span class="key">padding-block</span> and <span class="key">line-height: 1</span> under a type-qualified selector, less <span class="key">1px</span> off the bottom for the rail it is standing on.</p>
-      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
+      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">mark.note-highlight</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
     </section>
 
     <!-- ───────── LISTS ───────── -->
@@ -2787,6 +2807,25 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </div>
         </div>
       </div>
+      <h3 class="doc-sub">An error that explains itself</h3>
+      <p class="blurb">An error block whose manual page may be out of reach, because the server it comes from is what failed, explains itself in place (#583). Under the server's own message come two parts, each under a small mono label in ink: <b>What this means</b> in one or two sentences, then <b>What to try</b> as two or three numbered steps set like the block's text. The Help link stays, for when the server is back, and the action comes last. Use it only where the manual cannot load; every other state block points to Help and stays short.</p>
+      <div class="stage">
+        <div class="state-block error">
+          <h2>Vaults Unavailable</h2>
+          <p>Failed loading Vaults: 502.</p>
+          <p class="state-block-label">What this means</p>
+          <p>The browser could not reach Hatchdoor. The server is offline or restarting, or a proxy in front of it answered with an error. Your Vaults and notes are untouched.</p>
+          <p class="state-block-label">What to try</p>
+          <ol class="state-block-steps">
+            <li>Check that Hatchdoor is running and reachable from this device.</li>
+            <li>Press Try again.</li>
+            <li>Or wait: the app reloads the list by itself when the connection comes back.</li>
+          </ol>
+          <p><a href="#states">How does this work?</a></p>
+          <button class="ui-btn primary">Try again</button>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.state-block-label</span><span class="key">.state-block-steps</span></div>
       <h3 class="doc-sub">Announcement region</h3>
       <p class="blurb">The shell keeps one polite live region, the only general one in the
       application &mdash; the others belong to the startup gate (<a href="#gate">§33</a>) and the PDF

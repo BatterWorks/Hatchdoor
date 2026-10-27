@@ -39,6 +39,30 @@ Open **Settings** → **Add a Vault**, then:
 
 Hatchdoor commits a few seconds after the writing stops, so one commit usually holds several saves. Sending those commits to a remote is a separate step that follows the sync schedule, so on Two-way your local history is current well before the remote sees it. The subject names the first few writes it recorded and how many files they touched, and the body carries whatever one-line summary each of those writes supplied. An agent connected over MCP can pass a summary on every write, and the history then says why each note changed. Edits you make in the Vault folder yourself carry no summary, so a commit made up only of those keeps the generic `hatchdoor: vault update`.
 
+### Where each change came from
+
+Every commit Hatchdoor names this way ends with one `Hatchdoor-Origin:` line for each place its changes came in from:
+
+| Value | The commit holds |
+|---|---|
+| `web` | A change made in the web UI, or by anything else that uses the web token. |
+| `mcp/<name>` | A change made by an agent over MCP. `<name>` is the name the agent's client gave, such as `mcp/claude-code`. |
+| `mcp` | A change made over MCP by a client that gave no name. |
+| `unknown` | At least one changed file that Hatchdoor has no record of writing. Usually an edit made in the Vault folder itself, in Obsidian for instance. A write made just before Hatchdoor restarted shows up the same way. |
+
+A commit that holds changes from several places has one line for each, and `unknown` comes last:
+
+```
+hatchdoor: update "Projects/Plan", create "Inbox/Idea" (2 files)
+
+- Tightened the plan's opening section
+
+Hatchdoor-Origin: mcp/claude-code
+Hatchdoor-Origin: web
+```
+
+The agent name is a label the client chooses for itself, not proof of who wrote. Every agent connects with the same MCP token, so nothing stops one from giving another's name. The lines say which origins a commit holds, not which file each one changed. Merge commits made during a sync carry none. A Vault without Git keeps no record of where a change came from.
+
 > [!warning]
 > Local history creates a hidden `.git` folder inside the Vault's notes folder to hold its history, and that folder only grows: every image and PDF ever attached stays in it, even after you delete the file from the Vault. On a Vault with large attachments, choose Local history only if you accept that growth.
 

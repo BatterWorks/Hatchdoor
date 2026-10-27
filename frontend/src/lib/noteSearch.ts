@@ -15,10 +15,15 @@ export function normalizeSearchQuery(raw: string | null): string {
 
 export function createSearchHighlightPlugin(query: string) {
   const trimmedQuery = normalizeSearchQuery(query);
+  // Match on the original text: lowercasing a copy can change its length
+  // (`İ` becomes two characters), so the copy's offsets would not line up.
+  const pattern = trimmedQuery
+    ? new RegExp(escapeRegExp(trimmedQuery), "giu")
+    : null;
 
   return function searchHighlightPlugin() {
     return function transform(tree: HastNode): void {
-      if (!trimmedQuery) {
+      if (!pattern) {
         return;
       }
 
@@ -36,10 +41,10 @@ export function createSearchHighlightPlugin(query: string) {
 
         const highlighted = highlightTextNode(
           node.value,
-          trimmedQuery,
+          pattern,
           () => hitIndex++,
         );
-        if (highlighted.length > 1) {
+        if (highlighted) {
           parent.children?.splice(index, 1, ...highlighted);
         }
       });
@@ -98,27 +103,25 @@ function shouldSkipHighlighting(node: HastNode): boolean {
   );
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function highlightTextNode(
   text: string,
-  query: string,
+  pattern: RegExp,
   nextHitIndex: () => number,
-): HastNode[] {
-  const lower = text.toLowerCase();
-  const queryLower = query.toLowerCase();
-  if (!lower.includes(queryLower)) {
-    return [{ type: "text", value: text }];
+): HastNode[] | null {
+  const matches = Array.from(text.matchAll(pattern));
+  if (matches.length === 0) {
+    return null;
   }
 
   const nodes: HastNode[] = [];
   let start = 0;
 
-  while (start < text.length) {
-    const matchIndex = lower.indexOf(queryLower, start);
-    if (matchIndex === -1) {
-      nodes.push({ type: "text", value: text.slice(start) });
-      break;
-    }
-
+  for (const match of matches) {
+    const matchIndex = match.index;
     if (matchIndex > start) {
       nodes.push({ type: "text", value: text.slice(start, matchIndex) });
     }
@@ -133,17 +136,18 @@ function highlightTextNode(
       children: [
         {
           type: "text",
-          value: text.slice(matchIndex, matchIndex + query.length),
+          value: match[0],
         },
       ],
     });
 
-    start = matchIndex + query.length;
+    start = matchIndex + match[0].length;
   }
 
-  if (nodes.length === 0) {
-    return [{ type: "text", value: text }];
+  if (start < text.length) {
+    nodes.push({ type: "text", value: text.slice(start) });
   }
+
   return nodes;
 }
 

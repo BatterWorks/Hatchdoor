@@ -3,16 +3,6 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::vault::slugify;
-
-#[derive(Debug)]
-pub struct HeadingRow {
-    pub level: usize,
-    pub text: String,
-    pub anchor: String,
-    pub position: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSnapshot {
     pub mtime_ns: i64,
@@ -65,33 +55,6 @@ pub fn content_hash(content: &str) -> String {
     }
 
     format!("fnv1a64:{hash:016x}")
-}
-
-pub fn extract_headings(content: &str) -> Vec<HeadingRow> {
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(idx, line)| {
-            let trimmed = line.trim_start();
-            let level = trimmed.chars().take_while(|ch| *ch == '#').count();
-            if level == 0
-                || level > 6
-                || !trimmed.chars().nth(level).is_some_and(char::is_whitespace)
-            {
-                return None;
-            }
-            let text = trimmed[level..].trim().to_string();
-            if text.is_empty() {
-                return None;
-            }
-            Some(HeadingRow {
-                level,
-                anchor: slugify(&text),
-                text,
-                position: idx,
-            })
-        })
-        .collect()
 }
 
 pub fn extract_tags(content: &str) -> HashSet<String> {
@@ -434,10 +397,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_headings_tags_and_fts_query_tokens() {
-        let headings = extract_headings("# One\ntext\n### Three");
-        assert_eq!(headings.len(), 2);
-        assert_eq!(headings[0].anchor, "one");
+    fn extracts_tags_and_fts_query_tokens() {
         let tags = extract_tags("hello #topic/network #dns/network, ## no");
         assert!(tags.contains("topic/network"));
         assert!(tags.contains("dns/network"));

@@ -1050,8 +1050,8 @@ connection added by #426.
 history), `base_version`, which reads `2.8.0 (dev abc123)` as `2.8.0`,
 `InstanceStateStore::remove_section`, which drops one section and writes
 nothing when it is not there (#477), `AgentConnection` (`name`, `connected_at` in RFC 3339 UTC),
-and `AgentConnectionLog` (`load`, `latest`, `observe`, `save`, and a
-`Default` that keeps the record in memory only). The versioned `state/instance.json` format: a
+`AgentConnectionLog` (`load`, `latest`, `observe`, `save`, and a
+`Default` that keeps the record in memory only), and `clean_client_name`, the cleaning a stored client name gets, answering `None` when nothing is left, which Git synchronization uses for a write's origin (#570). The versioned `state/instance.json` format: a
 `schema_version` beside named sections, each a JSON value owned by one
 feature. `versions` is this module's own: `current`, `previous` and
 `fresh_install`, all base versions. `previous` moves only when the base
@@ -1213,7 +1213,7 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Public contract:** `TransferLinks` (one instance in `AppState`), with `key`,
 `mint_download`, `mint_upload`, `mint_note_replace`, `verify_download`,
 `redeem_upload`, and `redeem_note_upload`; `SigningKey`, `MintedLink`, `Grant`,
-`NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`,
+`RedeemedLink`, `NoteUploadRule`, `LinkRefusal` (and its stable `code`s), `LINK_LIFETIME`,
 `SIGNATURE_PARAM`, and `link_path`. A link is an absolute URL on the
 Vault-scoped `/transfers/{*path}` route, its path spelled by `link_path`
 (trimmed, `.` and empty segments dropped, because a client removes `.`
@@ -1230,6 +1230,8 @@ replacing note link. `key` derives the
 token's revision, and the token the request was admitted on, so a tool call
 admitted on a token that has since rotated mints links the new token will not
 accept. See ADR-27 and ADR-32.
+
+Since #570 (ADR-49) `mint_upload` and `mint_note_replace` take the asking client's name, and both redemptions answer a `RedeemedLink` carrying the link's rule and that name. Since #598 both take an `UploadRequest`, the client's name and the `commit_summary` the minting call gave, and `RedeemedLink` carries the summary next to the name. Both are kept in memory by nonce until the link is redeemed or expires, and never enter the URL, the `Grant` or the signature. `None` means none was given or the link is no longer remembered.
 
 **Consumers:** the MCP `get_attachment` and `create_upload_link` tools mint;
 `src/handlers/transfer.rs` verifies and redeems, and compares an upload
@@ -1934,7 +1936,11 @@ blocks (`duplicate_name`; each keeps the name it claims, and the report is what
 tells an addresser it names none of them). None changes a row. Two strings that both read as a date
 or date-time compare as instants in the shared `compare`, which `query_notes`
 uses too, so `now()` orders correctly against `2026-09-18 10:00` or a zoned
-timestamp; any other pair compares byte-wise as before.
+timestamp; any other pair compares byte-wise as before. `now()`, `today()` and
+a zoned value are all read in the zone `TZ` names, UTC when it is unset, through
+the one `operator_wall_clock` in `query.rs` (#584). A folder condition
+(`file.inFolder`, and `path_prefix` in `query_notes` and `find_text`) selects
+Notes inside the folder only, never a Note whose path equals the folder.
 `saved_query` (#277) addresses one saved query in a Note by its marker name and
 evaluates only that one, with the whole scan budget, against the Note's own
 Vault. The name may be omitted only when the Note holds exactly one. Selection
@@ -2099,7 +2105,9 @@ off the async runtime; recording what that write did in the Vault's
 (#249); marking the Vault's published snapshot stale and asking for its Index
 and commit turns itself, rather than relying on a watcher (#324); and returning `NoteWriteOutcome` or a structured
 `VaultOperationError`. `VaultMutation::with_commit_summary` carries the
-caller's one-line description of the change into that record; the private
+caller's one-line description of the change into that record, and
+`VaultMutationCore::with_commit_summary` gives one to every target the core
+opens, which the transfer handler uses for an upload link's summary (#598). Since #570 (ADR-49) `VaultMutationCore::new`, `VaultMutationCore::from_state` and `VaultMutation::gated` each take a `git::WriteOrigin`, which every record they make carries; the parameter has no default, so an adapter that does not state where its writes come from does not compile. The web handlers pass `WriteOrigin::web()`, and the MCP tools and the transfer handler pass `WriteOrigin::mcp` with the client's name. The private
 `RecordedWrite` trait is what lets `run_write` build the record once for all
 seventeen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
 resolved from the `LayerMap` the write's own pre-write index build already
@@ -2349,6 +2357,7 @@ backend checks.
 
 - `src/cache/mod.rs`
 - `src/cache/chunk_ops.rs`
+- `src/cache/migrate.rs`
 - `src/cache/parse.rs`
 - `src/cache/populate.rs`
 - `src/cache/schema.rs`
@@ -2441,7 +2450,25 @@ and embedder identity/dimensions.
   runs before the search core takes its snapshot: holding a slot across the
   embedder's inference lock let four concurrent searches starve every other
   read. Waiters are woken one at a time and not in arrival order.
-- Schema or embedder identity mismatch rebuilds rather than mixing data.
+- Schema or embedder identity mismatch rebuilds rather than mixing data, with
+  one exception (ADR-50): a cache one schema version behind is left alone at
+  open and migrated by `migrate.rs` right after `reset_if_embedder_changed`
+  has found the same embedder identity. Runtime composition calls
+  `prepare_for_embedder` when a model loads and before it installs it, so no
+  search reaches a cache still waiting to migrate. If that call fails, the
+  model is installed anyway and semantic search reports `search_unavailable`
+  until an Index turn's own model check succeeds. The migration commits only
+  once its row-count, identical-vector, Vault-mapping, self-retrieval and
+  integrity checks pass, and any failure wipes and rebuilds. Seeding a
+  candidate never copies a snapshot's recorded `schema_version` over the
+  candidate's own. The next schema bump replaces the migration rather than
+  adding a second one.
+- No vec0 table has a TEXT metadata column: sqlite-vec leaks the SQL it
+  formats for every write and delete of one (#600). The per-Vault vector
+  tables file each vector under an integer `vault_key` from `vault_keys`,
+  which keeps a Vault's key across publications; text is allowed only as a
+  partition key or a `+` auxiliary column. The cache keeps no headings
+  table (#308).
 - A refresh commits a coherent new read snapshot.
 - Shared semantic vectors have one embedder identity and dimension; a mismatch
   wipes the disposable cache before any partial rebuild can participate.
@@ -2687,8 +2714,8 @@ check-full` for the model-loading tests.
 
 **Public contract:** `GitMode` (`off`/`local`, carried only by the legacy
 first-boot import — the instance-wide runtime lane is gone, #185), `GitConfig`,
-write-record/message types (`WriteRecord`, `WriteLedger`,
-`build_commit_message`), commit outcomes and errors (including
+write-record/message types (`WriteRecord`, `WriteOrigin`, `WriteLedger`,
+`PendingBatch`, `build_commit_message`), commit outcomes and errors (including
 `GitError::ManualRecovery` for repository operations that cannot be proven
 Hatchdoor-owned), and the local repository operations `validate_repo`,
 `validate_local_repo`, `init_local_repo`, `commit_local`,
@@ -2829,6 +2856,8 @@ the unique file count. Body: one `- ` line per caller-supplied summary. A
 commit whose batch is empty, which is what drift from outside Hatchdoor
 produces, keeps the generic `hatchdoor: vault update`. The ledger is bounded
 (`WriteLedger::CAPACITY`) because a `Local` Vault has no Git turn to take it.
+
+Since #570 (ADR-49) every `WriteRecord` carries a `WriteOrigin`, built only by `WriteOrigin::web()` or `WriteOrigin::mcp(client_name)`, which cleans the name, and the message ends with a trailer block: one blank line, then one `Hatchdoor-Origin: <value>` line per distinct origin in order of first appearance, with `unknown` last. `unknown` means the commit changes a path no record in the batch accounts for, and a commit from an empty batch carries it alone. To decide that, `WriteLedger::commit_batch` hands the commit path a `PendingBatch` instead of a finished message, and the commit path calls `PendingBatch::message` with the Vault root and the Vault-relative paths `stage_vault_drift` staged. `commit_local` takes its message as a closure over those paths for the same reason. The title and summary lines are unchanged. The trailer name and the four values are a permanent, externally visible format.
 
 `ManagedGitOutcome` is what a finished Git or commit turn reports:
 `UpToDate`, `Synchronized` (it committed or pushed and left the working tree
@@ -3045,7 +3074,7 @@ and push. Only that selected remote and its optional push URL are constrained to
 the same credential-free HTTPS identity; unrelated operator-owned remotes in an
 `ExistingGit` checkout are ignored and never contacted.
 
-**Consumed dependencies:** local Git repository through `git2`, the live
+**Consumed dependencies:** local Git repository through `git2`, Instance state's `clean_client_name` for the client name in a `WriteOrigin` (#570), the live
 configuration snapshot for startup parsing, and the registry's shared
 credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
 `https_credentials` accessor (managed-Git turns only; never exposed further).
@@ -3176,7 +3205,7 @@ shared `vault_write::read_upload_form`; the form's optional
 (`is_note_upload_target`) is redeemed with `redeem_note_upload` and written
 through the core's `upload_note` instead, answering the note-write shape
 (`vault_write::note_write_response`); the part's declared content type is
-ignored. Both re-read the live configuration per
+ignored. The upload is written with the origin `WriteOrigin::mcp` of the client name the redeemed link remembered (#570, ADR-49). Both re-read the live configuration per
 request: MCP disabled refuses every link (`mcp_disabled`), write mode off every
 upload (`mcp_write_disabled`), and a link that does not verify is `403` with
 `transfer_link_invalid`, `transfer_link_expired`, or `transfer_link_spent`. The
@@ -3634,7 +3663,11 @@ call's structured error when its `code` is one the manual explains
 `page` is a name `read_docs` accepts. `handle_tools_call` adds it to the
 finished result, so `batch` item errors, `VaultOperationError` and HTTP bodies
 never carry it, and errors for other codes, the writes-off `-32602` refusal and
-the plain-text setup refusals are unchanged. Additive. #502 adds `get_note_outline` and `get_note_section`, the seventeenth and eighteenth read tools and both `READ_OPS` entries (so `batch` may carry them): mappings onto `VaultReadCore::note_outline` and `note_sections`, answering `GetNoteOutlineResult` (`NoteOutline`) and `GetNoteSectionResult` (`NoteSectionsResponse`) with hand-written input schemas. They refuse a malformed `vault_id` and a missing Note exactly as `get_note` does, and every limit and matching rule is the core's: the adapter does not check `headings`, and its schema takes `maxItems` from the core's `MAX_SECTION_HEADINGS`. `get_note`'s description gains one sentence pointing to them, and its reply does not change. Catalogue grows to 51, purely additive. #521 changes `get_note`'s reply and no mapping: `note.metadata`, empty on every note until then, carries the frontmatter the read core now fills, and its `outputSchema` (generated from `Note`) allows `null` there for frontmatter that does not parse. `properties` is an object whenever `metadata` is, where it was always `null`. The description gains one sentence saying so. Behavior-changing for a client that assumed an object.
+the plain-text setup refusals are unchanged. Additive. #583 extends the same table to `list_vaults`: the Vault-state codes (a folder Hatchdoor cannot open, the managed-Git sync failures) never come back as a tool error, so `docs_pointers::attach_to_vault_listing` adds `docs` to each Vault status error in the result (`activation_error`, `search_error`, `git_error`, `watcher_error`, `recovery_branch.error`) whose code the table lists, and `output_schema_for` describes the optional field on `list_vaults`' `VaultRuntimeError` definition alone. `VaultRuntimeError` itself and the HTTP Vault list keep their shape. A table test refuses a code that is neither in the management or read cores' closed lists or the mutation core's write codes nor spelled by a status producer (`vault_runtime.rs`, `git/managed_task.rs`, `git/sync.rs`). Additive. #502 adds `get_note_outline` and `get_note_section`, the seventeenth and eighteenth read tools and both `READ_OPS` entries (so `batch` may carry them): mappings onto `VaultReadCore::note_outline` and `note_sections`, answering `GetNoteOutlineResult` (`NoteOutline`) and `GetNoteSectionResult` (`NoteSectionsResponse`) with hand-written input schemas. They refuse a malformed `vault_id` and a missing Note exactly as `get_note` does, and every limit and matching rule is the core's: the adapter does not check `headings`, and its schema takes `maxItems` from the core's `MAX_SECTION_HEADINGS`. `get_note`'s description gains one sentence pointing to them, and its reply does not change. Catalogue grows to 51, purely additive. #521 changes `get_note`'s reply and no mapping: `note.metadata`, empty on every note until then, carries the frontmatter the read core now fills, and its `outputSchema` (generated from `Note`) allows `null` there for frontmatter that does not parse. `properties` is an object whenever `metadata` is, where it was always `null`. The description gains one sentence saying so. Behavior-changing for a client that assumed an object.
+
+The adapter also records the name the calling client sent in `McpConfig::client_name` (#570, ADR-49), `None` when the request carried no client identity, which the SDK reports as its own placeholder name and version. Every write tool builds its `WriteOrigin` from that name, one per call, so each item of a `batch` shares it, and `create_upload_link` passes it to the transfer link it mints.
+
+#598 gives `create_upload_link` an optional `commit_summary` argument, the one every other write tool takes. The tool passes it with the client's name in the `UploadRequest` it mints the link with, and the transfer handler applies it to the upload's write through `VaultMutationCore::with_commit_summary`; it never enters the link. Additive.
 
 **Kind:** adapter/security surface.
 
@@ -4392,7 +4425,9 @@ plus slug (#334). A single-Vault instance renders neither prefix. `useVaultTree`
 `modifiedNotesMissingVaults` from the `/recent` read's own envelope (#141);
 `ChangesPanel` never banners a partial read — a trailing warn-ink line below
 the last row names only the missing Vaults, and `StateBlock tone="error"`
-replaces the empty state outright when nothing is usable. A `/recent` read
+replaces the empty state outright when nothing is usable. A read whose only
+non-fresh Vaults are `stale` names none, so it renders as a complete one
+(#585). A `/recent` read
 that failed outright is `modifiedNotesError`, which `ChangesPanel` renders as
 a `Could Not Load` error block with Retry rather than as "Nothing has changed
 on disk yet" (#334). Every tree and recent read carries the current scope's
@@ -4496,7 +4531,9 @@ always reads.
 search envelope (#141), rendered with the same never-a-banner rule
 `ChangesPanel` uses: a trailing warn-ink line naming only the missing Vaults
 below the last result, or `StateBlock tone="error"` replacing "No matching
-notes" outright when nothing is usable. Ranking is unchanged either way.
+notes" outright when nothing is usable. Ranking is unchanged either way. A
+read with nothing to say, its only non-fresh Vaults `stale`, shows neither
+(#585).
 
 `SearchDialog` also carries its own Vault filter (#144) — a lens over the
 answer in front of you, never the browsing scope, per #119's rule the
@@ -4558,7 +4595,8 @@ loading/error/empty rendering only — the facet rail and results list underneat
 (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`), the shared
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
 `lib/vaultParticipants.ts`, `lib/noteComments.ts`'s `hideComments` (result
-snippets drop comments, #573), router navigation supplied by the shell,
+snippets drop comments, #573), `lib/markdownSyntax.ts`'s `stripHighlights`
+(snippets show a highlight's words without its signs, #572), router navigation supplied by the shell,
 `startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
@@ -4647,8 +4685,9 @@ address (`src/handlers/docs.rs`),
 codes `vaultConditionHelp` and `gitConsoleHelp` read, including ADR-30's
 `managed_git_conflict`), the shared `test/fixtures/vaults.ts` builders (tests
 only), `api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
-`lib/noteHeadings.ts` and `lib/noteComments.ts` from Note reading and
-rendering, and the icons in
+`lib/noteHeadings.ts`, `lib/noteComments.ts` and `lib/markdownSyntax.ts`
+(`NOTE_SYNTAX_PLUGINS` for pages, `stripHighlights` for search excerpts, #572)
+from Note reading and rendering, and the icons in
 `components/icons.tsx`. It also borrows other modules' CSS classes, so a change
 there reaches Help: the Search dialog's result rows (`.search-results`,
 `.search-group`, `.search-result--primary`, `.result-title`,
@@ -4898,6 +4937,7 @@ src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 - `frontend/src/components/note-page/text.ts`
 - `frontend/src/components/note-page/wikilinks.ts`
 - `frontend/src/lib/markdown.ts`
+- `frontend/src/lib/markdownSyntax.ts`
 - `frontend/src/lib/noteComments.ts`
 - `frontend/src/lib/noteHeadings.ts`
 - `frontend/src/lib/noteSearch.ts`
@@ -4936,7 +4976,19 @@ of contents and the Help reader see it, line-count preserving like `rewriteWikil
 link preview's `strip_comments` rule (shared cases in
 `lib/noteComments.cases.json`, run by both test suites) except that code,
 math and a whole-line `hatchdoor-query` marker are kept; the search dialog's
-snippets consume it too. The live editor still shows comments. The contract
+snippets consume it too. The live editor still shows comments.
+`NOTE_SYNTAX_PLUGINS` (`lib/markdownSyntax.ts`, #572) is the one list of
+remark syntax plugins (GFM, math, highlights) that the reading view, the
+source-mode preview and the Help reader all render with; a view adds its own
+steps after it rather than keeping a copy. Its `remarkHighlight` reads
+Obsidian's `==text==` as a parser construct by the live editor's rule (an
+exact pair of signs, emphasis flanking, closed within its paragraph) and renders
+it as `<mark class="note-highlight">`, so code, math and escaped signs keep
+theirs; `stripHighlights` drops the signs from plain-text excerpts outside
+code spans, for the search dialog's snippets and the Help reader's search
+excerpts. `NotePage.highlight.test.tsx` reads the editor's two toolbars'
+sources and fails when a button wraps text in a delimiter the reading view
+does not draw. The contract
 also covers heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the reading view's component map produced by
 `createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
@@ -5099,7 +5151,9 @@ hides only the panel.
 Vault condition, read escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
 fragment jump, in the reading view and from the live editor's wikilinks),
 `wikilinks.hook.test.ts` (`resolveNoteTargets`), `NotePage.comments.test.tsx` and
-`noteComments.test.ts` (comment hiding and note embeds, #573), Markdown/heading/search/state tests,
+`noteComments.test.ts` (comment hiding and note embeds, #573),
+`NotePage.highlight.test.tsx` and `markdownSyntax.test.tsx` (highlights and the
+editor-toolbar syntax check, #572), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 
@@ -5692,7 +5746,11 @@ the documented §23 red-heading variant — a genuine failure, never the plain
 empty shell — consumed wherever a partial collection read has nothing usable
 and wherever an exact read fails outright. Its optional `help` node (#423)
 renders on its own line under the description, for the start states' "How
-does this work?" links.
+does this work?" links. Its optional `details` node (#583) renders between
+the two: the failed discovery's "Vaults Unavailable" block puts its
+explanation there, with the `.state-block-label` and `.state-block-steps`
+styles (`ui-common.css`, design system §23), since its Help page loads from the
+server that is down.
 
 `topbar.css` also carries the shell's own topbar furniture that no feature
 owns (#530): the theme menu (`.theme-menu*`), the phone meta row and its
@@ -5814,7 +5872,18 @@ packet scope:
   `scripts/dev-browser-token.py`, started by `just dev-browser-token`, hands
   the dev web token to a test browser; it reads the same
   `HATCHDOOR_WEB_BEARER_TOKEN` the backend does and the `localStorage` key
-  `TOKEN_KEY` in `frontend/src/api/api.ts`.
+  `TOKEN_KEY` in `frontend/src/api/api.ts`. `scripts/proto-new.mjs` and
+  `scripts/proto-serve.mjs`, started by `just proto-new` and `just proto-serve`
+  (#602), capture the dev instance's screens as a static prototype and serve
+  it; the capture reads the same token and `TOKEN_KEY`, plus `THEME_KEY` in
+  `frontend/src/app/constants.ts`, `SEEN_VERSION_KEY` in
+  `frontend/src/features/whats-new/whatsNew.ts`, the `access_token` query
+  parameter `withAccessToken` adds in `frontend/src/api/api.ts` (cut from
+  every captured page) and the 920px mobile layout in `frontend/src/App.tsx`,
+  copying those names, so renaming one means editing `scripts/proto-new.mjs`
+  too. It drives `playwright-core` from the frontend's dev dependencies and
+  the Chrome on the path, or the one `HATCHDOOR_DEV_BROWSER` names. Validate
+  with `node --test scripts/proto.test.mjs`.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.

@@ -1024,11 +1024,9 @@ function VaultWorkspace({
                   // Discovery failed and nothing is known about the
                   // collection: never the zero-Vault state, which would tell
                   // the reader their Vaults are gone (#333).
-                  <BrokenStartState
-                    title="Vaults Unavailable"
+                  <VaultsUnavailableState
                     message={collectionError ?? "Could not load your Vaults."}
                     onTryAgain={() => void loadVaults()}
-                    manual={CONTEXTUAL_HELP.vaultsUnavailable}
                   />
                 ) : registryRecovery ? (
                   <BrokenStartState
@@ -1433,9 +1431,10 @@ function ZeroVaultState({
   );
 }
 
-/** A broken start (#150): the registry file itself is unreadable, or
- * discovery failed. Both open the ordinary workspace with this same
- * documented error block rather than a full-screen gate. */
+/** A broken start (#150): the registry file itself is unreadable. It opens
+ * the ordinary workspace with this documented error block rather than a
+ * full-screen gate, as a failed discovery does with its own
+ * (`VaultsUnavailableState`). */
 function BrokenStartState({
   title = "Vault Registry Unavailable",
   message,
@@ -1456,6 +1455,50 @@ function BrokenStartState({
       actionLabel={onTryAgain ? "Try again" : undefined}
       onAction={onTryAgain}
       help={<ContextualHelpLink to={manual} />}
+    />
+  );
+}
+
+/** Discovery failed (#333). The server is usually what is down, and Help
+ * fetches the manual from it, so the block explains itself in place and keeps
+ * the Help link for when the server is back (#583). */
+function VaultsUnavailableState({
+  message,
+  onTryAgain,
+}: {
+  message: string;
+  onTryAgain: () => void;
+}) {
+  const said = message.trim();
+  return (
+    <StateBlock
+      tone="error"
+      title="Vaults Unavailable"
+      description={/[.!?…]$/.test(said) ? said : `${said}.`}
+      details={
+        <>
+          <p className="state-block-label">What this means</p>
+          <p>
+            The browser could not reach Hatchdoor. The server is offline or
+            restarting, or a proxy in front of it answered with an error. Your
+            Vaults and notes are untouched.
+          </p>
+          <p className="state-block-label">What to try</p>
+          <ol className="state-block-steps">
+            <li>
+              Check that Hatchdoor is running and reachable from this device.
+            </li>
+            <li>Press Try again.</li>
+            <li>
+              Or wait: the app reloads the list by itself when the connection
+              comes back.
+            </li>
+          </ol>
+        </>
+      }
+      actionLabel="Try again"
+      onAction={onTryAgain}
+      help={<ContextualHelpLink to={CONTEXTUAL_HELP.vaultsUnavailable} />}
     />
   );
 }

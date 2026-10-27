@@ -874,6 +874,7 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
     tokio::spawn(async move {
         let model_dir = state.model_setup.model_cache_dir(selected);
         let runtime = state.runtime_embedder.clone();
+        let sqlite = state.startup_sqlite.clone();
         let model_setup = state.model_setup.clone();
         let download_tracker = tracker.clone();
         let load_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -920,6 +921,12 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                 })();
                 match loaded {
                     Ok(embedder) => {
+                        // Before the model is installed, so no search reaches
+                        // a cache still waiting for its migration (ADR-50).
+                        // An Index turn retries the same check on failure.
+                        if let Err(error) = sqlite.prepare_for_embedder(embedder.as_ref()) {
+                            warn!("Could not prepare the search cache for the model: {error}");
+                        }
                         runtime.set(embedder, selected == SelectedModel::Gemma);
                         return Ok(());
                     }
@@ -3792,6 +3799,7 @@ mod tests {
                     parsed_vault_id(&vault_id),
                     target,
                     false,
+                    crate::transfer_link::UploadRequest::default(),
                 )
                 .url
         };
@@ -3977,6 +3985,7 @@ mod tests {
             parsed_vault_id(&vault_id),
             "big.png",
             false,
+            crate::transfer_link::UploadRequest::default(),
         );
         let refused = app
             .clone()
@@ -3985,6 +3994,159 @@ mod tests {
             .expect("response");
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
         assert!(!vault_root.join("big.png").exists());
+    }
+
+    /// ADR-49: a write through the web API is recorded with the `web` origin.
+    #[tokio::test]
+    async fn a_write_through_the_web_api_has_the_web_origin() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
+        let created = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"relative_path":"Idea.md","content":"idea"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(created.status().is_success(), "{}", created.status());
+
+        let origins: Vec<_> = state
+            .vaults
+            .runtime(parsed_vault_id(&vault_id))
+            .expect("Vault runtime")
+            .write_ledger()
+            .take()
+            .into_iter()
+            .map(|record| record.origin)
+            .collect();
+        assert_eq!(origins, vec![crate::git::WriteOrigin::web()]);
+    }
+
+    /// ADR-49: an upload through a link is the write of the client that asked
+    /// for the link, exactly as if that client had written over MCP.
+    #[tokio::test]
+    async fn an_upload_through_a_link_has_the_origin_of_the_client_that_asked_for_it() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Origin", 0).await;
+        let ledger = state
+            .vaults
+            .runtime(parsed_vault_id(&vault_id))
+            .expect("Vault runtime")
+            .write_ledger();
+        ledger.take();
+
+        // `mcp_tool_call` initializes as a client named "t".
+        for target in ["scan.png", "Imports/Report.md"] {
+            let answer = mint_upload_link(&app, &vault_id, target, false, None).await;
+            let uploaded = post_upload(&app, minted_url(&answer), b"# report\n").await;
+            assert!(uploaded.status().is_success(), "{target}");
+            assert!(vault_root.join(target).exists());
+        }
+
+        let origins: Vec<_> = ledger
+            .take()
+            .into_iter()
+            .map(|record| record.origin)
+            .collect();
+        let asking_client = crate::git::WriteOrigin::mcp(Some("t"));
+        assert_eq!(origins, vec![asking_client.clone(), asking_client]);
+    }
+
+    /// #598: a `commit_summary` given to `create_upload_link` is the summary
+    /// of the write the upload makes, for an attachment and a note alike,
+    /// and reaches the body of the commit built from that write. A blank one
+    /// adds no line, as on every other write tool.
+    #[tokio::test]
+    async fn an_upload_through_a_link_writes_under_the_summary_it_was_minted_with() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Summaries", 0).await;
+        let ledger = state
+            .vaults
+            .runtime(parsed_vault_id(&vault_id))
+            .expect("Vault runtime")
+            .write_ledger();
+        ledger.take();
+
+        // Every kind of link: attachment create and overwrite, note create
+        // and replace.
+        let report_hash = crate::cache::parse::content_hash("# report\n");
+        for (target, overwrite, expected_content_hash, summary) in [
+            ("scan.png", false, None, "file the scan"),
+            ("scan.png", true, None, "rescan"),
+            ("Imports/Report.md", false, None, "import the report"),
+            (
+                "Imports/Report.md",
+                true,
+                Some(report_hash.as_str()),
+                "reimport",
+            ),
+            ("blank.png", false, None, "  "),
+        ] {
+            let mut arguments = serde_json::json!({
+                "vault_id": vault_id,
+                "target_relative_path": target,
+                "overwrite": overwrite,
+                "commit_summary": summary
+            });
+            if let Some(hash) = expected_content_hash {
+                arguments["expected_content_hash"] = serde_json::json!(hash);
+            }
+            let answer = mcp_tool_call(&app, "mcp-secret", "create_upload_link", arguments).await;
+            let uploaded = post_upload(&app, minted_url(&answer), b"# report\n").await;
+            assert!(uploaded.status().is_success(), "{target}");
+            assert!(vault_root.join(target).exists());
+        }
+
+        let records = ledger.take();
+        let summaries: Vec<_> = records
+            .iter()
+            .map(|record| record.summary.as_deref())
+            .collect();
+        assert_eq!(
+            summaries,
+            vec![
+                Some("file the scan"),
+                Some("rescan"),
+                Some("import the report"),
+                Some("reimport"),
+                None
+            ]
+        );
+        let message = crate::git::build_commit_message(&records, false);
+        let body_lines: Vec<_> = message
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        assert_eq!(
+            body_lines,
+            vec![
+                "- file the scan",
+                "- rescan",
+                "- import the report",
+                "- reimport"
+            ],
+            "{message}"
+        );
+        assert_eq!(
+            message.lines().last(),
+            Some("Hatchdoor-Origin: mcp/t"),
+            "{message}"
+        );
     }
 
     /// `create_upload_link` called over MCP for one target, with optional
@@ -4266,6 +4428,7 @@ mod tests {
                     vault_id,
                     "b.png",
                     false,
+                    crate::transfer_link::UploadRequest::default(),
                 )
                 .url,
         ] {
