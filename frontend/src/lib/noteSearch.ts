@@ -39,7 +39,7 @@ export function createSearchHighlightPlugin(query: string) {
           trimmedQuery,
           () => hitIndex++,
         );
-        if (highlighted.length > 1) {
+        if (highlighted) {
           parent.children?.splice(index, 1, ...highlighted);
         }
       });
@@ -102,11 +102,11 @@ function highlightTextNode(
   text: string,
   query: string,
   nextHitIndex: () => number,
-): HastNode[] {
+): HastNode[] | null {
   const lower = text.toLowerCase();
   const queryLower = query.toLowerCase();
   if (!lower.includes(queryLower)) {
-    return [{ type: "text", value: text }];
+    return null;
   }
 
   const nodes: HastNode[] = [];
@@ -141,9 +141,6 @@ function highlightTextNode(
     start = matchIndex + query.length;
   }
 
-  if (nodes.length === 0) {
-    return [{ type: "text", value: text }];
-  }
   return nodes;
 }
 

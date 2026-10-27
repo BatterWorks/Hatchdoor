@@ -131,6 +131,94 @@ describe("noteSearch", () => {
     });
   });
 
+  it("marks a match that fills its whole text node and numbers hits without gaps", () => {
+    const tree: {
+      type: string;
+      children: Array<{
+        type: string;
+        tagName: string;
+        properties: Record<string, unknown>;
+        children: Array<{
+          type: string;
+          tagName?: string;
+          properties?: Record<string, unknown>;
+          value?: string;
+          children?: Array<{
+            type: string;
+            tagName?: string;
+            properties?: Record<string, unknown>;
+            value?: string;
+            children?: Array<{ type: string; value: string }>;
+          }>;
+        }>;
+      }>;
+    } = {
+      type: "root",
+      children: [
+        {
+          type: "element",
+          tagName: "h1",
+          properties: {},
+          children: [{ type: "text", value: "Homelab" }],
+        },
+        {
+          type: "element",
+          tagName: "p",
+          properties: {},
+          children: [
+            {
+              type: "element",
+              tagName: "strong",
+              properties: {},
+              children: [{ type: "text", value: "homelab" }],
+            },
+          ],
+        },
+        {
+          type: "element",
+          tagName: "p",
+          properties: {},
+          children: [
+            { type: "text", value: "my homelab rack" },
+            {
+              type: "element",
+              tagName: "em",
+              properties: {},
+              children: [{ type: "text", value: "no match here" }],
+            },
+          ],
+        },
+      ],
+    };
+
+    createSearchHighlightPlugin("homelab")()(tree);
+
+    const [heading, boldParagraph, plainParagraph] = tree.children;
+    expect(heading.children).toEqual([
+      {
+        type: "element",
+        tagName: "mark",
+        properties: { className: ["search-hit"], "data-hit-index": "0" },
+        children: [{ type: "text", value: "Homelab" }],
+      },
+    ]);
+    expect(boldParagraph.children[0].children).toEqual([
+      {
+        type: "element",
+        tagName: "mark",
+        properties: { className: ["search-hit"], "data-hit-index": "1" },
+        children: [{ type: "text", value: "homelab" }],
+      },
+    ]);
+    expect(plainParagraph.children[1]).toMatchObject({
+      tagName: "mark",
+      properties: { "data-hit-index": "2" },
+    });
+    expect(plainParagraph.children[3].children).toEqual([
+      { type: "text", value: "no match here" },
+    ]);
+  });
+
   it("setActiveSearchHit toggles the active marker", () => {
     const root = document.createElement("div");
     root.innerHTML =
