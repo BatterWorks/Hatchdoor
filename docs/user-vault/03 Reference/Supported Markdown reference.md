@@ -8,7 +8,9 @@ The Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` 
 
 ## Inline formatting
 
-Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, `inline code`, and links such as <https://example.com>.
+Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, ==highlighted text==, `inline code`, and links such as <https://example.com>.
+
+A highlight is Obsidian's syntax: two equals signs on each side, `==like this==`, which is also what the editor's **Highlight** button writes. Both pairs must sit in the same paragraph, with no space just inside them, so a comparison such as `total == 0` in a sentence stays as written. Inside code and math the signs are always shown as written. Hatchdoor draws every highlight in one colour; Obsidian's coloured highlights, picked with an emoji after the opening signs, show as an ordinary highlight with the emoji in it.
 
 Raw HTML is not supported, apart from comments. Use Markdown syntax so a note reads the same in other apps.
 

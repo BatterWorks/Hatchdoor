@@ -4583,7 +4583,8 @@ loading/error/empty rendering only — the facet rail and results list underneat
 (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`), the shared
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
 `lib/vaultParticipants.ts`, `lib/noteComments.ts`'s `hideComments` (result
-snippets drop comments, #573), router navigation supplied by the shell,
+snippets drop comments, #573), `lib/markdownSyntax.ts`'s `stripHighlights`
+(snippets show a highlight's words without its signs, #572), router navigation supplied by the shell,
 `startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
@@ -4672,8 +4673,9 @@ address (`src/handlers/docs.rs`),
 codes `vaultConditionHelp` and `gitConsoleHelp` read, including ADR-30's
 `managed_git_conflict`), the shared `test/fixtures/vaults.ts` builders (tests
 only), `api/api.ts`'s `getToken`, `createManualMarkdownComponents` and
-`lib/noteHeadings.ts` and `lib/noteComments.ts` from Note reading and
-rendering, and the icons in
+`lib/noteHeadings.ts`, `lib/noteComments.ts` and `lib/markdownSyntax.ts`
+(`NOTE_SYNTAX_PLUGINS` for pages, `stripHighlights` for search excerpts, #572)
+from Note reading and rendering, and the icons in
 `components/icons.tsx`. It also borrows other modules' CSS classes, so a change
 there reaches Help: the Search dialog's result rows (`.search-results`,
 `.search-group`, `.search-result--primary`, `.result-title`,
@@ -4923,6 +4925,7 @@ src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 - `frontend/src/components/note-page/text.ts`
 - `frontend/src/components/note-page/wikilinks.ts`
 - `frontend/src/lib/markdown.ts`
+- `frontend/src/lib/markdownSyntax.ts`
 - `frontend/src/lib/noteComments.ts`
 - `frontend/src/lib/noteHeadings.ts`
 - `frontend/src/lib/noteSearch.ts`
@@ -4961,7 +4964,19 @@ of contents and the Help reader see it, line-count preserving like `rewriteWikil
 link preview's `strip_comments` rule (shared cases in
 `lib/noteComments.cases.json`, run by both test suites) except that code,
 math and a whole-line `hatchdoor-query` marker are kept; the search dialog's
-snippets consume it too. The live editor still shows comments. The contract
+snippets consume it too. The live editor still shows comments.
+`NOTE_SYNTAX_PLUGINS` (`lib/markdownSyntax.ts`, #572) is the one list of
+remark syntax plugins (GFM, math, highlights) that the reading view, the
+source-mode preview and the Help reader all render with; a view adds its own
+steps after it rather than keeping a copy. Its `remarkHighlight` reads
+Obsidian's `==text==` as a parser construct by the live editor's rule (an
+exact pair of signs, emphasis flanking, closed within its paragraph) and renders
+it as `<mark class="note-highlight">`, so code, math and escaped signs keep
+theirs; `stripHighlights` drops the signs from plain-text excerpts outside
+code spans, for the search dialog's snippets and the Help reader's search
+excerpts. `NotePage.highlight.test.tsx` reads the editor's two toolbars'
+sources and fails when a button wraps text in a delimiter the reading view
+does not draw. The contract
 also covers heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the reading view's component map produced by
 `createNoteMarkdownComponents`, the **Reading** toggle on the note (#541:
@@ -5124,7 +5139,9 @@ hides only the panel.
 Vault condition, read escalation), `NotePage.body-links.test.tsx` (in-body link routing and the
 fragment jump, in the reading view and from the live editor's wikilinks),
 `wikilinks.hook.test.ts` (`resolveNoteTargets`), `NotePage.comments.test.tsx` and
-`noteComments.test.ts` (comment hiding and note embeds, #573), Markdown/heading/search/state tests,
+`noteComments.test.ts` (comment hiding and note embeds, #573),
+`NotePage.highlight.test.tsx` and `markdownSyntax.test.tsx` (highlights and the
+editor-toolbar syntax check, #572), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 

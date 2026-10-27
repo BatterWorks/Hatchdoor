@@ -12,8 +12,6 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
 import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 
 import { noteInSyncConflict } from "../app/vaultSlotLogic";
 import {
@@ -27,6 +25,7 @@ import {
   slugifyHeading,
   type NoteHeading,
 } from "../lib/noteHeadings";
+import { NOTE_SYNTAX_PLUGINS } from "../lib/markdownSyntax";
 import { hideComments } from "../lib/noteComments";
 import { detectLineEnding, frontmatterLineOffset } from "../lib/sourceMap";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -170,7 +169,7 @@ function unwrapLinks(wire: VaultQualifiedLinks): NoteLinks {
   };
 }
 
-const NOTE_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
+const NOTE_REMARK_PLUGINS = [...NOTE_SYNTAX_PLUGINS, remarkHideQueryMarkers];
 
 export function NotePage({
   onActiveNoteChange,

@@ -6,6 +6,7 @@ import {
   UiPanel,
   VaultPrefix,
 } from "../../components/ui";
+import { stripHighlights } from "../../lib/markdownSyntax";
 import { hideComments } from "../../lib/noteComments";
 import {
   describeMissingVaults,
@@ -130,8 +131,9 @@ function groupResults(results: SearchResult[]): NoteGroup[] {
 function stripMarkdown(raw: string): string {
   return (
     // Comments go first, by the note page's own rule (#573): it knows which
-    // `%%` sits in code, and the code markers are stripped below.
-    hideComments(raw)
+    // `%%` sits in code, and the code markers are stripped below. A
+    // highlight shows its words without the signs (#572).
+    stripHighlights(hideComments(raw))
       // Frontmatter at the top of a chunk, and any fenced block whole: a
       // snippet that showed a Mermaid diagram's source read as noise (#530).
       // An unterminated fence is cut from its opening to the end.

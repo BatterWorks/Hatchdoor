@@ -10,8 +10,6 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 
 import {
   ArrowBackIcon,
@@ -21,6 +19,7 @@ import {
   OpenInFullIcon,
 } from "../../components/icons";
 import { createManualMarkdownComponents } from "../../components/note-page/renderers";
+import { NOTE_SYNTAX_PLUGINS } from "../../lib/markdownSyntax";
 import { hideComments } from "../../lib/noteComments";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import {
@@ -36,7 +35,6 @@ import {
   type HelpSearchHit,
 } from "./helpPages";
 
-const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS = [rehypeKatex];
 const SEARCH_DELAY_MS = 200;
 
@@ -372,7 +370,7 @@ function HelpPage({
       {showStart ? <HelpStart onOpen={onOpen} /> : null}
       <div className="note-body help-note-body" dir="auto">
         <ReactMarkdown
-          remarkPlugins={REMARK_PLUGINS}
+          remarkPlugins={NOTE_SYNTAX_PLUGINS}
           rehypePlugins={REHYPE_PLUGINS}
           components={components}
         >

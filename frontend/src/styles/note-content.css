@@ -209,6 +209,17 @@
   font-weight: 600;
 }
 
+/* A `==highlight==` (#572) takes the live editor's tint, --hot at a fifth, so
+   the two views of a note match. It stays apart from a search hit's
+   --highlight yellow, which paints over it where a hit falls inside. */
+.note-body mark.note-highlight {
+  background: color-mix(in srgb, var(--hot) 20%, transparent);
+  color: inherit;
+  border-radius: var(--radius-none);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 .note-body code {
   font-family: var(--font-mono);
   font-size: 0.86em;

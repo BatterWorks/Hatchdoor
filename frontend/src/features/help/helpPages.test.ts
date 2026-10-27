@@ -81,6 +81,12 @@ describe("plainExcerpt", () => {
     ).toBe("git from the Settings screen, see How to deploy");
   });
 
+  it("drops a highlight's signs but keeps them in code (#572)", () => {
+    expect(plainExcerpt("A ==marked== word, written `==so==`.")).toBe(
+      "A marked word, written ==so==.",
+    );
+  });
+
   it("drops comments but keeps code that looks like one (#573)", () => {
     expect(plainExcerpt("Before %%hidden%% after, `%%kept%%`.")).toBe(
       "Before after, %%kept%%.",
