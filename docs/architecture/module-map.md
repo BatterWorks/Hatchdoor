@@ -5843,9 +5843,14 @@ packet scope:
   `scripts/proto-serve.mjs`, started by `just proto-new` and `just proto-serve`
   (#602), capture the dev instance's screens as a static prototype and serve
   it; the capture reads the same token and `TOKEN_KEY`, plus `THEME_KEY` in
-  `frontend/src/app/constants.ts` and the 920px mobile layout in
-  `frontend/src/App.tsx`, and drives `playwright-core` from the frontend's
-  dev dependencies. Validate with `node --test scripts/proto.test.mjs`.
+  `frontend/src/app/constants.ts`, `SEEN_VERSION_KEY` in
+  `frontend/src/features/whats-new/whatsNew.ts`, the `access_token` query
+  parameter `withAccessToken` adds in `frontend/src/api/api.ts` (cut from
+  every captured page) and the 920px mobile layout in `frontend/src/App.tsx`,
+  copying those names, so renaming one means editing `scripts/proto-new.mjs`
+  too. It drives `playwright-core` from the frontend's dev dependencies and
+  the Chrome on the path, or the one `HATCHDOOR_DEV_BROWSER` names. Validate
+  with `node --test scripts/proto.test.mjs`.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.

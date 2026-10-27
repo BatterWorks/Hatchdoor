@@ -21,6 +21,7 @@
 // Running it again with more paths adds to the folder and redraws the index.
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -39,6 +40,10 @@ const TOKEN_SETTING = "HATCHDOOR_WEB_BEARER_TOKEN";
 // and `frontend/src/app/constants.ts`).
 const TOKEN_KEY = "hatchdoor_web_token";
 const THEME_KEY = "hatchdoor.theme";
+// The query parameter `withAccessToken` (`frontend/src/api/api.ts`) puts the
+// web token in, on note images among others. A prototype is served to the
+// whole LAN, so it is cut from every address before anything is written.
+const ACCESS_TOKEN_PARAM = /([?&])access_token=[^&#"'\s]*(&?)/g;
 // What's new (`frontend/src/features/whats-new/whatsNew.ts`) opens over every
 // screen in a browser that has never seen a release. It belongs to the fresh
 // capture browser, not to the screen, so the capture says it saw them all.
@@ -74,10 +79,34 @@ export function slugOf(route) {
   return slug || "home";
 }
 
-// The file an image is kept in under `media/`: its address, made safe for a
-// file name.
+// The file an image is kept in under `media/`: its path without the query,
+// made safe for a file name, with a short hash of the path so two addresses
+// that make the same safe name stay two files.
 export function mediaName(src) {
-  return src.replace(/^\/+/, "").replace(/[^A-Za-z0-9._-]+/g, "_");
+  const pathname = src.split(/[?#]/)[0];
+  const safe = pathname.replace(/^\/+/, "").replace(/[^A-Za-z0-9._-]+/g, "_");
+  const dot = safe.lastIndexOf(".");
+  const [stem, extension] =
+    dot > 0 ? [safe.slice(0, dot), safe.slice(dot)] : [safe, ""];
+  const hash = createHash("sha256").update(pathname).digest("hex").slice(0, 8);
+  return `${stem}-${hash}${extension}`;
+}
+
+// `text` with every `access_token` parameter cut out. Refuses outright when
+// the token is still there in any other form, so a page that carries it is
+// never written.
+export function withoutToken(text, token) {
+  // `?access_token=x&y` keeps `?y`, `&access_token=x&y` keeps `&y`, and a
+  // last parameter goes with its separator.
+  const cut = text.replace(ACCESS_TOKEN_PARAM, (_, lead, trail) =>
+    trail ? lead : "",
+  );
+  if (token && (cut.includes(token) || cut.includes(encodeURIComponent(token)))) {
+    throw new ToolError(
+      "a captured page still holds the web token, so it was not written",
+    );
+  }
+  return cut;
 }
 
 function escaped(text) {
@@ -267,6 +296,17 @@ function buildStylesheet(folder) {
 
 async function settle(page, url) {
   await page.goto(url);
+  // The network can fall quiet before React has drawn anything, which would
+  // capture an empty page; the data the first draw asks for comes after.
+  try {
+    await page.waitForFunction(
+      () => (document.getElementById("root")?.children.length ?? 0) > 0,
+      undefined,
+      { timeout: 30_000 },
+    );
+  } catch {
+    throw new ToolError(`${url} drew nothing within 30 seconds`);
+  }
   await page.waitForLoadState("networkidle");
   await page.evaluate(async () => {
     for (const img of document.querySelectorAll("img[loading=lazy]")) {
@@ -287,10 +327,11 @@ async function main() {
   const at = args.indexOf("--origin");
   const origin = at >= 0 ? args.splice(at, 2)[1] : undefined;
   const [name, ...routes] = args;
-  if (!origin || !name || routes.length === 0) {
-    throw new ToolError(`usage: ${usage}`);
-  }
-  if (!/^\d+-[a-z0-9][a-z0-9-]*$/.test(name)) {
+  if (
+    !origin ||
+    !/^\d+-[a-z0-9][a-z0-9-]*$/.test(name ?? "") ||
+    routes.length === 0
+  ) {
     throw new ToolError(`usage: ${usage}`);
   }
   const strays = routes.filter((route) => !route.startsWith("/"));
@@ -326,31 +367,36 @@ async function main() {
     executablePath: chromePath(),
   });
   const errors = [];
+  // Fetched afresh on every run, so a changed image is not left stale, and
+  // once per run, however many pages show it.
+  const fetched = new Set();
   try {
     for (const [size, [width, height]] of Object.entries(SIZES)) {
       for (const theme of THEMES) {
         // The service worker is kept out: it answers from its own cache, and
         // this exists to show what the code on disk draws today.
+        // Phone and tablet are touch screens, which the app reads as
+        // `(pointer: coarse)` to choose, for one, the editor's toolbar.
+        const touch = size !== "desktop";
         const context = await browser.newContext({
           viewport: { width, height },
+          hasTouch: touch,
+          isMobile: touch,
           serviceWorkers: "block",
           reducedMotion: "reduce",
           colorScheme: theme,
           extraHTTPHeaders: token ? { Authorization: `Bearer ${token}` } : {},
         });
         await context.addInitScript(
-          ([keys, value, chosen, seen]) => {
-            if (value) {
-              localStorage.setItem(keys.token, value);
+          (stored) => {
+            for (const [key, value] of stored) {
+              localStorage.setItem(key, value);
             }
-            localStorage.setItem(keys.theme, chosen);
-            localStorage.setItem(keys.seen, seen);
           },
           [
-            { token: TOKEN_KEY, theme: THEME_KEY, seen: SEEN_VERSION_KEY },
-            token,
-            theme,
-            SEEN_EVERYTHING,
+            ...(token ? [[TOKEN_KEY, token]] : []),
+            [THEME_KEY, theme],
+            [SEEN_VERSION_KEY, SEEN_EVERYTHING],
           ],
         );
         const page = await context.newPage();
@@ -362,9 +408,10 @@ async function main() {
           const got = await page.evaluate(capture, theme);
           for (const src of got.media) {
             const file = path.join(media, mediaName(src));
-            if (fs.existsSync(file)) {
+            if (fetched.has(file)) {
               continue;
             }
+            fetched.add(file);
             const answer = await context.request.get(origin + src);
             if (!answer.ok()) {
               errors.push(
@@ -385,7 +432,10 @@ async function main() {
             captured,
             `${slugOf(route)}.${size}.${theme}.html`,
           );
-          fs.writeFileSync(file, pageOf({ ...got, htmlAttributes, body }));
+          fs.writeFileSync(
+            file,
+            withoutToken(pageOf({ ...got, htmlAttributes, body }), token),
+          );
           console.log(path.relative(ROOT, file));
         }
         await context.close();

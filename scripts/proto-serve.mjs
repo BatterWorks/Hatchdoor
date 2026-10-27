@@ -32,6 +32,8 @@ const TYPES = {
 };
 
 // The file an address asks for, or nothing when it is not inside the folder.
+// Checked again once symlinks are resolved, so a link placed in the folder
+// cannot serve what lies outside it.
 export function fileFor(folder, url) {
   let wanted;
   try {
@@ -46,7 +48,12 @@ export function fileFor(folder, url) {
   if (fs.existsSync(file) && fs.statSync(file).isDirectory()) {
     file = path.join(file, "index.html");
   }
-  return fs.existsSync(file) ? file : undefined;
+  if (!fs.existsSync(file)) {
+    return undefined;
+  }
+  const real = fs.realpathSync(file);
+  const root = fs.realpathSync(folder);
+  return real.startsWith(root + path.sep) ? real : undefined;
 }
 
 export function server(folder) {
@@ -60,21 +67,35 @@ export function server(folder) {
     }
     const type =
       TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
-    response.writeHead(200, { "Content-Type": type });
-    fs.createReadStream(file).pipe(response);
+    const stream = fs.createReadStream(file);
+    // A file removed or made unreadable mid-request ends that request, not
+    // the server.
+    stream.once("error", () => {
+      if (!response.headersSent) {
+        response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      }
+      response.end();
+    });
+    stream.once("open", () => {
+      response.writeHead(200, { "Content-Type": type });
+      stream.pipe(response);
+    });
   });
 }
 
-// This machine's LAN address, the one another device can open.
-function lanAddress() {
+// Every address another device might open this machine at. A host with
+// Docker, a VPN or a bridge has several, and only the person holding the
+// phone knows which network it is on, so all are printed.
+function lanAddresses() {
+  const found = [];
   for (const addresses of Object.values(os.networkInterfaces())) {
     for (const address of addresses ?? []) {
       if (address.family === "IPv4" && !address.internal) {
-        return address.address;
+        found.push(address.address);
       }
     }
   }
-  return "localhost";
+  return found.length ? found : ["localhost"];
 }
 
 if (process.argv[1] === import.meta.filename) {
@@ -96,7 +117,9 @@ if (process.argv[1] === import.meta.filename) {
         )
         .listen(port, "0.0.0.0", () => {
           console.log(`serving ${path.relative(ROOT, folder)} with caching off`);
-          console.log(`http://${lanAddress()}:${port}/`);
+          for (const address of lanAddresses()) {
+            console.log(`http://${address}:${port}/`);
+          }
           resolve(undefined);
         });
     });

@@ -49,7 +49,11 @@ export async function run(main) {
 // answers the whole LAN, and the repository root holds `.env`.
 export function folderOf(name, prototypes = PROTOTYPES_DIR) {
   const found = path.join(prototypes, name ?? "");
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name ?? "") || !fs.existsSync(found)) {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name ?? "") ||
+    !fs.existsSync(found) ||
+    !fs.statSync(found).isDirectory()
+  ) {
     throw new ToolError(
       `there is no prototype named ${name} under .dev/prototypes/`,
     );
