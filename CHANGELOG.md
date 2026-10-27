@@ -17,6 +17,7 @@
 - Changed on disk and search no longer print a sentence with no Vault in it. When the only Vault short of fresh was a stale one, which still answered from its previous index, Changed on disk showed " did not answer." and search showed an empty red "Nothing Found" or a blank line under the results. Both now look as they do for a complete answer. A note opened from a search for its own title now lands on the first match you can see: the hidden copy of the title at the top of the body no longer counts as match 1. [#585]
 - `create_upload_link` now takes a `commit_summary`, like every other write tool. Uploading through a link, the recommended route for attachments and the only one for importing a Markdown file as a note, refused the argument, so the commit that recorded the upload had no line saying why the file was added. The summary given when the link is minted now reaches that commit, just as it does on `import_attachment`. It is held by the server, never put in the link. [#598]
 - A search match that makes up all the text of its piece of formatting, such as a heading that reads just `Homelab`, a bold or highlighted word, a link's text or a table cell holding only that word, is now highlighted on the note page when you arrive from a search. It was left unmarked, missing from the "Match N of M" count and never landed on, so a note whose only matches looked like that opened with no match navigator at all. [#609]
+- A search match on the note page is now marked on exactly the matched words when the text before it holds a letter such as the Turkish capital `İ`, which becomes two characters when lowercased. Each such letter shifted the mark one letter to the left, so a long note could mark the wrong words. [#612]
 
 [#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
 [#572]: https://github.com/BatterWorks/Hatchdoor/issues/572
@@ -28,6 +29,7 @@
 [#600]: https://github.com/BatterWorks/Hatchdoor/issues/600
 [#605]: https://github.com/BatterWorks/Hatchdoor/issues/605
 [#609]: https://github.com/BatterWorks/Hatchdoor/issues/609
+[#612]: https://github.com/BatterWorks/Hatchdoor/issues/612
 
 ## v2.8.2 - 2026-10-14
 
