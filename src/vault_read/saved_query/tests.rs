@@ -296,13 +296,92 @@ fn a_filter_against_the_current_time_changes_its_answer_as_time_passes() {
 
 #[test]
 fn today_is_the_date_alone() {
-    let notes = vec![note("a.md", "A", &[], json!({"due": "2026-09-18"}))];
+    let notes = vec![
+        note("a.md", "A", &[], json!({"due": "2026-09-18"})),
+        note("b.md", "B", &[], json!({"due": "2026-09-17"})),
+        note("c.md", "C", &[], json!({"due": "2026-09-19"})),
+    ];
     let due_today = table(evaluate_one(
         "filters: 'due == today()'",
         &notes,
         "2026-09-18T23:59:00",
     ));
     assert_eq!(titles(&due_today), vec!["A"]);
+}
+
+/// `TZ` is process-wide and chrono reads it on every call, so each zone is
+/// checked in a child process of its own, which prints the date it saw.
+#[test]
+fn today_follows_the_tz_setting_and_is_utc_without_it() {
+    const ZONE: &str = "HATCHDOOR_TEST_CLOCK_ZONE";
+    if let Some(zone) = std::env::var_os(ZONE) {
+        assert_eq!(std::env::var_os("TZ"), (!zone.is_empty()).then_some(zone));
+        // 23:30 UTC is already the next day in Paris, summer or winter.
+        let instant = chrono::DateTime::parse_from_rfc3339("2026-10-27T23:30:00Z")
+            .expect("instant")
+            .with_timezone(&chrono::Utc);
+        let clock = EvaluationClock::from_utc(instant);
+        // A zoned frontmatter value is read in the same zone as now().
+        let notes = vec![note(
+            "a.md",
+            "A",
+            &[],
+            json!({"stamp": "2026-10-27T23:30:00Z"}),
+        )];
+        let same = table(evaluate_one(
+            "filters: 'stamp == now()'",
+            &notes,
+            &clock.now,
+        ));
+        println!("today={} same={}", clock.today, titles(&same) == ["A"]);
+        return;
+    }
+
+    let today_with = |zone: Option<&str>| {
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child.args([
+            "--exact",
+            "vault_read::saved_query::tests::today_follows_the_tz_setting_and_is_utc_without_it",
+            "--test-threads=1",
+            "--nocapture",
+        ]);
+        match zone {
+            Some(zone) => child.env("TZ", zone).env(ZONE, zone),
+            None => child.env_remove("TZ").env(ZONE, ""),
+        };
+        let output = child.output().expect("run the clock in its own process");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "the clock check failed or did not run:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+            .lines()
+            // libtest may print the test's name on the same line first.
+            .find_map(|line| line.split_once("today=").map(|(_, rest)| rest.trim()))
+            .expect("the child printed its date")
+            .to_string()
+    };
+    let today_with = |zone: Option<&str>| {
+        let seen = today_with(zone);
+        let (date, same) = seen.split_once(" same=").expect("date and agreement");
+        assert_eq!(
+            same, "true",
+            "now() and a zoned value disagree under {zone:?}"
+        );
+        date.to_string()
+    };
+
+    assert_eq!(today_with(Some("Europe/Paris")), "2026-10-28");
+    assert_eq!(today_with(None), "2026-10-27");
+    // A zone nobody knows must not crash the read. chrono falls back to the
+    // host's zone, then UTC, so the date depends on the machine running this.
+    let unknown = today_with(Some("Nowhere/Atlantis"));
+    assert!(
+        ["2026-10-27", "2026-10-28"].contains(&unknown.as_str()),
+        "{unknown}"
+    );
 }
 
 #[test]
@@ -540,6 +619,20 @@ fn boolean_groups_and_operators_select_what_bases_would() {
         select("filters: 'file.path == \"projects/Budget.md\" || file.folder == \"nowhere\"'"),
         "Budget"
     );
+}
+
+#[test]
+fn in_folder_skips_a_root_note_named_after_the_folder() {
+    let notes = vec![
+        note("Subscriptions.md", "Index", &[], json!({})),
+        note("Subscriptions/Netflix.md", "Netflix", &[], json!({})),
+    ];
+    let inside = table(evaluate_one(
+        "filters: 'file.inFolder(\"Subscriptions\")'",
+        &notes,
+        "2026-09-18T12:00:00",
+    ));
+    assert_eq!(titles(&inside), vec!["Netflix"]);
 }
 
 #[test]

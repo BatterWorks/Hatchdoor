@@ -3300,6 +3300,8 @@ mod tests {
                 ("notes/A.md", "needle"),
                 ("notes-archive/B.md", "needle"),
                 ("Top.md", "needle"),
+                // A root Note named after the folder is beside it, not in it.
+                ("Notes.md", "needle"),
             ],
         )]);
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
