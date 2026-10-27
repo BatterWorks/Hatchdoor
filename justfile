@@ -115,6 +115,27 @@ dev-browser-token: _stop-browser-token
 dev-browser-token-stop: _stop-browser-token
     @echo "stopped"
 
+# Start a prototype for a `needs-a-choice` ticket (#602): .dev/prototypes/<name>/
+# holding each path as the dev instance draws it today, at phone, tablet and
+# desktop size in light and dark, as static pages with no scripts, beside the
+# stylesheet the app ships and an index. <name> is <issue>-<slug>, as in
+# `just proto-new 583-vaults-unavailable /`. `just dev-start` comes first. A
+# path with `?` in it is quoted. Run it again with more paths to add to it.
+proto-new name +$paths:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The paths are split on spaces and nothing more: a `?` or `&` in one is
+    # part of the address, not a pattern.
+    set -f
+    node scripts/proto-new.mjs --origin http://127.0.0.1:{{frontend_port}} "{{name}}" ${paths}
+
+# Serve a prototype to the LAN with caching off, and print its address. Stays
+# in the foreground until stopped. <name> is a folder under .dev/prototypes/
+# and nothing else, since the whole LAN can read what it serves. The port must
+# be one this host lets through its firewall.
+proto-serve name port:
+    @node scripts/proto-serve.mjs "{{name}}" "{{port}}"
+
 # By port, like the dev ports below: nothing to go stale once the helper has
 # stopped by itself.
 _stop-browser-token:

@@ -5839,7 +5839,13 @@ packet scope:
   `scripts/dev-browser-token.py`, started by `just dev-browser-token`, hands
   the dev web token to a test browser; it reads the same
   `HATCHDOOR_WEB_BEARER_TOKEN` the backend does and the `localStorage` key
-  `TOKEN_KEY` in `frontend/src/api/api.ts`.
+  `TOKEN_KEY` in `frontend/src/api/api.ts`. `scripts/proto-new.mjs` and
+  `scripts/proto-serve.mjs`, started by `just proto-new` and `just proto-serve`
+  (#602), capture the dev instance's screens as a static prototype and serve
+  it; the capture reads the same token and `TOKEN_KEY`, plus `THEME_KEY` in
+  `frontend/src/app/constants.ts` and the 920px mobile layout in
+  `frontend/src/App.tsx`, and drives `playwright-core` from the frontend's
+  dev dependencies. Validate with `node --test scripts/proto.test.mjs`.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.

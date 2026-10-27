@@ -40,6 +40,10 @@ rebuilds the current profile after you have poked at it.
 
 To check a change in a real browser, run `just dev-browser-token` and execute the line it prints in the page. The page fetches the web token itself, so the token stays out of tool calls and transcripts. `just dev-browser-token-stop` ends it. The Playwright browser tools read and write files inside the repository only: keep screenshots and scripts under `.playwright-mcp/`, which Git ignores.
 
+### Prototypes for a choice
+
+A ticket labelled `needs-a-choice` holds a decision only the maintainer makes: bring options, do not decide. When the choice is about a screen, answer it with a static prototype, never inside the running app, where the service worker and Vite's cache serve stale code. `just proto-new <issue>-<slug> <path>...` captures each path from the dev instance at phone, tablet and desktop size in light and dark into `.dev/prototypes/<issue>-<slug>/`; draw the options on top of those pages with plain HTML and CSS that uses the tokens in `frontend/src/styles/base.css`. `just proto-serve <issue>-<slug> <port>` serves the folder to the LAN with caching off. Hand over one link per option and state, then wait. The comment that records the choice names the chosen page, and review holds the build to it (`CODING_STANDARDS.md`).
+
 ## CodeGraph
 
 When a `.codegraph/` directory exists at the repository root, locate and read code with the `codegraph_explore` MCP tool, or `codegraph explore "<symbols or question>"` when the tool is unavailable, before grep, find, or reading source files. One query returns the relevant source, call paths, and blast radius. Without the directory or either tool, use normal search and read tools; creating an index is the maintainer's decision.
