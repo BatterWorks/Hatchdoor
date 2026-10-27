@@ -199,6 +199,12 @@ When changing the Docker Hub overview or short description under `docs/maintenan
 node --test scripts/docker-hub-overview.test.mjs
 ```
 
+When changing `just proto-new` or `just proto-serve`, run:
+
+```bash
+node --test scripts/proto.test.mjs
+```
+
 ## Review standards
 
 [`CODING_STANDARDS.md`](CODING_STANDARDS.md) holds the rules a reviewer applies to a finished diff: the judgement calls no check can make. Anything a machine can enforce belongs in `just check` instead.
