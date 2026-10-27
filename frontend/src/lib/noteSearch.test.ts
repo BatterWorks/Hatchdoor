@@ -6,6 +6,37 @@ import {
   setActiveSearchHit,
 } from "./noteSearch";
 
+type TextTree = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  children?: TextTree[];
+};
+
+// Highlights `text` as one paragraph and writes each mark as `[...]`.
+function markedText(text: string, query: string): string {
+  const tree: TextTree = {
+    type: "root",
+    children: [
+      {
+        type: "element",
+        tagName: "p",
+        children: [{ type: "text", value: text }],
+      },
+    ],
+  };
+
+  createSearchHighlightPlugin(query)()(tree);
+
+  return (tree.children?.[0].children ?? [])
+    .map((node) =>
+      node.tagName === "mark"
+        ? `[${node.children?.[0].value ?? ""}]`
+        : (node.value ?? ""),
+    )
+    .join("");
+}
+
 describe("noteSearch", () => {
   it("normalizes empty and trimmed query values", () => {
     expect(normalizeSearchQuery(null)).toBe("");
@@ -217,6 +248,23 @@ describe("noteSearch", () => {
     expect(plainParagraph.children[3].children).toEqual([
       { type: "text", value: "no match here" },
     ]);
+  });
+
+  it("marks exactly the match after a character that grows when lowercased", () => {
+    // `İ` lowercases to `i` plus a combining dot, two characters for one.
+    expect(markedText("İhome", "home")).toBe("İ[home]");
+    expect(markedText("İstanbul home", "home")).toBe("İstanbul [home]");
+    expect(markedText("İİ home", "home")).toBe("İİ [home]");
+    expect(markedText("İ İstanbul", "İstanbul")).toBe("İ [İstanbul]");
+  });
+
+  it("matches without case and reads the query literally", () => {
+    expect(markedText("Atlas, atlas, ATLAS", "atlas")).toBe(
+      "[Atlas], [atlas], [ATLAS]",
+    );
+    expect(markedText("a.b axb", "a.b")).toBe("[a.b] axb");
+    expect(markedText("(x) x", "(x)")).toBe("[(x)] x");
+    expect(markedText("[x]* x", "[x]*")).toBe("[[x]*] x");
   });
 
   it("setActiveSearchHit toggles the active marker", () => {
