@@ -103,8 +103,10 @@ under close human review, with tests and a documented safety model.
 - The manual built into the app: Help beside whatever you are doing, the same
   pages for agents through `read_docs` and `search_docs`, and as plain Markdown
   at `/docs/` on every instance.
-- Optional automatic git commits and pushes for Hatchdoor writes, with sync
-  conflicts resolved on your Git host through a recovery branch.
+- Optional automatic git commits and pushes for Hatchdoor writes, each commit
+  naming where its changes came from (the web UI, a named agent, or an outside
+  edit), with sync conflicts resolved on your Git host through a recovery
+  branch.
 - PWA assets and service worker caching for common read paths.
 - Distroless, rootless container image (no shell, runs as `nonroot`) that
   deploys with either Docker or Podman.
@@ -187,8 +189,8 @@ Two other things are wanted but not slotted to a version yet:
 
 - **Agent provenance and undo.** Which agent changed a note, a before/after diff
   beside the commit it produced, and one-click revert. Today git is the whole
-  answer, and reading a commit log is not the same as seeing what an agent did
-  to your note.
+  answer: each commit names the agent that made it, but reading a commit log is
+  not the same as seeing what an agent did to your note.
 - **Vault integrity checks.** A vault-scoped lint for orphaned notes, broken
   wikilinks, and layer markers whose declaration has vanished, so a vault an
   agent maintains unattended cannot quietly drift out of shape.
@@ -292,7 +294,7 @@ version you are running.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.8.2
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.9.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
