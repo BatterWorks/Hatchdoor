@@ -187,6 +187,49 @@ describe("highlights (#572)", () => {
   });
 });
 
+describe("search hits in the hidden title heading (#585)", () => {
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  // Test files share one environment (`isolate: false`), so the stub must
+  // not outlive this block.
+  afterEach(() => {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  });
+
+  it("counts only visible hits and lands on the body's", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const { container } = renderReadingView(
+      "# home\n\nThe home lab.\n",
+      "?q=hom",
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Match 1 of 1/)).toBeInTheDocument();
+    });
+    // The title heading does carry a mark: it is hidden, not unmarked.
+    expect(
+      container.querySelector(".note-heading-duplicate mark.search-hit"),
+    ).not.toBeNull();
+    const bodyHit = container.querySelector("p mark.search-hit");
+    expect(bodyHit).toHaveClass("active-hit");
+    expect(
+      container.querySelector(".note-heading-duplicate mark.active-hit"),
+    ).toBeNull();
+    expect(scrollIntoView.mock.contexts[0]).toBe(bodyHit);
+  });
+
+  it("shows no navigator when the title holds the only hits", async () => {
+    const { container } = renderReadingView("# home\n\nA lab.\n", "?q=hom");
+
+    await waitFor(() => {
+      expect(
+        container.querySelector(".note-heading-duplicate mark.search-hit"),
+      ).not.toBeNull();
+    });
+    expect(container.querySelector(".note-search-nav")).toBeNull();
+  });
+});
+
 /** The element the Reading view draws for each inline syntax. */
 const DRAWN_AS: Record<string, string> = {
   "**": "strong",

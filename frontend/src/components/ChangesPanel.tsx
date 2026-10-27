@@ -58,6 +58,13 @@ export function ChangesPanel({
   const overflow = notes.length - visible.length;
   // Provenance only where the list can actually span Vaults (#140).
   const showVaultPrefix = scope === "all" && vaults.length > 1;
+  // Only a Vault that did not answer is worth a sentence. A read whose only
+  // non-fresh Vaults are stale reads like a complete one: they answered, and
+  // their own status line already says "stale" (#585).
+  const missingSentence =
+    partial && missingVaultNames.length > 0
+      ? describeMissingVaults(missingVaultNames)
+      : null;
 
   return (
     <section
@@ -84,14 +91,14 @@ export function ChangesPanel({
           onAction={onRetry}
         />
       ) : notes.length === 0 ? (
-        partial ? (
+        missingSentence ? (
           // Nothing usable: the documented error block replaces the empty
           // shell entirely rather than sitting under it. "Nothing has
           // changed" would be a lie when some Vaults never answered.
           <StateBlock
             tone="error"
             title="Nothing Found"
-            description={describeMissingVaults(missingVaultNames)}
+            description={missingSentence}
           />
         ) : (
           <p className="explorer-changes-empty">
@@ -132,10 +139,8 @@ export function ChangesPanel({
           ) : null}
           {/* Ranking is unchanged by partiality; this trailing line is the
               only thing that changes (#141). */}
-          {partial ? (
-            <p className="explorer-changes-partial">
-              {describeMissingVaults(missingVaultNames)}
-            </p>
+          {missingSentence ? (
+            <p className="explorer-changes-partial">{missingSentence}</p>
           ) : null}
         </>
       )}

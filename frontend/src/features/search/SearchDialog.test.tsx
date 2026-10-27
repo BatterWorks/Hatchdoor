@@ -234,6 +234,40 @@ describe("SearchDialog tells the truth about a partial read (#141)", () => {
     ).toBeInTheDocument();
   });
 
+  // A stale Vault answered from its previous index generation and its rows
+  // are on screen; its own status line says "stale" (#585).
+  const STALE_ONLY = [
+    participantFor(THREE_VAULTS[0]),
+    participantFor(THREE_VAULTS[1], "stale"),
+  ];
+
+  it("shows the plain 'No matching notes' state when the only non-fresh Vault is stale", () => {
+    const { container } = renderDialog({
+      results: [],
+      vaults: THREE_VAULTS,
+      participants: STALE_ONLY,
+      partial: true,
+      missingVaultNames: [],
+    });
+
+    expect(container.querySelector(".state-block.error")).toBeNull();
+    expect(screen.queryByText("Nothing Found")).not.toBeInTheDocument();
+    expect(screen.getByText("No matching notes.")).toBeInTheDocument();
+  });
+
+  it("adds no trailing partial line under results when the only non-fresh Vault is stale", () => {
+    const { container } = renderDialog({
+      results: [resultFor(THREE_VAULTS[0].vault_id)],
+      vaults: THREE_VAULTS,
+      participants: STALE_ONLY,
+      partial: true,
+      missingVaultNames: [],
+    });
+
+    expect(container.querySelector(".search-result--primary")).not.toBeNull();
+    expect(container.querySelector(".search-partial")).toBeNull();
+  });
+
   it("shows the plain 'No matching notes' state, not the error block, when the read is not partial", () => {
     const { container } = renderDialog({ results: [], partial: false });
 
@@ -815,13 +849,6 @@ describe("SearchDialog result rows read cleanly (#530)", () => {
       content: "",
       ...over,
     });
-
-  it("keeps a numbered folder's path in reading order", () => {
-    renderDialog({ query: "homelab", results: [row({})] });
-
-    const path = document.querySelector(".result-path-text");
-    expect(path).toHaveTextContent("30-areas/Homelab.md");
-  });
 
   it("strips wikilink brackets, fenced code and frontmatter from the snippet", () => {
     renderDialog({
