@@ -317,6 +317,9 @@ export function SearchDialog({
   // because they ask different things of the reader: a Vault that did not
   // answer may need attention, while one whose notes semantic search could
   // not reach is answered by Keyword search. Both are named when both apply.
+  // A read whose only non-fresh Vaults are stale has nothing to say and reads
+  // like a complete one: they answered, and their status line says "stale"
+  // (#585).
   const pendingSearchNames = notSearchableVaultNames(participants);
   const partialSentence = [
     missingVaultNames.length > 0
@@ -328,6 +331,7 @@ export function SearchDialog({
   ]
     .filter(Boolean)
     .join(" ");
+  const showPartial = partial && partialSentence.length > 0;
   // One condition, both shapes: the rail on desktop and the phone's Scope
   // field are the same filter, so they appear and disappear together.
   // Shown wherever there is more than one Vault to tell apart, narrowed
@@ -578,7 +582,7 @@ export function SearchDialog({
             // Semantic search has not answered anything yet while the model
             // is still arriving; only Keyword can claim "no matches" then.
             (includeContent || !(startupWorkInFlight || startupDownloading)) ? (
-              partial ? (
+              showPartial ? (
                 // Nothing usable: the documented error block replaces the
                 // empty state entirely. "No matching notes" would be a lie
                 // when some Vaults never answered (#141).
@@ -770,7 +774,7 @@ export function SearchDialog({
             ) : null}
             {/* Ranking is unchanged by partiality; this trailing line below the
             last row is the only thing that changes (#141). */}
-            {partial && results.length > 0 ? (
+            {showPartial && results.length > 0 ? (
               <p className="search-partial">{partialSentence}</p>
             ) : null}
           </div>

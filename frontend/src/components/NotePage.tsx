@@ -1100,9 +1100,11 @@ export function NotePage({
       return;
     }
 
+    // The duplicate title heading keeps its marks (it stays line-addressable)
+    // but is hidden, so its hits are neither counted nor landed on (#585).
     const hits = Array.from(
       root.querySelectorAll<HTMLSpanElement>("mark.search-hit"),
-    );
+    ).filter((hit) => !hit.closest(".note-heading-duplicate"));
     searchHitsRef.current = hits;
     setSearchHitCount(hits.length);
     setActiveSearchHit(0);

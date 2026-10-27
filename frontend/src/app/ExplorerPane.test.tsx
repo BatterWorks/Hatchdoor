@@ -947,6 +947,35 @@ describe("Changed on disk tells the truth about a partial read (#141)", () => {
     ).toBeInTheDocument();
   });
 
+  // A stale Vault answered from its previous index generation; its own
+  // status line already says "stale" (#585).
+  it("shows the plain empty state, not the error block, when the only non-fresh Vault is stale", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      modifiedNotes: [],
+      modifiedNotesPartial: true,
+      modifiedNotesMissingVaults: [],
+    });
+    openChanges();
+
+    expect(document.querySelector(".state-block.error")).toBeNull();
+    expect(
+      screen.getByText("Nothing has changed on disk yet."),
+    ).toBeInTheDocument();
+  });
+
+  it("adds no trailing partial line under the rows when the only non-fresh Vault is stale", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      modifiedNotes: MODIFIED,
+      modifiedNotesPartial: true,
+      modifiedNotesMissingVaults: [],
+    });
+    openChanges();
+
+    expect(document.querySelector(".explorer-changes-partial")).toBeNull();
+  });
+
   it("shows the plain empty state, not the error block, when the read is not partial", () => {
     renderPane({
       vaults: THREE_VAULTS,

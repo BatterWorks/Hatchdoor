@@ -4421,7 +4421,9 @@ plus slug (#334). A single-Vault instance renders neither prefix. `useVaultTree`
 `modifiedNotesMissingVaults` from the `/recent` read's own envelope (#141);
 `ChangesPanel` never banners a partial read — a trailing warn-ink line below
 the last row names only the missing Vaults, and `StateBlock tone="error"`
-replaces the empty state outright when nothing is usable. A `/recent` read
+replaces the empty state outright when nothing is usable. A read whose only
+non-fresh Vaults are `stale` names none, so it renders as a complete one
+(#585). A `/recent` read
 that failed outright is `modifiedNotesError`, which `ChangesPanel` renders as
 a `Could Not Load` error block with Retry rather than as "Nothing has changed
 on disk yet" (#334). Every tree and recent read carries the current scope's
@@ -4525,7 +4527,9 @@ always reads.
 search envelope (#141), rendered with the same never-a-banner rule
 `ChangesPanel` uses: a trailing warn-ink line naming only the missing Vaults
 below the last result, or `StateBlock tone="error"` replacing "No matching
-notes" outright when nothing is usable. Ranking is unchanged either way.
+notes" outright when nothing is usable. Ranking is unchanged either way. A
+read with nothing to say, its only non-fresh Vaults `stale`, shows neither
+(#585).
 
 `SearchDialog` also carries its own Vault filter (#144) — a lens over the
 answer in front of you, never the browsing scope, per #119's rule the
