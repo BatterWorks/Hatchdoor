@@ -9,6 +9,22 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.9.0 - 2026-10-27
+
+- A Git-backed Vault's history now says where each change came from.
+- Hatchdoor's memory no longer grows with every index update.
+- The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them.
+- A highlight now shows as one on the rendered page.
+- Search matches are readable in the dark theme, on the rendered note page and in the search dialog's results.
+- A folder condition no longer picks up a note named after the folder.
+- `today()` and `now()` in a saved query now follow the server's `TZ` setting.
+- An agent now gets the manual's page for a Git sync failure or a Vault folder Hatchdoor cannot open.
+- The web app's "Vaults Unavailable" screen now explains itself.
+- Changed on disk and search no longer print a sentence with no Vault in it.
+- `create_upload_link` now takes a `commit_summary`, like every other write tool.
+- A search match that makes up all the text of its piece of formatting, such as a heading that reads just `Homelab`, a bold or highlighted word, a link's text or a table cell holding only that word, is now highlighted on the note page when you arrive from a search.
+- A search match on the note page is now marked on exactly the matched words when the text before it holds a letter such as the Turkish capital `İ`, which becomes two characters when lowercased.
+
 ## v2.8.2 - 2026-10-14
 
 - The note page and Help no longer show a note's comments, the text between `%%` marks or inside `<!-- -->`, so visitors to a read-only or demo Vault never see them. [[Supported Markdown reference#Comments]]
