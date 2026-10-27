@@ -10,9 +10,12 @@
 - The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them. [#596]
 - A highlight now shows as one on the rendered page. The editor's Highlight button wraps text in `==`, Obsidian's highlight syntax, and the editor draws it on a tint, but the note page printed the equals signs instead, and a read-only or demo Vault always opens on that page. The note page, the editor's preview and Help now draw `==text==` with the editor's tint, and search snippets show the words without the signs. Equals signs in code, in math and in a comparison such as `a == b` stay as written. The Supported Markdown reference now lists highlights. [#572]
 - Search matches are readable in the dark theme, on the rendered note page and in the search dialog's results. The matched words were drawn in black on the dark yellow match colour; they now take the theme's text colour, as they already did in the editor. [#605]
+- A folder condition no longer picks up a note named after the folder. `file.inFolder("Subscriptions")` in a saved query, and a `path_prefix` of `Subscriptions` in `query_notes` and `find_text`, also returned a note `Subscriptions.md` sitting beside the folder; they now return only the notes inside it. [#584]
+- `today()` and `now()` in a saved query now follow the server's `TZ` setting. The Docker image runs on UTC, so for a reader east of UTC, `today()` named yesterday between their midnight and UTC's, and nothing said which zone applied. Set `TZ`, such as `TZ=Europe/Paris`, in `.env`. With `TZ` unset, a server run outside Docker now uses UTC too, instead of its host's zone. `.env.example`, `docker-compose.yml` and the Supported Markdown reference now show the setting. [#584]
 
 [#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
 [#572]: https://github.com/BatterWorks/Hatchdoor/issues/572
+[#584]: https://github.com/BatterWorks/Hatchdoor/issues/584
 [#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
 [#600]: https://github.com/BatterWorks/Hatchdoor/issues/600
 [#605]: https://github.com/BatterWorks/Hatchdoor/issues/605

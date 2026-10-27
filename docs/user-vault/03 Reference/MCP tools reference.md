@@ -242,7 +242,7 @@ An agent session that was already open when Hatchdoor was upgraded from 2.7.x or
 `conditions` is a list, and every one of them must hold for a note to be selected. At least one condition is required. To read a Vault without selecting, use `get_tree` or `recently_modified`. There are three kinds:
 
 - `{"type": "tag", "tag": "project/active"}`. The leading `#` is optional, case does not matter, and nested tags are included: `project` selects `project` and `project/active`, never `projects`.
-- `{"type": "path_prefix", "prefix": "40-reference/Parenting"}`. A folder relative to the Vault, matched without regard to case and by whole path segment, so `notes` never selects `notes-archive`.
+- `{"type": "path_prefix", "prefix": "40-reference/Parenting"}`. A folder relative to the Vault; selects the notes inside it, at any depth. Matched without regard to case and by whole path segment, so `notes` never selects `notes-archive`, nor a note `notes.md` beside the folder.
 - `{"type": "property", "name": "review-date", "operator": "lt", "value": "2026-09-06"}`. One frontmatter property, tested by one operator.
 
 The property name is matched exactly, capitalisation included. `tags` and `aliases` are refused as property names, because Hatchdoor keeps both in lists of their own and a property test would report them missing on every note. Select tags with a tag condition. You can still have both returned by naming them in `properties`.

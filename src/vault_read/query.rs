@@ -12,7 +12,7 @@
 
 use std::borrow::Cow;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Utc};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
 
@@ -71,9 +71,9 @@ pub enum NoteQueryCondition {
     /// way the `#tag` search shorthand matches: `topic` selects `topic` and
     /// `topic/sub`, never `topical`.
     Tag { tag: String },
-    /// The Note lives at or under this Vault-relative folder. Segment-aware and
-    /// case-insensitive: `notes` selects `notes/a.md` but never
-    /// `notes-archive/a.md`.
+    /// The Note lives inside this Vault-relative folder, at any depth.
+    /// Segment-aware and case-insensitive: `notes` selects `notes/a.md` but
+    /// never `notes-archive/a.md` or a root `notes.md`.
     PathPrefix { prefix: String },
     /// The Note's frontmatter property `name` satisfies `operator`. `tags`
     /// and `aliases` are refused here — see [`compile_condition`].
@@ -467,15 +467,16 @@ fn normalize_path_prefix(raw: &str) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-/// Whether a Note's Vault-relative path sits at or under `prefix`. Segment
-/// aware on purpose: a plain string prefix would put `notes-archive/a.md`
-/// inside `notes`, and a caller reading that result has no way to tell.
+/// Whether a Note's Vault-relative path sits under `prefix`, at any depth.
+/// Segment aware on purpose: a plain string prefix would put
+/// `notes-archive/a.md` inside `notes`, and a caller reading that result has
+/// no way to tell. A path equal to the prefix is not under it: Note paths
+/// carry no `.md`, so that path is a root Note named after the folder (#584).
 fn path_under(relative_path: &str, prefix: &str) -> bool {
-    let path = relative_path.to_lowercase();
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|tail| tail.starts_with('/'))
+    relative_path
+        .to_lowercase()
+        .strip_prefix(prefix)
+        .is_some_and(|tail| tail.starts_with('/'))
 }
 
 pub(super) fn property<'a>(note: &'a VaultSnapshotNote, name: &str) -> Option<&'a Value> {
@@ -574,7 +575,7 @@ fn compare(left: &Value, right: &Value) -> Option<Ordering> {
 
 /// A frontmatter date or date-time as a local instant, or `None` for text that
 /// is not one. A value carrying a zone (`Z`, `+02:00`) is moved into the
-/// server's local time, which is the time `now()` is read in.
+/// operator's zone, which is the zone `now()` is read in.
 fn parse_instant(text: &str) -> Option<NaiveDateTime> {
     let text = text.trim();
     if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
@@ -592,7 +593,22 @@ fn parse_instant(text: &str) -> Option<NaiveDateTime> {
     }
     DateTime::parse_from_rfc3339(text)
         .ok()
-        .map(|instant| instant.with_timezone(&Local).naive_local())
+        .map(|instant| operator_wall_clock(instant.with_timezone(&Utc)))
+}
+
+/// `instant` on the wall clock of the zone the operator named with `TZ`, UTC
+/// when it is unset (#584). The one place a query decides its zone, so
+/// `now()` and a zoned frontmatter value always land in the same one. chrono
+/// reads `TZ` itself and falls back to the host's `/etc/localtime`, then UTC,
+/// when it names no zone; the published image has no `/etc/localtime`. An
+/// unset `TZ` is UTC here rather than the host's zone, so the documented
+/// default holds outside the image too.
+pub(super) fn operator_wall_clock(instant: DateTime<Utc>) -> NaiveDateTime {
+    if std::env::var_os("TZ").is_some_and(|zone| !zone.is_empty()) {
+        instant.with_timezone(&Local).naive_local()
+    } else {
+        instant.naive_utc()
+    }
 }
 
 /// The one order a query's results come back in, across every participating
@@ -730,11 +746,14 @@ mod tests {
 
     #[test]
     fn a_path_prefix_selects_a_folder_and_not_a_namesake_folder() {
-        assert!(path_under("notes/a.md", "notes"));
-        assert!(path_under("notes/deep/a.md", "notes"));
-        assert!(path_under("notes", "notes"));
-        assert!(!path_under("notes-archive/a.md", "notes"));
-        assert!(!path_under("other/a.md", "notes"));
+        assert!(path_under("notes/a", "notes"));
+        assert!(path_under("notes/deep/a", "notes"));
+        // Note paths carry no `.md`, so only a root Note named after the
+        // folder can equal it, and that Note is not inside the folder.
+        assert!(!path_under("notes", "notes"));
+        assert!(!path_under("Notes", "notes"));
+        assert!(!path_under("notes-archive/a", "notes"));
+        assert!(!path_under("other/a", "notes"));
     }
 
     #[test]
@@ -890,12 +909,13 @@ mod tests {
             Some(&json!("2026-09-18T00:00:00"))
         ));
         let zoned = json!("2026-09-18T09:00:00Z");
-        let local = chrono::DateTime::parse_from_rfc3339("2026-09-18T09:00:00Z")
-            .expect("instant")
-            .with_timezone(&chrono::Local)
-            .naive_local()
-            .format("%Y-%m-%dT%H:%M:%S")
-            .to_string();
+        let local = operator_wall_clock(
+            chrono::DateTime::parse_from_rfc3339("2026-09-18T09:00:00Z")
+                .expect("instant")
+                .with_timezone(&Utc),
+        )
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
         assert!(property_matches(
             Some(&zoned),
             PropertyOperator::Eq,

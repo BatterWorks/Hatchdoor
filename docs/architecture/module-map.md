@@ -1936,7 +1936,11 @@ blocks (`duplicate_name`; each keeps the name it claims, and the report is what
 tells an addresser it names none of them). None changes a row. Two strings that both read as a date
 or date-time compare as instants in the shared `compare`, which `query_notes`
 uses too, so `now()` orders correctly against `2026-09-18 10:00` or a zoned
-timestamp; any other pair compares byte-wise as before.
+timestamp; any other pair compares byte-wise as before. `now()`, `today()` and
+a zoned value are all read in the zone `TZ` names, UTC when it is unset, through
+the one `operator_wall_clock` in `query.rs` (#584). A folder condition
+(`file.inFolder`, and `path_prefix` in `query_notes` and `find_text`) selects
+Notes inside the folder only, never a Note whose path equals the folder.
 `saved_query` (#277) addresses one saved query in a Note by its marker name and
 evaluates only that one, with the whole scan budget, against the Note's own
 Vault. The name may be omitted only when the Note holds exactly one. Selection

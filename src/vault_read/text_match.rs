@@ -58,7 +58,7 @@ pub struct TextMatchRequest {
     /// layer, which is this operation's default and not
     /// `LayerSelection::default()`'s.
     pub layers: Vec<String>,
-    /// Only Notes at or under this folder, matched the way a query's
+    /// Only Notes inside this folder, matched the way a query's
     /// `path_prefix` condition is.
     pub path_prefix: Option<String>,
     /// Maximum Notes to return. `None` takes the default; anything outside

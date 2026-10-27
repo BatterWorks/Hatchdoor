@@ -43,7 +43,7 @@ use crate::cache::parse::{frontmatter_span, parse_fence_marker};
 use crate::cache::vault_snapshots::VaultSnapshotNote;
 use crate::vault_registry::VaultId;
 
-use super::query::{CompiledCondition, PropertyOperator, Subject};
+use super::query::{CompiledCondition, PropertyOperator, Subject, operator_wall_clock};
 
 /// The most saved queries one Note may hold. Each is evaluated against the
 /// whole Vault, so without this a Note could multiply its way past the
@@ -85,10 +85,15 @@ pub(super) struct EvaluationClock {
 }
 
 impl EvaluationClock {
-    /// The server's local time at this moment. Taken once per read, so every
-    /// saved query in one Note agrees on what "now" is.
+    /// This moment on the wall clock of the zone the operator named with
+    /// `TZ`, UTC when it is unset. Taken once per read, so every saved query
+    /// in one Note agrees on what "now" is.
     pub(super) fn current() -> Self {
-        Self::at(chrono::Local::now().naive_local())
+        Self::from_utc(chrono::Utc::now())
+    }
+
+    fn from_utc(instant: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::at(operator_wall_clock(instant))
     }
 
     pub(super) fn at(instant: chrono::NaiveDateTime) -> Self {
