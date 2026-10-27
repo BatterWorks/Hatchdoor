@@ -9,6 +9,14 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.9.0 - 2026-10-27
+
+- A Git-backed Vault's history now says where each change came from, whether the web app, a named agent or an edit made outside Hatchdoor. [[How to set up a Git-backed Vault#Where each change came from]]
+- Hatchdoor no longer takes more and more memory each time it updates the search index, and your existing index carries over when you upgrade.
+- Search matches are now readable in the dark theme and marked on the note page even when the match is a whole heading, bold word, link or table cell.
+- In a saved query, `today()` and `now()` follow your server's `TZ` setting, and a folder condition no longer picks up a note named after the folder.
+- Text you highlight with `==` in the editor now shows as a highlight on the rendered page.
+
 ## v2.8.2 - 2026-10-14
 
 - The note page and Help no longer show a note's comments, the text between `%%` marks or inside `<!-- -->`, so visitors to a read-only or demo Vault never see them. [[Supported Markdown reference#Comments]]

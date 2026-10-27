@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.9.0 - 2026-10-27
 
 ### Added
 - A Git-backed Vault's history now says where each change came from. Every commit Hatchdoor names from its own writes ends with one `Hatchdoor-Origin:` line per origin: `web` for the web UI, `mcp/<name>` for an agent with the name its client gave, `mcp` for an agent that gave none, and `unknown` when the commit holds a file Hatchdoor has no record of writing, such as an edit made in Obsidian. An upload through an upload link counts as the write of the agent that asked for the link. The name is a label the client chooses, not proof of who wrote, and the client's version is not recorded. The first line of the message and its summary lines are unchanged, so anything that reads only those is unaffected; a script that compares the whole message will see the new lines. See "Where each change came from" in the Git-backed Vault guide. [#570]

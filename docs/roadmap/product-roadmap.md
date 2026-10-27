@@ -44,7 +44,9 @@ clobber each other.
 Direction:
 
 - Make **agent provenance impossible to miss** in the web UI — which agent/token
-  changed a note, shown alongside the change.
+  changed a note, shown alongside the change. Since v2.9.0 each Git commit
+  already names its origin in `Hatchdoor-Origin:` lines (#570); the web UI does
+  not show them yet.
 - Show a **before/after diff** and the **linked commit** for every agent edit.
 - Offer **one-click revert** of an agent change.
 - Give destructive operations (move/delete/archive) a **dry-run preview** and
