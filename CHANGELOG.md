@@ -12,9 +12,12 @@
 - Search matches are readable in the dark theme, on the rendered note page and in the search dialog's results. The matched words were drawn in black on the dark yellow match colour; they now take the theme's text colour, as they already did in the editor. [#605]
 - A folder condition no longer picks up a note named after the folder. `file.inFolder("Subscriptions")` in a saved query, and a `path_prefix` of `Subscriptions` in `query_notes` and `find_text`, also returned a note `Subscriptions.md` sitting beside the folder; they now return only the notes inside it. [#584]
 - `today()` and `now()` in a saved query now follow the server's `TZ` setting. The Docker image runs on UTC, so for a reader east of UTC, `today()` named yesterday between their midnight and UTC's, and nothing said which zone applied. Set `TZ`, such as `TZ=Europe/Paris`, in `.env`. With `TZ` unset, a server run outside Docker now uses UTC too, instead of its host's zone. `.env.example`, `docker-compose.yml` and the Supported Markdown reference now show the setting. [#584]
+- An agent now gets the manual's page for a Git sync failure or a Vault folder Hatchdoor cannot open. 2.8.0 promised a `docs` pointer on these codes, but they never come back as a refused tool call: an agent meets them as a Vault's status in `list_vaults`, which carried no pointer. `list_vaults` now adds `docs` to each status error the manual explains, and the MCP tools reference says where `docs` appears. The HTTP Vault list is unchanged. [#583]
+- The web app's "Vaults Unavailable" screen now explains itself. Its Help link loads the manual from the server, which fails for the same reasons the screen appears, so a reader whose server was down only saw "The manual could not be loaded". The screen now says what the error means and what to try, with no network needed, and keeps the Help link for when the server is back. [#583]
 
 [#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
 [#572]: https://github.com/BatterWorks/Hatchdoor/issues/572
+[#583]: https://github.com/BatterWorks/Hatchdoor/issues/583
 [#584]: https://github.com/BatterWorks/Hatchdoor/issues/584
 [#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
 [#600]: https://github.com/BatterWorks/Hatchdoor/issues/600

@@ -328,6 +328,69 @@ describe("VaultApp when Vault discovery fails (#333)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("explains Vaults Unavailable on the screen without asking the server for the manual (#583)", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(
+            { code: "internal_error", message: "Failed loading Vaults: 502" },
+            502,
+          );
+        }
+        throw new TypeError("Failed to fetch");
+      });
+    renderApp();
+
+    const title = await screen.findByText("Vaults Unavailable");
+    const block = title.closest("section") as HTMLElement;
+    expect(
+      within(block).getByText(/^Failed loading Vaults: 502\.$/),
+    ).toBeVisible();
+    expect(within(block).getByText("What this means")).toBeVisible();
+    expect(
+      within(block).getByText(
+        "The browser could not reach Hatchdoor. The server is offline or restarting, or a proxy in front of it answered with an error. Your Vaults and notes are untouched.",
+      ),
+    ).toBeVisible();
+    expect(within(block).getByText("What to try")).toBeVisible();
+    const steps = within(within(block).getByRole("list")).getAllByRole(
+      "listitem",
+    );
+    expect(steps.map((step) => step.textContent)).toEqual([
+      "Check that Hatchdoor is running and reachable from this device.",
+      "Press Try again.",
+      "Or wait: the app reloads the list by itself when the connection comes back.",
+    ]);
+    expect(
+      within(block).getByRole("button", { name: "Try again" }),
+    ).toBeVisible();
+    const requested = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requested.some((url) => url.includes("/docs"))).toBe(false);
+  });
+
+  it("keeps the registry recovery block as it was", async () => {
+    mockDiscovery({
+      collection_revision: 0,
+      vaults: [],
+      recovery: {
+        code: "vault_registry_recovery_required",
+        kind: "corrupt",
+        message: "The registry file is not valid JSON.",
+      },
+      demo_mode: false,
+    } as VaultDiscoveryResponse);
+    renderApp();
+
+    const title = await screen.findByText("Vault Registry Unavailable");
+    const block = title.closest("section") as HTMLElement;
+    expect(
+      within(block).queryByText("What this means"),
+    ).not.toBeInTheDocument();
+    expect(within(block).queryByRole("list")).not.toBeInTheDocument();
+  });
+
   it("shows the connection error, not No Vaults Yet, when the app is reloaded offline after loading", async () => {
     const network = { online: true };
     mockThreeVaultServer(network);

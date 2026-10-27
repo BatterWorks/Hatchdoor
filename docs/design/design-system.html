@@ -1556,6 +1556,23 @@
     color: var(--muted);
   }
   .state-block.error h2 { color: var(--err-fg); }
+  .state-block .state-block-label {
+    margin: 0.9rem 0 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink);
+  }
+  .state-block-steps {
+    margin: 0 0 0.7rem;
+    padding-left: 1.2rem;
+    font-family: var(--font-sans);
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .state-block-steps li { margin: 0 0 0.2rem; }
   .skeleton-list { display: grid; gap: 0.45rem; }
   .skeleton-line {
     height: 0.85rem;
@@ -2790,6 +2807,25 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </div>
         </div>
       </div>
+      <h3 class="doc-sub">An error that explains itself</h3>
+      <p class="blurb">An error block whose manual page may be out of reach, because the server it comes from is what failed, explains itself in place (#583). Under the server's own message come two parts, each under a small mono label in ink: <b>What this means</b> in one or two sentences, then <b>What to try</b> as two or three numbered steps set like the block's text. The Help link stays, for when the server is back, and the action comes last. Use it only where the manual cannot load; every other state block points to Help and stays short.</p>
+      <div class="stage">
+        <div class="state-block error">
+          <h2>Vaults Unavailable</h2>
+          <p>Failed loading Vaults: 502.</p>
+          <p class="state-block-label">What this means</p>
+          <p>The browser could not reach Hatchdoor. The server is offline or restarting, or a proxy in front of it answered with an error. Your Vaults and notes are untouched.</p>
+          <p class="state-block-label">What to try</p>
+          <ol class="state-block-steps">
+            <li>Check that Hatchdoor is running and reachable from this device.</li>
+            <li>Press Try again.</li>
+            <li>Or wait: the app reloads the list by itself when the connection comes back.</li>
+          </ol>
+          <p><a href="#states">How does this work?</a></p>
+          <button class="ui-btn primary">Try again</button>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.state-block-label</span><span class="key">.state-block-steps</span></div>
       <h3 class="doc-sub">Announcement region</h3>
       <p class="blurb">The shell keeps one polite live region, the only general one in the
       application &mdash; the others belong to the startup gate (<a href="#gate">§33</a>) and the PDF

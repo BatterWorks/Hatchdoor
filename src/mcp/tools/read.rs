@@ -36,6 +36,7 @@ use crate::vault_read::{
 use crate::vault_registry::VaultId;
 
 use super::super::config::McpConfig;
+use super::super::docs_pointers;
 use super::super::protocol::{JsonRpcFailure, tool_structured_error, tool_success};
 use super::read_only_tool_annotations;
 
@@ -909,7 +910,13 @@ pub(super) async fn list_vaults_tool(
             .map_err(|join_error| {
                 JsonRpcFailure::internal(format!("background task panicked: {join_error}"))
             })?;
-    management_result::<results::ListVaultsResult>(listing)
+    Ok(match listing {
+        // A Vault status error the manual explains names its page (#583).
+        Ok(listing) => tool_success(docs_pointers::attach_to_vault_listing(
+            results::result_to_value::<results::ListVaultsResult>(&listing),
+        )),
+        Err(error) => structured_error(error),
+    })
 }
 
 /// The code `read_docs` answers with when no bundled page has the name asked
