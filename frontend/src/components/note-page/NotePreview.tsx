@@ -2,10 +2,9 @@ import { useMemo } from "react";
 
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 
 import { parseFrontmatter, stripBlockIds } from "../../lib/markdown";
+import { NOTE_SYNTAX_PLUGINS } from "../../lib/markdownSyntax";
 import { hideComments } from "../../lib/noteComments";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import { NoteProperties } from "./sections";
@@ -15,7 +14,7 @@ import { useResolvedWikilinks } from "./wikilinks";
 import type { VaultId } from "../../types";
 
 const PREVIEW_REHYPE_PLUGINS = [rehypeKatex];
-const PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkHideQueryMarkers];
+const PREVIEW_REMARK_PLUGINS = [...NOTE_SYNTAX_PLUGINS, remarkHideQueryMarkers];
 
 /**
  * Render draft markdown exactly as the read view would, so the editor preview

@@ -5,6 +5,7 @@
 // the token prompt the way a Vault request does.
 
 import { getToken } from "../../api/api";
+import { stripHighlights } from "../../lib/markdownSyntax";
 import { hideComments } from "../../lib/noteComments";
 
 /** The manual's front page plus a list of every page the reader may open. */
@@ -81,7 +82,7 @@ export function helpPageTitle(markdown: string, fallback = ""): string {
 /** A search excerpt as plain words: search hits quote raw Markdown. */
 export function plainExcerpt(excerpt: string): string {
   // Comments first, as the note page hides them (#573).
-  return hideComments(excerpt)
+  return stripHighlights(hideComments(excerpt))
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/`|\*\*|__/g, "")
     .replace(/\|/g, " ")

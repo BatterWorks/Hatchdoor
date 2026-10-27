@@ -54,6 +54,8 @@ const PAGES: Record<string, string> = {
     "",
     "Shown %%hidden%% text, and `%%kept%%` code.",
     "",
+    "A ==highlighted== word, written `==like this==`.",
+    "",
     "%%",
     "## Hidden heading",
     "%%",
@@ -268,6 +270,20 @@ describe("Help panel", () => {
     expect(
       within(panel).queryByRole("heading", { name: "Hidden heading" }),
     ).toBeNull();
+  });
+
+  it("draws a highlight as a mark and leaves its code example alone (#572)", async () => {
+    const { panel } = renderHelp({
+      page: "reference/supported-markdown-reference",
+    });
+
+    await within(panel).findByRole("heading", {
+      name: "Supported Markdown reference",
+    });
+    const mark = panel.querySelector("mark.note-highlight");
+    expect(mark?.textContent).toBe("highlighted");
+    expect(panel.textContent).toContain("A highlighted word");
+    expect(panel.textContent).toContain("==like this==");
   });
 
   it("toggles full width", async () => {

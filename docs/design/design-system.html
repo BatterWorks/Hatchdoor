@@ -1135,6 +1135,7 @@
   .note-body a:hover { background-color: var(--hot); color: var(--bg); }
   .note-body em { font-style: italic; }
   .note-body strong { font-weight: 600; }
+  .note-body mark.note-highlight { background: color-mix(in srgb, var(--hot) 20%, transparent); color: inherit; border-radius: var(--radius-none); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
   .note-body code { font-family: var(--font-mono); font-size: 0.86em; background: var(--paper-2); padding: 0.05rem 0.35rem; color: var(--ink); }
   .note-body ul, .note-body ol {
     padding-left: 0;
@@ -1407,7 +1408,7 @@
   }
 
   /* Search highlight inline */
-  .search-hit { background: var(--highlight); padding: 0 0.1rem; }
+  .search-hit { background: var(--highlight); color: var(--ink); padding: 0 0.1rem; }
   .search-hit.active { background: var(--highlight-active); }
 
   /* ════════════════════════════════════════════════════════════════
@@ -2267,10 +2268,12 @@
           <p>The mornings have turned colder than they should be for May, and the cordons along the south wall are flowering anyway. I went out at half-six to see whether <a href="#">the frost</a> had taken the blossom — it had not — but the bees were absent and the wasps were already on the cherries.</p>
           <p>The rosemary planted along the path is doing more for the pollinator count than the lavender ever did. <em>The lavender is theatrical; the rosemary is reliable.</em> Use <code>secateurs</code> on spurs, <strong>not on the leader</strong>. See also <span class="ty-broken">→ missing note</span>.</p>
           <p>Search highlight: the word <span class="search-hit">orchard</span> appears 5 times, and <span class="search-hit active">this is the active match</span>.</p>
+          <p>Text highlight: <mark class="note-highlight">prune the cordons before the sap rises</mark>, and a search for <mark class="note-highlight">the <span class="search-hit">sap</span> rises</mark> lands inside one.</p>
         </div>
       </div>
+      <p class="blurb"><b>A text highlight is the author&rsquo;s mark; a search hit is the reader&rsquo;s.</b> <code>==text==</code> renders as a <span class="key">mark.note-highlight</span>: <span class="key">--hot</span> mixed to 20% over the page, the same tint the live editor draws, so the two views of a note match. Square, like everything else, and the text keeps its own ink. It never takes <span class="key">--highlight</span>, which belongs to search: a hit inside a highlight paints its yellow over the tint and still reads as the hit.</p>
       <p class="blurb"><b>A link shaped like a button must pay off the prose link rule.</b> <span class="key">.note-body a</span> outweighs a bare component class, so a button inside the body &mdash; the PDF preview&rsquo;s <span class="key">Open PDF</span> &mdash; inherits the 2px hot rail (wanted: it is still a link) along with a <span class="key">1px</span> bottom padding and the body&rsquo;s <span class="key">1.45</span> line-height (not wanted: together they set the label high in a box 5px taller than it should be). Any such button restores its own <span class="key">padding-block</span> and <span class="key">line-height: 1</span> under a type-qualified selector, less <span class="key">1px</span> off the bottom for the rail it is standing on.</p>
-      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
+      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">mark.note-highlight</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
     </section>
 
     <!-- ───────── LISTS ───────── -->

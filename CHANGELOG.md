@@ -8,10 +8,14 @@
 ### Fixed
 - Hatchdoor's memory no longer grows with every index update. The search index filed each vector under its Vault's ID as text, and the vector library Hatchdoor uses never frees the memory it uses to write or delete such a value, so every index pass that changed something kept about 1.6 MB on a 5,000-chunk Vault, and a long-running container grew by around 0.6 GB a day until the system killed it. Vectors are now filed under a number. Upgrading keeps your existing index: once the embedding model has loaded, Hatchdoor migrates the index in place, checks the result, and re-indexes from your notes only if a check fails. [#600]
 - The Docker verification stage now includes the shared note-comment cases so the Rust link-preview test can compile against them. [#596]
+- A highlight now shows as one on the rendered page. The editor's Highlight button wraps text in `==`, Obsidian's highlight syntax, and the editor draws it on a tint, but the note page printed the equals signs instead, and a read-only or demo Vault always opens on that page. The note page, the editor's preview and Help now draw `==text==` with the editor's tint, and search snippets show the words without the signs. Equals signs in code, in math and in a comparison such as `a == b` stay as written. The Supported Markdown reference now lists highlights. [#572]
+- Search matches are readable in the dark theme, on the rendered note page and in the search dialog's results. The matched words were drawn in black on the dark yellow match colour; they now take the theme's text colour, as they already did in the editor. [#605]
 
 [#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
+[#572]: https://github.com/BatterWorks/Hatchdoor/issues/572
 [#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
 [#600]: https://github.com/BatterWorks/Hatchdoor/issues/600
+[#605]: https://github.com/BatterWorks/Hatchdoor/issues/605
 
 ## v2.8.2 - 2026-10-14
 

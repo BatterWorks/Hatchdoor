@@ -861,6 +861,23 @@ describe("SearchDialog result rows read cleanly (#530)", () => {
     expect(snippet?.textContent).not.toContain("hidden");
   });
 
+  it("shows a highlight's words without its equals signs (#572)", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({
+          content: "The ==fleet sails== on, and finished == null stays.",
+        }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet");
+    expect(snippet).toHaveTextContent(
+      "The fleet sails on, and finished == null stays.",
+    );
+    expect(snippet?.querySelector("mark:not(.search-match)")).toBeNull();
+  });
+
   it("omits the heading line when it only repeats the note's title", () => {
     renderDialog({
       query: "homelab",
