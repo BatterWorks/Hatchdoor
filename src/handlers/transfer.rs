@@ -122,6 +122,7 @@ pub async fn upload_transfer_handler(
     let RedeemedLink {
         rule: kind,
         client_name,
+        commit_summary,
     } = match kind {
         Ok(redeemed) => redeemed,
         Err(refusal) => return link_refusal(refusal, Some(vault_id)),
@@ -155,9 +156,11 @@ pub async fn upload_transfer_handler(
         }
     };
 
-    // The upload is the write of the client that asked for the link, exactly
-    // as if it had written over MCP (ADR-49).
-    let core = VaultMutationCore::from_state(&state, WriteOrigin::mcp(client_name.as_deref()));
+    // The upload is the write of the client that asked for the link, under
+    // the summary it gave, exactly as if it had written over MCP (ADR-49,
+    // #598).
+    let core = VaultMutationCore::from_state(&state, WriteOrigin::mcp(client_name.as_deref()))
+        .with_commit_summary(commit_summary);
     let written = match kind {
         RedeemedUpload::Attachment { overwrite } => core
             .import_attachment(

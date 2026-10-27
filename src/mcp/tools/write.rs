@@ -35,6 +35,7 @@ use crate::app_state::AppState;
 use crate::git::WriteOrigin;
 use crate::mcp::results::UploadKind;
 use crate::runtime_config::ConfigSnapshot;
+use crate::transfer_link::UploadRequest;
 use crate::vault::{AttachmentOutcome, SectionMode};
 use crate::vault_error::VaultOperationError;
 use crate::vault_mutation::{NoteWriteOutcome, VaultMutation, is_note_upload_target};
@@ -643,6 +644,12 @@ pub(super) async fn create_upload_link_tool(
     };
 
     let (key, base) = super::transfer_link_signer(&state, config)?;
+    // Held by the server, not the link, and applied to the write when the
+    // upload lands (#598).
+    let request = UploadRequest {
+        client_name: vault.origin.client_name(),
+        commit_summary: args.commit_summary.as_deref(),
+    };
     let link = match &expected_content_hash {
         Some(hash) => state.transfer_links.mint_note_replace(
             &key,
@@ -650,7 +657,7 @@ pub(super) async fn create_upload_link_tool(
             vault.vault_id,
             &target_relative_path,
             hash,
-            vault.origin.client_name(),
+            request,
         ),
         None => state.transfer_links.mint_upload(
             &key,
@@ -658,7 +665,7 @@ pub(super) async fn create_upload_link_tool(
             vault.vault_id,
             &target_relative_path,
             overwrite,
-            vault.origin.client_name(),
+            request,
         ),
     };
     let usage = match upload_kind {
@@ -1045,7 +1052,8 @@ pub(super) fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png, or Imports/Report.md for a note."},
                     "overwrite": {"type": "boolean", "default": false, "description": "Allow the upload to replace an existing file at the target. For a note this also needs expected_content_hash."},
-                    "expected_content_hash": {"type": "string", "minLength": 1, "description": "Only for replacing a note (a .md target with overwrite true): the note's current content_hash from get_frontmatter or get_note."}
+                    "expected_content_hash": {"type": "string", "minLength": 1, "description": "Only for replacing a note (a .md target with overwrite true): the note's current content_hash from get_frontmatter or get_note."},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body, applied to the write when the upload arrives."}
                 },
                 "required": ["target_relative_path"],
                 "additionalProperties": false
@@ -1306,6 +1314,8 @@ struct CreateUploadLinkArgs {
     overwrite: Option<bool>,
     #[serde(default)]
     expected_content_hash: Option<String>,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1396,6 +1406,19 @@ mod scoped_tests {
                     .as_array()
                     .unwrap()
                     .contains(&json!("vault_id"))
+            );
+        }
+    }
+
+    /// The MCP tools reference says every write tool accepts a
+    /// `commit_summary`; `create_upload_link` once did not (#598).
+    #[test]
+    fn every_advertised_write_tool_takes_a_commit_summary() {
+        for tool in write_tools_list() {
+            assert_eq!(
+                tool["inputSchema"]["properties"]["commit_summary"]["type"], "string",
+                "{}",
+                tool["name"]
             );
         }
     }

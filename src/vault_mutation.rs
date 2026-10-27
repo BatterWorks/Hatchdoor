@@ -125,6 +125,9 @@ pub struct VaultMutationCore<'a> {
     /// Where every write this core makes came in from (ADR-49). Stated by
     /// the adapter that builds the core, which is the only party that knows.
     origin: WriteOrigin,
+    /// The caller's summary of the change, given to every target
+    /// [`VaultMutationCore::open`] opens (#249, #598).
+    commit_summary: Option<String>,
 }
 
 impl<'a> VaultMutationCore<'a> {
@@ -139,7 +142,15 @@ impl<'a> VaultMutationCore<'a> {
             vaults,
             settings,
             origin,
+            commit_summary: None,
         }
+    }
+
+    /// Carry `summary` into the commit that records each write this core
+    /// makes, filtered as [`VaultMutation::with_commit_summary`] filters it.
+    pub fn with_commit_summary(mut self, summary: Option<String>) -> Self {
+        self.commit_summary = summary;
+        self
     }
 
     /// The core as an adapter holding an [`AppState`] builds it.
@@ -170,7 +181,8 @@ impl<'a> VaultMutationCore<'a> {
             control,
             Arc::clone(&self.settings),
             self.origin.clone(),
-        ))
+        )
+        .with_commit_summary(self.commit_summary.clone()))
     }
 
     /// Whether this Vault is worth offering a write surface for. Unlike every

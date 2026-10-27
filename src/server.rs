@@ -3799,7 +3799,7 @@ mod tests {
                     parsed_vault_id(&vault_id),
                     target,
                     false,
-                    None,
+                    crate::transfer_link::UploadRequest::default(),
                 )
                 .url
         };
@@ -3985,7 +3985,7 @@ mod tests {
             parsed_vault_id(&vault_id),
             "big.png",
             false,
-            None,
+            crate::transfer_link::UploadRequest::default(),
         );
         let refused = app
             .clone()
@@ -4061,6 +4061,92 @@ mod tests {
             .collect();
         let asking_client = crate::git::WriteOrigin::mcp(Some("t"));
         assert_eq!(origins, vec![asking_client.clone(), asking_client]);
+    }
+
+    /// #598: a `commit_summary` given to `create_upload_link` is the summary
+    /// of the write the upload makes, for an attachment and a note alike,
+    /// and reaches the body of the commit built from that write. A blank one
+    /// adds no line, as on every other write tool.
+    #[tokio::test]
+    async fn an_upload_through_a_link_writes_under_the_summary_it_was_minted_with() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let (vault_id, vault_root) = transfer_vault(&app, &tmp, "Summaries", 0).await;
+        let ledger = state
+            .vaults
+            .runtime(parsed_vault_id(&vault_id))
+            .expect("Vault runtime")
+            .write_ledger();
+        ledger.take();
+
+        // Every kind of link: attachment create and overwrite, note create
+        // and replace.
+        let report_hash = crate::cache::parse::content_hash("# report\n");
+        for (target, overwrite, expected_content_hash, summary) in [
+            ("scan.png", false, None, "file the scan"),
+            ("scan.png", true, None, "rescan"),
+            ("Imports/Report.md", false, None, "import the report"),
+            (
+                "Imports/Report.md",
+                true,
+                Some(report_hash.as_str()),
+                "reimport",
+            ),
+            ("blank.png", false, None, "  "),
+        ] {
+            let mut arguments = serde_json::json!({
+                "vault_id": vault_id,
+                "target_relative_path": target,
+                "overwrite": overwrite,
+                "commit_summary": summary
+            });
+            if let Some(hash) = expected_content_hash {
+                arguments["expected_content_hash"] = serde_json::json!(hash);
+            }
+            let answer = mcp_tool_call(&app, "mcp-secret", "create_upload_link", arguments).await;
+            let uploaded = post_upload(&app, minted_url(&answer), b"# report\n").await;
+            assert!(uploaded.status().is_success(), "{target}");
+            assert!(vault_root.join(target).exists());
+        }
+
+        let records = ledger.take();
+        let summaries: Vec<_> = records
+            .iter()
+            .map(|record| record.summary.as_deref())
+            .collect();
+        assert_eq!(
+            summaries,
+            vec![
+                Some("file the scan"),
+                Some("rescan"),
+                Some("import the report"),
+                Some("reimport"),
+                None
+            ]
+        );
+        let message = crate::git::build_commit_message(&records, false);
+        let body_lines: Vec<_> = message
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        assert_eq!(
+            body_lines,
+            vec![
+                "- file the scan",
+                "- rescan",
+                "- import the report",
+                "- reimport"
+            ],
+            "{message}"
+        );
+        assert_eq!(
+            message.lines().last(),
+            Some("Hatchdoor-Origin: mcp/t"),
+            "{message}"
+        );
     }
 
     /// `create_upload_link` called over MCP for one target, with optional
@@ -4342,7 +4428,7 @@ mod tests {
                     vault_id,
                     "b.png",
                     false,
-                    None,
+                    crate::transfer_link::UploadRequest::default(),
                 )
                 .url,
         ] {

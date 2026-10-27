@@ -15,6 +15,7 @@
 - An agent now gets the manual's page for a Git sync failure or a Vault folder Hatchdoor cannot open. 2.8.0 promised a `docs` pointer on these codes, but they never come back as a refused tool call: an agent meets them as a Vault's status in `list_vaults`, which carried no pointer. `list_vaults` now adds `docs` to each status error the manual explains, and the MCP tools reference says where `docs` appears. The HTTP Vault list is unchanged. [#583]
 - The web app's "Vaults Unavailable" screen now explains itself. Its Help link loads the manual from the server, which fails for the same reasons the screen appears, so a reader whose server was down only saw "The manual could not be loaded". The screen now says what the error means and what to try, with no network needed, and keeps the Help link for when the server is back. [#583]
 - Changed on disk and search no longer print a sentence with no Vault in it. When the only Vault short of fresh was a stale one, which still answered from its previous index, Changed on disk showed " did not answer." and search showed an empty red "Nothing Found" or a blank line under the results. Both now look as they do for a complete answer. A note opened from a search for its own title now lands on the first match you can see: the hidden copy of the title at the top of the body no longer counts as match 1. [#585]
+- `create_upload_link` now takes a `commit_summary`, like every other write tool. Uploading through a link, the recommended route for attachments and the only one for importing a Markdown file as a note, refused the argument, so the commit that recorded the upload had no line saying why the file was added. The summary given when the link is minted now reaches that commit, just as it does on `import_attachment`. It is held by the server, never put in the link. [#598]
 
 [#570]: https://github.com/BatterWorks/Hatchdoor/issues/570
 [#572]: https://github.com/BatterWorks/Hatchdoor/issues/572
@@ -22,6 +23,7 @@
 [#584]: https://github.com/BatterWorks/Hatchdoor/issues/584
 [#585]: https://github.com/BatterWorks/Hatchdoor/issues/585
 [#596]: https://github.com/BatterWorks/Hatchdoor/issues/596
+[#598]: https://github.com/BatterWorks/Hatchdoor/issues/598
 [#600]: https://github.com/BatterWorks/Hatchdoor/issues/600
 [#605]: https://github.com/BatterWorks/Hatchdoor/issues/605
 

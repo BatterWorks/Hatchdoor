@@ -9,11 +9,12 @@
 //! server can check it without remembering it. The exception is an upload
 //! link's single use, which needs a record of spent links; that record lives
 //! here, in memory, and forgets each entry once the link would have expired
-//! anyway. Beside it sits the one other thing remembered: the name of the MCP
-//! client that asked for each upload link, so the upload is recorded as that
-//! client's write (ADR-49). It is kept here and not in the link because the
-//! link's URL and signature must not change, and it is forgotten on the same
-//! schedule.
+//! anyway. Beside it sits the one other thing remembered: who asked for each
+//! upload link and why, the MCP client's name, so the upload is recorded as
+//! that client's write (ADR-49), and the `commit_summary` it gave, so the
+//! write carries it (#598). Both are kept here and not in the link because
+//! the link's URL and signature must not change, and both are forgotten on
+//! the same schedule.
 //!
 //! The random master key is held only in memory and never written anywhere.
 //! Each request signs or checks under a [`SigningKey`] derived from it, from
@@ -62,19 +63,37 @@ pub struct TransferLinks {
     /// Upload links already redeemed, by nonce, with the Unix second each one
     /// expires at. An entry is dropped once its link could no longer verify.
     spent_uploads: Mutex<HashMap<[u8; NONCE_BYTES], u64>>,
-    /// The name of the client that asked for each upload link not yet
-    /// redeemed, by nonce, with the Unix second the link expires at. Only a
-    /// client that sent a name has an entry.
-    upload_clients: Mutex<HashMap<[u8; NONCE_BYTES], (u64, String)>>,
+    /// What was given with each upload link not yet redeemed, by nonce, with
+    /// the Unix second the link expires at. Only a link minted with a client
+    /// name or a summary has an entry.
+    upload_requests: Mutex<HashMap<[u8; NONCE_BYTES], (u64, RememberedUpload)>>,
 }
 
-/// A redeemed upload link: the rule it allows the upload under, and the name
-/// of the client that asked for the link. `client_name` is `None` when that
-/// client sent no name or the name is no longer remembered.
+/// What the MCP call that mints an upload link says about the upload, held
+/// by the server until the link is redeemed and never put in the link:
+/// `client_name` is the name of the client asking, and `commit_summary` the
+/// summary of the change it gave. `Default` is a call that gave neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UploadRequest<'a> {
+    pub client_name: Option<&'a str>,
+    pub commit_summary: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RememberedUpload {
+    client_name: Option<String>,
+    commit_summary: Option<String>,
+}
+
+/// A redeemed upload link: the rule it allows the upload under, the name of
+/// the client that asked for the link, and the commit summary it gave.
+/// `client_name` and `commit_summary` are `None` when none was given or the
+/// link is no longer remembered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedeemedLink<Rule> {
     pub rule: Rule,
     pub client_name: Option<String>,
+    pub commit_summary: Option<String>,
 }
 
 impl<Rule> RedeemedLink<Rule> {
@@ -83,6 +102,7 @@ impl<Rule> RedeemedLink<Rule> {
         RedeemedLink {
             rule: restate(self.rule),
             client_name: self.client_name,
+            commit_summary: self.commit_summary,
         }
     }
 }
@@ -176,7 +196,7 @@ impl TransferLinks {
         Self {
             master_key,
             spent_uploads: Mutex::new(HashMap::new()),
-            upload_clients: Mutex::new(HashMap::new()),
+            upload_requests: Mutex::new(HashMap::new()),
         }
     }
 
@@ -205,8 +225,8 @@ impl TransferLinks {
 
     /// An upload link for one target path under one overwrite rule. For a
     /// note target this is the creating link only: a link that replaces a
-    /// note is [`TransferLinks::mint_note_replace`]. `client_name` is the
-    /// name of the MCP client asking, remembered until the link expires.
+    /// note is [`TransferLinks::mint_note_replace`]. `request` is remembered
+    /// until the link is redeemed or expires.
     pub fn mint_upload(
         &self,
         key: &SigningKey,
@@ -214,7 +234,7 @@ impl TransferLinks {
         vault_id: VaultId,
         target_relative_path: &str,
         overwrite: bool,
-        client_name: Option<&str>,
+        request: UploadRequest<'_>,
     ) -> MintedLink {
         let nonce = fresh_nonce();
         let link = mint(
@@ -225,7 +245,7 @@ impl TransferLinks {
             Grant::Upload { overwrite, nonce },
             now(),
         );
-        self.remember_client(nonce, &link, client_name);
+        self.remember_request(nonce, &link, request);
         link
     }
 
@@ -238,7 +258,7 @@ impl TransferLinks {
         vault_id: VaultId,
         target_relative_path: &str,
         expected_content_hash: &str,
-        client_name: Option<&str>,
+        request: UploadRequest<'_>,
     ) -> MintedLink {
         let nonce = fresh_nonce();
         let link = mint(
@@ -252,26 +272,30 @@ impl TransferLinks {
             },
             now(),
         );
-        self.remember_client(nonce, &link, client_name);
+        self.remember_request(nonce, &link, request);
         link
     }
 
-    /// Remember who asked for an upload link, and forget everyone whose link
-    /// has expired since.
-    fn remember_client(
+    /// Remember who asked for an upload link and why, and forget every link
+    /// that has expired since.
+    fn remember_request(
         &self,
         nonce: [u8; NONCE_BYTES],
         link: &MintedLink,
-        client_name: Option<&str>,
+        request: UploadRequest<'_>,
     ) {
-        let mut clients = self
-            .upload_clients
+        let mut requests = self
+            .upload_requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let minted_at = link.expires_at - LINK_LIFETIME.as_secs();
-        clients.retain(|_, (expires_at, _)| *expires_at >= minted_at);
-        if let Some(name) = client_name {
-            clients.insert(nonce, (link.expires_at, name.to_string()));
+        requests.retain(|_, (expires_at, _)| *expires_at >= minted_at);
+        if request != UploadRequest::default() {
+            let remembered = RememberedUpload {
+                client_name: request.client_name.map(str::to_string),
+                commit_summary: request.commit_summary.map(str::to_string),
+            };
+            requests.insert(nonce, (link.expires_at, remembered));
         }
     }
 
@@ -334,7 +358,12 @@ impl TransferLinks {
         query: Option<&str>,
     ) -> Result<RedeemedLink<NoteUploadRule>, LinkRefusal> {
         let redeemed = self.redeem_any_upload(key, vault_id, target_relative_path, query, now())?;
-        let rule = match redeemed.rule {
+        let RedeemedLink {
+            rule,
+            client_name,
+            commit_summary,
+        } = redeemed;
+        let rule = match rule {
             Grant::Upload {
                 overwrite: false, ..
             } => NoteUploadRule::Create,
@@ -348,12 +377,13 @@ impl TransferLinks {
         };
         Ok(RedeemedLink {
             rule,
-            client_name: redeemed.client_name,
+            client_name,
+            commit_summary,
         })
     }
 
     /// Verify an upload link of either kind and spend it, returning its grant
-    /// and forgetting the name of the client that asked for it.
+    /// and forgetting what was given with it.
     fn redeem_any_upload(
         &self,
         key: &SigningKey,
@@ -379,15 +409,19 @@ impl TransferLinks {
         }
         drop(spent);
 
-        let mut clients = self
-            .upload_clients
+        let mut requests = self
+            .upload_requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let client_name = clients.remove(&nonce).map(|(_, name)| name);
-        clients.retain(|_, (expires_at, _)| *expires_at >= at);
+        let remembered = requests.remove(&nonce).map(|(_, remembered)| remembered);
+        requests.retain(|_, (expires_at, _)| *expires_at >= at);
+        let (client_name, commit_summary) = remembered
+            .map(|remembered| (remembered.client_name, remembered.commit_summary))
+            .unwrap_or_default();
         Ok(RedeemedLink {
             rule: presented.grant,
             client_name,
+            commit_summary,
         })
     }
 }
@@ -696,7 +730,14 @@ mod tests {
             );
         }
 
-        let upload = links.mint_upload(&key, BASE, vault(), "./in/scan.png", false, None);
+        let upload = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "./in/scan.png",
+            false,
+            UploadRequest::default(),
+        );
         assert_eq!(path_of(&upload), format!("{route}in/scan.png"));
         assert_eq!(
             links
@@ -705,7 +746,14 @@ mod tests {
             Ok(false)
         );
 
-        let replace = links.mint_note_replace(&key, BASE, vault(), "./Notes/a.md", "abc123", None);
+        let replace = links.mint_note_replace(
+            &key,
+            BASE,
+            vault(),
+            "./Notes/a.md",
+            "abc123",
+            UploadRequest::default(),
+        );
         assert_eq!(path_of(&replace), format!("{route}Notes/a.md"));
         assert!(
             links
@@ -742,7 +790,14 @@ mod tests {
         let config = RuntimeConfig::for_tests();
         let links = TransferLinks::new();
         let key = links.key(&config, TOKEN);
-        let link = links.mint_upload(&key, BASE, vault(), "in/scan.png", true, None);
+        let link = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "in/scan.png",
+            true,
+            UploadRequest::default(),
+        );
         let query = query_of(&link);
 
         assert_eq!(
@@ -770,7 +825,14 @@ mod tests {
         let config = RuntimeConfig::for_tests();
         let links = TransferLinks::new();
         let key = links.key(&config, TOKEN);
-        let link = links.mint_upload(&key, BASE, vault(), "in/scan.png", false, None);
+        let link = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "in/scan.png",
+            false,
+            UploadRequest::default(),
+        );
         let query = query_of(&link);
         let flipped = query.replace("overwrite=false", "overwrite=true");
         assert_eq!(
@@ -840,7 +902,14 @@ mod tests {
         set_token("token-a");
         let key = links.key(&config, "token-a");
         let download = links.mint_download(&key, BASE, vault(), "a.pdf");
-        let upload = links.mint_upload(&key, BASE, vault(), "b.pdf", false, None);
+        let upload = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "b.pdf",
+            false,
+            UploadRequest::default(),
+        );
 
         set_token("token-b");
         set_token("token-a");
@@ -902,7 +971,14 @@ mod tests {
         let links = TransferLinks::new();
         let key = links.key(&config, TOKEN);
 
-        let create = links.mint_upload(&key, BASE, vault(), "Imports/Report.md", false, None);
+        let create = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "Imports/Report.md",
+            false,
+            UploadRequest::default(),
+        );
         assert_eq!(
             links
                 .redeem_note_upload(&key, vault(), "Imports/Report.md", Some(&query_of(&create)))
@@ -910,8 +986,14 @@ mod tests {
             Ok(NoteUploadRule::Create)
         );
 
-        let replace =
-            links.mint_note_replace(&key, BASE, vault(), "Imports/Report.md", "abc123", None);
+        let replace = links.mint_note_replace(
+            &key,
+            BASE,
+            vault(),
+            "Imports/Report.md",
+            "abc123",
+            UploadRequest::default(),
+        );
         let query = query_of(&replace);
         assert!(query.contains("overwrite=true"), "{query}");
         assert_eq!(
@@ -941,7 +1023,14 @@ mod tests {
         let config = RuntimeConfig::for_tests();
         let links = TransferLinks::new();
         let key = links.key(&config, TOKEN);
-        let link = links.mint_note_replace(&key, BASE, vault(), "a.md", "abc123", None);
+        let link = links.mint_note_replace(
+            &key,
+            BASE,
+            vault(),
+            "a.md",
+            "abc123",
+            UploadRequest::default(),
+        );
         let query = query_of(&link);
         let hash_param = format!("&expected_content_hash={}", encode(b"abc123"));
         assert!(query.contains(&hash_param), "{query}");
@@ -981,7 +1070,7 @@ mod tests {
         let config = RuntimeConfig::for_tests();
         let links = TransferLinks::new();
         let key = links.key(&config, TOKEN);
-        let link = links.mint_upload(&key, BASE, vault(), "a.md", true, None);
+        let link = links.mint_upload(&key, BASE, vault(), "a.md", true, UploadRequest::default());
         assert_eq!(
             links
                 .redeem_note_upload(&key, vault(), "a.md", Some(&query_of(&link)))
@@ -1011,8 +1100,15 @@ mod tests {
         }
     }
 
+    fn claude_code(commit_summary: Option<&str>) -> UploadRequest<'_> {
+        UploadRequest {
+            client_name: Some("claude-code"),
+            commit_summary,
+        }
+    }
+
     #[test]
-    fn an_upload_link_remembers_who_asked_for_it_without_changing_its_url() {
+    fn an_upload_link_remembers_who_asked_for_it_and_why_without_changing_its_url() {
         let links = TransferLinks::new();
         let key = links.key(&RuntimeConfig::for_tests(), "token");
         let named = links.mint_upload(
@@ -1021,11 +1117,35 @@ mod tests {
             vault(),
             "in/scan.png",
             false,
-            Some("claude-code"),
+            claude_code(Some("file the scan")),
         );
-        let unnamed = links.mint_upload(&key, BASE, vault(), "in/scan.png", false, None);
-        let replace =
-            links.mint_note_replace(&key, BASE, vault(), "a.md", "abc123", Some("claude-code"));
+        let unnamed = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "in/scan.png",
+            false,
+            UploadRequest::default(),
+        );
+        let replace = links.mint_note_replace(
+            &key,
+            BASE,
+            vault(),
+            "a.md",
+            "abc123",
+            claude_code(Some("refresh the import")),
+        );
+        let summary_only = links.mint_upload(
+            &key,
+            BASE,
+            vault(),
+            "b.md",
+            false,
+            UploadRequest {
+                client_name: None,
+                commit_summary: Some("import the report"),
+            },
+        );
 
         let parameters = |link: &MintedLink| -> Vec<String> {
             query_of(link)
@@ -1043,43 +1163,70 @@ mod tests {
             parameters(&named),
             ["expires", "overwrite", "nonce", "signature"]
         );
-        assert!(!named.url.contains("claude-code") && !replace.url.contains("claude-code"));
+        for link in [&named, &replace, &summary_only] {
+            for given in ["claude", "file", "refresh", "import"] {
+                assert!(!link.url.contains(given), "{given} in {}", link.url);
+            }
+        }
 
         let redeemed = links
             .redeem_upload(&key, vault(), "in/scan.png", Some(&query_of(&named)))
             .expect("redeem the named link");
         assert_eq!(redeemed.client_name.as_deref(), Some("claude-code"));
+        assert_eq!(redeemed.commit_summary.as_deref(), Some("file the scan"));
         let redeemed = links
             .redeem_upload(&key, vault(), "in/scan.png", Some(&query_of(&unnamed)))
             .expect("redeem the unnamed link");
         assert_eq!(redeemed.client_name, None);
+        assert_eq!(redeemed.commit_summary, None);
         let redeemed = links
             .redeem_note_upload(&key, vault(), "a.md", Some(&query_of(&replace)))
             .expect("redeem the note link");
         assert_eq!(redeemed.client_name.as_deref(), Some("claude-code"));
+        assert_eq!(
+            redeemed.commit_summary.as_deref(),
+            Some("refresh the import")
+        );
+        let redeemed = links
+            .redeem_note_upload(&key, vault(), "b.md", Some(&query_of(&summary_only)))
+            .expect("redeem the summarized link");
+        assert_eq!(redeemed.client_name, None);
+        assert_eq!(
+            redeemed.commit_summary.as_deref(),
+            Some("import the report")
+        );
     }
 
     #[test]
-    fn the_client_behind_an_upload_link_is_forgotten_when_the_link_expires() {
+    fn what_was_given_with_an_upload_link_is_forgotten_when_the_link_expires() {
         let links = TransferLinks::new();
         let key = links.key(&RuntimeConfig::for_tests(), "token");
-        let remembered = || links.upload_clients.lock().expect("clients").len();
+        let remembered = || links.upload_requests.lock().expect("requests").len();
 
         let stale = mint(&key, BASE, vault(), "a.png", upload_grant(1), 1_000);
-        links.remember_client([1; NONCE_BYTES], &stale, Some("claude-code"));
+        links.remember_request([1; NONCE_BYTES], &stale, claude_code(Some("stale")));
         assert_eq!(remembered(), 1);
 
         let later = mint(&key, BASE, vault(), "b.png", upload_grant(2), 2_000);
-        links.remember_client([2; NONCE_BYTES], &later, Some("codex"));
-        assert_eq!(remembered(), 1, "minting drops the expired link's client");
+        links.remember_request(
+            [2; NONCE_BYTES],
+            &later,
+            UploadRequest {
+                client_name: None,
+                commit_summary: Some("later"),
+            },
+        );
+        assert_eq!(remembered(), 1, "minting drops the expired link's entry");
 
-        links
+        let redeemed = links
             .redeem_upload_at(&key, vault(), "b.png", Some(&query_of(&later)), 2_000)
             .expect("redeem");
+        assert_eq!(redeemed.commit_summary.as_deref(), Some("later"));
+        assert_eq!(remembered(), 0, "and redeeming forgets what it returns");
         assert_eq!(
-            remembered(),
-            0,
-            "and redeeming forgets the client it returns"
+            links.redeem_upload_at(&key, vault(), "b.png", Some(&query_of(&later)), 2_000),
+            Err(LinkRefusal::Spent),
+            "a spent link hands nothing back"
         );
     }
 }
