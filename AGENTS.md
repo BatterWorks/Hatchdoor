@@ -1,5 +1,7 @@
 # Agent Instructions
 
+Tracker instructions: `AGENTS.local.md` if present, "Issue tracker"; coding standards: `CODING_STANDARDS.md`, read at review.
+
 ## Local-only instructions
 
 If `AGENTS.local.md` exists at the repository root, read it before interacting
