@@ -3548,7 +3548,7 @@ files, checkouts, Git history, or credentials outside the registry record.
 ### MCP adapter
 
 **Status:** Implemented per [ADR-17](../../adr/README.md) (#168): rmcp 3.x
-(pinned `rmcp = "=3.1.4"`) owns the `/mcp` transport and the advertised
+(pinned `rmcp = "=3.8.0"`, #621) owns the `/mcp` transport and the advertised
 revisions are exactly `2026-07-28` and `2025-11-25`; #170 adds honest
 `tools.listChanged` on the modern surface. The remaining Wayfinder children
 build on this seam: #171 (layered rate limits) and #172 (release evidence).

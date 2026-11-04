@@ -853,6 +853,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initialize_naming_the_modern_revision_opens_an_honest_legacy_session() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let response = send(
+            app,
+            "POST",
+            [
+                ("authorization", format!("Bearer {TEST_TOKEN}")),
+                ("accept", "application/json, text/event-stream".into()),
+                ("content-type", "application/json".into()),
+            ]
+            .to_vec(),
+            Some(
+                json!({"jsonrpc":"2.0","id":3,"method":"initialize",
+                       "params":{"protocolVersion":"2026-07-28","capabilities":{},
+                                 "clientInfo":{"name":"t","version":"1"}}})
+                .to_string(),
+            ),
+        )
+        .await;
+        let message = response_message(response).await;
+        // `2026-07-28` has no `initialize` handshake, so the handshake answers
+        // with the newest legacy revision, and that session cannot open the
+        // subscription stream `listChanged` promises.
+        assert_eq!(message["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(
+            message["result"]["capabilities"]["tools"]["listChanged"],
+            false
+        );
+    }
+
+    #[tokio::test]
     async fn retired_protocol_version_header_is_rejected_cleanly() {
         let (state, _tmp) = test_state();
         let app = transport(&state);
@@ -6253,7 +6285,8 @@ mod tests {
         assert_eq!(legacy["error"]["code"], -32602);
         assert_eq!(legacy["error"]["message"], "Unknown MCP tool: no_such_tool");
 
-        // Modern revision: HTTP 400 with the same protocol error semantics.
+        // Modern revision: the same protocol error, in-band with HTTP 200, as
+        // every handler-generated invalid-params error is.
         let modern = raw_modern_post(
             app,
             "tools/call",
@@ -6266,8 +6299,8 @@ mod tests {
             .to_string(),
         )
         .await;
-        assert_eq!(modern.status(), StatusCode::BAD_REQUEST);
-        let message = error_body(modern).await;
+        assert_eq!(modern.status(), StatusCode::OK);
+        let message = response_message(modern).await;
         assert_eq!(message["error"]["code"], -32602);
         assert_eq!(
             message["error"]["message"],

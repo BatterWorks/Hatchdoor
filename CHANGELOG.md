@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- MCP agents on the `2026-07-28` revision now get a refused tool call, such as an unknown tool, a write while writes are off or an invalid argument, with HTTP 200 and the JSON-RPC error in the body, where it was HTTP 400; the error code and message are unchanged, so a client that reads the body sees no difference. An `initialize` that names `2026-07-28`, a revision with no handshake, now opens a `2025-11-25` session, and that session no longer claims `tools.listChanged: true`, which only the modern revision can deliver. A request with no session that is not `initialize` is refused with `400 Bad Request: Session ID is required` instead of `422 Unexpected message, expect initialize request`. These come with the MCP library moving to 3.8.0. [#621]
+- Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
+
+### Fixed
+- Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
+
+[#621]: https://github.com/BatterWorks/Hatchdoor/issues/621
+
 ## v2.9.0 - 2026-10-27
 
 ### Added

@@ -138,6 +138,50 @@ the compatible programmatic API required by that toolchain.
    The application was checked with Rust 1.97.1 in an isolated Cargo target.
    No Docker image was built.
 
+## November 2026 update (#621)
+
+Checked on 2026-11-04 against crates.io, npm, RustSec (through OSV) and
+`npm audit`. Every dependency moved to the newest version its range allowed,
+and both lockfiles were regenerated; the frontend lockfile with npm 11,
+because npm 10.9 crashes resolving this tree's peer set.
+
+Moved across a major version:
+
+- Rust: `rmcp` `=3.1.4` to `=3.8.0` (ADR-17 amended), `zip` 9, `rusqlite`
+  0.41, `text-splitter` 0.33, `base64` 0.23, `getrandom` 0.4, and the
+  `jsonschema` 0.60 dev-dependency.
+- Frontend: Mermaid 12, `vite-plugin-pwa` 2, Vitest and
+  `@vitest/coverage-v8` 5, jsdom 30, `@babel/core` 8 and
+  `@rolldown/plugin-babel` 0.3. Mermaid 12 carries its own KaTeX 0.18 in the
+  lazily loaded diagram chunk, which grows the precache from 3,077 KiB to
+  3,331 KiB.
+
+Held, with the reason:
+
+- **FastEmbed 7.5.** It moves ONNX Runtime from 1.28 to 1.31 and brings no
+  model, pooling or session change Hatchdoor would use. Embedding 120
+  paragraphs of the manual with both versions gave Nomic v1.5 vectors that
+  differ only in rounding (largest difference 2.8e-7, every top-5 neighbour
+  list identical), but moved EmbeddingGemma q4 vectors measurably (lowest
+  cosine 0.99955; top-5 sets differed from a fresh index in 4 of 120 queries
+  when old vectors were kept). The embedder identity would have to change,
+  re-embedding every deployment for no visible gain, so it waits for a
+  release that brings something or a change that reindexes anyway. Moving
+  to 7 also lets the `tokenizers-fe` alias go, since 7 uses tokenizers 0.23.
+- **hf-hub 1.0.** A rewrite on reqwest 0.13 and hf-xet. FastEmbed still
+  depends on 0.5, so moving Hatchdoor's own edge would compile both stacks.
+- **TypeScript 7.** `typescript-eslint` 8.72 still supports TypeScript below
+  6.1 only.
+- **KaTeX 0.19.** The latest `rehype-katex` and `remark-math` require 0.16,
+  so a direct 0.19 would bundle a second KaTeX with a stylesheet that does
+  not match the one rendering notes.
+
+Still reported after the update: `unsafe-libyaml` (through `serde_yaml_ng`)
+and `paste` are unmaintained with no fix; KaTeX 0.16's low-severity advisory
+(fixed from 0.18.2); and `minimatch`, `glob` and `deepmerge` advisories under
+ESLint and Workbox, which pin the affected major versions. All three of the
+last are build and lint time only.
+
 ## Upstream references
 
 - [Vite 8 migration guide](https://vite.dev/guide/migration.html)

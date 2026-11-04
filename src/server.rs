@@ -7508,7 +7508,10 @@ mod tests {
             .expect("zip body");
         let mut archive =
             zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.to_vec())).expect("read zip");
-        let mut names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        let mut names = archive
+            .file_names()
+            .map(|name| name.expect("entry name").into_owned())
+            .collect::<Vec<_>>();
         names.sort();
         assert_eq!(names, ["Mixed-assets/visible.png", "Mixed.md"]);
         let mut markdown = String::new();
