@@ -53,14 +53,14 @@ First check that agent access is on in **Settings** → **Agent access (MCP)**, 
 
 - **`404 Not Found` on `/mcp`, with an empty body**: MCP is disabled. Turn on **Let assistants connect (MCP)** in **Settings** → **Agent access (MCP)**. Read the body before acting on a `404`: an empty body means this, and a body with text means the next entry.
 - **`404 Not Found` whose body reads `Not Found: Session not found`**: MCP is on and the client got in, but the session it is quoting doesn't exist. Either it was never issued, or it was issued before Hatchdoor last restarted. The remedy belongs to the client: it has to run `initialize` again and use the session that comes back.
-- **`422 Unprocessable Entity`, "Unexpected message, expect initialize request"**: the client sent an ordinary call with no session. The message says what the server expected and not what to do. The remedy is the one above: run `initialize` again.
+- **`400 Bad Request`, "Bad Request: Session ID is required"**: the client sent an ordinary call with no session. The remedy is the one above: run `initialize` again.
 - **`401`, JSON-RPC error `-32001`, "Missing or invalid MCP bearer token"**: the client's `Authorization: Bearer <token>` header doesn't match the current MCP password. Generate a new one or copy it again from Settings. The client and Settings must hold the same value.
 - **A write tool (`create_note`, `edit_vault`, etc.) returns "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED"**: MCP is connected and reading fine, but **Let assistants change notes** is off. That switch is separate from the one that lets an agent connect. [[Search and change notes with your agent]] explains why.
 
 A sixth is less common. **`403 Forbidden`, "Forbidden MCP origin"**: the request carried an `Origin` header that is not on the allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`). This normally affects a browser-based MCP client and not a command-line agent.
 
 > [!note]
-> MCP sessions are held in memory only, so restarting Hatchdoor ends every one of them. A client holding a session finds out on its next call, as the `Session not found` or the `422` above, and has to re-initialize. No Hatchdoor setting keeps sessions across a restart, so restart or reconnect a client that keeps retrying the same failing call. Clients that use no session are unaffected.
+> MCP sessions are held in memory only, so restarting Hatchdoor ends every one of them. A client holding a session finds out on its next call, as the `Session not found` or the `400` above, and has to re-initialize. No Hatchdoor setting keeps sessions across a restart, so restart or reconnect a client that keeps retrying the same failing call. Clients that use no session are unaffected.
 
 ## An agent can't download or upload a file
 
