@@ -54,6 +54,7 @@ const SURFACES = [
       `${REFERENCE}/MCP tools reference.md`,
       `${GET_STARTED}/Connect your agent.md`,
       `${GET_STARTED}/Search and change notes with your agent.md`,
+      `${GUIDES}/How to troubleshoot common problems.md`,
     ],
   },
   {

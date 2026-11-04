@@ -38,6 +38,7 @@ const FIXTURE_NOTES = [
   "docs/user-vault/03 Reference/Usage report reference.md",
   "docs/user-vault/03 Reference/Settings and environment variables reference.md",
   "docs/user-vault/04 Concepts/The security model.md",
+  "docs/user-vault/02 Guides/How to troubleshoot common problems.md",
 ];
 
 function run(root, args = []) {
@@ -202,6 +203,18 @@ test("one change can require several surfaces' notes", async () => {
 // the note-mutation surface. What it did not do was summon the guide that
 // actually documents move_attachment, rename_attachment, and delete_attachment
 // (#220), which left that guide free to drift.
+test("an MCP transport change names the troubleshooting guide", async () => {
+  // The guide quotes the transport's status lines for a failed connection, so
+  // a change to the MCP routes or the library behind them can make it wrong.
+  const root = await fixture();
+  await write(root, "src/mcp/routes.rs", "// a new status answer\n");
+  await commit(root, "mcp transport");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /How to troubleshoot common problems\.md/);
+});
+
 test("an attachment mutation change names the attachments guide too", async () => {
   const root = await fixture();
   await write(root, "src/vault/write/attachments.rs", "// move an asset\n");
