@@ -78,7 +78,9 @@ RUN npm run build
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775 AS runtime
 WORKDIR /app
 
-ENV HOST=0.0.0.0 \
+# Keep Microsoft ONNX Runtime telemetry disabled if a future runtime includes it.
+ENV ORT_DISABLE_TELEMETRY=1 \
+    HOST=0.0.0.0 \
     PORT=42824 \
     VAULT_PATH=/data/vault \
     RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn
