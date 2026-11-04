@@ -27,7 +27,7 @@
     "d3-force": "^3.0.1",
     "katex": "^0.16.47",
     "mdast-util-from-markdown": "^2.1.0",
-    "mermaid": "^11.17.2",
+    "mermaid": "^12.3.0",
     "micromark-util-chunked": "^2.0.1",
     "micromark-util-classify-character": "^2.0.1",
     "micromark-util-resolve-all": "^2.0.1",
