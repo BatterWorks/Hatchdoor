@@ -13,7 +13,7 @@ use crate::app_state::AppState;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
     ErrorData, Implementation, InitializeResult, ListToolsResult, ProtocolVersion,
-    ServerCapabilities, ServerInfo, SubscriptionFilter, Tool, ToolAnnotations,
+    ServerCapabilities, ServerConfig, SubscriptionFilter, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, SubscriptionContext};
 use rmcp::{RoleServer, ServerHandler};
@@ -63,7 +63,7 @@ impl HatchdoorMcpHandler {
     /// the one-time usage report sentence (#479). Only `initialize` and
     /// `discover` call this: rmcp also reads `get_info` for other purposes,
     /// which would spend the sentence where no agent sees it.
-    async fn opening_info(&self) -> (ServerInfo, bool) {
+    async fn opening_info(&self) -> (ServerConfig, bool) {
         let mut info = self.get_info();
         let usage_report = Arc::clone(&self.state.usage_report);
         let versions = Arc::clone(&self.state.instance_versions);
@@ -261,7 +261,7 @@ fn first_forwarded_element(value: &str) -> ForwardedElement {
 }
 
 impl ServerHandler for HatchdoorMcpHandler {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // `model_setup_pending`, not the collection's index readiness: a client
         // that happens to connect while a Vault is reindexing has a fully
         // set-up instance and needs the real instructions, not the first-run
@@ -285,7 +285,7 @@ impl ServerHandler for HatchdoorMcpHandler {
         tools_capability.list_changed = Some(true);
         let mut capabilities = ServerCapabilities::builder().enable_tools().build();
         capabilities.tools = Some(tools_capability);
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             // Preferred revision for clients that request one we no longer
             // serve: the newest legacy revision, not the modern one.
             .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25)
@@ -350,11 +350,12 @@ impl ServerHandler for HatchdoorMcpHandler {
     /// metadata. rmcp validates the per-request `_meta`/header contract before
     /// dispatch reaches this method.
     /// The legacy `initialize` handshake. Replicates rmcp's default
-    /// negotiation (a supported requested version wins; otherwise the server
-    /// default stands) and then advertises `tools.listChanged` honestly for
-    /// the negotiated revision: only the modern surface can deliver change
-    /// events through `subscriptions/listen`, so a legacy session still sees
-    /// `false` and keeps reissuing `tools/list`.
+    /// negotiation (a supported requested version that still has an
+    /// `initialize` handshake wins; otherwise the server default stands; rmcp
+    /// re-applies the same rule to the result) and then advertises
+    /// `tools.listChanged` honestly for the negotiated revision: only the
+    /// modern surface can deliver change events through `subscriptions/listen`,
+    /// so a legacy session still sees `false` and keeps reissuing `tools/list`.
     async fn initialize(
         &self,
         request: rmcp::model::InitializeRequestParams,
@@ -363,7 +364,9 @@ impl ServerHandler for HatchdoorMcpHandler {
         context.peer.set_peer_info(request.clone());
         let (mut info, _) = self.opening_info().await;
         let supported = self.supported_protocol_versions();
-        let negotiated = if supported.contains(&request.protocol_version) {
+        let negotiated = if request.protocol_version.has_initialize()
+            && supported.contains(&request.protocol_version)
+        {
             request.protocol_version.clone()
         } else {
             info.protocol_version.clone()

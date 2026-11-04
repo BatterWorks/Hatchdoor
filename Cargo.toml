@@ -30,7 +30,7 @@ getrandom = "0.3"
 ignore = "0.4"
 libc = "0.2"
 notify = "8"
-rmcp = { version = "=3.1.4", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "=3.8.0", features = ["server", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
