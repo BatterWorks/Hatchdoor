@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "web-programming::http-server"]
 ahash = "0.8"
 arc-swap = "1"
 axum = { version = "0.8", features = ["multipart"] }
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1"
 bytemuck = "1"
 # Inference backend for the benchmark-only Qwen3 and Nomic v2 MoE embedders.
@@ -26,18 +26,18 @@ dotenvy = "0.15"
 fastembed = "5"
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "native-tls"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
-getrandom = "0.3"
+getrandom = "0.4"
 ignore = "0.4"
 libc = "0.2"
 notify = "8"
 rmcp = { version = "=3.8.0", features = ["server", "transport-streamable-http-server"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 sqlite-vec = "0.1"
-text-splitter = { version = "0.32", features = ["markdown", "tokenizers"] }
+text-splitter = { version = "0.33", features = ["markdown", "tokenizers"] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # FastEmbed 5 exposes its model tokenizer through tokenizers 0.22, while
 # text-splitter (application chunking) uses 0.23. Keep this version-matched
@@ -58,7 +58,7 @@ unicode-normalization = "0.1"
 # downloads the search models with it; this only makes the edge direct.
 ureq = { version = "3.3", default-features = false, features = ["json", "native-tls"] }
 walkdir = "2"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [features]
 default = []
@@ -94,7 +94,7 @@ required-features = ["eval"]
 opt-level = 2
 
 [dev-dependencies]
-jsonschema = { version = "0.30", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
 tower = { version = "0.5", features = ["util"] }
