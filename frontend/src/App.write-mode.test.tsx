@@ -298,6 +298,7 @@ describe("App write mode", () => {
           body: JSON.stringify({
             content: "# Home\nUpdated",
             expected_content_hash: "hash-1",
+            expected_relative_path: "Home",
           }),
         }),
       );
@@ -516,6 +517,7 @@ describe("App write mode", () => {
           body: JSON.stringify({
             content: "# Home\nMine",
             expected_content_hash: "hash-1",
+            expected_relative_path: "Home",
           }),
         }),
       );
@@ -524,10 +526,10 @@ describe("App write mode", () => {
 
   it("warns and offers reload for a stale recovered draft", async () => {
     window.localStorage.setItem(
-      noteDraftKey(VAULT_ID, "home"),
+      noteDraftKey(VAULT_ID, "Home"),
       JSON.stringify({
         vaultId: VAULT_ID,
-        slug: "home",
+        relativePath: "Home",
         content: "# Home\nStale draft",
         baseContentHash: "old-hash",
         savedAt: Date.now(),

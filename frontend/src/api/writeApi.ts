@@ -79,6 +79,18 @@ export function isDemoReadOnlyError(error: unknown): boolean {
   );
 }
 
+/** The code the server sends when a note write's slug now names a different
+ * file than the one the caller opened (#627). Not a conflict to review: the
+ * note on disk under that slug is another note altogether. */
+export const NOTE_MOVED_CODE = "note_moved";
+
+export function isNoteMovedError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as Error & { code?: string }).code === NOTE_MOVED_CODE
+  );
+}
+
 function statusFallbackText(res: Response): string {
   if (res.statusText.trim()) {
     return res.statusText.trim();
@@ -111,7 +123,15 @@ function statusFallbackText(res: Response): string {
 
 function makeWriteError(message: string, status: number, code?: string): Error {
   const error = new Error(message) as Error & { code?: string };
-  error.name = status === 409 ? "ConflictError" : "WriteApiError";
+  // A moved note is a 409 too, but nothing about it is a conflict to review:
+  // autosave and the source editor would offer the other note's text as "the
+  // version on disk" (#627).
+  error.name =
+    code === NOTE_MOVED_CODE
+      ? "NoteMovedError"
+      : status === 409
+        ? "ConflictError"
+        : "WriteApiError";
   error.code = code;
   return error;
 }
@@ -227,7 +247,14 @@ export async function fetchAttachmentMaxBytes(): Promise<number | null> {
  * caps a keepalive body at 64KB and rejects the request outright above that,
  * so callers check the size first and keep the local draft as the fallback.
  */
-export type UpdateNoteOptions = { keepalive?: boolean };
+export type UpdateNoteOptions = {
+  keepalive?: boolean;
+  /** The Vault-relative path the caller opened under `slug` (#627). A slug
+   * moves when a same-named note appears earlier in path order, and the hash
+   * cannot tell two notes with the same text apart, so the server refuses the
+   * write with `note_moved` when the slug now names another file. */
+  expectedRelativePath?: string;
+};
 
 export function updateNote(
   vaultId: VaultId,
@@ -242,6 +269,9 @@ export function updateNote(
     body: JSON.stringify({
       content,
       expected_content_hash: expectedContentHash,
+      ...(options.expectedRelativePath === undefined
+        ? {}
+        : { expected_relative_path: options.expectedRelativePath }),
     }),
   });
 }

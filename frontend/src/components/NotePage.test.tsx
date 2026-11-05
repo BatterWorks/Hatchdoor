@@ -7,12 +7,22 @@ import {
 } from "@testing-library/react";
 import { act } from "react";
 import { EditorView } from "@codemirror/view";
-import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import {
+  Link,
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
 import { isAppReloadHeld, resetAppReloadHolds } from "../lib/reloadGuard";
-import { loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
+import {
+  listHeldDrafts,
+  loadNoteDraft,
+  saveNoteDraft,
+} from "../lib/writeDrafts";
 import {
   conflictVault,
   staleVault,
@@ -423,9 +433,9 @@ describe("NotePage held-draft recovery (#151)", () => {
 
   it("opens the editor with a recovered draft on ?restoreEdit=1 and strips the marker", async () => {
     const vaultId = "vault-1";
-    saveNoteDraft(vaultId, "home", {
+    saveNoteDraft(vaultId, "Home", {
       vaultId,
-      slug: "home",
+      relativePath: "Home",
       content: "recovered draft text",
       baseContentHash: "hash",
       savedAt: Date.now(),
@@ -556,9 +566,9 @@ describe("NotePage crash-safe inline editing (#330)", () => {
   }
 
   it("restores an unsaved inline edit from its draft after a reload", async () => {
-    saveNoteDraft("vault-1", "home", {
+    saveNoteDraft("vault-1", "Home.md", {
       vaultId: "vault-1",
-      slug: "home",
+      relativePath: "Home.md",
       content: "Body with the sentence that never saved.",
       baseContentHash: "hash",
       savedAt: Date.now(),
@@ -581,9 +591,9 @@ describe("NotePage crash-safe inline editing (#330)", () => {
   });
 
   it("leaves the body alone and points at source mode when the note moved under the draft", async () => {
-    saveNoteDraft("vault-1", "home", {
+    saveNoteDraft("vault-1", "Home.md", {
       vaultId: "vault-1",
-      slug: "home",
+      relativePath: "Home.md",
       content: "An edit based on an older version.",
       baseContentHash: "older-hash",
       savedAt: Date.now(),
@@ -618,7 +628,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
       let seen: string | null = null;
       act(() => {
         window.dispatchEvent(new Event("pagehide"));
-        seen = loadNoteDraft("vault-1", "home")?.content ?? null;
+        seen = loadNoteDraft("vault-1", "Home.md")?.content ?? null;
       });
       return seen as string | null;
     })();
@@ -634,7 +644,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     );
     // This page happens to survive its own pagehide, and the send is booked
     // like any other save, so the draft it no longer needs is cleared.
-    await waitFor(() => expect(loadNoteDraft("vault-1", "home")).toBeNull());
+    await waitFor(() => expect(loadNoteDraft("vault-1", "Home.md")).toBeNull());
   });
 
   it("does not write a draft per keystroke, and flushes the pending one on the way out", async () => {
@@ -648,13 +658,15 @@ describe("NotePage crash-safe inline editing (#330)", () => {
 
     // The write is debounced off the typing path rather than running a
     // JSON.stringify plus a synchronous setItem on every keystroke.
-    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+    expect(loadNoteDraft("vault-1", "Home.md")).toBeNull();
 
     act(() => {
       window.dispatchEvent(new Event("pagehide"));
     });
 
-    expect(loadNoteDraft("vault-1", "home")?.content).toBe("Body being typed.");
+    expect(loadNoteDraft("vault-1", "Home.md")?.content).toBe(
+      "Body being typed.",
+    );
   });
 
   it("says so when the browser refuses to store the draft", async () => {
@@ -709,14 +721,14 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     fireEvent.blur(screen.getByRole("textbox"));
 
     await waitFor(() => expect(sent).toHaveLength(1));
-    await waitFor(() => expect(loadNoteDraft("vault-1", "home")).toBeNull());
+    await waitFor(() => expect(loadNoteDraft("vault-1", "Home.md")).toBeNull());
 
     // The debounced write scheduled by that edit fires after the save landed.
     // Recreating the draft there leaves text the vault already holds sitting
     // under a hash that has moved on, and the next visit reports a held edit
     // that was in fact saved.
     await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+    expect(loadNoteDraft("vault-1", "Home.md")).toBeNull();
   });
 
   it("notices the note changed on disk even while a refused save holds the edit", async () => {
@@ -1002,9 +1014,9 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
 
   it("never restores a draft older than the last inline save into source mode", async () => {
     // A source-mode draft left behind against a version that has since moved.
-    saveNoteDraft("vault-1", "home", {
+    saveNoteDraft("vault-1", "home.md", {
       vaultId: "vault-1",
-      slug: "home",
+      relativePath: "home.md",
       content: "An old source-mode draft.",
       baseContentHash: "home-0",
       savedAt: Date.now() - 60_000,
@@ -1250,5 +1262,466 @@ describe("NotePage reading chrome (#530)", () => {
       expect(edit.querySelector(".shortcut-hint")).toBeNull();
       expect(edit).toHaveTextContent(/^Source$/);
     });
+  });
+});
+
+/** Shows the current history entry's router state. */
+function RouterStateProbe() {
+  return (
+    <span data-testid="router-state">
+      {JSON.stringify(useLocation().state ?? null)}
+    </span>
+  );
+}
+
+describe("NotePage keeps its note when the slug moves (#627)", () => {
+  type Sent = { url: string; init: RequestInit };
+  type Disk = { relativePath: string; content: string; hash: string };
+
+  /** Serves whichever note currently holds slug `plan`, the way the server
+   * does once a same-named note earlier in path order takes it over, and
+   * refuses a write whose expected path no longer matches. `elsewhere` maps
+   * every other note's path to its slug, for the page's lookup of where the
+   * note it opened is now. */
+  function mockSlug(
+    holder: { current: Disk },
+    elsewhere: Record<string, string> = { "z/Plan": "plan-2" },
+  ): Sent[] {
+    const sent: Sent[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/resolve-batch")) {
+          const body = JSON.parse(String(init?.body)) as {
+            note_link_targets?: string[];
+          };
+          return jsonResponse({
+            vault_id: "vault-1",
+            results: [],
+            note_link_results: (body.note_link_targets ?? []).map((target) => {
+              const path = decodeURIComponent(target.slice(1, -3));
+              return {
+                target,
+                slug:
+                  path === holder.current.relativePath
+                    ? "plan"
+                    : (elsewhere[path] ?? null),
+                archived: false,
+              };
+            }),
+          });
+        }
+        if (url.endsWith("/links")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (init?.method === "PUT") {
+          sent.push({ url, init });
+          const body = JSON.parse(String(init.body)) as {
+            content: string;
+            expected_relative_path?: string;
+          };
+          if (body.expected_relative_path !== holder.current.relativePath) {
+            return jsonResponse(
+              { code: "note_moved", message: "moved", retryable: false },
+              409,
+            );
+          }
+          holder.current = { ...holder.current, content: body.content };
+          return jsonResponse({
+            vault_id: "vault-1",
+            ok: true,
+            slug: "plan",
+            relative_path: holder.current.relativePath,
+            content_hash: "saved",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
+        }
+        if (url.includes("/notes/plan")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            note: {
+              title: "Plan",
+              slug: "plan",
+              relative_path: holder.current.relativePath,
+              content: holder.current.content,
+              content_hash: holder.current.hash,
+              layer: null,
+            },
+          });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+    return sent;
+  }
+
+  const zPlan = { vault_id: "vault-1", title: "Plan", slug: "plan-2" };
+  const candidates = [{ ...zPlan, relativePath: "z/Plan.md" }];
+
+  function renderPlan(
+    revision: number,
+    initialCandidates = candidates,
+    routerState?: unknown,
+  ) {
+    const tree = (
+      vaultRevision: number,
+      noteCandidates = initialCandidates,
+    ) => (
+      <MemoryRouter
+        initialEntries={[{ pathname: "/v/vault-1/n/plan", state: routerState }]}
+      >
+        <Routes>
+          <Route
+            path="/v/:vaultId/n/:slug"
+            element={
+              <NotePage
+                onActiveNoteChange={vi.fn()}
+                onTagSelect={vi.fn()}
+                propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
+                vaultRevision={vaultRevision}
+                writeEnabled={true}
+                editRequestId={0}
+                vaults={[]}
+                noteCandidates={noteCandidates as never}
+              />
+            }
+          />
+        </Routes>
+        <Link
+          to="/v/vault-1/n/plan"
+          state={{ movedFrom: "z/Plan", movedTo: "b/Plan" }}
+        >
+          hand-off
+        </Link>
+        <RouterStateProbe />
+      </MemoryRouter>
+    );
+    const view = render(tree(revision));
+    return {
+      setRevision: (next: number, nextCandidates = initialCandidates) =>
+        view.rerender(tree(next, nextCandidates)),
+    };
+  }
+
+  function typeInEditor(text: string): void {
+    const view = EditorView.findFromDOM(screen.getByRole("textbox"));
+    if (!view) {
+      throw new Error("no CodeMirror view is mounted");
+    }
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+      });
+    });
+  }
+
+  it("refuses to save into the note that took the slug, with the same content", async () => {
+    const holder = {
+      current: { relativePath: "z/Plan", content: "body\n", hash: "same" },
+    };
+    const sent = mockSlug(holder);
+    renderPlan(1);
+
+    fireEvent.click(await screen.findByText("body"));
+    // `a/Plan` appears with identical text and takes the slug over.
+    holder.current = {
+      relativePath: "a/Plan",
+      content: "body\n",
+      hash: "same",
+    };
+    typeInEditor("typed in z");
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(JSON.parse(String(sent[0].init.body))).toMatchObject({
+      expected_relative_path: "z/Plan",
+    });
+    expect(holder.current.content).toBe("body\n");
+    expect(
+      await screen.findByText(/This address now opens a different note/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/This note changed somewhere else/)).toBeNull();
+    // The edit is kept for the note it was typed into, never for `a/Plan`.
+    await waitFor(() =>
+      expect(loadNoteDraft("vault-1", "z/Plan")?.content).toContain(
+        "typed in z",
+      ),
+    );
+    expect(loadNoteDraft("vault-1", "a/Plan")).toBeNull();
+    expect(screen.getByRole("button", { name: "Open it" })).toBeInTheDocument();
+  });
+
+  it("does not swap in the other note's text when the slug moves while unfocused", async () => {
+    const holder = {
+      current: { relativePath: "z/Plan", content: "z body\n", hash: "z" },
+    };
+    mockSlug(holder);
+    const { setRevision } = renderPlan(1);
+
+    expect(await screen.findByText("z body")).toBeInTheDocument();
+    holder.current = {
+      relativePath: "a/Plan",
+      content: "the OTHER note\n",
+      hash: "a",
+    };
+    setRevision(2);
+
+    expect(
+      await screen.findByText(/This address now opens a different note/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("z body")).toBeInTheDocument();
+    expect(screen.queryByText("the OTHER note")).toBeNull();
+  });
+
+  it("never restores a draft typed into one note into the note that took its slug", async () => {
+    saveNoteDraft("vault-1", "z/Plan", {
+      vaultId: "vault-1",
+      relativePath: "z/Plan",
+      content: "typed in z",
+      baseContentHash: "same",
+      savedAt: Date.now(),
+    });
+    const holder = {
+      current: { relativePath: "a/Plan", content: "body\n", hash: "same" },
+    };
+    const sent = mockSlug(holder);
+    renderPlan(1);
+
+    expect(await screen.findByText("body")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText("typed in z")).toBeNull();
+    expect(sent).toHaveLength(0);
+    expect(loadNoteDraft("vault-1", "z/Plan")?.content).toBe("typed in z");
+  });
+
+  // A move made outside this page that keeps the slug looks exactly like a
+  // deleted note whose namesake inherited the slug, so the page asks.
+  it("asks before opening what the address names once its file is gone", async () => {
+    const holder = {
+      current: { relativePath: "z/Plan", content: "z body\n", hash: "z" },
+    };
+    const sent = mockSlug(holder, {});
+    const { setRevision } = renderPlan(1);
+
+    expect(await screen.findByText("z body")).toBeInTheDocument();
+    holder.current = {
+      relativePath: "b/Plan",
+      content: "b body\n",
+      hash: "b",
+    };
+    setRevision(2);
+
+    expect(
+      await screen.findByText(/opens a different file than z\/Plan/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("b body")).toBeNull();
+    expect(sent).toHaveLength(0);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open what is here now" }),
+    );
+    expect(await screen.findByText("b body")).toBeInTheDocument();
+    expect(screen.queryByText(/opens a different file/)).toBeNull();
+  });
+
+  // Source mode holds the old note's text and its base hash. Opening the
+  // address afresh must not save that into the file opened in its place,
+  // even when both files hold the same text.
+  it("never saves source mode's text into the file opened afresh", async () => {
+    const holder = {
+      current: { relativePath: "z/Plan", content: "same\n", hash: "same" },
+    };
+    const sent = mockSlug(holder, {});
+    const { setRevision } = renderPlan(1);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "typed into z" } });
+
+    holder.current = {
+      relativePath: "b/Plan",
+      content: "same\n",
+      hash: "same",
+    };
+    setRevision(2);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open what is here now" }),
+    );
+
+    expect(await screen.findByText("same")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    expect(holder.current.content).toBe("same\n");
+    expect(
+      sent.every(
+        (call) =>
+          JSON.parse(String(call.init.body)).expected_relative_path ===
+          "z/Plan",
+      ),
+    ).toBe(true);
+    // The edit is held in Settings rather than lost, and nothing is left
+    // behind under the old path for a later visit to pick up.
+    expect(listHeldDrafts().map((draft) => draft.content)).toEqual([
+      "typed into z",
+    ]);
+    expect(loadNoteDraft("vault-1", "z/Plan")).toBeNull();
+  });
+
+  // This app's own Move names where it took the note, so the page follows
+  // it without asking.
+  it("follows its own note after this app's Move kept the slug", async () => {
+    const holder = {
+      current: { relativePath: "z/Plan", content: "z body\n", hash: "z" },
+    };
+    const sent = mockSlug(holder, {});
+    const { setRevision } = renderPlan(1);
+
+    expect(await screen.findByText("z body")).toBeInTheDocument();
+    holder.current = { ...holder.current, relativePath: "b/Plan" };
+    // The refresh lands first and flags the move; the Move's navigation,
+    // carrying where it took the note, arrives after it.
+    setRevision(2);
+    expect(
+      await screen.findByText(/opens a different file than z\/Plan/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByText("hand-off"));
+    await waitFor(() =>
+      expect(screen.queryByText(/opens a different file/)).toBeNull(),
+    );
+    // Spent, so it leaves the history entry.
+    await waitFor(() =>
+      expect(screen.getByTestId("router-state").textContent).toBe("null"),
+    );
+
+    fireEvent.click(await screen.findByText("z body"));
+    typeInEditor("edited after the move");
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(JSON.parse(String(sent[0].init.body))).toMatchObject({
+      expected_relative_path: "b/Plan",
+    });
+    expect(holder.current.content).toContain("edited after the move");
+  });
+
+  it("finishes the held edit in its own note after Open it", async () => {
+    // Two files, two slugs: `a/Plan` took `plan`, `z/Plan` is now `plan-2`.
+    const files: Record<string, Disk & { slug: string }> = {
+      "a/Plan": {
+        slug: "plan",
+        relativePath: "a/Plan",
+        content: "body\n",
+        hash: "same",
+      },
+      "z/Plan": {
+        slug: "plan-2",
+        relativePath: "z/Plan",
+        content: "body\n",
+        hash: "same",
+      },
+    };
+    let zOpenedAs = "plan";
+    const bySlug = (slug: string) =>
+      Object.values(files).find((file) => file.slug === slug) ?? null;
+    const sent: Sent[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/resolve-batch")) {
+          const body = JSON.parse(String(init?.body)) as {
+            note_link_targets?: string[];
+          };
+          return jsonResponse({
+            vault_id: "vault-1",
+            results: [],
+            note_link_results: (body.note_link_targets ?? []).map((target) => ({
+              target,
+              slug:
+                files[decodeURIComponent(target.slice(1, -3))]?.slug ?? null,
+              archived: false,
+            })),
+          });
+        }
+        if (url.endsWith("/links")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        const slug = decodeURIComponent(url.split("/notes/")[1] ?? "");
+        // Before the takeover, `plan` still named z/Plan.
+        const file =
+          slug === "plan" && zOpenedAs === "plan"
+            ? files["z/Plan"]
+            : bySlug(slug);
+        if (!file) {
+          return jsonResponse({ error: "not found" }, 404);
+        }
+        if (init?.method === "PUT") {
+          sent.push({ url, init });
+          const body = JSON.parse(String(init.body)) as {
+            content: string;
+            expected_relative_path?: string;
+          };
+          if (body.expected_relative_path !== file.relativePath) {
+            return jsonResponse(
+              { code: "note_moved", message: "moved", retryable: false },
+              409,
+            );
+          }
+          file.content = body.content;
+          file.hash = "saved";
+          return jsonResponse({
+            vault_id: "vault-1",
+            ok: true,
+            slug: file.slug,
+            relative_path: file.relativePath,
+            content_hash: "saved",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
+        }
+        return jsonResponse({
+          vault_id: "vault-1",
+          note: {
+            title: "Plan",
+            slug: file.slug,
+            relative_path: file.relativePath,
+            content: file.content,
+            content_hash: file.hash,
+            layer: null,
+          },
+        });
+      },
+    );
+    renderPlan(1);
+
+    fireEvent.click(await screen.findByText("body"));
+    zOpenedAs = "plan-2";
+    typeInEditor("typed in z");
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open it" }));
+
+    await waitFor(() =>
+      expect(files["z/Plan"].content).toContain("typed in z"),
+    );
+    expect(files["a/Plan"].content).toBe("body\n");
+    expect(String(sent.at(-1)?.url)).toContain("/notes/plan-2");
+    await waitFor(() => expect(loadNoteDraft("vault-1", "z/Plan")).toBeNull());
+    expect(screen.queryByText(/Edits aren.t saving/)).toBeNull();
   });
 });

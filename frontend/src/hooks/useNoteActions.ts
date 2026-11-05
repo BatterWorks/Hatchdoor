@@ -29,6 +29,22 @@ interface UseNoteActionsParams {
 }
 
 /**
+ * Router state a Rename, Move or Archive leaves on the note it opens (#627).
+ * The note page treats its note's path as its identity and refuses to adopt
+ * another file under the same slug; a slug that stayed while its own file
+ * moved looks exactly like that from the page. This names the move, so the
+ * page follows its note instead of reporting another note at its address.
+ */
+export type NoteMovedHere = { movedFrom: string; movedTo: string };
+
+function noteMovedHere(
+  from: string,
+  to: string | null | undefined,
+): NoteMovedHere | undefined {
+  return to ? { movedFrom: from, movedTo: to } : undefined;
+}
+
+/**
  * Owns the note-action dialog (create/rename/move/archive/delete) and the
  * handlers that perform each write, refresh the vault, and navigate to the
  * result. Depends on the current note, the enabled-Vault list (to resolve a
@@ -98,6 +114,7 @@ export function useNoteActions({
       vaultId: activeNote.vaultId,
       slug: activeNote.slug,
       contentHash: activeNote.contentHash,
+      relativePath: activeNote.relativePath,
     };
   }, [activeNote]);
 
@@ -187,7 +204,8 @@ export function useNoteActions({
         return;
       }
       try {
-        const { vaultId, slug, contentHash } = requireActiveNoteHash();
+        const { vaultId, slug, contentHash, relativePath } =
+          requireActiveNoteHash();
         const outcome = await renameNote(vaultId, slug, trimmed, contentHash);
         setNoteActionDialog(null);
         setWriteNotice(describeWriteOutcome(outcome));
@@ -195,6 +213,7 @@ export function useNoteActions({
         if (outcome.slug) {
           navigate(
             `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+            { state: noteMovedHere(relativePath, outcome.relative_path) },
           );
         }
       } catch (error) {
@@ -227,7 +246,8 @@ export function useNoteActions({
         return;
       }
       try {
-        const { vaultId, slug, contentHash } = requireActiveNoteHash();
+        const { vaultId, slug, contentHash, relativePath } =
+          requireActiveNoteHash();
         const outcome = await moveNote(
           vaultId,
           slug,
@@ -240,6 +260,7 @@ export function useNoteActions({
         if (outcome.slug) {
           navigate(
             `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+            { state: noteMovedHere(relativePath, outcome.relative_path) },
           );
         }
       } catch (error) {
@@ -263,7 +284,8 @@ export function useNoteActions({
   const handleArchiveNote = useCallback(async () => {
     setNoteActionError(null);
     try {
-      const { vaultId, slug, contentHash } = requireActiveNoteHash();
+      const { vaultId, slug, contentHash, relativePath } =
+        requireActiveNoteHash();
       const outcome = await archiveNote(vaultId, slug, contentHash);
       setNoteActionDialog(null);
       setWriteNotice(describeWriteOutcome(outcome));
@@ -271,6 +293,7 @@ export function useNoteActions({
       if (outcome.slug) {
         navigate(
           `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+          { state: noteMovedHere(relativePath, outcome.relative_path) },
         );
       }
     } catch (error) {

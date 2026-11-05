@@ -1,17 +1,20 @@
 /**
- * Recovery for drafts that predate Vault qualification (#137): a pre-#137
- * note draft was keyed by slug alone, and the standalone create draft has
- * never carried a Vault at all. Neither can be silently reused once notes
- * are addressed by Vault + slug, so both surface here for explicit,
- * one-row-at-a-time recovery instead. This is a migration artefact, not a
- * standing feature — the section withdraws for good once the last held
- * draft is dealt with.
+ * Recovery for drafts that cannot name the note they belong to: a note draft
+ * keyed by slug, alone before #137 or with its Vault until #627 (a slug can
+ * pass to a same-named note, so neither names one file), and the standalone
+ * create draft, which has never carried a Vault at all. None can be silently
+ * reused, so they surface here for explicit, one-row-at-a-time recovery
+ * instead. A restored note draft is filed under the path of the note the
+ * destination read found. This is a migration artefact, not a standing
+ * feature: the section withdraws for good once the last held draft is dealt
+ * with.
  */
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
+import { findNoteAtPath } from "../../components/note-page/wikilinks";
 import type { VaultId, VaultSummary } from "../../types";
 import { saveNoteDraft, type HeldDraft } from "../../lib/writeDrafts";
 import { formatWhen } from "./relativeTime";
@@ -110,8 +113,23 @@ function DraftRow({
 
     setRestoring(true);
     try {
+      // A draft held by path (#627) names a file, not an address: a slug
+      // equal to that path can belong to a namesake, so the path is looked up.
+      let slug = draft.slug;
+      if (draft.relativePath !== undefined) {
+        const found = await findNoteAtPath(destination, draft.relativePath);
+        if (found === undefined) {
+          setMessage("This Vault could not be checked. Try again.");
+          return;
+        }
+        if (found === null) {
+          setNoSuchNote(true);
+          return;
+        }
+        slug = found;
+      }
       const res = await apiFetch(
-        `/api/v1/vaults/${encodeURIComponent(destination)}/notes/${encodeURIComponent(draft.slug)}`,
+        `/api/v1/vaults/${encodeURIComponent(destination)}/notes/${encodeURIComponent(slug)}`,
       );
       if (res.status === 404) {
         setNoSuchNote(true);
@@ -131,17 +149,21 @@ function DraftRow({
       // against — is preserved rather than replaced with the destination
       // note's current hash, so NotePage's existing stale-draft check (which
       // compares the two) still fires correctly on a note that moved on disk
-      // since the draft was made.
-      saveNoteDraft(destination, draft.slug, {
+      // since the draft was made. It is filed under the path of the note the
+      // user is about to open (#627), which is the note this read found.
+      const found = (await res.json()) as {
+        note: { slug: string; relative_path: string };
+      };
+      saveNoteDraft(destination, found.note.relative_path, {
         vaultId: destination,
-        slug: draft.slug,
+        relativePath: found.note.relative_path,
         content: draft.content,
         baseContentHash: draft.baseContentHash,
         savedAt: Date.now(),
       });
       onDiscard(draft.id);
       navigate(
-        `/v/${encodeURIComponent(destination)}/n/${encodeURIComponent(draft.slug)}?restoreEdit=1`,
+        `/v/${encodeURIComponent(destination)}/n/${encodeURIComponent(found.note.slug)}?restoreEdit=1`,
       );
     } catch {
       setMessage("This Vault could not be checked. Try again.");

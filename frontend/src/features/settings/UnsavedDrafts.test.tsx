@@ -62,7 +62,11 @@ describe("UnsavedDrafts (#151)", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({
         vault_id: v.vault_id,
-        note: { content_hash: "fresh-hash" },
+        note: {
+          slug: "orphaned",
+          relative_path: "Notes/Orphaned",
+          content_hash: "fresh-hash",
+        },
       }),
     );
     const onDiscard = vi.fn();
@@ -86,7 +90,7 @@ describe("UnsavedDrafts (#151)", () => {
       expect(onDiscard).toHaveBeenCalledWith("note:orphaned"),
     );
     const stored = window.localStorage.getItem(
-      "hatchdoor:draft:note:vault-1:orphaned",
+      "hatchdoor:draft:note-path:vault-1:Notes/Orphaned",
     );
     expect(stored).toContain("some unsaved text");
     // The draft's own baseContentHash survives restore — never the
@@ -246,5 +250,73 @@ describe("UnsavedDrafts (#151)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
     expect(await screen.findByText(/not answering right now/)).toBeVisible();
+  });
+
+  // #627: a draft held by path names a file. A root note's path can equal a
+  // namesake's slug, so restore asks who is at the path, never the slug.
+  it("looks a path-held draft up by its path, not as a slug", async () => {
+    const v = vault("vault-1", "Alpha");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/resolve-batch")) {
+            const body = JSON.parse(String(init?.body)) as {
+              note_link_targets: string[];
+            };
+            return jsonResponse({
+              vault_id: "vault-1",
+              results: [],
+              note_link_results: body.note_link_targets.map((target) => ({
+                target,
+                slug: null,
+                archived: false,
+              })),
+            });
+          }
+          return jsonResponse({
+            note: { slug: "todo", relative_path: "x/todo" },
+          });
+        },
+      );
+    const onRestoreCreateDraft = vi.fn().mockResolvedValue(true);
+
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[
+            {
+              id: "note-path:vault-1:todo:1",
+              kind: "note",
+              slug: "todo",
+              relativePath: "todo",
+              content: "typed into the root todo",
+              baseContentHash: "h",
+              savedAt: Date.now(),
+            },
+          ]}
+          vaults={[v]}
+          onRestoreCreateDraft={onRestoreCreateDraft}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await screen.findByText(/has no note at/);
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes("/notes/")),
+    ).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "restore it as a new note here" }),
+    );
+    expect(onRestoreCreateDraft).toHaveBeenCalledWith(
+      "vault-1",
+      "",
+      "todo",
+      "typed into the root todo",
+    );
   });
 });

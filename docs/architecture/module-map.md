@@ -2114,7 +2114,10 @@ the HTTP and MCP write adapters used to repeat around a `vault/write`
 primitive: resolving the Vault ID to a control block and refusing a missing,
 disabled, or runtime-less Vault; the mutation capability check; the per-Vault
 mutation lock; building the authoritative index off the async runtime;
-resolving the slug to an entry; refusing a write to a path this Vault's own
+resolving the slug to an entry and, for `update_note` given an expected
+Vault-relative path, refusing with non-retryable `note_moved` when the slug
+names another file (#627; the HTTP adapter answers `409`, MCP passes none);
+refusing a write to a path this Vault's own
 exclusion patterns would make invisible, using the write layer's shared path
 normalisers before matching, including `.md` for note targets (#624); resolving the archive prefix from the
 Vault's own archive folder or the instance default; running the blocking write
@@ -4987,6 +4990,8 @@ resolved one is pointed at the asset route, so a root-anchored or bare-name
 `![](path)`, the forms ADR-33's inserts can write, renders; an unresolved
 image keeps its destination. `resolveAssetTargets` is the uncached form the
 editor asks when choosing a `shortest` attachment path, and
+`findNoteAtPath` (#627) answers, uncached, which slug the note at one exact
+Vault-relative path has now, for the note page's moved-slug check;
 `resolveNoteTargets` (#544) answers wikilink targets alone from the same
 cache the hook fills, one `resolve-batch` per call, for the live editor's
 links, and `cachedAssetHref` (#544) gives one embed target the href the
@@ -5144,7 +5149,37 @@ once autosave has stopped on a refused save, the effect's
 every later revision for the session. When no write of ours can be in flight
 the bump is someone else's, so it sets `noteChangedOnDisk` — flagged, with its
 own reading-view notice, rather than refetched, because refetching is what
-would replace the unsaved text. `NotePage`'s
+would replace the unsaved text. A note's identity on the page is its
+Vault-relative path, not the URL's slug (#627): a slug passes to a same-named
+note earlier in path order (ADR-24). Every later read of the open note by slug
+(the revision refresh, the reload after closing source mode, the conflict
+reads behind Review, Save and reload-latest) goes through `ownNoteOrMoved`,
+which drops a read naming another file and sets `noteMoved` instead; every
+save sends the opened path, the draft writer files under it, and a
+`note_moved` refusal sets the same flag. While it is set autosave is disabled
+and `note-page/wikilinks.ts`'s `findNoteAtPath` asks the server who is at the
+opened path now (a root-anchored `note_link_targets` entry of `resolve-batch`,
+which resolves by path alone, ignoring case and Unicode form): another slug
+there means the slug changed hands, so the conflict and error strip gives way
+to one notice that this address opens a different note, with an **Open it**
+button to that slug; nobody there, or this same slug matched only loosely,
+means the note was moved, renamed or deleted outside the page, which the page
+cannot tell from a namesake inheriting the slug, so a second notice asks, and
+its **Open what is here now** opens the address as a fresh visit: the page
+writes out its draft, drops autosave's unsent edits (`useNoteAutosave`'s
+`discard`), moves the old path's draft to the held-draft store
+(`lib/writeDrafts.ts`'s `holdNoteDraft`, restorable from Settings as a note at
+that path) and bumps a visit counter that is part of the note key, so every
+per-note reset runs as on navigation. A lookup that could not be made shows
+the first notice with **Try again**. A Rename, Move or Archive made in the app
+leaves `useNoteActions`' `NoteMovedHere` router state (`{movedFrom, movedTo}`),
+which the page accepts as its own note's new path without asking, once, and
+then replaces out of the history entry. The explorer tree is not asked: it
+serves the index snapshot, which can lag a new note by minutes. Because the
+route reuses the page, a key change also writes any debounced draft out at
+once, inline draft recovery waits for the read made under the new key, and
+autosave is resumed, so a save refused on one note does not leave the next
+unsaved. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp has nothing
 to touch there. `handleSave`'s catch and the live editor's `onUploadError`
@@ -5276,8 +5311,22 @@ blocked store stays silent on those paths and surfacing it there is unfinished.
 `collectLegacyHeldDrafts` reads every key before it writes any, the same
 two-phase shape `pruneNoteDrafts` uses, because writing into a storage area
 mid-enumeration can shift entries behind the `key(i)` cursor and skip drafts.
-`api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive }` (#330) for
-the unload send, and `hooks/useNoteAutosave.ts` takes an optional `flushSave`
+`api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive,
+expectedRelativePath }`: `keepalive` (#330) for the unload send, and
+`expectedRelativePath` (#627), sent as `expected_relative_path`, the path the
+page opened, which the server checks against the file the slug names now;
+its `note_moved` refusal is thrown as `NoteMovedError` (`isNoteMovedError`),
+never as `ConflictError`, so neither autosave nor source mode offers the other
+note's text as the version on disk. Note drafts (`lib/writeDrafts.ts`) are
+keyed by Vault and Vault-relative path under `hatchdoor:draft:note-path:`
+(#627), and `NoteDraft` carries `relativePath` in place of `slug`; every
+slug-keyed draft under `hatchdoor:draft:note:`, pre-#137 or Vault-qualified, is
+swept into the held-draft store by `collectLegacyHeldDrafts`, and
+`UnsavedDrafts.tsx` files a restored one under the path its destination read
+returns; a draft the note page held by path (`holdNoteDraft`, which sets
+`HeldNoteDraft.relativePath`) is looked up by that path through Note reading
+and rendering's `findNoteAtPath`, never as a slug, since a root note's path
+can equal a namesake's slug. For the unload send, `hooks/useNoteAutosave.ts` takes an optional `flushSave`
 the `pagehide`/`visibilitychange` flush hands to `write` in place of the
 ordinary sender: a fetch started while the document is being torn down is
 cancelled with it. It is one send, not a side channel — the hook books its
@@ -5290,7 +5339,9 @@ edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`
 (coordination path) asks it before pulling an update and before acting on one
 that has already activated.
-`hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second
+`hooks/useNoteActions.ts`'s Rename, Move and Archive navigate with
+`NoteMovedHere` router state naming the note's old and new path (#627), which
+`NotePage` reads. Its `openCreateDialog` takes an optional second
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding
 `resolvePrimaryVaultId`'s inference for that one dialog session.

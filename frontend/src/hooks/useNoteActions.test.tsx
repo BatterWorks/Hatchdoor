@@ -1,5 +1,5 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -103,5 +103,59 @@ describe("useNoteActions — demo_read_only refusal (#152)", () => {
     expect(onDemoRefusal).toHaveBeenCalledTimes(1);
     expect(result.current.noteActionDialog).toBe("create");
     expect(result.current.noteActionError).toBe("boom");
+  });
+});
+
+describe("useNoteActions: Move names where it took the note (#627)", () => {
+  it("leaves the old and new path in the router state of the note it opens", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        vault_id: "vault-1",
+        ok: true,
+        slug: "plan",
+        relative_path: "b/Plan",
+        content_hash: "h2",
+        quality_warnings: [],
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: null,
+        layer: null,
+      }),
+    );
+    let seenState: unknown = null;
+    const Probe = () => {
+      seenState = useLocation().state;
+      return null;
+    };
+    const { result } = renderHook(
+      () =>
+        useNoteActions({
+          activeNote: {
+            vaultId: "vault-1",
+            title: "Plan",
+            slug: "plan",
+            relativePath: "z/Plan",
+            exportContent: "",
+            contentHash: "h1",
+          },
+          vaults: [healthyVault("Alpha")],
+          refreshVault: vi.fn().mockResolvedValue(undefined),
+          setWriteNotice: vi.fn(),
+        }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <MemoryRouter>
+            <Probe />
+            {children}
+          </MemoryRouter>
+        ),
+      },
+    );
+
+    await act(async () => {
+      await result.current.handleMoveNote("b");
+    });
+
+    expect(seenState).toEqual({ movedFrom: "z/Plan", movedTo: "b/Plan" });
   });
 });

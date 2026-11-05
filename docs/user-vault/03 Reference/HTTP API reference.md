@@ -358,10 +358,12 @@ Content-changing routes. Web bearer token (if configured); refused with `403 dem
 
 That rejection is unconditional. What depends on the filesystem is the narrower race: on a Vault reporting `atomic_compare_and_swap: false`, a change landing between the hash check and the replacement is overwritten instead of reported, because the save is two steps there rather than one. Read `GET .../write-capabilities` to know which kind of Vault you are writing to.
 
+A slug can change hands. When a note with the same name appears in a folder that sorts earlier, it takes the slug, and the note that had it gets `-2`. Two notes with the same text have the same hash, so the hash cannot tell them apart. The `PUT` below takes `expected_relative_path` for that case. Send the `relative_path` you read: if the slug now names a different file, the save is refused with `409 note_moved`, not retryable, and nothing is written.
+
 | Method | Path | Body | Purpose |
 | --- | --- | --- | --- |
 | POST | `/api/v1/vaults/{vault_id}/notes` | `{"relative_path", "content"}` | Create a note. |
-| PUT | `/api/v1/vaults/{vault_id}/notes/{slug}` | `{"content", "expected_content_hash"}` | Replace a note's content. |
+| PUT | `/api/v1/vaults/{vault_id}/notes/{slug}` | `{"content", "expected_content_hash", "expected_relative_path"?}` | Replace a note's content. `expected_relative_path` is optional: send the `relative_path` the read returned, and the save is refused with `409 note_moved` if the slug now names another file. |
 | PATCH | `/api/v1/vaults/{vault_id}/notes/{slug}/rename` | `{"new_title", "expected_content_hash"}` | Rename a note (keeps its folder). |
 | PATCH | `/api/v1/vaults/{vault_id}/notes/{slug}/move` | `{"target_folder", "expected_content_hash"}` | Move a note to another folder (keeps its title). |
 | PATCH | `/api/v1/vaults/{vault_id}/notes/{slug}/move-rename` | `{"target_relative_path", "expected_content_hash"}` | Move and rename in one step. |
