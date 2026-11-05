@@ -1,5 +1,6 @@
 //! Synchronization graphs for a validated, Vault-ID-owned managed checkout.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use git2::{
@@ -796,10 +797,14 @@ fn fast_forward(
     let remote = repository
         .find_commit(remote_oid)
         .map_err(|_| ManagedSyncError::Validation)?;
+    reject_ignored_files_in_the_way(
+        repository,
+        &remote.tree().map_err(|_| ManagedSyncError::Validation)?,
+    )?;
     repository
         .checkout_tree(
             remote.as_object(),
-            Some(git2::build::CheckoutBuilder::new().safe()),
+            Some(&mut safe_checkout_keeping_ignored()),
         )
         .map_err(|_| dirty_worktree_error(changed_paths(repository).unwrap_or_default()))?;
     repository
@@ -824,12 +829,20 @@ fn merge_remote(
     let local_oid = repository
         .refname_to_id(&format!("refs/heads/{}", config.branch))
         .map_err(|_| ManagedSyncError::Validation)?;
+    reject_ignored_files_in_the_way(
+        repository,
+        &merge_result_tree(repository, local_oid, remote_oid)?,
+    )?;
     let remote = repository
         .find_annotated_commit(remote_oid)
         .map_err(|_| ManagedSyncError::Validation)?;
     let mut options = MergeOptions::new();
     repository
-        .merge(&[&remote], Some(&mut options), None)
+        .merge(
+            &[&remote],
+            Some(&mut options),
+            Some(&mut safe_checkout_keeping_ignored()),
+        )
         .map_err(|_| ManagedSyncError::Validation)?;
     let mut index = repository
         .index()
@@ -867,8 +880,177 @@ fn merge_remote(
         .cleanup_state()
         .map_err(|_| ManagedSyncError::Validation)?;
     repository
-        .checkout_head(Some(git2::build::CheckoutBuilder::new().safe()))
+        .checkout_head(Some(&mut safe_checkout_keeping_ignored()))
         .map_err(|_| dirty_worktree_error(changed_paths(repository).unwrap_or_default()))
+}
+
+/// A safe checkout that also treats an ignored file in its way as a conflict.
+/// libgit2's safe mode alone counts ignored files as expendable, and a Vault
+/// note can sit in an ignored path: Hatchdoor writes there whatever the
+/// checkout's ignore rules say, and never commits it (#623).
+fn safe_checkout_keeping_ignored() -> git2::build::CheckoutBuilder<'static> {
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.safe().overwrite_ignored(false);
+    checkout
+}
+
+fn head_tree(repository: &Repository) -> Result<git2::Tree<'_>, ManagedSyncError> {
+    repository
+        .head()
+        .and_then(|head| head.peel_to_tree())
+        .map_err(|_| ManagedSyncError::Validation)
+}
+
+/// The tree a merge of `remote_oid` into `local_oid` would check out, worked
+/// out in memory. A merge that will conflict writes some of the remote's
+/// changes and aborts, so for that one the remote's own tree stands in: it
+/// holds every path the merge could write, and the turn ends in a conflict
+/// either way.
+fn merge_result_tree(
+    repository: &Repository,
+    local_oid: git2::Oid,
+    remote_oid: git2::Oid,
+) -> Result<git2::Tree<'_>, ManagedSyncError> {
+    let local = repository
+        .find_commit(local_oid)
+        .map_err(|_| ManagedSyncError::Validation)?;
+    let remote = repository
+        .find_commit(remote_oid)
+        .map_err(|_| ManagedSyncError::Validation)?;
+    let mut merged = repository
+        .merge_commits(&local, &remote, None)
+        .map_err(|_| ManagedSyncError::Validation)?;
+    if merged.has_conflicts() {
+        return remote.tree().map_err(|_| ManagedSyncError::Validation);
+    }
+    merged
+        .write_tree_to(repository)
+        .and_then(|tree| repository.find_tree(tree))
+        .map_err(|_| ManagedSyncError::Validation)
+}
+
+/// Refuse a checkout of `target` over `HEAD` that would write over a file
+/// existing only in the working tree, as a [`ManagedSyncError::Conflict`]
+/// naming those files, before anything is written.
+///
+/// By the time a turn integrates, every untracked file is either refused as
+/// dirt (Pull-only, and outside the Vault) or already committed (Two-way), so
+/// what is left on disk outside `HEAD` is ignored: a note in a path the
+/// checkout's `.gitignore`, `info/exclude` or `core.excludesFile` covers. A
+/// remote file at that path, a remote file where an ignored folder stands,
+/// and a remote folder where an ignored file stands would each destroy it,
+/// and the note exists nowhere else (ADR-10). `safe_checkout_keeping_ignored` makes
+/// libgit2 refuse the same writes; this check runs first so the refusal names
+/// the notes and leaves no merge state behind.
+///
+/// A submodule `HEAD` already has is left to libgit2, which never writes into
+/// one: its pointer moving is no write over its files, and `HEAD` lists none
+/// of them. A new submodule where ignored files stand is checked like a
+/// folder.
+fn reject_ignored_files_in_the_way(
+    repository: &Repository,
+    target: &git2::Tree<'_>,
+) -> Result<(), ManagedSyncError> {
+    let workdir = repository.workdir().ok_or(ManagedSyncError::Validation)?;
+    let head = head_tree(repository)?;
+    let diff = repository
+        .diff_tree_to_tree(Some(&head), Some(target), None)
+        .map_err(|_| ManagedSyncError::Validation)?;
+    let mut in_the_way = BTreeSet::new();
+    for delta in diff.deltas() {
+        if delta.status() == git2::Delta::Deleted {
+            continue;
+        }
+        let Some(path) = delta.new_file().path() else {
+            continue;
+        };
+        // Walk down from the top: a remote file needs every folder above it
+        // to be a folder. The walk stops at the first thing that is not one,
+        // a symbolic link included, because the checkout replaces that thing
+        // and never writes through it.
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            let Ok(metadata) = std::fs::symlink_metadata(workdir.join(&prefix)) else {
+                break;
+            };
+            if metadata.is_dir() && prefix.as_path() != path {
+                continue;
+            }
+            if !exists_as_named(workdir, &prefix) {
+                break;
+            }
+            if metadata.is_dir() {
+                untracked_files_under(workdir, &head, &prefix, &mut in_the_way)?;
+            } else if tracked_mode(&head, &prefix).is_none() {
+                in_the_way.insert(prefix.clone());
+            }
+            break;
+        }
+    }
+    if in_the_way.is_empty() {
+        Ok(())
+    } else {
+        Err(ManagedSyncError::Conflict {
+            files: in_the_way
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        })
+    }
+}
+
+/// True when every component of `path` is on disk under exactly that name. A
+/// case-insensitive disk also answers to `notes.md` for a stored `Notes.md`,
+/// so a rename by case alone would otherwise look like a file in the way.
+/// Read only for a path about to be reported or walked, which is rare.
+fn exists_as_named(workdir: &Path, path: &Path) -> bool {
+    let mut parent = workdir.to_path_buf();
+    path.components().all(|component| {
+        let listed = std::fs::read_dir(&parent).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name() == component.as_os_str())
+        });
+        parent.push(component);
+        listed
+    })
+}
+
+/// The mode `HEAD` tracks `path` with, or `None` when it tracks nothing there.
+fn tracked_mode(head: &git2::Tree<'_>, path: &Path) -> Option<i32> {
+    head.get_path(path).ok().map(|entry| entry.filemode())
+}
+
+/// Add every file under the folder `relative` that `head` does not track to
+/// `found`. Symbolic links are listed, never followed, and a submodule's
+/// folder is not entered. An empty folder adds nothing: replacing it loses
+/// nothing, and libgit2 replaces it.
+fn untracked_files_under(
+    workdir: &Path,
+    head: &git2::Tree<'_>,
+    relative: &Path,
+    found: &mut BTreeSet<PathBuf>,
+) -> Result<(), ManagedSyncError> {
+    if tracked_mode(head, relative) == Some(i32::from(git2::FileMode::Commit)) {
+        return Ok(());
+    }
+    let entries =
+        std::fs::read_dir(workdir.join(relative)).map_err(|_| ManagedSyncError::Validation)?;
+    for entry in entries {
+        let entry = entry.map_err(|_| ManagedSyncError::Validation)?;
+        let path = relative.join(entry.file_name());
+        let is_dir = entry
+            .file_type()
+            .map_err(|_| ManagedSyncError::Validation)?
+            .is_dir();
+        if is_dir {
+            untracked_files_under(workdir, head, &path, found)?;
+        } else if tracked_mode(head, &path).is_none() {
+            found.insert(path);
+        }
+    }
+    Ok(())
 }
 
 fn conflict_paths(index: &mut git2::Index) -> Vec<String> {
@@ -1090,6 +1272,9 @@ mod tests {
 
     fn commit(repository: &Repository, path: &str, contents: &str, message: &str) {
         let workdir = repository.workdir().expect("workdir");
+        if let Some(parent) = workdir.join(path).parent() {
+            std::fs::create_dir_all(parent).expect("parent directory");
+        }
         std::fs::write(workdir.join(path), contents).expect("write");
         let mut index = repository.index().expect("index");
         index.add_path(Path::new(path)).expect("stage");
@@ -1505,6 +1690,470 @@ mod tests {
         assert_eq!(checkout.state(), git2::RepositoryState::Clean);
         let remote = Repository::open_bare(root.path().join("remote.git")).expect("remote");
         assert_eq!(file_at_head(&remote, "vault/Home.md"), "remote change\n");
+    }
+
+    /// Mark `pattern` ignored in the checkout's own `.git/info/exclude`, the
+    /// way an operator's local ignore rules would, and write `notes` (paths
+    /// relative to the checkout) as Hatchdoor would write them there.
+    fn ignored_notes(config: &ManagedSyncConfig, pattern: &str, notes: &[&str]) {
+        std::fs::write(
+            config.repository_path.join(".git/info/exclude"),
+            format!("{pattern}\n"),
+        )
+        .expect("exclude rule");
+        for note in notes {
+            let path = config.repository_path.join(note);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("note folder");
+            std::fs::write(&path, format!("hatchdoor {note}\n")).expect("ignored note");
+        }
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert!(
+            checkout.is_path_ignored(notes[0]).expect("ignore lookup"),
+            "fixture note must be ignored"
+        );
+    }
+
+    fn assert_notes_unchanged(config: &ManagedSyncConfig, notes: &[&str]) {
+        for note in notes {
+            assert_eq!(
+                std::fs::read_to_string(config.repository_path.join(note))
+                    .expect("ignored note remains"),
+                format!("hatchdoor {note}\n")
+            );
+        }
+    }
+
+    fn assert_conflict_names(error: &ManagedSyncError, expected: &[&str]) {
+        let ManagedSyncError::Conflict { files } = error else {
+            panic!("expected a conflict, got {error:?}");
+        };
+        assert_eq!(
+            files,
+            &expected
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_fast_forward_onto_an_ignored_note_is_a_conflict_that_keeps_the_note() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let note = "vault/private/Diary.md";
+        ignored_notes(&config, "vault/private/", &[note]);
+        let before = local_head(&config);
+        remote_commit(root.path(), note, "laptop version\n", "force add diary");
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored note in the way");
+
+        assert_conflict_names(&error, &[note]);
+        assert_notes_unchanged(&config, &[note]);
+        assert_eq!(local_head(&config), before);
+    }
+
+    #[test]
+    fn a_pull_only_fast_forward_onto_an_ignored_note_is_a_conflict_that_keeps_the_note() {
+        let (root, config) = fixture(ManagedSyncMode::PullOnly);
+        let note = "vault/private/Diary.md";
+        ignored_notes(&config, "vault/private/", &[note]);
+        let before = local_head(&config);
+        remote_commit(root.path(), note, "laptop version\n", "force add diary");
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored note in the way");
+
+        assert_conflict_names(&error, &[note]);
+        assert_notes_unchanged(&config, &[note]);
+        assert_eq!(local_head(&config), before);
+    }
+
+    #[test]
+    fn a_remote_file_replacing_an_ignored_folder_is_a_conflict_that_keeps_its_notes() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let notes = ["vault/drafts/A.md", "vault/drafts/B.md"];
+        ignored_notes(&config, "vault/drafts/", &notes);
+        let before = local_head(&config);
+        remote_commit(
+            root.path(),
+            "vault/drafts",
+            "a plain file\n",
+            "add drafts file",
+        );
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored folder in the way");
+
+        assert_conflict_names(&error, &notes);
+        assert_notes_unchanged(&config, &notes);
+        assert_eq!(local_head(&config), before);
+    }
+
+    #[test]
+    fn a_remote_folder_replacing_an_ignored_file_is_a_conflict_that_keeps_it() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let note = "vault/scratch";
+        ignored_notes(&config, "vault/scratch", &[note]);
+        let before = local_head(&config);
+        remote_commit(
+            root.path(),
+            "vault/scratch/Inside.md",
+            "remote\n",
+            "add scratch folder",
+        );
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored file in the way");
+
+        assert_conflict_names(&error, &[note]);
+        assert_notes_unchanged(&config, &[note]);
+        assert_eq!(local_head(&config), before);
+    }
+
+    #[test]
+    fn the_checkout_itself_refuses_to_overwrite_an_ignored_note() {
+        let (root, config) = fixture(ManagedSyncMode::PullOnly);
+        let note = "vault/private/Diary.md";
+        ignored_notes(&config, "vault/private/", &[note]);
+        remote_commit(root.path(), note, "laptop version\n", "force add diary");
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        fetch(&checkout, &config).expect("fetch");
+        let remote = checkout
+            .find_commit(graph(&checkout, &config).expect("graph").remote_oid)
+            .expect("remote commit");
+
+        checkout
+            .checkout_tree(
+                remote.as_object(),
+                Some(&mut safe_checkout_keeping_ignored()),
+            )
+            .expect_err("the backstop refuses on its own");
+
+        assert_notes_unchanged(&config, &[note]);
+    }
+
+    #[test]
+    fn a_new_submodule_where_an_ignored_folder_stands_is_a_conflict() {
+        let (root, config) = fixture(ManagedSyncMode::PullOnly);
+        let notes = ["vault/drafts/A.md"];
+        ignored_notes(&config, "vault/drafts/", &notes);
+        let target = local_head(&config);
+        remote_gitlink(
+            root.path(),
+            "vault/drafts",
+            target,
+            "add submodule over drafts",
+        );
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored folder in the way");
+
+        assert_conflict_names(&error, &notes);
+        assert_notes_unchanged(&config, &notes);
+    }
+
+    /// Commit the staged index of `repository` and push it to the remote.
+    fn commit_staged_and_push(repository: &Repository, message: &str) {
+        let tree = repository
+            .find_tree(
+                repository
+                    .index()
+                    .expect("index")
+                    .write_tree()
+                    .expect("tree id"),
+            )
+            .expect("tree");
+        let parent = repository
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        let signature = Signature::now("Test", "test@example.test").expect("signature");
+        repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &[&parent],
+            )
+            .expect("commit");
+        repository
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("push");
+    }
+
+    #[test]
+    fn a_tracked_symlink_replaced_by_a_folder_is_not_a_conflict() {
+        let (root, config) = fixture(ManagedSyncMode::PullOnly);
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("link target");
+        std::fs::write(elsewhere.join("x.md"), "outside\n").expect("outside file");
+        let actor = root.path().join("actor-link");
+        let repository = Repository::clone(
+            root.path()
+                .join("remote.git")
+                .to_str()
+                .expect("remote path"),
+            &actor,
+        )
+        .expect("actor checkout");
+        std::os::unix::fs::symlink(&elsewhere, actor.join("vault/Assets")).expect("symlink");
+        let mut index = repository.index().expect("index");
+        index
+            .add_path(Path::new("vault/Assets"))
+            .expect("stage link");
+        index.write().expect("write index");
+        commit_staged_and_push(&repository, "add link");
+        synchronize_managed_checkout(&config, &WriteLedger::new()).expect("pull the link");
+        assert!(
+            std::fs::symlink_metadata(config.vault_path.join("Assets"))
+                .expect("link")
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_file(actor.join("vault/Assets")).expect("remove link");
+        std::fs::create_dir(actor.join("vault/Assets")).expect("folder");
+        std::fs::write(actor.join("vault/Assets/x.md"), "inside\n").expect("inside file");
+        let mut index = repository.index().expect("index");
+        index
+            .remove_path(Path::new("vault/Assets"))
+            .expect("unstage link");
+        index
+            .add_path(Path::new("vault/Assets/x.md"))
+            .expect("stage folder");
+        index.write().expect("write index");
+        commit_staged_and_push(&repository, "replace link");
+
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("link replaced");
+
+        assert_eq!(outcome, ManagedSyncOutcome::PullOnlyFastForwarded);
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("x.md")).expect("outside file"),
+            "outside\n"
+        );
+    }
+
+    #[test]
+    fn a_merge_onto_an_ignored_note_is_a_conflict_that_keeps_the_note_and_the_local_commit() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let note = "vault/private/Merge.md";
+        ignored_notes(&config, "vault/private/", &[note]);
+        std::fs::write(config.vault_path.join("Local.md"), "local\n").expect("local note");
+        remote_commit(root.path(), note, "remote version\n", "force add merge");
+        remote_commit(root.path(), "vault/Other.md", "other\n", "unrelated remote");
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored note in the way");
+
+        assert_conflict_names(&error, &[note]);
+        assert_notes_unchanged(&config, &[note]);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(file_at_head(&checkout, "vault/Local.md"), "local\n");
+        assert_eq!(checkout.state(), git2::RepositoryState::Clean);
+        assert!(!config.vault_path.join("Other.md").exists());
+        let remote = Repository::open_bare(root.path().join("remote.git")).expect("remote");
+        assert!(
+            remote
+                .head()
+                .expect("remote head")
+                .peel_to_tree()
+                .expect("remote tree")
+                .get_path(Path::new("vault/Local.md"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_gitignore_rule_protects_a_note_from_a_force_added_remote_copy() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        std::fs::write(config.vault_path.join(".gitignore"), "private/\n").expect("gitignore");
+        synchronize_managed_checkout(&config, &WriteLedger::new()).expect("push the gitignore");
+        let note = "vault/private/Diary.md";
+        std::fs::create_dir_all(config.vault_path.join("private")).expect("private folder");
+        std::fs::write(
+            config.repository_path.join(note),
+            format!("hatchdoor {note}\n"),
+        )
+        .expect("ignored note");
+        let before = local_head(&config);
+        // `commit` stages with `add_path`, which ignores ignore rules as
+        // `git add -f` does.
+        remote_commit(root.path(), note, "laptop version\n", "force add diary");
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored note in the way");
+
+        assert_conflict_names(&error, &[note]);
+        assert_notes_unchanged(&config, &[note]);
+        assert_eq!(local_head(&config), before);
+    }
+
+    #[test]
+    fn a_merge_bringing_a_file_where_an_ignored_folder_stands_is_a_conflict() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let notes = ["vault/drafts/A.md", "vault/drafts/B.md"];
+        ignored_notes(&config, "vault/drafts/", &notes);
+        std::fs::write(config.vault_path.join("Local.md"), "local\n").expect("local note");
+        remote_commit(
+            root.path(),
+            "vault/drafts",
+            "a plain file\n",
+            "add drafts file",
+        );
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ignored folder in the way");
+
+        assert_conflict_names(&error, &notes);
+        assert_notes_unchanged(&config, &notes);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(checkout.state(), git2::RepositoryState::Clean);
+        assert_eq!(file_at_head(&checkout, "vault/Local.md"), "local\n");
+    }
+
+    #[test]
+    fn an_empty_ignored_folder_in_the_way_never_blocks_a_sync() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        std::fs::write(
+            config.repository_path.join(".git/info/exclude"),
+            "vault/drafts/\n",
+        )
+        .expect("exclude rule");
+        std::fs::create_dir(config.vault_path.join("drafts")).expect("empty folder");
+        remote_commit(
+            root.path(),
+            "vault/drafts",
+            "a plain file\n",
+            "add drafts file",
+        );
+
+        synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect("an empty folder holds nothing to lose");
+
+        assert_eq!(
+            std::fs::read_to_string(config.vault_path.join("drafts")).expect("remote file"),
+            "a plain file\n"
+        );
+    }
+
+    /// Point the gitlink at `path` to `target` in a commit pushed to the remote.
+    fn remote_gitlink(root: &Path, path: &str, target: git2::Oid, message: &str) {
+        let actor = root.join(format!("actor-{}", message.replace(' ', "-")));
+        let repository = Repository::clone(
+            root.join("remote.git").to_str().expect("remote path"),
+            &actor,
+        )
+        .expect("actor checkout");
+        let mut index = repository.index().expect("index");
+        let zero = git2::IndexTime::new(0, 0);
+        index
+            .add(&git2::IndexEntry {
+                ctime: zero,
+                mtime: zero,
+                dev: 0,
+                ino: 0,
+                mode: u32::try_from(i32::from(git2::FileMode::Commit)).expect("mode"),
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: target,
+                flags: 0,
+                flags_extended: 0,
+                path: path.as_bytes().to_vec(),
+            })
+            .expect("stage gitlink");
+        index.write().expect("write index");
+        let tree = repository
+            .find_tree(index.write_tree().expect("tree id"))
+            .expect("tree");
+        let parent = repository
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        let signature = Signature::now("Test", "test@example.test").expect("signature");
+        repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &[&parent],
+            )
+            .expect("commit gitlink");
+        repository
+            .find_remote("origin")
+            .expect("origin")
+            .push(&["refs/heads/master:refs/heads/master"], None)
+            .expect("push gitlink");
+    }
+
+    #[test]
+    fn a_submodule_pointer_moving_never_blocks_a_sync() {
+        let (root, config) = fixture(ManagedSyncMode::PullOnly);
+        let upstream = root.path().join("submodule-upstream");
+        let upstream_repository = Repository::init(&upstream).expect("submodule upstream");
+        commit(&upstream_repository, "Inner.md", "inner\n", "first");
+        let first = upstream_repository
+            .head()
+            .expect("head")
+            .target()
+            .expect("oid");
+        commit(&upstream_repository, "Inner.md", "inner again\n", "second");
+        let second = upstream_repository
+            .head()
+            .expect("head")
+            .target()
+            .expect("oid");
+        remote_gitlink(root.path(), "vault/sub", first, "add submodule");
+        synchronize_managed_checkout(&config, &WriteLedger::new()).expect("pull the submodule");
+        // The submodule as `git submodule update` leaves it: a checkout of
+        // its own, at the commit the outer `HEAD` points to, whose files the
+        // outer `HEAD` does not list.
+        let submodule = config.vault_path.join("sub");
+        let _ = std::fs::remove_dir(&submodule);
+        let inner = Repository::clone(upstream.to_str().expect("upstream path"), &submodule)
+            .expect("submodule checkout");
+        inner
+            .reset(
+                inner.find_commit(first).expect("first").as_object(),
+                ResetType::Hard,
+                None,
+            )
+            .expect("submodule at first");
+        remote_gitlink(root.path(), "vault/sub", second, "bump submodule");
+
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("pointer moves");
+
+        assert_eq!(outcome, ManagedSyncOutcome::PullOnlyFastForwarded);
+        assert_eq!(
+            std::fs::read_to_string(submodule.join("Inner.md")).expect("submodule note"),
+            "inner\n"
+        );
+    }
+
+    #[test]
+    fn an_ignored_note_the_remote_does_not_touch_never_blocks_a_sync() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let note = "vault/private/Diary.md";
+        ignored_notes(&config, "vault/private/", &[note]);
+        std::fs::write(config.vault_path.join("Local.md"), "local\n").expect("local note");
+        remote_commit(root.path(), "vault/Other.md", "other\n", "unrelated remote");
+
+        synchronize_managed_checkout(&config, &WriteLedger::new()).expect("merge and push");
+
+        assert_notes_unchanged(&config, &[note]);
+        assert_eq!(
+            std::fs::read_to_string(config.vault_path.join("Other.md")).expect("merged"),
+            "other\n"
+        );
     }
 
     #[test]

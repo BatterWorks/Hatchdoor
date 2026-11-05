@@ -3139,9 +3139,16 @@ while a managed-Git or `ExistingGit` remote-sync turn, or a Two-way commit
 turn, is in flight for that Vault, see below; task replacement drains
 before another task can start;
 local mode never contacts a remote; remote mode never force-checks out over
-uncommitted manual vault edits (ADR-10). Managed acquisition never writes
-credentials to URLs, Git configuration, reads, logs, errors, or status; it
-never deletes, overwrites, or silently adopts a checkout destination. The
+uncommitted manual vault edits (ADR-10), ignored files included: a
+fast-forward or merge that would write over a file `HEAD` does not track
+(a note in an ignored path, or one inside an ignored folder) stops first as
+`ManagedSyncError::Conflict` naming those files, and both checkouts set
+libgit2's don't-overwrite-ignored flag besides (#623). A merge is checked
+against its in-memory result; the files of a submodule `HEAD` already has,
+paths reached through a symbolic link, and a name a case-insensitive disk
+only matches by case are never counted.
+Managed acquisition never writes credentials to URLs, Git configuration,
+reads, logs, errors, or status; it never deletes, overwrites, or silently adopts a checkout destination. The
 managed-Git scheduler adds no persisted queue, priority, or second execution
 lane (ADR-13); a Git turn's returned failure always completes that Vault's
 turn so the shared worker is released for the next Vault. A `ManagedGit` or
