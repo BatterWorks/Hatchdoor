@@ -782,10 +782,12 @@ fn error(vault_id: Option<VaultId>, code: &str, message: &str, retryable: bool) 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Condvar, mpsc};
     use std::time::Duration;
+    use unicode_normalization::UnicodeNormalization;
 
     use tempfile::TempDir;
 
@@ -929,6 +931,66 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             std::fs::write(path, contents).expect("write note");
         }
+    }
+
+    /// Keyword search finds a word inside a CJK sentence, a decomposed Hangul
+    /// note from a composed query, and other scripts as before (#634).
+    #[test]
+    fn keyword_search_finds_words_inside_cjk_sentences_and_decomposed_hangul() {
+        let hangul = "# 한국어 노트\n\n한글 자모가 조합된 본문입니다."
+            .nfd()
+            .collect::<String>();
+        let files: &[(&str, &str)] = &[
+            (
+                "日本語のノート.md",
+                "# 日本語のノート\n\nひらがな、カタカナ、漢字が混ざった本文です。",
+            ),
+            ("中文笔记.md", "# 中文笔记\n\n简体中文正文，包含标点符号。"),
+            ("Hangul.md", &hangul),
+            ("Thai.md", "# บันทึก\n\nภาษาไทยไม่มีการเว้นวรรคระหว่างคำ"),
+            (
+                "Cyrillic.md",
+                "# Русская заметка\n\nКириллица, включая ё и щ.",
+            ),
+            ("Arabic.md", "# ملاحظة عربية\n\nرابط داخل فقرة عربية."),
+            ("Latin.md", "# Café\n\nThe well-known café serves espresso."),
+        ];
+        let workspace = workspace(&[("Pathological", files)]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let titles = |query: &str| {
+            let mut search = request(VaultScope::All, query);
+            search.mode = SearchMode::Keyword;
+            core.search(search)
+                .expect("keyword search")
+                .data
+                .results
+                .into_iter()
+                .map(|hit| hit.note_title)
+                .collect::<Vec<_>>()
+        };
+        for (query, title) in [
+            ("日本語", "日本語のノート"),
+            ("本文", "日本語のノート"),
+            ("漢字", "日本語のノート"),
+            ("中文", "中文笔记"),
+            ("笔记", "中文笔记"),
+            ("한국어", "Hangul"),
+            ("조합된", "Hangul"),
+            ("ภาษาไทย", "Thai"),
+            ("เว้นวรรค", "Thai"),
+            ("Кириллица", "Cyrillic"),
+            ("ё", "Cyrillic"),
+            ("عربية", "Arabic"),
+            ("cafe", "Latin"),
+            ("well-known", "Latin"),
+        ] {
+            assert_eq!(titles(query), [title], "{query}");
+        }
+        assert!(
+            titles("本文字").is_empty(),
+            "a phrase, not any of its pairs"
+        );
     }
 
     #[test]

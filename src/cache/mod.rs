@@ -1,4 +1,5 @@
 mod chunk_ops;
+pub(crate) mod keyword;
 mod migrate;
 pub mod parse;
 mod populate;
