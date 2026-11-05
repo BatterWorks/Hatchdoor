@@ -452,7 +452,10 @@ mod tests {
         let decomposed = "한국어".nfd().collect::<String>();
         assert_eq!(fts_query_terms(&decomposed), ["한국어"]);
         // Composed before splitting, so a decomposed accent stays in its word.
-        assert_eq!(fts_query_terms("tie\u{302}\u{301}ng Việt"), ["tiếng", "Việt"]);
+        assert_eq!(
+            fts_query_terms("tie\u{302}\u{301}ng Việt"),
+            ["tiếng", "Việt"]
+        );
     }
 
     #[test]
