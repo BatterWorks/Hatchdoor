@@ -69,14 +69,13 @@ sudo chown -R 65532:65532 data models
 
 `data/state` holds the list of your Vaults and must survive upgrades. `models` holds the downloaded search model.
 
-Start it, then read the log:
+Start it:
 
 ```bash
 docker compose up -d
-docker compose logs hatchdoor
 ```
 
-The first start stops on purpose. Hatchdoor refuses to run without a web token, so it makes one and prints it. Near the end of the log is a line that contains `HATCHDOOR_WEB_BEARER_TOKEN=` followed by a long random value. Copy that whole `HATCHDOOR_WEB_BEARER_TOKEN=...` part into `.env` as a new line (take the last one if there are several), then run `docker compose up -d` again. This time it stays running.
+The first start stops on purpose. Hatchdoor refuses to run without a web token, so it makes one and saves it in `data/state/new-web-token.env`, never in the log. Add it to `.env` with `sudo cat data/state/new-web-token.env >> .env`, then run `docker compose up -d` again. This time it stays running.
 
 Open `http://localhost:42824`, enter the token, and pick a search model. A fresh install has no Vaults: the setup checklist that opens next walks you through adding your notes folder and connecting your agent.
 

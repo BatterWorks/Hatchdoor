@@ -82,19 +82,19 @@ Start it:
 docker compose up -d
 ```
 
-The first start stops on purpose. Hatchdoor refuses to run without a password for the browser, so it makes one for you and prints it. Show the output with:
+The first start stops on purpose. Hatchdoor refuses to run without a password for the browser, so it makes one for you and saves it in `data/state/new-web-token.env`. Add that file's line to `.env`:
 
 ```bash
-docker compose logs hatchdoor
+sudo cat data/state/new-web-token.env >> .env
 ```
 
-Near the end is a line that contains `HATCHDOOR_WEB_BEARER_TOKEN=` followed by a long random value. Copy that whole `HATCHDOOR_WEB_BEARER_TOKEN=...` part and add it as a new line in `.env`:
+The file belongs to Hatchdoor's user `65532`, hence `sudo`. `.env` now ends with a line like this:
 
 ```env
-HATCHDOOR_WEB_BEARER_TOKEN=paste-the-printed-token-here
+HATCHDOOR_WEB_BEARER_TOKEN=a-long-random-value
 ```
 
-If you see several such lines, take the last one: Docker retries the start, and each attempt prints a new value. Then start Hatchdoor again:
+Docker retries the start in the meantime, and every attempt keeps the same token, so there is only ever one. The token is not in `docker compose logs`: the log only names the file. Then start Hatchdoor again:
 
 ```bash
 docker compose up -d

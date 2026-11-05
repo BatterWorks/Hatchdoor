@@ -24,12 +24,12 @@ Find what you are seeing in the list below and jump to its section. Each section
 
 ## Hatchdoor won't start
 
-On the very first start this is expected. Hatchdoor refuses to run until the browser has a password (the web token), so it makes one, prints it, and stops. The log line starts `HOST=0.0.0.0 is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to start unauthenticated on a public interface` and ends with the exact line to paste into `.env`.
+On the very first start this is expected. Hatchdoor refuses to run until the browser has a password (the web token), so it makes one, saves it in its state folder, and stops. The log line starts `HOST=0.0.0.0 is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to start unauthenticated on a public interface` and names the file that holds the token, `/data/state/new-web-token.env` inside the container.
 
-Fix: show the newest token with `docker compose logs hatchdoor | grep HATCHDOOR_WEB_BEARER_TOKEN | tail -1`, paste the `HATCHDOOR_WEB_BEARER_TOKEN=...` part into `.env`, then run `docker compose up -d` again.
+Fix: with the shipped `compose.yaml` that file is `data/state/new-web-token.env` next to it. Add its line to `.env` with `sudo cat data/state/new-web-token.env >> .env`, then run `docker compose up -d` again.
 
-> [!warning]
-> Docker restarts Hatchdoor after each refusal, and every attempt prints a different token. Always take the last one in the log, not the first you see.
+> [!note]
+> Docker restarts Hatchdoor after each refusal. Every attempt keeps the token already saved in the file, so it does not matter when you copy it. If the log says Hatchdoor could not save a token, the state folder is not writable by user `65532`: see step 3 of [[Install Hatchdoor with Docker Compose]], or set any long random value, such as the output of `openssl rand -hex 32`, as `HATCHDOOR_WEB_BEARER_TOKEN` in `.env` yourself.
 
 If the log says `HATCHDOOR_MCP_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing`, you turned on agent access in `.env` without giving it a password. Either add `HATCHDOOR_MCP_BEARER_TOKEN` to `.env`, or remove `HATCHDOOR_MCP_ENABLED` from `.env` and turn agent access on in **Settings** instead (see [[Connect your agent]]), which is the usual way.
 

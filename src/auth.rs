@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::cell::Cell;
 
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -55,6 +55,29 @@ pub(crate) fn generate_bearer_token() -> Result<String, String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// The credential an `Authorization` header carries under the Bearer scheme.
+/// The scheme name is matched case-insensitively (RFC 7235 section 2.1) and
+/// any run of spaces or tabs may separate it from the credential, so `bearer
+/// <token>` and `BEARER  <token>` both present `<token>`. The credential itself
+/// is returned as sent, for a constant-time comparison by the caller.
+pub(crate) fn bearer_credential(value: &str) -> Option<&str> {
+    let is_space = |ch: char| ch == ' ' || ch == '\t';
+    let (scheme, rest) = value.trim_matches(is_space).split_once(is_space)?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let credential = rest.trim_start_matches(is_space);
+    (!credential.is_empty()).then_some(credential)
+}
+
+/// The Bearer credential in a request's `Authorization` header, if any.
+pub(crate) fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bearer_credential)
+}
+
 /// Token required to access protected web routes, shared into the auth layer.
 #[derive(Clone)]
 pub struct WebToken(pub Arc<str>);
@@ -75,11 +98,7 @@ pub async fn require_web_token(
 }
 
 pub(crate) fn request_is_authorized(request: &Request, expected: &[u8]) -> bool {
-    if let Some(presented) = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    if let Some(presented) = presented_bearer(request.headers())
         && constant_time_eq(presented.as_bytes(), expected)
     {
         return true;
@@ -146,11 +165,7 @@ pub(crate) async fn require_web_or_live_mcp_token(
     if tokens.web.is_none() {
         return next.run(request).await;
     }
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+    let presented = presented_bearer(request.headers());
 
     let mcp = match crate::mcp::McpConfig::from_snapshot(&tokens.runtime_config.snapshot()) {
         Ok(config) => config,
@@ -240,12 +255,7 @@ pub(crate) async fn require_web_or_live_mcp_read_token(
         return next.run(request).await;
     }
 
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::to_string);
+    let presented = presented_bearer(request.headers()).map(str::to_string);
     let matches_mcp = presented.as_deref().is_some_and(|presented| {
         mcp.enabled
             && mcp
@@ -275,6 +285,161 @@ pub(crate) async fn require_web_or_live_mcp_read_token(
     let response = next.run(request).await;
     drop(guard);
     response
+}
+
+/// Middleware for an instance serving with no web token, which ADR-07 allows
+/// only on a loopback bind. Without a token, the address a request was sent to
+/// and the page that sent it are all that separate the local user from any web
+/// page: a page on an attacker's domain whose DNS answer flips to 127.0.0.1
+/// becomes same-origin with the API (DNS rebinding), and a cross-site form can
+/// post a multipart upload without rebinding at all (#629).
+///
+/// So two checks, read from the live settings on every request:
+///
+/// - The `Host` must name this machine (`localhost`, `127.0.0.1`, `[::1]`, any
+///   port) or the host of `HATCHDOOR_PUBLIC_URL`. A rebinding page always sends
+///   its own name. A request with no `Host` at all (HTTP/1.0, in-process tests)
+///   cannot come from a browser and passes.
+/// - A state-changing request (anything but `GET`, `HEAD` and `OPTIONS`) must
+///   not come from another site. Its `Origin`, when present, must be this
+///   request's own origin, `HATCHDOOR_PUBLIC_URL`'s, or one the MCP allow-list
+///   accepts ([`crate::mcp::auth::is_allowed_origin`], ADR-09). Without an
+///   `Origin`, `Sec-Fetch-Site: cross-site` is refused. `curl` sends neither and
+///   passes.
+///
+/// It is layered only when no web token is configured and demo mode is off;
+/// `/mcp` keeps its own Origin check and is not behind it.
+pub(crate) async fn require_local_host_and_origin(
+    State(runtime_config): State<crate::runtime_config::RuntimeConfig>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let mcp = match crate::mcp::McpConfig::from_snapshot(&runtime_config.snapshot()) {
+        Ok(config) => config,
+        // A malformed runtime configuration must never open this gate.
+        Err(_) => return forbidden_request(FORBIDDEN_HOST),
+    };
+    let public_url = mcp.public_url.as_deref();
+    let host = request_host(&request);
+
+    if let Some(host) = host
+        && !host_is_local_or_public(host, public_url)
+    {
+        return forbidden_request(FORBIDDEN_HOST);
+    }
+
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        let headers = request.headers();
+        let origin = headers.get(header::ORIGIN).map(|value| value.to_str());
+        let refused = match origin {
+            Some(Ok(origin)) => !origin_is_allowed(origin, host, public_url, &mcp.allowed_origins),
+            Some(Err(_)) => true,
+            None => headers
+                .get("sec-fetch-site")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|site| site.trim().eq_ignore_ascii_case("cross-site")),
+        };
+        if refused {
+            return forbidden_request(FORBIDDEN_ORIGIN);
+        }
+    }
+
+    next.run(request).await
+}
+
+const FORBIDDEN_HOST: &str = "This Hatchdoor has no web token, so it only answers requests \
+     addressed to localhost, 127.0.0.1, [::1] or HATCHDOOR_PUBLIC_URL. Set \
+     HATCHDOOR_WEB_BEARER_TOKEN or HATCHDOOR_PUBLIC_URL to reach it under another name.";
+const FORBIDDEN_ORIGIN: &str = "This Hatchdoor has no web token, so it refuses changes \
+     sent from another website.";
+
+/// The `Host` a request was addressed to: the header, or the URI's authority
+/// for an HTTP/2 request that carries it there instead.
+fn request_host(request: &Request) -> Option<&str> {
+    request
+        .headers()
+        .get(header::HOST)
+        // A Host that is not text cannot name this machine: compare it as
+        // empty, which nothing allows, rather than skip the check.
+        .map(|value| value.to_str().unwrap_or_default())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str())
+        })
+        .map(str::trim)
+}
+
+/// `authority` without its port: `[::1]:42824` gives `[::1]`, `localhost:5173`
+/// gives `localhost`.
+fn host_name(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        return authority
+            .find(']')
+            .map_or(authority, |end| &authority[..=end]);
+    }
+    match authority.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|ch| ch.is_ascii_digit()) => name,
+        _ => authority,
+    }
+}
+
+/// The authority (`host[:port]`) of an absolute `http`/`https` address.
+fn url_authority(url: &str) -> Option<&str> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    (!authority.is_empty()).then_some(authority)
+}
+
+fn host_is_local_or_public(host: &str, public_url: Option<&str>) -> bool {
+    let name = host_name(host);
+    if ["localhost", "127.0.0.1", "[::1]"]
+        .iter()
+        .any(|local| name.eq_ignore_ascii_case(local))
+    {
+        return true;
+    }
+    public_url
+        .and_then(url_authority)
+        .is_some_and(|public| host_name(public).eq_ignore_ascii_case(name))
+}
+
+fn origin_is_allowed(
+    origin: &str,
+    host: Option<&str>,
+    public_url: Option<&str>,
+    allowed_origins: &[String],
+) -> bool {
+    let origin = origin.trim();
+    if let (Some(authority), Some(host)) = (url_authority(origin), host)
+        && authority.eq_ignore_ascii_case(host)
+    {
+        return true;
+    }
+    if let (Some(origin_authority), Some(public_authority)) =
+        (url_authority(origin), public_url.and_then(url_authority))
+        && origin_authority.eq_ignore_ascii_case(public_authority)
+    {
+        return true;
+    }
+    crate::mcp::auth::is_allowed_origin(origin, allowed_origins)
+}
+
+fn forbidden_request(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(ErrorResponse {
+            error: message.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 /// `429` with `Retry-After`, for a request refused by the MCP tool budget
@@ -413,6 +578,79 @@ mod tests {
             let request = request.body(axum::body::Body::empty()).expect("request");
             assert_eq!(request_is_authorized(&request, expected), accepted, "{uri}");
         }
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_and_whitespace_tolerant() {
+        for (value, credential) in [
+            ("Bearer abc", Some("abc")),
+            ("bearer abc", Some("abc")),
+            ("BEARER abc", Some("abc")),
+            ("Bearer   abc", Some("abc")),
+            ("Bearer \t abc ", Some("abc")),
+            ("Bearer", None),
+            ("Bearer   ", None),
+            ("Bearerabc", None),
+            ("Basic abc", None),
+            ("Bear abc", None),
+        ] {
+            assert_eq!(bearer_credential(value), credential, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn host_names_drop_only_a_numeric_port() {
+        assert_eq!(host_name("localhost:5173"), "localhost");
+        assert_eq!(host_name("[::1]:42824"), "[::1]");
+        assert_eq!(host_name("[::1]"), "[::1]");
+        assert_eq!(host_name("notes.example.com"), "notes.example.com");
+        assert!(!host_is_local_or_public("localhost.attacker.example", None));
+        assert!(
+            !host_is_local_or_public("::1", None),
+            "an IPv6 Host is bracketed"
+        );
+        assert!(host_is_local_or_public(
+            "notes.example.com:443",
+            Some("https://notes.example.com/sub")
+        ));
+    }
+
+    #[test]
+    fn origins_are_allowed_by_sameness_public_url_or_the_mcp_list() {
+        let list = vec![
+            "http://127.0.0.1".to_string(),
+            "http://localhost".to_string(),
+        ];
+        assert!(origin_is_allowed(
+            "http://127.0.0.1:42824",
+            Some("127.0.0.1:42824"),
+            None,
+            &[]
+        ));
+        assert!(origin_is_allowed(
+            "http://localhost:5173",
+            None,
+            None,
+            &list
+        ));
+        assert!(origin_is_allowed(
+            "https://notes.example.com",
+            Some("127.0.0.1:42824"),
+            Some("https://notes.example.com/hatchdoor"),
+            &[]
+        ));
+        assert!(!origin_is_allowed(
+            "https://evil.example",
+            Some("127.0.0.1:42824"),
+            None,
+            &list
+        ));
+        assert!(!origin_is_allowed(
+            "null",
+            Some("127.0.0.1:42824"),
+            None,
+            &list
+        ));
     }
 
     #[test]

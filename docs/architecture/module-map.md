@@ -96,9 +96,11 @@ that production inventory are still checked for stale paths and duplicates.
 - `main.rs` selects serve, model-prefetch, and container-healthcheck modes.
 - `server.rs` is the HTTP composition root: it validates startup posture,
   constructs `AppState`, builds routes, and starts background work. Unsafe
-  public startup without web authentication remains a refusal; its error
-  includes a freshly generated, non-persisted recovery token for the operator
-  to place in `.env`. Per-Vault variables left in the environment
+  public startup without web authentication remains a refusal. Its recovery
+  token never reaches the log (#629): `check_web_auth_posture` saves it as one
+  `.env` line to `NEW_WEB_TOKEN_FILE` (`new-web-token.env`) beside the Vault
+  registry, mode 0600, reuses a valid file an earlier refusal left, and names
+  the file in the error. Per-Vault variables left in the environment
   (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*`) are named in one startup warning;
   they no longer hold the instance in a restricted recovery mode (#427).
 - `AppState` carries shared runtime state. Every field has a production
@@ -1142,8 +1144,11 @@ followed by the full backend checks.
 **Owned paths:** `src/auth.rs`.
 
 **Public contract:** `WebToken`, `WebOrLiveMcpToken`, `require_web_token`,
-`require_web_or_live_mcp_token`, and `require_web_or_live_mcp_read_token`, plus
-the crate-internal `request_is_authorized(request, token)`, the web-token check
+`require_web_or_live_mcp_token`, `require_web_or_live_mcp_read_token`, and
+`require_local_host_and_origin`, plus the crate-internal `bearer_credential` and
+`presented_bearer`, the one parser of `Authorization: Bearer` for every web gate
+and `/mcp` (scheme matched case-insensitively, any spaces or tabs after it), and
+`request_is_authorized(request, token)`, the web-token check
 those middlewares share, which the public manual routes (`src/handlers/docs.rs`)
 use to decide whether a caller may see private pages without gating the route. Both
 attachment middlewares bind the MCP token from the current runtime snapshot
@@ -1182,10 +1187,13 @@ web token configured, and not demo mode — so a deployment with no web token
 keeps serving assets openly and enabling MCP never demands a credential the
 browser has never held.
 
-**Consumers:** `server.rs` and protected HTTP routes.
+**Consumers:** `server.rs`, protected HTTP routes, and `mcp/auth.rs`
+(`presented_bearer`).
 
 **Consumed dependencies:** live runtime configuration and `McpConfig` parsing
-for per-request attachment authorization.
+for per-request attachment authorization and for the token-less guard's
+`HATCHDOOR_PUBLIC_URL` and `HATCHDOOR_MCP_ALLOWED_ORIGINS`;
+`mcp::auth::is_allowed_origin` for that guard's Origin allow-list.
 
 **Coordination paths:** `src/server.rs`, `src/config.rs`, frontend
 `frontend/src/api/api.ts`, and any route whose authentication requirements
@@ -1198,6 +1206,17 @@ shared `429`.
 `redact_query_token` redacts a transfer link's `signature` as well as the web
 token's `access_token`, so neither reaches the request trace span (ADR-27).
 Transfer links are redeemed on their own routes, not through these guards.
+
+`require_local_host_and_origin` (#629) is what protects an instance with no web
+token, which ADR-07 allows on loopback only. `build_router` layers it over every
+route except `/mcp` when no web token is configured and demo mode is off. It
+reads the live snapshot per request and answers `403` when the `Host` is not
+`localhost`, `127.0.0.1` or `[::1]` (any port) or `HATCHDOOR_PUBLIC_URL`'s host,
+and when a request other than `GET`/`HEAD`/`OPTIONS` carries an `Origin` that
+is neither the request's own, the public URL's, nor one
+`mcp::auth::is_allowed_origin` accepts from `HATCHDOOR_MCP_ALLOWED_ORIGINS`, or
+carries no `Origin` and `Sec-Fetch-Site: cross-site`. A request with no `Host`
+cannot come from a browser and passes.
 
 **Invariants:** constant-time token comparison, no token logging, and deliberate
 query-parameter fallback for browser contexts that cannot set headers (ADR-08).
@@ -3869,6 +3888,9 @@ itself is rmcp-owned rather than hand-implemented, and the advertised revision
 set stays narrowed to `2026-07-28` + `2025-11-25` (ADR-17). Per-request security
 ordering is preserved across the swap: enabled check → token-configured check →
 Origin allowlist → constant-time bearer compare → protocol-version header.
+The bearer credential is parsed by `auth::presented_bearer`, shared with the web
+gates, so the scheme name is case-insensitive (#629). `is_allowed_origin` is also
+consumed by `auth::require_local_host_and_origin`, the token-less web guard.
 The MCP bearer token is accepted by the multipart attachment endpoint only while
 MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
