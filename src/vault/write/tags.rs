@@ -36,6 +36,7 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::MutationJournal;
+use super::intent::IntentLog;
 use super::rewrites::read_note_text;
 use super::types::{TextRewrite, WriteError};
 
@@ -116,6 +117,7 @@ pub fn rename_tag(
     old_tag: &str,
     new_tag: &str,
     expected_plan_hash: Option<&str>,
+    intent_log: Option<&IntentLog>,
 ) -> Result<TagRename, TagRenameError> {
     rename_tag_with_hook(
         vault_root,
@@ -123,6 +125,7 @@ pub fn rename_tag(
         old_tag,
         new_tag,
         expected_plan_hash,
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -133,6 +136,7 @@ fn rename_tag_with_hook(
     old_tag: &str,
     new_tag: &str,
     expected_plan_hash: Option<&str>,
+    intent_log: Option<&IntentLog>,
     after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<TagRename, TagRenameError> {
     let (old_tag, new_tag) = validated_names(old_tag, new_tag)?;
@@ -143,7 +147,7 @@ fn rename_tag_with_hook(
     if plan.report.plan_hash.as_deref() != Some(expected.trim()) {
         return Err(TagRenameError::StalePlan);
     }
-    apply(vault_root, plan, after_write)
+    apply(vault_root, plan, intent_log, after_write)
 }
 
 /// The two names, normalised. A leading `#` is accepted on either, since that
@@ -531,12 +535,14 @@ fn renamed_item(item: &str, old: &str, new: &str) -> Option<String> {
 fn apply(
     vault_root: &Path,
     plan: Plan,
+    intent_log: Option<&IntentLog>,
     after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<TagRename, TagRenameError> {
     let affected_paths = write_rewrites(
         vault_root,
         &plan.rewrites,
         TagOperation::Rename,
+        intent_log,
         after_write,
     )?;
     let mut report = plan.report;
@@ -600,6 +606,7 @@ fn write_rewrites(
     vault_root: &Path,
     rewrites: &[PlannedRewrite],
     operation: TagOperation,
+    intent_log: Option<&IntentLog>,
     mut after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<Vec<PathBuf>, ApplyError> {
     // The plan was read under the same lock this write holds, but a person
@@ -625,21 +632,29 @@ fn write_rewrites(
         }
     }
 
-    let mut journal = MutationJournal::new(vault_root);
+    let text_rewrites = rewrites
+        .iter()
+        .map(|rewrite| TextRewrite {
+            path: rewrite.path.clone(),
+            original_hash: rewrite.original_hash.clone(),
+            content: rewrite.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut journal = MutationJournal::new(vault_root, intent_log);
+    if let Err(error) = journal.begin(&format!("{} tag", operation.noun()), &[], &text_rewrites) {
+        return Err(ApplyError::Write(journal.rollback(error)));
+    }
     let mut affected_paths = Vec::with_capacity(rewrites.len());
-    for (position, rewrite) in rewrites.iter().enumerate() {
+    for (position, rewrite) in text_rewrites.into_iter().enumerate() {
         let written = journal
-            .apply_rewrites(vec![TextRewrite {
-                path: rewrite.path.clone(),
-                original_hash: rewrite.original_hash.clone(),
-                content: rewrite.content.clone(),
-            }])
+            .apply_rewrites(vec![rewrite])
             .and_then(|written| after_write(position).map(|()| written));
         match written {
             Ok(written) => affected_paths.extend(written),
             Err(error) => return Err(ApplyError::Write(journal.rollback(error))),
         }
     }
+    journal.finish();
     Ok(affected_paths)
 }
 
@@ -721,6 +736,7 @@ pub fn delete_tag(
     index: &VaultIndex,
     tag: &str,
     expected_plan_hash: Option<&str>,
+    intent_log: Option<&IntentLog>,
 ) -> Result<TagDelete, TagDeleteError> {
     let tag = tag_name(tag, "tag")
         .map_err(TagDeleteError::InvalidTagName)?
@@ -732,8 +748,13 @@ pub fn delete_tag(
     if report.plan_hash.as_deref() != Some(expected.trim()) {
         return Err(TagDeleteError::StalePlan);
     }
-    report.affected_paths =
-        write_rewrites(vault_root, &rewrites, TagOperation::Delete, |_| Ok(()))?;
+    report.affected_paths = write_rewrites(
+        vault_root,
+        &rewrites,
+        TagOperation::Delete,
+        intent_log,
+        |_| Ok(()),
+    )?;
     for (note, rewrite) in report.notes.iter_mut().zip(&rewrites) {
         note.content_hash = content_hash(&rewrite.content);
     }
@@ -902,6 +923,7 @@ pub(super) fn rename_tag_with_failure(
         old_tag,
         new_tag,
         expected_plan_hash,
+        None,
         after_write,
     )
 }

@@ -11,6 +11,7 @@ use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::{
     MutationJournal, atomic_create, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
 };
+use super::intent::IntentLog;
 use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
@@ -663,6 +664,7 @@ pub fn move_or_rename_note(
     entry: &NoteEntry,
     target_relative_path: &str,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<WriteOutcome, WriteError> {
     move_or_rename_note_with_hook(
         vault_root,
@@ -670,6 +672,7 @@ pub fn move_or_rename_note(
         entry,
         target_relative_path,
         expected_content_hash,
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -680,6 +683,7 @@ fn move_or_rename_note_with_hook(
     entry: &NoteEntry,
     target_relative_path: &str,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
     mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
@@ -719,6 +723,8 @@ fn move_or_rename_note_with_hook(
     create_destination_dirs(vault_root, &target_path, "destination", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
+        intent_log,
+        "move note",
         entry,
         &target_path,
         expected_content_hash,
@@ -761,6 +767,7 @@ pub fn archive_note(
     entry: &NoteEntry,
     archive_prefix: &str,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<WriteOutcome, WriteError> {
     let archive_folder = archive_prefix.trim().trim_matches('/');
     if archive_folder.is_empty() {
@@ -802,6 +809,7 @@ pub fn archive_note(
         entry,
         &target_relative_path,
         expected_content_hash,
+        intent_log,
     )
 }
 
@@ -810,8 +818,16 @@ pub fn delete_note(
     index: &VaultIndex,
     entry: &NoteEntry,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<WriteOutcome, WriteError> {
-    delete_note_with_hook(vault_root, index, entry, expected_content_hash, |_| Ok(()))
+    delete_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        expected_content_hash,
+        intent_log,
+        |_| Ok(()),
+    )
 }
 
 fn delete_note_with_hook(
@@ -819,6 +835,7 @@ fn delete_note_with_hook(
     index: &VaultIndex,
     entry: &NoteEntry,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
     mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
@@ -843,6 +860,8 @@ fn delete_note_with_hook(
     create_destination_dirs(vault_root, &trash_path, "trash", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
+        intent_log,
+        "delete note",
         entry,
         &trash_path,
         expected_content_hash,
@@ -894,8 +913,11 @@ struct CompletedNoteMutation {
     moved_content: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_note_mutation(
     vault_root: &Path,
+    intent_log: Option<&IntentLog>,
+    operation: &str,
     entry: &NoteEntry,
     target_path: &Path,
     expected_content_hash: &str,
@@ -903,7 +925,17 @@ fn execute_note_mutation(
     rewrites: Vec<TextRewrite>,
     after_phase: &mut impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<CompletedNoteMutation, WriteError> {
-    let mut journal = MutationJournal::new(vault_root);
+    let mut journal = MutationJournal::new(vault_root, intent_log);
+    let moves = std::iter::once((entry.path.as_path(), target_path))
+        .chain(
+            asset_moves
+                .iter()
+                .map(|asset| (asset.source.as_path(), asset.destination.as_path())),
+        )
+        .collect::<Vec<_>>();
+    if let Err(error) = journal.begin(operation, &moves, &rewrites) {
+        return Err(journal.rollback(error));
+    }
 
     if let Err(error) = journal.move_note(&entry.path, target_path, expected_content_hash) {
         return Err(journal.rollback(error));
@@ -944,6 +976,7 @@ fn execute_note_mutation(
         }
     };
 
+    journal.finish();
     Ok(CompletedNoteMutation {
         rewritten,
         moved_content,
@@ -965,6 +998,7 @@ pub(super) fn move_or_rename_note_with_failure(
         entry,
         target_relative_path,
         expected_content_hash,
+        None,
         after_phase,
     )
 }
@@ -977,5 +1011,12 @@ pub(super) fn delete_note_with_failure(
     expected_content_hash: &str,
     after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<WriteOutcome, WriteError> {
-    delete_note_with_hook(vault_root, index, entry, expected_content_hash, after_phase)
+    delete_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        expected_content_hash,
+        None,
+        after_phase,
+    )
 }

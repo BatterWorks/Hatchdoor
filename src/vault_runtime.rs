@@ -667,6 +667,9 @@ pub struct VaultControlBlock {
     /// every request (#377). A fresh block starts empty, so no catalog
     /// outlives the path and exclusions it was scanned under.
     indexed_assets: Arc<RwLock<Option<Arc<IndexedAssets>>>>,
+    /// Where this Vault's multi-note writes record their plan before the
+    /// first step, beside the registry (#631, ADR-51).
+    intent_log: crate::vault::IntentLog,
     #[cfg(test)]
     full_index_builds: Arc<AtomicU64>,
     #[cfg(test)]
@@ -784,6 +787,25 @@ fn report_compare_and_swap_support(vault_id: VaultId, vault_path: &Path) -> bool
     true
 }
 
+/// The Vaults this process has repaired (ADR-51).
+static REPAIRED_VAULTS: Mutex<BTreeSet<VaultId>> = Mutex::new(BTreeSet::new());
+
+/// Finish the write a dead process left in this Vault, and sweep its
+/// temporary files, at the Vault's first activation in this process and
+/// never again. Leftovers only come from a process that died, and a later
+/// activation (an edit, a disable and quick re-enable, a lost checkout cloned
+/// again) can overlap a write this process is still running on the retiring
+/// block, whose record and temporary files are not leftovers (#631).
+fn repair_once(vault_id: VaultId, vault_path: &Path, intent_log: &crate::vault::IntentLog) {
+    let first = REPAIRED_VAULTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(vault_id);
+    if first {
+        crate::vault::repair_interrupted_writes(vault_path, intent_log);
+    }
+}
+
 /// Start one Vault's change watcher, and say what its status is.
 ///
 /// Used where a Vault is activated already Active, and again where it only
@@ -830,6 +852,7 @@ impl VaultControlBlock {
     fn activate(
         definition: VaultDefinition,
         vault_path: PathBuf,
+        state_directory: &Path,
         watching: Option<&WatcherContext>,
         snapshot_cache: Option<&Arc<SqliteCache>>,
         revisions: CollectionRevisionPublisher,
@@ -850,6 +873,11 @@ impl VaultControlBlock {
             prior_git,
         );
         snapshot.recovery_branch = prior_recovery;
+        let intent_log = crate::vault::IntentLog::for_vault(state_directory, definition.vault_id());
+        // Before the watcher starts and before any write can reach the Vault.
+        if snapshot.activation == VaultActivationStatus::Active {
+            repair_once(definition.vault_id(), &vault_path, &intent_log);
+        }
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
             watching.and_then(|watching| {
                 let (watcher, status, error) = start_watcher(&definition, &vault_path, watching);
@@ -884,6 +912,7 @@ impl VaultControlBlock {
             ))),
             watcher_epoch: Arc::new(AtomicU64::new(0)),
             indexed_assets: Arc::new(RwLock::new(None)),
+            intent_log,
             #[cfg(test)]
             full_index_builds: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -957,6 +986,11 @@ impl VaultControlBlock {
     /// (the MCP `batch` tool does — issue #321).
     pub(crate) fn write_exclusion(&self) -> VaultWriteExclusion {
         self.exclusion.clone()
+    }
+
+    /// Where this Vault's multi-note writes record their plan (ADR-51).
+    pub(crate) fn intent_log(&self) -> crate::vault::IntentLog {
+        self.intent_log.clone()
     }
 
     /// This Vault's pending write records. Cloned rather than borrowed so a
@@ -1367,6 +1401,18 @@ impl VaultControlBlock {
         error: Option<VaultRuntimeError>,
     ) -> Result<(), VaultRuntimeError> {
         self.ensure_accepting_operations()?;
+        // A managed Git Vault's folder first exists here, so this is where an
+        // interrupted write in it is repaired, before it becomes Active and
+        // admits a write (ADR-51).
+        if status != LocalContentStatus::Unavailable
+            && self.snapshot().activation != VaultActivationStatus::Active
+        {
+            repair_once(
+                self.definition.vault_id(),
+                &self.vault_path,
+                &self.intent_log,
+            );
+        }
         let mut snapshot = self.write_snapshot();
         let previous = snapshot.clone();
         snapshot.local_content = status;
@@ -1856,6 +1902,7 @@ impl VaultCollectionRuntime {
                         VaultCollectionEntry::Active(VaultControlBlock::activate(
                             definition,
                             vault_path,
+                            registry.path().parent().unwrap_or_else(|| Path::new(".")),
                             self.watching.as_ref(),
                             self.snapshot_cache.as_ref(),
                             revision_publisher.clone(),

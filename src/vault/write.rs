@@ -2,6 +2,7 @@ mod assets;
 mod attachments;
 mod frontmatter;
 mod fs_ops;
+mod intent;
 mod notes;
 mod paths;
 mod rewrites;
@@ -15,6 +16,8 @@ pub use attachments::{
     check_attachment_import_target, delete_attachment, import_attachment_bytes,
     list_note_attachments, move_attachment, rename_attachment,
 };
+pub use intent::IntentLog;
+pub(crate) use intent::repair_interrupted_writes;
 pub use notes::{
     NoteTarget, SectionMode, append_note, archive_note, check_note_content_hash, create_note,
     delete_note, edit_note, move_or_rename_note, note_exists_conflict, note_target,
