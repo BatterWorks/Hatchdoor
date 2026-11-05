@@ -741,7 +741,10 @@ fn attachment_overwrite_rejects_a_symlink_destination_without_touching_its_targe
     let error = import_attachment_bytes(vault.path(), "image.png", b"new image", 1024, true)
         .expect_err("an overwrite must not follow a symlink destination");
 
-    assert!(matches!(error, WriteError::Conflict(_) | WriteError::Io(_)));
+    assert!(
+        matches!(error, WriteError::InvalidInput(_)),
+        "got {error:?}"
+    );
     assert_eq!(fs::read_to_string(&sentinel).unwrap(), "do not change");
 }
 

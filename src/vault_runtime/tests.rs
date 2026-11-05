@@ -300,6 +300,11 @@ fn activation_failure_is_isolated_from_healthy_local_markdown() {
 fn read_only_and_stale_statuses_keep_usable_local_markdown_honest() {
     use std::os::unix::fs::PermissionsExt;
 
+    // Root writes through the mode bits, so the folder would read as writable.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
     let directory = tempdir().expect("temporary state directory");
     let vault_path = directory.path().join("read-only");
     std::fs::create_dir_all(&vault_path).expect("Vault directory");
@@ -812,6 +817,11 @@ async fn disabled_runtime_rejects_operations_through_preexisting_handles() {
 #[test]
 fn unreadable_directory_is_not_reported_as_browseable() {
     use std::os::unix::fs::PermissionsExt;
+
+    // Root reads through the mode bits, so the folder would read as browseable.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
 
     let directory = tempdir().expect("temporary state directory");
     let vault_path = directory.path().join("unreadable");

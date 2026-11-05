@@ -248,7 +248,10 @@ that production inventory are still checked for stale paths and duplicates.
   retained participating SQLite snapshot before its reconstructed Index turn
   runs; a missing, nonparticipating, or unreadable snapshot remains
   Unavailable. Each enabled block owns its
-  definition and resolved Markdown root, capability-specific activation/local
+  definition and resolved Markdown root, the stored root with every symlink
+  in it resolved before the retain-or-replace comparison, so the write
+  layer's no-follow walk can reach it (#630); a root that cannot be resolved,
+  a missing folder, keeps its stored path. It also owns capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
   independently cancellable watcher. Its `index_turn` (`VaultIndexTurn`:
   `running` or `waiting`, absent when idle) is the Vault's place in the
@@ -1706,6 +1709,17 @@ write API/types, and configuration for archive or upload limits.
   no caller is told a write did not land when it did. A `recovery_required`
   message is the one write failure that reaches an API client unsanitized, so
   it names the note and its sidecar without the directories above them.
+- A write that is refused or fails before its commit removes its sidecar, so
+  nothing it prepared reaches Git (#630). A symlink or anything other than a
+  regular file at the destination is refused as invalid input, not as a
+  retryable conflict. A replaced file keeps its permission bits, without
+  set-ID or sticky bits since the bytes are the caller's, and its owner where
+  the process may set it, or else its group where the process belongs to it;
+  a new file is created asking for 0666, so the umask or the folder's default
+  ACL decides. The walk to a write's folder opens each folder above it as a
+  path handle, so it needs only permission to pass through them. `import_attachment` without `overwrite`
+  commits as `create_note` does, refusing a file that appeared after its
+  existence check.
 - A write that names part of a note edits that part and leaves every other byte
   alone (ADR-22). `update_note_frontmatter` rewrites only the lines its named
   keys own, so key order, one-line versus block lists, indentation, quoting,

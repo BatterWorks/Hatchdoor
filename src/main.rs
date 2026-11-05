@@ -124,10 +124,14 @@ mod tests {
     #[test]
     fn health_probe_reaches_an_ipv6_loopback_listener_when_available() {
         if let Err(error) = assert_health_probe_reaches_listener("::1") {
+            // A host without IPv6 answers in one of three ways; a kernel
+            // built or booted without it reports the address family itself
+            // as unsupported, which Rust has no `ErrorKind` for.
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
-            ) {
+            ) || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
+            {
                 return;
             }
             panic!("IPv6 loopback listener failed unexpectedly: {error}");

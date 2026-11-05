@@ -742,6 +742,20 @@ impl LinkGraphCache {
     }
 }
 
+/// The Vault root a runtime is activated at: the stored path with every
+/// symlink in it resolved.
+///
+/// The write layer opens each directory above a note without following
+/// symlinks, so a root stored through one (a hand-edited or old registry;
+/// the API canonicalises what it stores) failed every write while the Vault
+/// still reported itself writable (#630). Resolving it here, once, gives the
+/// index, the watcher and the writes one real path. A folder that cannot be
+/// resolved, usually because it is missing, keeps its stored path and is
+/// reported unavailable by activation as before.
+fn resolved_vault_root(stored: PathBuf) -> PathBuf {
+    stored.canonicalize().unwrap_or(stored)
+}
+
 /// Say once, when a Vault's runtime is established, that its filesystem cannot
 /// commit a write as one atomic exchange.
 ///
@@ -1782,7 +1796,7 @@ impl VaultCollectionRuntime {
         let mut next = BTreeMap::new();
         for definition in snapshot.definitions() {
             let vault_id = definition.vault_id();
-            let vault_path = registry.vault_path(&definition);
+            let vault_path = resolved_vault_root(registry.vault_path(&definition));
             let entry = if !definition.enabled() {
                 VaultCollectionEntry::Disabled(Box::new(disabled_snapshot(&definition)))
             } else {
