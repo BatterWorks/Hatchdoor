@@ -551,15 +551,14 @@ pub(super) async fn import_attachment_tool(
     // so anything longer than that for the cap cannot decode to an allowed size.
     // Rejecting up front avoids decoding a deliberately oversized payload; the
     // authoritative check on the decoded length runs in import_attachment_bytes.
-    let max_encoded = config
-        .max_base64_bytes
+    let max_base64_bytes = config.base64_limit();
+    let max_encoded = max_base64_bytes
         .saturating_mul(4)
         .div_ceil(3)
         .saturating_add(4);
     if content.len() as u64 > max_encoded {
         return Err(JsonRpcFailure::invalid_params(format!(
-            "attachment exceeds max size: base64 content is larger than the {}-byte base64 limit allows",
-            config.max_base64_bytes
+            "attachment exceeds max size: base64 content is larger than the {max_base64_bytes}-byte base64 limit allows"
         )));
     }
 
@@ -574,7 +573,7 @@ pub(super) async fn import_attachment_tool(
         .import_attachment(
             &target_relative_path,
             bytes,
-            config.max_base64_bytes,
+            max_base64_bytes,
             args.overwrite.unwrap_or(false),
         )
         .await

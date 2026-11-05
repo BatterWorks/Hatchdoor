@@ -63,7 +63,7 @@ These checks exist only on a deployment with a web token. With none, both routes
 
 On the download route the MCP token is held to the **same limits it has over `/mcp`**, so the URL is no way around them:
 
-- **Size.** It can read up to `HATCHDOOR_MCP_MAX_BASE64_BYTES` (5 MiB by default), the same ceiling `get_attachment`'s base64 encoding enforces, and not the route's own, much larger limit. An attachment over that returns `413`. Lower the setting and both paths follow.
+- **Size.** It can read up to `HATCHDOOR_MCP_MAX_BASE64_BYTES` (5 MiB by default), the setting `get_attachment`'s base64 encoding is held to, and not the route's own, much larger limit. Base64 also stops at about 5.95 MiB, what one MCP reply can carry, so above that the URL is the only way to fetch a file, and still no further than the setting. An attachment over that returns `413`. Lower the setting and both paths follow.
 - **Rate.** The request spends the same per-token quota and concurrency budget an MCP tool call spends, drawn from the same counter, and gets `429` with `Retry-After` when it runs out. Fetching through the URL does not give a second allowance.
 
 A request with the **web** token is held to neither limit. It comes from the browser, which already has the whole Vault.

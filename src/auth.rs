@@ -233,7 +233,8 @@ pub struct McpAssetRead {
 /// - Admission on the MCP token is *not* equivalent to admission on the web
 ///   token, and the two guards below are what make the difference safe. An MCP
 ///   client reading attachment bytes over `/mcp` is bounded by
-///   `HATCHDOOR_MCP_MAX_BASE64_BYTES` and by the #171 tool quota and concurrency
+///   `HATCHDOOR_MCP_MAX_BASE64_BYTES` (and, inline, by what one reply can carry,
+///   #632) and by the #171 tool quota and concurrency
 ///   caps; this route's own bound is far larger (64 MiB) and it sits outside the
 ///   `/mcp` transport entirely. Left alone, the `download_url` would hand that
 ///   credential a way around both limits. So an MCP-admitted request spends the

@@ -685,16 +685,21 @@ struct FetchedAttachment {
 /// contained-resource seam — the same Vault gate, containment check, extension
 /// allow-list, and browse surface the `/assets/{*path}` route answers on, so a
 /// path one surface refuses is refused identically by the other.
+///
+/// `max_base64_bytes` is the base64 cap for this call: the config's
+/// [`McpConfig::base64_limit`] standalone, and less inside a `batch` whose
+/// reply has already spent part of its budget (#632). A file over it is
+/// refused with `attachment_too_large_for_base64` before any byte is read.
 pub(super) async fn get_attachment_tool(
     state: AppState,
     arguments: Value,
     config: &McpConfig,
+    max_base64_bytes: u64,
 ) -> Result<Value, JsonRpcFailure> {
     let args: GetAttachmentArgs = parse("get_attachment", arguments)?;
     let vault_id = scoped_vault_id(&args.vault_id)?;
     let relative_path = super::non_empty_argument("relative_path", args.relative_path)?;
     let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
-    let max_base64_bytes = config.max_base64_bytes;
 
     // Resolution, the size check, and the read are all blocking filesystem
     // work; they happen in one offloaded trip rather than on a tokio worker.
@@ -846,7 +851,7 @@ pub(super) async fn attachment_import_config_tool(
             results::AttachmentImportMethod::McpBase64 {
                 tool: "import_attachment",
                 role: "fallback",
-                max_bytes: config.max_base64_bytes,
+                max_bytes: config.base64_limit(),
                 recommended_for: "fallback when an out-of-band HTTP request is not possible; universal, works with any MCP client, but size-limited",
                 usage: "Call import_attachment with this vault_id, base64-encoded `content`, and a Vault-relative `target_relative_path`.",
             },

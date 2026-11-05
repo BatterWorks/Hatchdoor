@@ -3780,6 +3780,8 @@ The adapter also records the name the calling client sent in `McpConfig::client_
 
 #598 gives `create_upload_link` an optional `commit_summary` argument, the one every other write tool takes. The tool passes it with the client's name in the `UploadRequest` it mints the link with, and the transfer handler applies it to the upload's write through `VaultMutationCore::with_commit_summary`; it never enters the link. Additive.
 
+#632 closes five gaps in the resource limits and error contract. The concurrency guard a tool call takes now rides its response body (`routes::hold_until_body_ends`) and is released when the body ends or is dropped, because a legacy session answers with an SSE head at once and runs the tool afterwards. A legacy `initialize` is admitted through `limits::SessionRegistry`: at most `INITIALIZES_PER_MINUTE` handshakes per token, `MAX_SESSIONS_PER_TOKEN` live sessions per token and `MAX_SESSIONS` in all, refused with 429 and `Retry-After` like the tool quota. The registry attributes each session ID to its token and is pruned against rmcp's own `LocalSessionManager::sessions` table, and a session no later request has named within `UNCONFIRMED_SESSION_GRACE` is closed through rmcp, at the next handshake or by a sweep every `SESSION_SWEEP_INTERVAL`. A client that hangs up after a legacy call's head returns frees its slot while rmcp's session worker still runs the tool; only the quota bounds that case. `batch` counts the serialized bytes of its items against `BATCH_REPLY_BUDGET`: a base64 `get_attachment` item is capped by what is left and refused with `attachment_too_large_for_base64` before it is read, and any other read whose answer does not fit becomes an item error with the new code `batch_reply_too_large`. A write tool's Vault resolution and lock now run inside the outcome the dispatcher renders, so an unknown, disabled or read-only Vault is a structured tool error with `docs`, no longer a `-32602` error carrying a JSON string; `docs_pointers` gains `vault_not_found`. `McpConfig::base64_limit` is the smaller of `HATCHDOOR_MCP_MAX_BASE64_BYTES` and `config::MAX_REPLY_BASE64_BYTES` (what one reply can carry), and `get_attachment`, `import_attachment`, `get_attachment_import_config` and the write-mode request body limit all use it. Behavior-changing for a client that read the old error shape or relied on a base64 cap above about 5.95 MiB.
+
 **Kind:** adapter/security surface.
 
 **Owned paths:**
@@ -3821,7 +3823,9 @@ list handling from the tool quota, limits tool calls to 120/minute/token and
 concurrency to eight ordinary / two expensive searches, rejects over-limit
 requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
-window, the concurrency pools, and the POST classification). A `batch` is
+window, the concurrency pools, the legacy session caps (#632), and the POST
+classification). A call's concurrency slots are held until its response body
+ends, on both protocol revisions. A `batch` is
 charged for the searches it carries (`limits::charge`, #327): one quota unit
 per `search_notes` item (at least one, at most `BATCH_MAX_READ_ITEMS`), and an
 expensive-search slot for its whole dispatch when any item searches, which
@@ -3895,8 +3899,8 @@ same `relative_path` `list_note_attachments` reports: `encoding: "url"` (the
 default) returns a download transfer link (ADR-27, #310) on the Vault-scoped
 `/transfers/{*path}` route, absolute and carrying its own credential, with
 `expires_at`; `encoding: "base64"` inlines the bytes instead,
-bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment`
-enforces on the way in. Resolution goes through
+bounded by the same cap `import_attachment` enforces on the way in,
+`McpConfig::base64_limit` (#632). Resolution goes through
 `VaultReadCore::contained_asset` (#188), so the Vault gate, containment, the
 extension allow-list, the content type, and the browse surface are the same
 ones the `/assets/{*path}` route answers on — a demoted or excluded asset is

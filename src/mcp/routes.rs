@@ -25,9 +25,12 @@ use crate::app_state::AppState;
 use super::adapter::HatchdoorMcpHandler;
 use super::auth::{reject_unsupported_protocol_version, validate_mcp_request};
 use super::config::McpConfig;
-use super::limits::{self, RateLimiter, ToolCallCharge};
+use super::limits::{
+    self, ConcurrencyGuard, RateLimiter, SessionRegistry, SessionReservation, ToolCallCharge,
+};
 use super::protocol::jsonrpc_error_response;
 use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
+use rmcp::transport::streamable_http_server::session::SessionManager;
 
 /// The process-wide MCP transport: one rmcp service instance whose session
 /// manager outlives individual requests (legacy clients hold a session across
@@ -35,10 +38,8 @@ use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
 #[derive(Clone)]
 pub struct HatchdoorMcpTransport {
     service: StreamableHttpService<HatchdoorMcpHandler, LocalSessionManager>,
-    /// Layered resource protection (#171): one rolling quota window per token
-    /// plus the process-wide concurrency pools, shared by every handler this
-    /// service constructs.
-    limiter: Arc<RateLimiter>,
+    /// Layered resource protection (#171, #632), shared by every request.
+    limits: TransportLimits,
 }
 
 impl HatchdoorMcpTransport {
@@ -74,6 +75,12 @@ impl HatchdoorMcpTransport {
         // cancels rmcp's own token, which terminates every session (#353).
         // `build_router` also runs in synchronous tests, where nothing serves
         // and there is no runtime to watch from.
+        let rmcp_sessions = Arc::new(LocalSessionManager::default());
+        let limits = TransportLimits {
+            limiter: Arc::new(RateLimiter::new()),
+            sessions: Arc::new(SessionRegistry::default()),
+            rmcp_sessions: rmcp_sessions.clone(),
+        };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let sessions = config.cancellation_token.clone();
             let shutdown = state.shutdown.clone();
@@ -81,12 +88,27 @@ impl HatchdoorMcpTransport {
                 shutdown.wait().await;
                 sessions.cancel();
             });
+            // Silent sessions are closed on a timer as well as at the next
+            // handshake, so one is never held past the grace by a quiet
+            // instance (#632).
+            let sweeper = limits.clone();
+            let shutdown = state.shutdown.clone();
+            runtime.spawn(async move {
+                loop {
+                    tokio::select! {
+                        () = shutdown.wait() => break,
+                        () = tokio::time::sleep(limits::SESSION_SWEEP_INTERVAL) => {
+                            sweeper.close_silent_sessions().await;
+                        }
+                    }
+                }
+            });
         }
         // The per-token live-subscription budget (#170) shared by every
         // handler instance this service constructs.
         let subscriptions = Arc::new(SubscriptionRegistry::new());
         Self {
-            limiter: Arc::new(RateLimiter::new()),
+            limits,
             service: StreamableHttpService::new(
                 move || {
                     Ok(HatchdoorMcpHandler::new(
@@ -94,7 +116,7 @@ impl HatchdoorMcpTransport {
                         subscriptions.clone(),
                     ))
                 },
-                Arc::new(LocalSessionManager::default()),
+                rmcp_sessions,
                 config,
             ),
         }
@@ -106,7 +128,7 @@ impl HatchdoorMcpTransport {
     /// must not get a second, independent budget by fetching attachment bytes
     /// through `get_attachment`'s `download_url` instead of over `/mcp`.
     pub fn limiter(&self) -> Arc<RateLimiter> {
-        self.limiter.clone()
+        self.limits.limiter.clone()
     }
 
     /// The `/mcp` sub-router: rmcp's Streamable HTTP service (GET/SSE + POST +
@@ -115,19 +137,54 @@ impl HatchdoorMcpTransport {
     /// rate limiter is captured here so one transport's middleware shares its
     /// quota windows and concurrency pools across all requests.
     pub fn router(&self, state: &AppState) -> Router<AppState> {
-        let limiter = self.limiter.clone();
+        let limits = self.limits.clone();
         let state = state.clone();
         Router::new()
             .route("/mcp", any_service(self.clone()))
             .layer(axum::middleware::from_fn(
                 move |request: Request, next: Next| {
                     let state = state.clone();
-                    let limiter = limiter.clone();
+                    let limits = limits.clone();
                     async move {
-                        authorize_mcp_transport(State(state.clone()), limiter, request, next).await
+                        authorize_mcp_transport(State(state.clone()), limits, request, next).await
                     }
                 },
             ))
+    }
+}
+
+/// What the transport middleware limits against, shared by every request:
+/// one rolling quota window per token plus the process-wide concurrency
+/// pools (#171), and the legacy sessions this transport opened, by token,
+/// with rmcp's own session table they are checked against (#632).
+#[derive(Clone)]
+struct TransportLimits {
+    limiter: Arc<RateLimiter>,
+    sessions: Arc<SessionRegistry>,
+    rmcp_sessions: Arc<LocalSessionManager>,
+}
+
+impl TransportLimits {
+    /// Forget sessions rmcp has closed, and close the ones that never sent a
+    /// second request within the grace.
+    async fn close_silent_sessions(&self) {
+        let silent = {
+            let live = self.rmcp_sessions.sessions.read().await;
+            self.sessions
+                .prune(|id| live.contains_key(id), std::time::Instant::now())
+        };
+        for id in silent {
+            let _ = self.rmcp_sessions.close_session(&Arc::from(id)).await;
+        }
+    }
+
+    /// Admit a legacy `initialize` under the session caps (#632).
+    async fn admit_session(
+        &self,
+        token: &McpBearerToken,
+    ) -> Result<SessionReservation, std::time::Duration> {
+        self.close_silent_sessions().await;
+        self.sessions.admit(token, std::time::Instant::now())
     }
 }
 
@@ -169,10 +226,11 @@ async fn live_mcp_config(State(state): State<AppState>) -> Result<McpConfig, Res
 /// check with id echo → layered resource protection (#171).
 async fn authorize_mcp_transport(
     State(state): State<AppState>,
-    limiter: Arc<RateLimiter>,
+    limits: TransportLimits,
     request: Request,
     next: Next,
 ) -> Response {
+    let limiter = &limits.limiter;
     let (mut parts, body) = request.into_parts();
     let config = match live_mcp_config(State(state)).await {
         Ok(config) => config,
@@ -191,6 +249,16 @@ async fn authorize_mcp_transport(
         parts
             .extensions
             .insert(McpBearerToken(Arc::from(token.as_str())));
+    }
+
+    // Any request naming a session after its handshake shows a real client
+    // holds it, so it is never closed as silent (#632).
+    if let Some(id) = parts
+        .headers
+        .get(SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        limits.sessions.confirm(id);
     }
 
     if parts.method == Method::POST {
@@ -242,12 +310,37 @@ async fn authorize_mcp_transport(
             {
                 return too_many_requests(limits::retry_after_seconds(retry_in));
             }
-            // The guard is deliberately held across dispatch: its Drop is what
-            // frees the concurrency slots when the response (or an early
-            // error/cancel) completes.
+            // The guard is held until the response body ends or is dropped,
+            // not until its head returns: a legacy session answers a tool
+            // call with an SSE head at once and runs the tool afterwards
+            // (#632), so releasing on the head freed the slot while the tool
+            // still ran.
             let request = Request::from_parts(parts, Body::from(body));
             let response = next.run(request).await;
-            drop(guard);
+            return hold_until_body_ends(response, guard);
+        }
+
+        // A legacy handshake opens a session that holds memory until it
+        // closes, so it is admitted under the session caps (#632). A modern
+        // client has no handshake and opens no session.
+        if config.rate_limits_enabled
+            && !parts.headers.contains_key(SESSION_ID_HEADER)
+            && is_initialize(&body)
+            && let Some(token) = parts.extensions.get::<McpBearerToken>().cloned()
+        {
+            let reservation = match limits.admit_session(&token).await {
+                Ok(reservation) => reservation,
+                Err(retry_in) => return too_many_requests(limits::retry_after_seconds(retry_in)),
+            };
+            let request = Request::from_parts(parts, Body::from(body));
+            let response = next.run(request).await;
+            if let Some(id) = response
+                .headers()
+                .get(SESSION_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+            {
+                reservation.opened(id, std::time::Instant::now());
+            }
             return response;
         }
 
@@ -280,6 +373,40 @@ fn classify_post_body(body: &[u8]) -> Option<ToolCallCharge> {
         parsed["params"]["name"].as_str(),
         parsed["params"].get("arguments"),
     )
+}
+
+/// The header rmcp names a legacy session in.
+const SESSION_ID_HEADER: &str = "mcp-session-id";
+
+/// Whether a buffered POST body is an `initialize` request. Parsed rather than
+/// scanned, so an escaped method name cannot slip past the session caps.
+fn is_initialize(body: &[u8]) -> bool {
+    const MARKER: &[u8] = b"initialize";
+    let marker_absent = !body.windows(MARKER.len()).any(|window| window == MARKER);
+    if marker_absent && !body.contains(&b'\\') {
+        return false;
+    }
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .get("method")
+                .and_then(Value::as_str)
+                .map(|m| m == "initialize")
+        })
+        .unwrap_or(false)
+}
+
+/// `response` with `guard` moved into its body, so the concurrency slots stay
+/// taken until the body has been sent in full or the client hangs up.
+fn hold_until_body_ends(response: Response, guard: ConcurrencyGuard) -> Response {
+    use tokio_stream::StreamExt as _;
+    let (parts, body) = response.into_parts();
+    let stream = body.into_data_stream().map(move |chunk| {
+        let _held = &guard;
+        chunk
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
 }
 
 /// The over-limit rejection (#171): HTTP 429 plus `Retry-After` in whole
@@ -2107,6 +2234,139 @@ mod tests {
         assert_eq!(admitted.status(), StatusCode::OK, "a freed slot admits it");
     }
 
+    /// A legacy `search_notes` call whose response body has not been read yet.
+    async fn legacy_search(app: &Router, session: &Session, id: u64) -> Response {
+        rpc(
+            app,
+            session,
+            json!({
+                "jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"search_notes","arguments":{
+                    "scope": "all", "query":"alpha"
+                }}
+            }),
+        )
+        .await
+    }
+
+    /// #632: a legacy session answers a tool call with an SSE head at once
+    /// and runs the tool afterwards, so the slot freed on the head let any
+    /// number of legacy searches run together. The slot now rides the body.
+    #[tokio::test]
+    async fn a_legacy_call_keeps_its_slot_until_its_response_body_ends() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+
+        let mut open = Vec::new();
+        for id in 0..super::super::limits::MAX_CONCURRENT_EXPENSIVE_SEARCHES as u64 {
+            let response = legacy_search(&app, &session, 10 + id).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            open.push(response);
+        }
+        let refused = legacy_search(&app, &session, 20).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "two legacy searches still streaming hold both search slots"
+        );
+        assert!(
+            refused
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER)
+        );
+
+        for response in open {
+            let body = response_message(response).await;
+            assert!(body["result"].is_object(), "{body}");
+        }
+        let admitted = legacy_search(&app, &session, 21).await;
+        assert_eq!(
+            admitted.status(),
+            StatusCode::OK,
+            "read bodies free the slots"
+        );
+        assert!(response_message(admitted).await["result"].is_object());
+    }
+
+    /// A legacy `initialize` POST, returning the raw response.
+    async fn legacy_initialize(app: &Router) -> Response {
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("accept", "application/json, text/event-stream".into()));
+        headers.push(("content-type", "application/json".into()));
+        send(
+            app.clone(),
+            "POST",
+            headers,
+            Some(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "cap-test", "version": "0"}
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .await
+    }
+
+    /// #632: sessions were unlimited, so any token could open thousands, each
+    /// held for five minutes. One token now holds at most a fixed number.
+    #[tokio::test]
+    async fn sessions_past_the_per_token_cap_are_refused() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        for _ in 0..super::super::limits::MAX_SESSIONS_PER_TOKEN {
+            initialize(&app).await;
+        }
+        let refused = legacy_initialize(&app).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            refused
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER)
+        );
+        assert!(!refused.headers().contains_key("mcp-session-id"));
+
+        // Modern clients open no session, so the cap never touches them.
+        let modern = modern_cheap_tool_call(app.clone(), 7).await;
+        assert_eq!(modern.status(), StatusCode::OK);
+    }
+
+    /// Closing a session gives its place back.
+    #[tokio::test]
+    async fn a_closed_session_stops_counting_against_the_cap() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut sessions = Vec::new();
+        for _ in 0..super::super::limits::MAX_SESSIONS_PER_TOKEN {
+            sessions.push(initialize(&app).await.0);
+        }
+        assert_eq!(
+            legacy_initialize(&app).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-session-id", sessions[0].id.clone()));
+        let closed = send(app.clone(), "DELETE", headers, None).await;
+        assert!(closed.status().is_success(), "{}", closed.status());
+        // rmcp drops the session from its table on the worker's way out.
+        let mut admitted = legacy_initialize(&app).await;
+        // Few tries, each spaced out: every one spends the handshake budget.
+        for _ in 0..20 {
+            if admitted.status() == StatusCode::OK {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            admitted = legacy_initialize(&app).await;
+        }
+        assert_eq!(admitted.status(), StatusCode::OK);
+        assert!(admitted.headers().contains_key("mcp-session-id"));
+    }
+
     #[tokio::test]
     async fn list_and_discovery_stay_outside_the_exhausted_tool_quota() {
         let (state, _tmp) = test_state();
@@ -2768,21 +3028,13 @@ mod tests {
     #[tokio::test]
     async fn other_errors_and_the_two_refusals_carry_no_docs_field() {
         let (state, _tmp) = test_state();
-        let unknown = call_tool_unscoped(
-            &state,
-            "get_note",
-            json!({"vault_id": "00000000-0000-4000-8000-000000000999", "slug": "home"}),
-        )
-        .await;
+        let unknown = call_tool(&state, "get_note", json!({"slug": "no-such-note"})).await;
         assert_eq!(
-            unknown["result"]["structuredContent"],
-            json!({
-                "code": "vault_not_found",
-                "message": "Vault definition was not found",
-                "vault_id": "00000000-0000-4000-8000-000000000999",
-                "retryable": false,
-                "ok": false,
-            }),
+            unknown["result"]["structuredContent"]["code"], "note_not_found",
+            "{unknown:#}"
+        );
+        assert!(
+            unknown["result"]["structuredContent"].get("docs").is_none(),
             "{unknown:#}"
         );
 
@@ -4426,6 +4678,168 @@ mod tests {
             .decode(content["content"]["content"].as_str().expect("content"))
             .expect("valid base64");
         assert_eq!(decoded, bytes);
+    }
+
+    /// #632: a write tool refused an unusable Vault before its own error
+    /// rendering ran, so the refusal came back as a `-32602` JSON-RPC error
+    /// whose message was a JSON string. It is now the structured tool error
+    /// every read tool and `batch` item already gives, with its `docs` page.
+    #[tokio::test]
+    async fn a_write_to_an_unusable_vault_is_a_structured_tool_error() {
+        fn assert_structured(body: &Value, code: &str) {
+            assert!(
+                body.get("error").is_none(),
+                "not a JSON-RPC error: {body:#}"
+            );
+            assert_eq!(body["result"]["isError"], true, "{body:#}");
+            let error = &body["result"]["structuredContent"];
+            assert_eq!(error["code"], code, "{body:#}");
+            assert_eq!(error["ok"], false, "{body:#}");
+            assert!(error["retryable"].is_boolean(), "{body:#}");
+            assert!(error["docs"]["page"].is_string(), "{body:#}");
+        }
+        let create = json!({"relative_path": "New.md", "content": "body"});
+
+        // A Vault whose folder is gone accepts no writes.
+        let (state, _tmp) = unusable_local_content_write_state();
+        let body = call_tool(&state, "create_note", create.clone()).await;
+        assert_structured(&body, "capability_unavailable");
+
+        // An unknown Vault.
+        let (state, _tmp) = write_state();
+        let mut unknown = create.clone();
+        unknown["vault_id"] = json!("00000000-0000-4000-8000-000000000999");
+        let body = call_tool_unscoped(&state, "create_note", unknown).await;
+        assert_structured(&body, "vault_not_found");
+
+        // A disabled Vault.
+        let vault_id = vault_id_of(&state);
+        let revision = match state.vault_registry.load().expect("registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot.revision(),
+            _ => panic!("registry in recovery"),
+        };
+        let snapshot = state
+            .vault_registry
+            .disable(revision, vault_id)
+            .expect("disable");
+        state.vaults.reconcile(&state.vault_registry, &snapshot);
+        let mut disabled = create.clone();
+        disabled["vault_id"] = json!(vault_id);
+        let body = call_tool_unscoped(&state, "create_note", disabled).await;
+        assert_structured(&body, "vault_disabled");
+    }
+
+    /// A batch call naming `get_attachment` in base64 `count` times.
+    async fn base64_batch(state: &AppState, path: &str, count: usize) -> Value {
+        let vault_id = vault_id_of(state).to_string();
+        let operations: Vec<Value> = (0..count)
+            .map(|_| {
+                json!({"op": "get_attachment", "arguments": {
+                    "vault_id": vault_id, "relative_path": path, "encoding": "base64"
+                }})
+            })
+            .collect();
+        call_tool_unscoped(state, "batch", json!({"operations": operations})).await
+    }
+
+    /// #632: a batch of base64 attachments read and encoded every one, several
+    /// hundred megabytes, before the finished reply was refused for its size.
+    /// Each now has to fit in what is left of the reply, and one that cannot
+    /// is refused before it is read.
+    #[tokio::test]
+    async fn a_base64_batch_stops_reading_once_the_reply_is_full() {
+        let (state, _tmp) = test_state();
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("big.png"), vec![7u8; 5_000_008]).expect("attachment");
+
+        let body = base64_batch(&state, "big.png", 50).await;
+        assert!(body.get("error").is_none(), "{}", &body.to_string()[..300]);
+        let result = &body["result"]["structuredContent"];
+        assert_eq!(result["succeeded"], 1, "only the first fits");
+        assert_eq!(result["failed"], 49);
+        let items = result["items"].as_array().expect("items");
+        assert_eq!(items[0]["ok"], true);
+        assert!(
+            items[1]["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("batch reply")),
+            "{}",
+            items[1]
+        );
+        for item in &items[1..] {
+            assert_eq!(
+                item["error"]["code"], "attachment_too_large_for_base64",
+                "{item}"
+            );
+        }
+    }
+
+    /// A read whose answer would overflow the batch reply is reported as an
+    /// item error, and the reply stays deliverable.
+    #[tokio::test]
+    async fn a_read_that_overflows_the_batch_reply_is_an_item_error() {
+        let (state, _tmp) = write_state();
+        let created = call_tool(
+            &state,
+            "create_note",
+            json!({"relative_path": "Big.md", "content": "word ".repeat(600_000)}),
+        )
+        .await;
+        assert_eq!(created["result"]["isError"], false, "{created}");
+        let slug = created["result"]["structuredContent"]["slug"].clone();
+        let vault_id = vault_id_of(&state).to_string();
+        let operations: Vec<Value> = (0..3)
+            .map(|_| json!({"op": "get_note", "arguments": {"vault_id": vault_id, "slug": slug}}))
+            .collect();
+        let body = call_tool_unscoped(&state, "batch", json!({"operations": operations})).await;
+        assert!(body.get("error").is_none(), "the reply is delivered");
+        let result = &body["result"]["structuredContent"];
+        assert_eq!(result["succeeded"], 2);
+        let third = &result["items"][2];
+        assert_eq!(third["ok"], false);
+        assert_eq!(third["error"]["code"], "batch_reply_too_large", "{third}");
+    }
+
+    /// #632: the base64 setting goes up to 512 MiB, but a reply holds about
+    /// 6 MiB of base64, so a larger file failed at the reply size check with
+    /// plain text. The effective cap is now the smaller of the two,
+    /// advertised as such, and refused with the structured code.
+    #[tokio::test]
+    async fn the_base64_cap_never_exceeds_what_a_reply_can_carry() {
+        let (state, _tmp) = write_state();
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "20000000".to_string(),
+            )])
+            .expect("raise the base64 cap");
+        let reply_cap = super::super::config::MAX_REPLY_BASE64_BYTES;
+
+        let config = call_tool(&state, "get_attachment_import_config", json!({})).await;
+        let methods = config["result"]["structuredContent"]["methods"]
+            .as_array()
+            .expect("methods");
+        let base64 = methods
+            .iter()
+            .find(|method| method["tool"] == "import_attachment")
+            .expect("base64 method");
+        assert_eq!(base64["max_bytes"], reply_cap);
+
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("big.png"), vec![7u8; 8_000_008]).expect("attachment");
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "big.png", "encoding": "base64"}),
+        )
+        .await;
+        assert!(body.get("error").is_none(), "{body}");
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["structuredContent"]["code"],
+            "attachment_too_large_for_base64"
+        );
     }
 
     #[tokio::test]
