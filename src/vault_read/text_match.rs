@@ -15,9 +15,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::cache::parse::frontmatter_span;
 use crate::cache::vault_snapshots::{VaultSnapshotNote, VaultSnapshotRead};
 use crate::search::LayerSelection;
+use crate::vault::body_start;
 use crate::vault_registry::VaultId;
 
 use super::VaultReadError;
@@ -448,21 +448,6 @@ fn fold(text: &str, case_sensitive: bool) -> String {
         text.nfc().collect()
     } else {
         text.chars().flat_map(char::to_lowercase).nfc().collect()
-    }
-}
-
-/// Where the body begins: just past the line closing a leading frontmatter
-/// block, or `0` when the Note has none. The same block the canonical parser
-/// and the write layer recognise.
-pub(super) fn body_start(content: &str) -> usize {
-    let Some((_, inner_end)) = frontmatter_span(content) else {
-        return 0;
-    };
-    // `inner_end` sits on the `\n` before the closing `---`.
-    let closing = inner_end + 1;
-    match content[closing..].find('\n') {
-        Some(newline) => closing + newline + 1,
-        None => content.len(),
     }
 }
 

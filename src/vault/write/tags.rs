@@ -459,6 +459,7 @@ fn write_error_message(error: &WriteError) -> &str {
     match error {
         WriteError::Conflict(message)
         | WriteError::InvalidInput(message)
+        | WriteError::HeadingNotFound(message)
         | WriteError::Io(message) => message,
         WriteError::LinkRewriteUnsupported(_) => "a linking note cannot be rewritten",
     }

@@ -609,7 +609,7 @@ fn section_span(
         .map(|(idx, _)| idx)
         .collect();
     match matched.as_slice() {
-        [] => Err(WriteError::InvalidInput(format!(
+        [] => Err(WriteError::HeadingNotFound(format!(
             "heading '{requested}' not found in note '{relative_path}'"
         ))),
         [idx] => {

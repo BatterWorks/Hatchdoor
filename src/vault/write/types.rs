@@ -48,6 +48,8 @@ pub struct UnrewritableNote {
 pub enum WriteError {
     Conflict(String),
     InvalidInput(String),
+    /// No body heading matches the requested section. Nothing was written.
+    HeadingNotFound(String),
     Io(String),
     /// Every note, in path order, whose link to the subject of a move, rename
     /// or delete would have to change but cannot be rewritten. Nothing was

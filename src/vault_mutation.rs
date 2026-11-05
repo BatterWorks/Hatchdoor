@@ -588,6 +588,7 @@ pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOpera
     let (code, message, retryable) = match error {
         WriteError::Conflict(message) => ("write_conflict", message, true),
         WriteError::InvalidInput(message) => ("invalid_write_input", message, false),
+        WriteError::HeadingNotFound(message) => ("heading_not_found", message, false),
         WriteError::Io(message) => {
             // The only record of an I/O write failure used to be whatever the
             // client happened to log, which is how a whole filesystem being
@@ -2660,6 +2661,33 @@ mod tests {
         assert!(outcome.trashed_path.is_some());
         assert_eq!(outcome.layer, None);
         assert!(!workspace.exists("Home.md"));
+    }
+
+    #[tokio::test]
+    async fn replace_section_reports_heading_not_found_without_changing_frontmatter() {
+        let body = "---\ntitle: W\n# status: draft\ntags: [a]\n---\nIntro\n\n## Log\nMonday\n";
+        let workspace = workspace(Fixture::new(&[("Home.md", body)]));
+        let core = workspace.core();
+        for mode in [
+            SectionMode::Replace,
+            SectionMode::Before,
+            SectionMode::After,
+        ] {
+            let error = core
+                .replace_section(
+                    workspace.vault_id,
+                    "home",
+                    "# status: draft",
+                    mode,
+                    "new\n",
+                    &hash(body),
+                )
+                .await
+                .expect_err("frontmatter is not a section");
+            assert_code(&error, "heading_not_found");
+            assert!(!error.retryable);
+            assert_eq!(workspace.read("Home.md"), body);
+        }
     }
 
     #[tokio::test]

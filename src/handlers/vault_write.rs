@@ -176,7 +176,7 @@ pub(crate) fn mutation_error_response(error: VaultOperationError) -> Response {
         "invalid_write_input" | "noise_excluded_write" | "layer_marker_write" => {
             StatusCode::BAD_REQUEST
         }
-        "note_not_found" => StatusCode::NOT_FOUND,
+        "note_not_found" | "heading_not_found" => StatusCode::NOT_FOUND,
         _ => {
             return vault_read_error_response(VaultReadError {
                 code: error.code,
@@ -745,6 +745,7 @@ mod tests {
         );
         assert_eq!(map("layer_marker_write").status(), StatusCode::BAD_REQUEST);
         assert_eq!(map("note_not_found").status(), StatusCode::NOT_FOUND);
+        assert_eq!(map("heading_not_found").status(), StatusCode::NOT_FOUND);
         assert_eq!(
             map("write_recovery_required").status(),
             StatusCode::INTERNAL_SERVER_ERROR
