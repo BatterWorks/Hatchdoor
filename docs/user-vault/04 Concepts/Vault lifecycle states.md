@@ -30,10 +30,12 @@ Beside the axes, `index_turn` says where the Vault's indexing stands in the queu
 
 **Search** has middle values that are easy to misread:
 
-- `indexing`: the Vault is building its first index, and there is nothing to search yet. A Vault that was already searchable never shows `indexing` during a reindex. It shows `stale`, with `index_turn` `running`.
+- `indexing`: the Vault is building its first index, and there is nothing to search yet. A Vault that keeps a valid searchable index does not show `indexing` during an ordinary reindex. It shows `stale`, with `index_turn` `running`.
 - `browsable`: the Vault's notes, links and headings are published and current, but it has no vectors yet. You can open and read every note, and semantic search returns nothing. `query_notes` works in full, and so does a note's saved query table, since selecting notes by tag, path or property needs no vectors. A Vault passes through `browsable` once, on its first index, between reading the notes and preparing search by meaning. A later rebuild of a searchable Vault never drops back to it, because search keeps answering from the previous build while the rebuild runs.
 - `ready`: fully current, with structure and vectors.
 - `stale`: search still works, but what it answers from is one build behind. There are three ways to get here. A newer build is in progress, or paused while it waits its turn behind another Vault. The last build failed. Or a note was written, or a sync pulled changes from the remote, during the build that just finished, so what it published was already behind when it landed. The third is normal during a bulk edit or a migration: every write schedules the next reindex, as does every sync that pulls, and the Vault settles on `ready` once the writing stops. A commit, or a sync that pulls nothing, changes no note and does not make a Vault `stale`. `stale` is not an error. It means what you see might be one build behind.
+
+A damaged cache is an exception to retaining the old index. Hatchdoor quarantines it and rebuilds every active Vault. `search_error.code` is `cache_rebuilding` after replacement while the Vault waits for its Index turn, or `cache_recovery_failed` if recovery could not finish and is being retried. Its Markdown still reads directly from disk; indexed listings and search return as that Vault is rebuilt.
 
 ## What capabilities actually come from
 

@@ -4,7 +4,7 @@ tags: [type/how-to, topic/troubleshooting]
 
 # How to troubleshoot common problems
 
-Find what you are seeing in the list below and jump to its section. Each section says what is going on, then how to fix it. None of these problems lose notes: your notes are plain files in a folder, and Hatchdoor refuses a change rather than half-make it.
+Find what you are seeing in the list below and jump to its section. Each section says what is going on, then how to fix it. Your notes are plain files in a folder. Read the reported error before changing files or permissions.
 
 - Hatchdoor stops right after starting, or the container keeps restarting: [[#Hatchdoor won't start]]
 - The browser says "Vaults Unavailable": [[#The workspace says "Vaults Unavailable"]]
@@ -117,6 +117,8 @@ These are normal, not faults:
 
 Anything reporting `unavailable` carries a matching error field (`activation_error`, `search_error`, `git_error` or `watcher_error`) with an error code and a message. Read it before guessing at a cause. [[Vault lifecycle states]] explains every value in depth.
 
+If the error names a damaged SQLite cache, Hatchdoor quarantines it and rebuilds every active Vault from Markdown automatically, without changing the note files. `cache_rebuilding` means that rebuild has been queued; `cache_recovery_failed` means recovery itself failed and is being retried. Check the message for a permissions or disk-space problem. The quarantined files stay beside the cache with `.corrupt-...` in their names.
+
 ## Permission denied reading or writing the Vault
 
 Hatchdoor runs as its own restricted user, number `65532`, not as you. Your notes folder has to be readable by that user, and writable too if you want to edit notes in the browser or let an agent change them. A folder only your own account can open shows up as this error.
@@ -212,6 +214,8 @@ If `next_attempt_at` is more than about a minute in the past, something is wrong
 In the browser, switch **Mode** to **Keyword** when you are looking for an exact word, name or ID; search by meaning can rank a note with the exact word below notes that are closer in meaning. For agents, first check that a search is what you want. `search_notes` finds notes by meaning and ranks them. If you want every note with a tag, in a folder or with a frontmatter property, use `query_notes`, which selects without ranking and never comes back empty for want of a good enough match. It also reads every layer, so it can select a demoted note that an ordinary search would not show you. If you want every note that contains an exact string, with a count, use `find_text`: a keyword search ranks notes that hold any one word of the query, so its list is not a list of occurrences.
 
 If a search is what you want, remember that search looks only at the **default surface** unless you ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search. [[How to organize a Vault with layers]] explains how to search across layers on purpose. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
+
+A keyword search that reports a time limit exceeded its 750 ms SQLite budget. Try fewer terms. Repeating a word does not help: Keyword mode ignores duplicates, uses only the first 8,192 bytes and stops at 64 distinct terms. `get_frontmatter` reporting `invalid_frontmatter` can also mean the YAML block exceeds 16,384 bytes; shorten it in the note itself. The note remains readable.
 
 ## A saved query shows a message instead of a table
 

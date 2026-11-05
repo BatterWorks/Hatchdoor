@@ -380,6 +380,11 @@ pub fn update_note_frontmatter(
     }
     ensure_content_hash(entry, expected_content_hash)?;
     let content = read_note(entry)?;
+    let bom = if content.starts_with('\u{feff}') {
+        "\u{feff}"
+    } else {
+        ""
+    };
     let span = frontmatter_span(&content);
     let had_frontmatter = span.is_some();
     // Surface the same frontmatter quality contract as the sibling note
@@ -416,7 +421,7 @@ pub fn update_note_frontmatter(
                 };
                 end + 4 + spaces + line_ending
             });
-            content[body_start..].to_string()
+            format!("{bom}{}", &content[body_start..])
         }
         // Rewrite exactly the inner region so the opening/closing markers and
         // everything after them keep their original bytes. The edited block
@@ -432,9 +437,9 @@ pub fn update_note_frontmatter(
             None => match content.contains("\r\n") {
                 true => {
                     let edited = edited.replace('\n', "\r\n");
-                    format!("---\r\n{edited}\r\n---\r\n{content}")
+                    format!("{bom}---\r\n{edited}\r\n---\r\n{}", &content[bom.len()..])
                 }
-                false => format!("---\n{edited}\n---\n{content}"),
+                false => format!("{bom}---\n{edited}\n---\n{}", &content[bom.len()..]),
             },
         },
     };

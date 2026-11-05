@@ -1455,6 +1455,8 @@ pub async fn run_server() {
     // Repair remains owned by its later packet.
     // Exits on its own once `vault_work.shutdown()` has discarded the queue
     // and every running turn has published its outcome.
+    let cache_recovery_task =
+        tokio::spawn(crate::vault_executor::recover_corrupt_cache(state.clone()));
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
         let executor = VaultWorkExecutor::from_state(&state);
@@ -1583,6 +1585,9 @@ pub async fn run_server() {
     }
     if let Some(task) = watcher_index_task {
         task.abort();
+    }
+    if let Err(error) = cache_recovery_task.await {
+        error!(%error, "SQLite cache recovery waiter exited unexpectedly");
     }
     if let Err(error) = dispatch_task.await {
         error!(%error, "Vault background work dispatch loop exited unexpectedly");
@@ -2290,6 +2295,91 @@ mod tests {
         let lines = logs.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("Loading search model"), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn cache_recovery_requeues_every_active_vault_and_preserves_markdown() {
+        let (_, tmp, mut state, mut worker) = app_for_tests_with_worker(None, false);
+        state.startup_sqlite =
+            Arc::new(SqliteCache::open(tmp.path().join("cache.sqlite3"), 384).unwrap());
+        let app = build_router(state.clone(), None);
+        let mut ids = Vec::new();
+        for (revision, name) in ["First", "Second"].into_iter().enumerate() {
+            let root = tmp.path().join(name);
+            let id = create_vault_with_files(
+                &app,
+                name,
+                &root,
+                &[("Home.md", "# Home\nword\n")],
+                revision as u64,
+            )
+            .await;
+            ids.push(id.parse::<crate::vault_registry::VaultId>().unwrap());
+        }
+        drain_queued_turns(&mut worker).await;
+        let recovery = tokio::spawn(crate::vault_executor::recover_corrupt_cache(state.clone()));
+        // The cache tests exercise physical damage. This test exercises the
+        // runtime's reaction to that same coalesced corruption signal.
+        state
+            .startup_sqlite
+            .report_corruption("database corruption");
+        let mut rebuilt = Vec::new();
+        for _ in 0..2 {
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                worker.run_next(|request| {
+                    let state = state.clone();
+                    async move {
+                        crate::vault_executor::dispatch_vault_index_turn(
+                            &state.vaults,
+                            state.startup_sqlite,
+                            state.embedder,
+                            request,
+                        )
+                        .await
+                    }
+                }),
+            )
+            .await
+            .expect("every active Vault gets a turn")
+            .unwrap();
+            outcome.result.expect("rebuild succeeds");
+            rebuilt.push(outcome.request.vault_id());
+        }
+        ids.sort();
+        rebuilt.sort();
+        assert_eq!(rebuilt, ids);
+        for id in ids {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{id}/search?q=word&mode=keyword"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(response).await["data"]["results"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        for name in ["First", "Second"] {
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join(name).join("Home.md")).unwrap(),
+                "# Home\nword\n"
+            );
+        }
+        state.shutdown.trigger();
+        tokio::time::timeout(Duration::from_secs(2), recovery)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn app_for_tests() -> (Router, TempDir) {

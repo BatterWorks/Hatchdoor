@@ -95,7 +95,8 @@ that production inventory are still checked for stale paths and duplicates.
   binaries.
 - `main.rs` selects serve, model-prefetch, and container-healthcheck modes.
 - `server.rs` is the HTTP composition root: it validates startup posture,
-  constructs `AppState`, builds routes, and starts background work. Unsafe
+  constructs `AppState`, builds routes, and starts background work. It starts
+  and joins Vault work execution's signal-driven cache-recovery waiter (#633). Unsafe
   public startup without web authentication remains a refusal. Its recovery
   token never reaches the log (#629): `check_web_auth_posture` saves it as one
   `.env` line to `NEW_WEB_TOKEN_FILE` (`new-web-token.env`) beside the Vault
@@ -541,6 +542,12 @@ saved setting still reaches the next turn without a restart — that is where
 `git_author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
 commit identity, overridden per Vault by
 `git::config::resolve_commit_identity`) and `HATCHDOOR_EMBED_LAYERS` are read.
+`recover_corrupt_cache`, started once by `server.rs` and stopped on shutdown,
+waits for the cache's corruption signal. It runs handle replacement and
+quarantine on the blocking pool, then requests an Index turn for every active
+Vault through the existing coordinator. It reports `cache_rebuilding` on each
+Vault until its turn starts, or `cache_recovery_failed` while retrying a failed
+recovery. It creates no new indexing lane and changes no Markdown.
 `settle_startup` latches startup Ready, and is the one place that does:
 `publish_outcome` asks it after an Index turn, and runtime composition asks
 it when model setup finishes and, through
@@ -1681,6 +1688,8 @@ multi-note write (`move_or_rename_note`, `archive_note`, `delete_note`,
 argument, `None` only in tests, and the layer exports `IntentLog`,
 `repair_interrupted_writes` and its `WriteRepair` report for Vault
 activation (ADR-51).
+`update_note_frontmatter` keeps an existing leading UTF-8 BOM at the start
+when it creates, edits or removes the frontmatter block (#633).
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
 (ADR-13), and its second caller is the Vault-wide tag rename and delete in
@@ -2525,7 +2534,24 @@ occupies in the note, for the Vault-wide tag rename (`vault/write/tags.rs`,
 store, or miss one it would. A tag split by an inline code span is recognised
 but has no range, because no single run of text spells it.
 `ReadSnapshot` is the crate-private pinned-read seam used where participant
-metadata and cache queries must observe one published generation.
+metadata and cache queries must observe one published generation. Its keyword
+time limit installs a SQLite progress handler on that lease; committing checks
+the same deadline, and returning the lease clears the handler before reuse.
+`open` checks physical integrity with `quick_check(1)` before trusting a file.
+Read guards report `SQLITE_CORRUPT` and `NOTADB` before a rollback clears the
+error; writer acquisition and cache-publication failures report them too.
+`wait_for_corruption` and `recover_corruption` are the crate-private recovery
+seam consumed by Vault work execution. Reporting only signals: recovery runs
+elsewhere, under the model epoch, drains all read leases, closes pooled and
+writer handles, quarantines the file and sidecars, then recreates the schema.
+New operations refuse while recovery is replacing those handles. A failed
+recovery stays unavailable and is retried by the executor's waiter.
+
+The shared frontmatter parser accepts a leading UTF-8 BOM while retaining byte
+offsets into the original file. It refuses inner YAML over 16,384 bytes before
+parsing and reports an unclosed block as invalid. `fts_query_terms` uses at most
+8,192 bytes and 64 case-insensitively distinct terms, in first-occurrence order;
+query construction and compact snippets share those same bounded terms.
 
 **Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec. Its tests capture log lines with runtime composition's
@@ -2554,6 +2580,10 @@ and embedder identity/dimensions.
   runs before the search core takes its snapshot: holding a slot across the
   embedder's inference lock let four concurrent searches starve every other
   read. Waiters are woken one at a time and not in arrival order.
+- The `note_metadata` shape stamp sends every note through the parser once when
+  its rules change, without changing its content hash or re-embedding unchanged
+  chunks. It travels with candidate and published snapshot metadata, so an
+  upgrade repairs cached BOM metadata even when the note itself did not change.
 - Schema or embedder identity mismatch rebuilds rather than mixing data, with
   one exception (ADR-50): a cache one schema version behind is left alone at
   open and migrated by `migrate.rs` right after `reset_if_embedder_changed`
@@ -2690,6 +2720,10 @@ and future Vault-scoped MCP adapters.
 
 - Runtime search defaults to pure semantic retrieval; hybrid and reranking stay
   offline (ADR-05).
+- Keyword search uses the cache parser's bounded, deduplicated terms and one
+  750 ms SQLite deadline across its pinned snapshot and candidate windows.
+  Interrupts return `search_unavailable` with a time-limit message. No expired
+  handler reaches the next request, and Semantic search has no new deadline.
 - Layer selection must never widen the eligible result set.
 - There is one retrieval path per mode. #210 removed the unreachable note
   metadata filters, the property projection, and the second semantic path they
@@ -5515,7 +5549,13 @@ held-draft model and `openCreateDialog`'s target-Vault override), backend
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
-safety; every mutation continues through backend `vault/write` (ADR-03/11);
+safety; every mutation continues through backend `vault/write` (ADR-03/11).
+
+The frontmatter builder's optional `preserveBom` argument keeps an existing
+leading byte order mark through property creation, editing and removal;
+`NoteEditor` and the reading view's property editor pass the original note's
+marker state (#633).
+
 **nothing re-serializes a note** — the editor's document is the file's text,
 the body is put back under the current frontmatter in the file's own line
 ending, and no save ever rewrites what was not typed; **the floating toolbar

@@ -410,6 +410,63 @@ impl VaultWorkExecutor {
     }
 }
 
+/// One signal-driven recovery waiter, started by runtime composition. The
+/// cache owns handle draining and quarantine; rebuilt Vaults use the existing
+/// Index lane. Never recover from inside a query or an Index turn's locks.
+pub(crate) async fn recover_corrupt_cache(state: AppState) {
+    loop {
+        tokio::select! {
+            () = state.shutdown.wait() => return,
+            () = state.startup_sqlite.wait_for_corruption() => {},
+        }
+        loop {
+            let cache = state.startup_sqlite.clone();
+            let dimension = state.embedder.embedding_dim();
+            let result = tokio::task::spawn_blocking(move || cache.recover_corruption(dimension))
+                .await
+                .map_err(|error| format!("cache recovery task failed: {error}"))
+                .and_then(|result| result);
+            match result {
+                Ok(false) => break,
+                Ok(true) => {
+                    for vault_id in state.vaults.active_vault_ids() {
+                        if let Some(vault) = state.vaults.runtime(vault_id) {
+                            let _ = vault.set_search_status(VaultSearchStatus::Unavailable, Some(VaultRuntimeError {
+                                code: "cache_rebuilding".into(),
+                                message: "The damaged search cache was quarantined. Rebuilding from Markdown.".into(),
+                                retryable: true,
+                                detail: None,
+                            }));
+                        }
+                        state.vault_work.request(vault_id, VaultWorkKind::Index);
+                    }
+                    break;
+                }
+                Err(message) => {
+                    error!(%message, "SQLite cache recovery failed; retrying");
+                    for vault_id in state.vaults.active_vault_ids() {
+                        if let Some(vault) = state.vaults.runtime(vault_id) {
+                            let _ = vault.set_search_status(
+                                VaultSearchStatus::Unavailable,
+                                Some(VaultRuntimeError {
+                                    code: "cache_recovery_failed".into(),
+                                    message: message.clone(),
+                                    retryable: true,
+                                    detail: None,
+                                }),
+                            );
+                        }
+                    }
+                    tokio::select! {
+                        () = state.shutdown.wait() => return,
+                        () = tokio::time::sleep(Duration::from_secs(2)) => {},
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Latch startup `Ready` if the instance is ready now: the search model is
 /// set up, the Vault registry loaded normally, and every active Vault's first
 /// index has settled ([`collection_indexes_settled`]). Latching also releases

@@ -176,6 +176,9 @@ pub enum UpsertOutcome {
 /// changes without the embedded text changing, so existing indexes are
 /// re-chunked once and keep their vectors.
 const CHUNK_STORED_TEXT_SHAPE: &str = "fence-markers";
+/// Reparse unchanged notes once after the BOM and bounded-YAML parser upgrade.
+/// Chunk hashes still reuse their vectors; this is not a model/schema change.
+const NOTE_METADATA_SHAPE: &str = "bounded-yaml-bom-v1";
 
 const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -242,7 +245,10 @@ impl SqliteCache {
             .snapshot_model_epoch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The refresh runs in one transaction whose rollback clears the
+        // connection's error, so report corruption from the returned message.
         self.replace_with_options_unlocked(index, embedder, handles, embed_layers, opts, None)
+            .inspect_err(|message| self.report_corruption(message))
     }
 
     /// Callers hold `snapshot_model_epoch`. `build_stamp` carries the metadata a
@@ -321,6 +327,8 @@ impl SqliteCache {
         // hash, so the pass re-chunks without re-embedding.
         let stored_text_changed =
             self.get_metadata("chunk_stored_text")?.as_deref() != Some(CHUNK_STORED_TEXT_SHAPE);
+        let note_metadata_changed =
+            self.get_metadata("note_metadata")?.as_deref() != Some(NOTE_METADATA_SHAPE);
 
         // Guard against silent promotion: if a `.hatchdoor-layer` marker present
         // at the last index has vanished (a sync tool dropped the dotfile), keep
@@ -427,7 +435,10 @@ impl SqliteCache {
         // of the measured full-vault runtime, and retaining these results gives
         // the heartbeat an exact embedding-work denominator without chunking
         // notes twice.
-        let force_note_refresh = marker_set_changed || embed_layers_changed || stored_text_changed;
+        let force_note_refresh = marker_set_changed
+            || embed_layers_changed
+            || stored_text_changed
+            || note_metadata_changed;
         for entry in &entries {
             let note_sync_started = Instant::now();
             let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
@@ -643,6 +654,7 @@ impl SqliteCache {
         set_metadata_in_transaction(&tx, "marker_set", &effective_markers_json)?;
         set_metadata_in_transaction(&tx, "embed_layers", embed_layers_value)?;
         set_metadata_in_transaction(&tx, "chunk_stored_text", CHUNK_STORED_TEXT_SHAPE)?;
+        set_metadata_in_transaction(&tx, "note_metadata", NOTE_METADATA_SHAPE)?;
         set_metadata_in_transaction(&tx, "layer_catalog", &layer_catalog_json)?;
         if let Some(stamp) = build_stamp {
             set_metadata_in_transaction(
@@ -731,6 +743,7 @@ impl SqliteCache {
                 started_at: Instant::now(),
             }),
         )
+        .inspect_err(|message| self.report_corruption(message))
     }
 }
 
@@ -3166,6 +3179,49 @@ mod chunk_integration_tests {
             )
             .expect("fts");
         assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn old_metadata_is_reparsed_without_reembedding_unchanged_notes() {
+        let dir = make_vault(&[(
+            "bom.md",
+            "\u{feff}---\ntags: [bomtag]\nstatus: current\n---\n# Body\nword",
+        )]);
+        let cache = SqliteCache::in_memory(384).unwrap();
+        let index = VaultIndex::build(dir.path()).unwrap();
+        let embedder = RecordingEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .unwrap();
+        let embedded = embedder.recorded().len();
+        {
+            let conn = cache.connection().unwrap();
+            conn.execute_batch(
+                "DELETE FROM metadata WHERE key='note_metadata'; DELETE FROM tags;
+                UPDATE notes SET frontmatter_json='{}';",
+            )
+            .unwrap();
+        }
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .unwrap();
+        let metadata = cache
+            .read_note_by_slug("bom")
+            .unwrap()
+            .unwrap()
+            .metadata
+            .unwrap();
+        assert_eq!(metadata.tags, ["bomtag"]);
+        assert_eq!(metadata.properties["status"], "current");
+        assert_eq!(
+            embedder.recorded().len(),
+            embedded,
+            "reuse every unchanged vector"
+        );
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .unwrap();
+        assert_eq!(embedder.recorded().len(), embedded);
     }
 
     #[test]

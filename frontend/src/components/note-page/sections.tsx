@@ -59,7 +59,11 @@ export function NoteProperties({
     );
     // buildContentWithFrontmatter joins with LF, so a CRLF note would come
     // back entirely rewritten: a whole-file diff from editing one property.
-    const rebuilt = buildContentWithFrontmatter(next, body);
+    const rebuilt = buildContentWithFrontmatter(
+      next,
+      body,
+      content.startsWith("\uFEFF"),
+    );
     const ending = detectLineEnding(content);
     onChange(ending === "\n" ? rebuilt : rebuilt.split("\n").join("\r\n"));
   };

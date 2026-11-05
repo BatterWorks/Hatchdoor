@@ -4,11 +4,13 @@ tags: [type/explanation, topic/search]
 
 # How indexing and search work
 
-Your Markdown files are the real copy of your notes. To search them quickly, Hatchdoor reads them into one SQLite file, the index, and everything it searches, lists and links comes from there. This page explains what the index is, how it keeps up with your notes, and how the two search modes differ.
+Your Markdown files are the real copy of your notes. To search and list them quickly, Hatchdoor reads them into one SQLite file, the index. Reading a note still reads its file directly; links are read from the files and kept until Hatchdoor notices a change. This page explains what the index is, how it keeps up with your notes, and how the two search modes differ.
 
 ## The index is disposable, on purpose
 
 The index is built from the Vault's Markdown and holds nothing that is not in your files. Delete it and Hatchdoor rebuilds it from the files on disk, with nothing lost. That is why [[Understand where your data lives]] says to back up the Vault folder and not the cache folder.
+
+Hatchdoor checks the cache for physical damage when it opens it. Damage found then, or during a later cache operation, moves the cache and any journal files to `.corrupt-...` files beside it and rebuilds every active Vault from Markdown. Search and indexed listings may be unavailable until their Vault's index is rebuilt. The note files are not changed. If recovery fails, the Vault's error says why and Hatchdoor keeps retrying.
 
 ## What happens when a note changes
 
@@ -36,7 +38,9 @@ While a Vault waits, its `index_turn` is `waiting` and the sidebar shows **waiti
 Hatchdoor has two search modes, **Semantic** (the default) and **Keyword**, and you choose between them. It never blends the two into one ranking.
 
 - **Semantic** embeds your query with the model that embedded your notes, then finds the closest vectors. It matches by meaning, so a query can find a note that never uses the query's words.
-- **Keyword** runs against SQLite's FTS5 full-text index, the BM25-style engine most databases use for exact-text search. It matches the words that are present, which is what you want for a hostname, filename, tag, ID, or any other exact string.
+- **Keyword** runs against SQLite's FTS5 full-text index, which ranks notes by the query words they contain. It matches any query word, not necessarily the whole string. Use `find_text` over MCP when you need every occurrence of one exact string.
+
+Keyword search uses the first 8,192 bytes of the query, cut between characters, and at most 64 distinct terms, ignoring case for duplicates. Repeating a word does not give it more weight. Its SQLite work has a 750 ms deadline shared across candidate windows, so an expensive or abandoned query cannot keep a reader slot indefinitely. A timed-out search reports `search_unavailable` with a message asking for fewer terms. These limits apply to the browser, HTTP and MCP alike; Semantic search is unchanged.
 
 > [!warning]
 > Hatchdoor never fuses the two modes at query time. It was tested: combining them with Reciprocal Rank Fusion added a second query and measurable latency, and the results were unpredictable and often worse. On the evaluation set, fusion sometimes pushed the correct top result below a distractor that shared its words. Semantic search alone scored best. If you see "hybrid" used loosely elsewhere, it does not mean fused retrieval in Hatchdoor's search.
