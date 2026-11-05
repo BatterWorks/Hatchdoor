@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::types::WriteError;
 
-pub(super) fn normalize_note_relative_path(input: &str) -> Result<String, WriteError> {
+pub(crate) fn normalize_note_relative_path(input: &str) -> Result<String, WriteError> {
     let trimmed = input.trim().replace('\\', "/");
     if trimmed.is_empty() {
         return Err(WriteError::InvalidInput(
@@ -61,7 +61,7 @@ pub fn allowed_attachment_extensions() -> &'static [&'static str] {
     &["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "pdf"]
 }
 
-pub(super) fn normalize_attachment_relative_path(input: &str) -> Result<String, WriteError> {
+pub(crate) fn normalize_attachment_relative_path(input: &str) -> Result<String, WriteError> {
     let trimmed = input.trim().replace('\\', "/");
     if trimmed.is_empty() {
         return Err(WriteError::InvalidInput(

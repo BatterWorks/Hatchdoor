@@ -4667,7 +4667,7 @@ mod tests {
         let create = call_tool(
             &state,
             "create_note",
-            json!({"relative_path": "notes/scratch.tmp", "content": "ignore me"}),
+            json!({"relative_path": ".obsidian/scratch.md", "content": "ignore me"}),
         )
         .await;
         assert_eq!(create["error"]["code"], -32602);
@@ -6775,7 +6775,7 @@ mod tests {
             "batch",
             json!({"operations": [
                 {"op": "create_note", "arguments": {
-                    "vault_id": vault_id, "relative_path": "notes/scratch.tmp", "content": "x"
+                    "vault_id": vault_id, "relative_path": ".obsidian/scratch.md", "content": "x"
                 }},
                 {"op": "create_note", "arguments": {
                     "vault_id": vault_id, "relative_path": "wiki/.hatchdoor-layer", "content": "x"
