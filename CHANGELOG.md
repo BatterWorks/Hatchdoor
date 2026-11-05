@@ -8,8 +8,10 @@
 
 ### Fixed
 - Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
+- A Git sync no longer destroys a note kept in a path your ignore rules cover. Hatchdoor writes notes in folders a `.gitignore`, `.git/info/exclude` or `core.excludesFile` ignores, and never commits them, so they exist only on that disk. When the remote then brought a file at the same path, or a plain file named like an ignored folder, or a folder named like an ignored file, the sync replaced or deleted the note and still reported the Vault as ready. The sync now stops before writing anything and reports a conflict that names the notes in the way, as it does for any other local edit the remote would overwrite. An ignored note the remote does not touch never blocks a sync, nor does a submodule the remote moves. The troubleshooting guide says how to clear this kind of conflict, which a recovery branch cannot. [#623]
 
 [#621]: https://github.com/BatterWorks/Hatchdoor/issues/621
+[#623]: https://github.com/BatterWorks/Hatchdoor/issues/623
 
 ## v2.9.0 - 2026-10-27
 
