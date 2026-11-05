@@ -194,6 +194,8 @@ On Linux with an existing notes folder, also let user `65532` read and write it,
 sudo setfacl -R -m u:65532:rwX -m d:u:65532:rwX "$NOTES"
 ```
 
+A note Hatchdoor edits then belongs to user `65532`, because only root may hand a file to another user. Its former owner keeps the access they had through an entry Hatchdoor adds to the note's access list, so they can still open and save it.
+
 Many Linux systems do not have `setfacl` installed. If it is missing, leave the folder's permissions alone; do not install it or change the folder's owner. Hatchdoor can usually still read the notes, so search works, but neither the browser nor an agent can change them. Step 5 shows whether that happened, and step 7 says how to tell the user. macOS and Windows need neither command; Docker Desktop handles access.
 
 Start Hatchdoor:
