@@ -398,6 +398,66 @@ fn build_gives_the_unsuffixed_slug_to_the_default_surface() {
     );
 }
 
+/// The layer guarantees the cache's retired resolver used to carry (#653),
+/// now held by the one resolution rule.
+#[test]
+fn resolve_wikilink_prefers_the_default_surface_over_a_layered_namesake() {
+    // `sources/` sorts before `wiki/`, and the link sits next to the clipping,
+    // so neither path order nor folder distance may decide this tie.
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+    fs::write(
+        dir.path().join("sources/Melatonin.md"),
+        "# Melatonin\n\nraw clipping",
+    )
+    .expect("note");
+    fs::write(
+        dir.path().join("wiki/Melatonin.md"),
+        "# Melatonin\n\ncompiled page",
+    )
+    .expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    for note_dir in ["", "sources", "wiki"] {
+        assert_eq!(
+            index
+                .resolve_wikilink_from("Melatonin", note_dir)
+                .map(|entry| entry.relative_path.as_str()),
+            Some("wiki/Melatonin"),
+            "[[Melatonin]] linked from {note_dir:?} must reach the default-surface page"
+        );
+    }
+}
+
+#[test]
+fn resolve_wikilink_still_reaches_a_note_that_lives_only_in_a_layer() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+    fs::write(
+        dir.path().join("sources/Ashwagandha.md"),
+        "# Ashwagandha\n\nraw clipping",
+    )
+    .expect("note");
+    fs::write(
+        dir.path().join("wiki/Page.md"),
+        "# Page\n\nsee [[Ashwagandha]]",
+    )
+    .expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    let resolved = index
+        .resolve_wikilink_from("Ashwagandha", "wiki")
+        .expect("a layered-only note still resolves");
+    assert_eq!(resolved.relative_path, "sources/Ashwagandha");
+    assert_eq!(resolved.layer.as_deref(), Some("sources"));
+}
+
 #[test]
 fn build_with_config_honours_user_supplied_exclude_patterns() {
     let dir = tempdir().expect("temp dir");
