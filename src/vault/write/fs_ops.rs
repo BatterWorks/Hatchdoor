@@ -535,7 +535,8 @@ fn atomic_write_inner(
     file.write_all(bytes)
         .and_then(|()| {
             if let Some(replaced) = &replaced {
-                keep_mode_and_owner(&file, path, replaced);
+                let kept = keep_mode_and_owner(&file, path, replaced);
+                keep_access_list(&file, path, replaced, kept, &parent, &filename);
             }
             // Stamped after the last byte is written, since any later write
             // would refresh it, and before the fsync makes it durable.
@@ -751,6 +752,14 @@ impl Drop for PendingSidecar<'_> {
     }
 }
 
+/// Which of the replaced file's owner and group the prepared file ended up
+/// with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kept {
+    owner: bool,
+    group: bool,
+}
+
 /// Give the prepared file the mode and owner of the file it replaces. The
 /// owner is changed only where this process may, which in practice means as
 /// root; anywhere else the file keeps the old group when this process belongs
@@ -761,17 +770,28 @@ impl Drop for PendingSidecar<'_> {
 /// Set-ID and sticky bits are not carried over. The bytes are the caller's,
 /// so a setuid file replaced as root would otherwise run the caller's
 /// content with its owner's rights.
-fn keep_mode_and_owner(file: &fs::File, path: &Path, replaced: &libc::stat) {
+fn keep_mode_and_owner(file: &fs::File, path: &Path, replaced: &libc::stat) -> Kept {
     let fd = file.as_raw_fd();
-    let same_owner = replaced.st_uid == unsafe { libc::geteuid() };
-    let same_group = replaced.st_gid == unsafe { libc::getegid() };
-    if !(same_owner && same_group)
+    // What the prepared file was actually created with: a setgid folder
+    // gives it the folder's group rather than this process's.
+    let kept = |file_stat: &libc::stat| Kept {
+        owner: file_stat.st_uid == replaced.st_uid,
+        group: file_stat.st_gid == replaced.st_gid,
+    };
+    let created = fstat_fd(fd).map_or(
+        Kept {
+            owner: true,
+            group: true,
+        },
+        |created| kept(&created),
+    );
+    if (!created.owner || !created.group)
         && unsafe { libc::fchown(fd, replaced.st_uid, replaced.st_gid) } != 0
     {
         let owner_error = std::io::Error::last_os_error();
         // Keeping the group alone needs only membership in it.
         let kept_group =
-            !same_group && unsafe { libc::fchown(fd, libc::uid_t::MAX, replaced.st_gid) } == 0;
+            created.group || unsafe { libc::fchown(fd, libc::uid_t::MAX, replaced.st_gid) } == 0;
         tracing::debug!(
             path = %path.display(),
             error = %owner_error,
@@ -786,6 +806,274 @@ fn keep_mode_and_owner(file: &fs::File, path: &Path, replaced: &libc::stat) {
             "could not keep a note's permissions; it now carries Hatchdoor's defaults"
         );
     }
+    fstat_fd(fd).map_or(created, |result| kept(&result))
+}
+
+fn fstat_fd(fd: libc::c_int) -> Option<libc::stat> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    (unsafe { libc::fstat(fd, stat.as_mut_ptr()) } == 0).then(|| unsafe { stat.assume_init() })
+}
+
+/// Where the owner or group could not be kept, they keep their access
+/// through ACL entries naming them instead (#661): a note owned by the user
+/// who granted Hatchdoor access with `setfacl` would otherwise come back
+/// owned by Hatchdoor, leaving that user only "other" rights. The replaced
+/// file's own access ACL is carried over too, which is what keeps those
+/// entries through every later write, once the note already belongs to
+/// Hatchdoor. A filesystem without ACLs keeps only the mode.
+fn keep_access_list(
+    file: &fs::File,
+    path: &Path,
+    replaced: &libc::stat,
+    kept: Kept,
+    parent: &fs::File,
+    filename: &CString,
+) {
+    let old_acl = read_access_acl_at(parent, filename, replaced);
+    let Some(acl) = carried_access_acl(replaced, old_acl.as_deref(), kept) else {
+        return;
+    };
+    let value = encode_acl(&acl);
+    let result = unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            ACL_ACCESS_XATTR.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+            tracing::debug!(
+                path = %path.display(),
+                "the filesystem has no ACLs, so a note's former owner keeps only its mode"
+            );
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "could not keep a note's access list; its former owner may have lost access"
+            );
+        }
+    }
+}
+
+/// The extended attribute holding a file's access ACL on Linux.
+const ACL_ACCESS_XATTR: &std::ffi::CStr = c"system.posix_acl_access";
+
+// Linux's ACL extended-attribute layout, from `linux/posix_acl_xattr.h` and
+// `linux/posix_acl.h`: a little-endian version word, then one
+// `{tag: u16, perm: u16, id: u32}` per entry.
+const ACL_XATTR_VERSION: u32 = 2;
+const ACL_USER_OBJ: u16 = 0x01;
+const ACL_USER: u16 = 0x02;
+const ACL_GROUP_OBJ: u16 = 0x04;
+const ACL_GROUP: u16 = 0x08;
+const ACL_MASK: u16 = 0x10;
+const ACL_OTHER: u16 = 0x20;
+const ACL_UNDEFINED_ID: u32 = u32::MAX;
+
+/// The id the kernel reports for a user or group this process's user
+/// namespace cannot see (the default `overflowuid` and `overflowgid`), as
+/// in rootless Podman for a note owned by another host user. Naming it in
+/// an ACL would grant access to whoever 65534 maps to, not to the owner.
+const OVERFLOW_ID: u32 = 65534;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AclEntry {
+    tag: u16,
+    perm: u16,
+    id: u32,
+}
+
+/// The entries the mask limits.
+fn masked(entry: &AclEntry) -> bool {
+    matches!(entry.tag, ACL_USER | ACL_GROUP_OBJ | ACL_GROUP)
+}
+
+/// The replaced file's access ACL, or `None` when it has none beyond its
+/// mode, cannot be found, is no longer the file `replaced` describes, or
+/// lives on a filesystem without ACLs.
+///
+/// Reading an ACL needs no read permission on the file, so the file is
+/// opened only as a path and its ACL read through `/proc/self/fd`, which
+/// every Linux system and container has.
+fn read_access_acl_at(
+    parent: &fs::File,
+    filename: &CString,
+    replaced: &libc::stat,
+) -> Option<Vec<AclEntry>> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            filename.as_ptr(),
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    let file = file_from_fd(fd).ok()?;
+    let current = fstat_fd(file.as_raw_fd())?;
+    if (current.st_dev, current.st_ino) != (replaced.st_dev, replaced.st_ino) {
+        return None;
+    }
+    let proc_path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+    let mut buffer = Vec::new();
+    // The size can change between asking and reading; ERANGE asks again.
+    for _ in 0..4 {
+        let size = unsafe {
+            libc::getxattr(
+                proc_path.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        buffer.resize(usize::try_from(size).ok()?, 0);
+        let length = unsafe {
+            libc::getxattr(
+                proc_path.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if let Ok(length) = usize::try_from(length) {
+            return decode_acl(&buffer[..length]);
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::ERANGE) {
+            return None;
+        }
+    }
+    None
+}
+
+fn decode_acl(bytes: &[u8]) -> Option<Vec<AclEntry>> {
+    let (version, entries) = bytes.split_first_chunk::<4>()?;
+    if u32::from_le_bytes(*version) != ACL_XATTR_VERSION || entries.len() % 8 != 0 {
+        return None;
+    }
+    Some(
+        entries
+            .chunks_exact(8)
+            .map(|entry| AclEntry {
+                tag: u16::from_le_bytes([entry[0], entry[1]]),
+                perm: u16::from_le_bytes([entry[2], entry[3]]),
+                id: u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]),
+            })
+            .collect(),
+    )
+}
+
+fn encode_acl(entries: &[AclEntry]) -> Vec<u8> {
+    let mut bytes = ACL_XATTR_VERSION.to_le_bytes().to_vec();
+    for entry in entries {
+        bytes.extend_from_slice(&entry.tag.to_le_bytes());
+        bytes.extend_from_slice(&entry.perm.to_le_bytes());
+        bytes.extend_from_slice(&entry.id.to_le_bytes());
+    }
+    bytes
+}
+
+/// The access ACL the replacement needs, or `None` when the rename alone
+/// already gives everyone the access they had: the owner and group were
+/// kept and the old file had no ACL to carry over.
+///
+/// Built from the old file's ACL, or from its mode when it had none. Every
+/// entry the old mask limited keeps exactly what the mask let it have, so
+/// recomputing the mask grants nobody more than before. A former owner the
+/// replacement could not keep is named with the old owner's rights, and a
+/// former group with the old group's when it had any; an entry already
+/// naming them is replaced. An id this process cannot see is never named.
+fn carried_access_acl(
+    replaced: &libc::stat,
+    old: Option<&[AclEntry]>,
+    kept: Kept,
+) -> Option<Vec<AclEntry>> {
+    if kept.owner && kept.group && old.is_none() {
+        return None;
+    }
+    let mode = replaced.st_mode;
+    let bits = |shift: u32| ((mode >> shift) & 0o7) as u16;
+    let base = [
+        AclEntry {
+            tag: ACL_USER_OBJ,
+            perm: bits(6),
+            id: ACL_UNDEFINED_ID,
+        },
+        AclEntry {
+            tag: ACL_GROUP_OBJ,
+            perm: bits(3),
+            id: ACL_UNDEFINED_ID,
+        },
+        AclEntry {
+            tag: ACL_OTHER,
+            perm: bits(0),
+            id: ACL_UNDEFINED_ID,
+        },
+    ];
+    let old = old.unwrap_or(&base);
+    let old_mask = old
+        .iter()
+        .find(|entry| entry.tag == ACL_MASK)
+        .map_or(0o7, |entry| entry.perm);
+    let perm_of = |tag: u16| {
+        old.iter()
+            .find(|entry| entry.tag == tag)
+            .map_or(0, |entry| entry.perm)
+    };
+    let owner_perm = perm_of(ACL_USER_OBJ);
+    let group_perm = perm_of(ACL_GROUP_OBJ) & old_mask;
+    let visible = |id: u32| id != ACL_UNDEFINED_ID && id != OVERFLOW_ID;
+
+    let mut acl: Vec<AclEntry> = old
+        .iter()
+        .filter(|entry| entry.tag != ACL_MASK)
+        .filter(|entry| !matches!(entry.tag, ACL_USER | ACL_GROUP) || visible(entry.id))
+        .filter(|entry| !(entry.tag == ACL_USER && !kept.owner && entry.id == replaced.st_uid))
+        .filter(|entry| !(entry.tag == ACL_GROUP && !kept.group && entry.id == replaced.st_gid))
+        .map(|entry| {
+            if masked(entry) {
+                AclEntry {
+                    perm: entry.perm & old_mask,
+                    ..*entry
+                }
+            } else {
+                *entry
+            }
+        })
+        .collect();
+    if !kept.owner && visible(replaced.st_uid) {
+        acl.push(AclEntry {
+            tag: ACL_USER,
+            perm: owner_perm,
+            id: replaced.st_uid,
+        });
+    }
+    if !kept.group && group_perm != 0 && visible(replaced.st_gid) {
+        acl.push(AclEntry {
+            tag: ACL_GROUP,
+            perm: group_perm,
+            id: replaced.st_gid,
+        });
+    }
+    if acl
+        .iter()
+        .any(|entry| entry.tag == ACL_USER || entry.tag == ACL_GROUP)
+    {
+        let mask = acl
+            .iter()
+            .filter(|entry| masked(entry))
+            .fold(0, |mask, entry| mask | entry.perm);
+        acl.push(AclEntry {
+            tag: ACL_MASK,
+            perm: mask,
+            id: ACL_UNDEFINED_ID,
+        });
+    }
+    // The kernel refuses an ACL out of this order.
+    acl.sort_by_key(|entry| (entry.tag, entry.id));
+    Some(acl)
 }
 
 fn ensure_safe_destination(path: &Path) -> Result<(), WriteError> {
@@ -1576,6 +1864,232 @@ mod tests {
 
         let metadata = fs::metadata(&note).unwrap();
         assert_eq!((metadata.uid(), metadata.gid()), (1000, 1000));
+    }
+
+    fn stat_of(uid: u32, gid: u32, mode: libc::mode_t) -> libc::stat {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        stat.st_uid = uid;
+        stat.st_gid = gid;
+        stat.st_mode = libc::S_IFREG | mode;
+        stat
+    }
+
+    fn acl_entry(tag: u16, perm: u16, id: u32) -> AclEntry {
+        AclEntry { tag, perm, id }
+    }
+
+    const KEPT: Kept = Kept {
+        owner: true,
+        group: true,
+    };
+    const LOST: Kept = Kept {
+        owner: false,
+        group: false,
+    };
+
+    /// #661: a note owned by uid 1000, replaced by Hatchdoor's uid 65532,
+    /// names 1000 and its group with the rights the owner bits and group
+    /// bits gave them, so they keep that access.
+    #[test]
+    fn a_former_owner_and_group_are_named_with_their_old_rights() {
+        let u = ACL_UNDEFINED_ID;
+        assert_eq!(
+            carried_access_acl(&stat_of(1000, 1000, 0o644), None, LOST),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 1000),
+                acl_entry(ACL_GROUP_OBJ, 4, u),
+                acl_entry(ACL_GROUP, 4, 1000),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 4, u),
+            ])
+        );
+        // A group with no rights needs no entry naming it.
+        assert_eq!(
+            carried_access_acl(&stat_of(1000, 1000, 0o600), None, LOST),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 1000),
+                acl_entry(ACL_GROUP_OBJ, 0, u),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 0, u),
+            ])
+        );
+    }
+
+    /// In a user namespace, as under rootless Podman, a note owned by a host
+    /// user the container cannot see reports 65534, and an ACL entry naming
+    /// one reads back as 65534 or as no id at all. Naming 65534 would grant
+    /// whoever it maps to, and a second unnamed entry makes the kernel
+    /// refuse the whole list.
+    #[test]
+    fn an_id_the_process_cannot_see_is_never_named() {
+        let u = ACL_UNDEFINED_ID;
+        let old = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 6, 2000),
+            acl_entry(ACL_USER, 6, OVERFLOW_ID),
+            acl_entry(ACL_USER, 4, u),
+            acl_entry(ACL_GROUP_OBJ, 4, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 0, u),
+        ];
+        assert_eq!(
+            carried_access_acl(&stat_of(OVERFLOW_ID, OVERFLOW_ID, 0o640), Some(&old), LOST),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 2000),
+                acl_entry(ACL_GROUP_OBJ, 4, u),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 0, u),
+            ])
+        );
+    }
+
+    /// Kept as root or as the note's own owner, a note with no ACL gets none
+    /// written, as after #630.
+    #[test]
+    fn a_kept_owner_with_no_old_acl_needs_no_acl() {
+        assert_eq!(
+            carried_access_acl(&stat_of(1000, 1000, 0o644), None, KEPT),
+            None
+        );
+    }
+
+    /// Once the note belongs to Hatchdoor, the next write keeps its owner and
+    /// must carry the old ACL over, or the former owner's entry is lost.
+    #[test]
+    fn an_old_acl_is_carried_over_when_the_owner_was_kept() {
+        let u = ACL_UNDEFINED_ID;
+        let old = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 6, 1000),
+            acl_entry(ACL_GROUP_OBJ, 4, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 4, u),
+        ];
+        assert_eq!(
+            carried_access_acl(&stat_of(65532, 65532, 0o664), Some(&old), KEPT),
+            Some(old)
+        );
+    }
+
+    /// An entry the old mask limited keeps only what it had in effect, the
+    /// former owner's existing entry is replaced rather than duplicated, and
+    /// the kept group gets no named entry.
+    #[test]
+    fn carried_entries_keep_their_effective_rights_only() {
+        let u = ACL_UNDEFINED_ID;
+        let old = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 7, 1000),
+            acl_entry(ACL_USER, 7, 2000),
+            acl_entry(ACL_GROUP_OBJ, 6, u),
+            acl_entry(ACL_MASK, 4, u),
+            acl_entry(ACL_OTHER, 0, u),
+        ];
+        assert_eq!(
+            carried_access_acl(
+                &stat_of(1000, 1000, 0o640),
+                Some(&old),
+                Kept {
+                    owner: false,
+                    group: true
+                }
+            ),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 1000),
+                acl_entry(ACL_USER, 4, 2000),
+                acl_entry(ACL_GROUP_OBJ, 4, u),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 0, u),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_acl_survives_encoding_and_a_foreign_version_is_refused() {
+        let acl = vec![
+            acl_entry(ACL_USER_OBJ, 6, ACL_UNDEFINED_ID),
+            acl_entry(ACL_USER, 6, 1000),
+        ];
+        assert_eq!(decode_acl(&encode_acl(&acl)), Some(acl));
+        let mut foreign = encode_acl(&[]);
+        foreign[0] = 1;
+        assert_eq!(decode_acl(&foreign), None);
+        assert_eq!(decode_acl(&[2, 0, 0]), None);
+    }
+
+    /// On a filesystem with ACLs, an entry on a note survives a replace.
+    /// Without them there is nothing to check: the write itself is covered
+    /// by every other test.
+    #[test]
+    fn a_replaced_note_keeps_its_access_acl() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Shared.md");
+        fs::write(&note, "original").expect("note");
+        let name = CString::new(note.as_os_str().as_bytes()).unwrap();
+        let u = ACL_UNDEFINED_ID;
+        let acl = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 6, 4242),
+            acl_entry(ACL_GROUP_OBJ, 4, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 4, u),
+        ];
+        let value = encode_acl(&acl);
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if set != 0 {
+            return; // No ACLs here.
+        }
+
+        atomic_write_if_unchanged(&note, "edited", &content_hash("original")).expect("write");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "edited");
+        let (parent, filename) = open_parent_dir_no_follow(&note).unwrap();
+        let replaced = metadata_at_no_follow(&parent, &filename).unwrap();
+        assert_eq!(read_access_acl_at(&parent, &filename, &replaced), Some(acl));
+
+        // Reading the list needs no read permission on the note, as when
+        // Hatchdoor may replace an attachment it may not read.
+        fs::set_permissions(&note, fs::Permissions::from_mode(0o200)).expect("chmod");
+        let unreadable_acl = vec![
+            acl_entry(ACL_USER_OBJ, 2, u),
+            acl_entry(ACL_USER, 6, 4242),
+            acl_entry(ACL_GROUP_OBJ, 0, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 0, u),
+        ];
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                encode_acl(&unreadable_acl).as_ptr().cast(),
+                encode_acl(&unreadable_acl).len(),
+                0,
+            )
+        };
+        assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+        atomic_write(&note, "replaced unread").expect("replace");
+
+        let replaced = metadata_at_no_follow(&parent, &filename).unwrap();
+        assert_eq!(
+            read_access_acl_at(&parent, &filename, &replaced),
+            Some(unreadable_acl)
+        );
+        fs::set_permissions(&note, fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "replaced unread");
     }
 
     #[test]

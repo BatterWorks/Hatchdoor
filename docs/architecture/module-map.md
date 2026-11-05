@@ -1714,8 +1714,12 @@ write API/types, and configuration for archive or upload limits.
   regular file at the destination is refused as invalid input, not as a
   retryable conflict. A replaced file keeps its permission bits, without
   set-ID or sticky bits since the bytes are the caller's, and its owner where
-  the process may set it, or else its group where the process belongs to it;
-  a new file is created asking for 0666, so the umask or the folder's default
+  the process may set it, or else its group where the process belongs to it.
+  It also keeps the old file's access ACL, and an owner or group it could
+  not keep is named in that ACL with the rights the mode gave them, never
+  with more than any entry had in effect, and never as an id the process's
+  user namespace cannot see (#661). A filesystem without ACLs keeps only
+  the mode. A new file is created asking for 0666, so the umask or the folder's default
   ACL decides. The walk to a write's folder opens each folder above it as a
   path handle, so it needs only permission to pass through them. `import_attachment` without `overwrite`
   commits as `create_note` does, refusing a file that appeared after its
