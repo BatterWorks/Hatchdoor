@@ -328,7 +328,7 @@ Hatchdoor keeps the version record in `instance.json`, beside the Vault list in 
 
 ## Vault-scoped content: one Vault
 
-Every route below is a read and stays reachable unauthenticated in demo mode (subject to the collection-wide token gate above). Exact reads always inspect the Vault's live Markdown directory, never the disposable cache, so indexing lag never applies to them.
+Every route below is a read and stays reachable unauthenticated in demo mode, subject to the collection-wide token gate above. Note content and hashes come directly from the live file, so indexing lag never applies to them. Links are kept until Hatchdoor notices a file change; detailed statistics and saved-query rows use the published index.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -353,6 +353,8 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 | GET | `/api/v1/vaults/{scope}/stats` | Short statistics for each Vault. For the detailed, exact version see `stats/detail` above. |
 | GET | `/api/v1/vaults/{scope}/graph` | Note-link graph, grouped per Vault; edges never cross a Vault boundary. |
 | GET | `/api/v1/vaults/{scope}/search?q=&mode=&limit=&per_note_cap=&layers=` | One global ranking flattened across every usable participant. Each result's `content` is the matched chunk, with code between ` ``` ` lines (the opening one carries the block's language) so a client can leave code out of a snippet. `mode` is `semantic` (default) or `keyword`. `limit` is clamped to 1 to 50 (default 10) and `per_note_cap` to 1 to 10 (default 2). `layers` is a comma-separated list of layer names, or `all`/`default`; a demo instance always sees the default surface regardless of this parameter. Each result's `score` runs 0 to 1: in semantic mode it is the cosine similarity between the query and the chunk, so it can be compared across searches; in keyword mode it is relative to the best hit of that search, which scores 1. A query that is a single `#tag` (letters, digits, `-`, `_` and `/` after the `#`) runs as a tag match whatever `mode` was requested: every hit scores 1 and the response reports `"mode": "tag"`. Every other query reports the mode it asked for. `tag` is never accepted as a requested mode. |
+
+Keyword search uses only the first 8,192 bytes of `q`, cut between characters, and the first 64 distinct terms. Duplicate terms are ignored without regard to case. Its SQLite work has one 750 ms deadline; exceeding it returns `search_unavailable` with a time-limit message. See [[How indexing and search work]].
 
 ## Vault-scoped mutations
 

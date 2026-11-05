@@ -122,6 +122,20 @@ impl<'a> VaultSearchCore<'a> {
 
     pub fn search(
         &self,
+        request: VaultSearchRequest,
+    ) -> Result<VaultReadProjection<VaultSearchResponse>, VaultReadError> {
+        let keyword = request.mode == SearchMode::Keyword;
+        self.search_inner(request).map_err(|mut error| {
+            if keyword && error.message.contains("interrupted") {
+                error.message =
+                    "keyword query exceeded its time limit; try fewer terms".to_string();
+            }
+            error
+        })
+    }
+
+    fn search_inner(
+        &self,
         mut request: VaultSearchRequest,
     ) -> Result<VaultReadProjection<VaultSearchResponse>, VaultReadError> {
         request.query = request.query.trim().to_string();
@@ -163,6 +177,14 @@ impl<'a> VaultSearchCore<'a> {
             .cache
             .read_snapshot()
             .map_err(|message| error(None, "search_unavailable", &message, true))?;
+        if request.mode == SearchMode::Keyword && tag_query.is_none() {
+            // One wall-clock budget for the entire pinned keyword read, not a
+            // fresh budget for every expanded candidate window. It also ends
+            // abandoned requests without depending on transport cancellation.
+            cache_snapshot
+                .limit_query_time(std::time::Duration::from_millis(750))
+                .map_err(|message| error(None, "search_unavailable", &message, true))?;
+        }
         let mut snapshots = BTreeMap::new();
         let mut participants = Vec::with_capacity(selected.len());
         for vault in selected {
@@ -294,6 +316,10 @@ impl<'a> VaultSearchCore<'a> {
         vault_name: String,
         message: &str,
     ) -> Result<(), VaultReadError> {
+        // In an all-Vault response this error is data rather than an early
+        // return. Report it before a later successful query clears SQLite's
+        // last error on the pinned connection.
+        self.cache.report_corruption(message);
         let issue = error(Some(vault_id), "vault_unavailable", message, true);
         if matches!(scope, VaultScope::One(_)) {
             return Err(issue);
@@ -903,6 +929,76 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             std::fs::write(path, contents).expect("write note");
         }
+    }
+
+    #[test]
+    fn repeated_keyword_searches_leave_tree_and_statistics_readers_available() {
+        let content = format!("# Home\n{}", "word ".repeat(8_000));
+        let workspace = file_backed_workspace(&[("Pathological", &[("Home.md", &content)])]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let mut single = request(VaultScope::All, "word");
+        single.mode = SearchMode::Keyword;
+        let expected = core.search(single.clone()).unwrap().data.results;
+        let mut repeated = single;
+        repeated.query = "word ".repeat(1_100);
+        // Each search meets the test thread while it still holds its pinned
+        // reader, so the tree and statistics reads below start with all four
+        // searches in flight and every reader slot taken.
+        let in_flight = Arc::new(std::sync::Barrier::new(5));
+        let hook_barrier = in_flight.clone();
+        let held = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder)
+            .with_after_snapshot_read_hook(Arc::new(move || {
+                hook_barrier.wait();
+            }));
+        let start = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            let queries = (0..4)
+                .map(|_| scope.spawn(|| held.search(repeated.clone())))
+                .collect::<Vec<_>>();
+            in_flight.wait();
+            let reads = crate::vault_read::VaultReadCore::new(&workspace.cache, &workspace.vaults);
+            assert_eq!(
+                reads
+                    .trees(VaultScope::All, Default::default())
+                    .unwrap()
+                    .data
+                    .len(),
+                1
+            );
+            assert_eq!(
+                reads.statistics(VaultScope::All).unwrap().data[0].note_count,
+                1
+            );
+            for query in queries {
+                let hits = query.join().unwrap().unwrap().data.results;
+                assert_eq!(
+                    serde_json::to_value(hits).unwrap(),
+                    serde_json::to_value(&expected).unwrap()
+                );
+            }
+        });
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn keyword_deadline_interrupts_work_and_does_not_poison_the_next_reader() {
+        let workspace = file_backed_workspace(&[("First", &[("Home.md", "# Home\nword")])]);
+        let embedder = StubEmbedder::new(384);
+        let mut query = request(VaultScope::All, "word");
+        query.mode = SearchMode::Keyword;
+        let delayed = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder)
+            .with_after_snapshot_read_hook(Arc::new(|| {
+                std::thread::sleep(Duration::from_secs(1));
+            }));
+        let failure = delayed
+            .search(query.clone())
+            .expect_err("deadline must interrupt SQLite");
+        assert!(failure.message.contains("time limit"), "{failure:?}");
+        let response = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder)
+            .search(query)
+            .expect("a returned connection must have no expired handler");
+        assert_eq!(response.data.results.len(), 1);
     }
 
     /// A browser answers one typed query with several overlapping requests,

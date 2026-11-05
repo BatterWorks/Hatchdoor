@@ -31,7 +31,7 @@ ignore = "0.4"
 libc = "0.2"
 notify = "8"
 rmcp = { version = "=3.8.0", features = ["server", "transport-streamable-http-server"] }
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

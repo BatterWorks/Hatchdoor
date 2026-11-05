@@ -402,6 +402,40 @@ fn frontmatter_entry(
 }
 
 #[test]
+fn frontmatter_updates_refuse_oversized_yaml_before_parsing() {
+    let tmp = TempDir::new().unwrap();
+    let original = format!("\u{feff}---\nx: {}\n---\nBody\n", "[".repeat(40_000));
+    fs::write(tmp.path().join("Home.md"), &original).unwrap();
+    let index =
+        VaultIndex::build_catalog_with_config(tmp.path(), &VaultScanConfig::default()).unwrap();
+    let entry = index.find_by_slug("home").unwrap().clone();
+    let updates = serde_json::from_value(serde_json::json!({"status": "new"})).unwrap();
+    let start = std::time::Instant::now();
+    let error = update_note_frontmatter(&entry, updates, &content_hash(&original)).unwrap_err();
+    assert!(format!("{error:?}").contains("16384"), "{error:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(fs::read_to_string(&entry.path).unwrap(), original);
+}
+
+#[test]
+fn frontmatter_create_edit_and_remove_keep_a_leading_bom() {
+    let tmp = TempDir::new().unwrap();
+    let original = "\u{feff}# Body\n";
+    let (_, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let updates = serde_json::from_value(serde_json::json!({"tags": ["bomtag"]})).unwrap();
+    update_note_frontmatter(&entry, updates, &content_hash(original)).unwrap();
+    let created = fs::read_to_string(&entry.path).unwrap();
+    assert_eq!(created, "\u{feff}---\ntags: [bomtag]\n---\n# Body\n");
+    let updates = serde_json::from_value(serde_json::json!({"tags": ["edited"]})).unwrap();
+    update_note_frontmatter(&entry, updates, &content_hash(&created)).unwrap();
+    let edited = fs::read_to_string(&entry.path).unwrap();
+    assert_eq!(edited, "\u{feff}---\ntags: [edited]\n---\n# Body\n");
+    let updates = serde_json::from_value(serde_json::json!({"tags": null})).unwrap();
+    update_note_frontmatter(&entry, updates, &content_hash(&edited)).unwrap();
+    assert_eq!(fs::read_to_string(&entry.path).unwrap(), original);
+}
+
+#[test]
 fn update_note_frontmatter_merges_top_level_keys_and_keeps_the_body_byte_for_byte() {
     let tmp = TempDir::new().expect("tempdir");
     let original = "---\ntitle: Home\ntags:\n  - alpha\nnested:\n  keep: me\n---\n\n# Body\nsecret body text\n";

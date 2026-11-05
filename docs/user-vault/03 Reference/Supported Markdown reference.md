@@ -207,6 +207,8 @@ status: current
 
 Hatchdoor reads the block and shows its properties, such as tags, aliases and any other key with its value, above the note body and apart from its text.
 
+The block's inner text may be at most 16,384 bytes. A larger block, or one with no closing delimiter, is invalid frontmatter: the note still reads as text, but `get_frontmatter` refuses it with `invalid_frontmatter`. Shorten or repair the block in the note itself. A leading UTF-8 byte order mark, an invisible marker some editors add before `---`, is accepted and kept when properties are edited.
+
 ## Tags
 
 A note's tags come from two places. Anything listed under `tags:` in frontmatter counts, in whatever shape you write it, including plain words and numbers.

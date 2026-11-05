@@ -157,7 +157,11 @@ export function NoteEditor({
   const updateContentBody = (nextBody: string) => {
     if (showFrontmatterFields) {
       onChange(
-        buildContentWithFrontmatter(frontmatterFields.entries, nextBody),
+        buildContentWithFrontmatter(
+          frontmatterFields.entries,
+          nextBody,
+          content.startsWith("\uFEFF"),
+        ),
       );
     } else {
       onChange(nextBody);
@@ -168,7 +172,13 @@ export function NoteEditor({
     const nextEntries = frontmatterFields.entries.map((entry) =>
       entry.id === id ? { ...entry, value } : entry,
     );
-    onChange(buildContentWithFrontmatter(nextEntries, frontmatter.body));
+    onChange(
+      buildContentWithFrontmatter(
+        nextEntries,
+        frontmatter.body,
+        content.startsWith("\uFEFF"),
+      ),
+    );
   };
 
   const insertAttachmentAtCaret = (

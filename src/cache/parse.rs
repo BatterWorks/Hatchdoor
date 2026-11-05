@@ -68,8 +68,27 @@ pub fn extract_tags(content: &str) -> HashSet<String> {
     tags
 }
 
+pub(crate) fn validate_frontmatter_size(frontmatter: &str) -> Result<(), String> {
+    const MAX_FRONTMATTER_BYTES: usize = 16 * 1024;
+    if frontmatter.len() > MAX_FRONTMATTER_BYTES {
+        Err(format!("frontmatter exceeds {MAX_FRONTMATTER_BYTES} bytes"))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn parse_frontmatter_metadata(content: &str) -> Result<FrontmatterMetadata, String> {
     let (frontmatter, _) = split_frontmatter(content);
+    validate_frontmatter_size(frontmatter)?;
+    if let Some(start) = frontmatter_start(content)
+        && frontmatter_span(content).is_none()
+        && !content[start..]
+            .lines()
+            .next()
+            .is_some_and(|line| line.trim() == "---")
+    {
+        return Err("frontmatter has no closing delimiter".to_string());
+    }
     if frontmatter.trim().is_empty() {
         return Ok(FrontmatterMetadata::default());
     }
@@ -134,14 +153,18 @@ fn split_frontmatter(content: &str) -> (&str, &str) {
 /// frontmatter merge rewrites exactly this region and leaves every other
 /// byte of the note untouched.
 pub(crate) fn frontmatter_span(content: &str) -> Option<(usize, usize)> {
-    let lines: Vec<&str> = content.splitn(3, '\n').collect();
-    if lines.len() < 2 || lines[0].trim() != "---" {
-        return None;
-    }
-    let start = lines[0].len() + 1; // skip "---\n"
+    let start = frontmatter_start(content)?;
     let rest = &content[start..];
     let end = start + rest.find("\n---")?;
     Some((start, end))
+}
+
+fn frontmatter_start(content: &str) -> Option<usize> {
+    let opening = content.split('\n').next()?;
+    if opening.strip_prefix('\u{feff}').unwrap_or(opening).trim() != "---" {
+        return None;
+    }
+    Some(opening.len() + usize::from(opening.len() < content.len()))
 }
 
 fn extract_frontmatter_tags(frontmatter: &str, tags: &mut HashSet<String>) {
@@ -383,11 +406,21 @@ pub fn build_fts_query(input: &str) -> Option<String> {
     }
 }
 
+/// Keyword work is bounded before SQLite sees it. Keep first-occurrence order
+/// so the compact snippet uses exactly the terms the query searches.
 pub fn fts_query_terms(input: &str) -> Vec<String> {
-    input
+    const MAX_QUERY_BYTES: usize = 8 * 1024;
+    const MAX_QUERY_TERMS: usize = 64;
+    let mut end = input.len().min(MAX_QUERY_BYTES);
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut seen = HashSet::new();
+    input[..end]
         .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-'))
-        .map(str::trim)
         .filter(|token| !token.is_empty())
+        .filter(|token| seen.insert(token.to_lowercase()))
+        .take(MAX_QUERY_TERMS)
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -395,6 +428,55 @@ pub fn fts_query_terms(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_keyword_terms_are_searched_once() {
+        assert_eq!(
+            build_fts_query(&"word ".repeat(1_100)),
+            Some("\"word\"".into())
+        );
+    }
+
+    #[test]
+    fn oversized_and_unclosed_frontmatter_is_invalid_but_text_is_untouched() {
+        let content = format!("---\nx: {}\n---\nBody\n", "[".repeat(40_000));
+        let before = std::time::Instant::now();
+        let error = parse_frontmatter_metadata(&content).expect_err("reject before YAML parsing");
+        assert!(error.contains("16384"), "{error}");
+        assert!(before.elapsed() < std::time::Duration::from_secs(1));
+        assert!(parse_frontmatter_metadata("---\nx: [").is_err());
+        assert!(parse_frontmatter_metadata("---\n---\n# Body").is_ok());
+    }
+
+    #[test]
+    fn bom_frontmatter_has_metadata_and_offsets_into_the_original_text() {
+        let content = "\u{feff}---\ntags: [bomtag]\n# YAML comment\n---\n# Body\n";
+        assert_eq!(
+            parse_frontmatter_metadata(content).unwrap().tags,
+            ["bomtag"]
+        );
+        let (start, end) = frontmatter_span(content).expect("BOM frontmatter");
+        assert_eq!(&content[..start], "\u{feff}---\n");
+        assert_eq!(&content[start..end], "tags: [bomtag]\n# YAML comment");
+        assert_eq!(
+            crate::vault::NoteSections::scan(content).headings()[0].text(),
+            "Body"
+        );
+    }
+
+    #[test]
+    fn keyword_terms_are_case_deduplicated_and_bounded_on_unicode_boundaries() {
+        assert_eq!(fts_query_terms("Word word WORD café"), ["Word", "café"]);
+        let many = (0..1_100)
+            .map(|n| format!("term{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let terms = fts_query_terms(&many);
+        assert_eq!(terms.len(), 64);
+        assert_eq!(terms.last().unwrap(), "term63");
+        let unicode = format!("{}é tail", "x".repeat(8_191));
+        assert_eq!(fts_query_terms(&unicode), ["x".repeat(8_191)]);
+    }
 
     #[test]
     fn extracts_tags_and_fts_query_tokens() {

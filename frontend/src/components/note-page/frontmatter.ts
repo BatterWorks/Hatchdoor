@@ -84,7 +84,9 @@ export function parseFrontmatterEntries(raw: string): {
 export function buildContentWithFrontmatter(
   entries: FrontmatterEntry[],
   body: string,
+  preserveBom = false,
 ): string {
+  const bom = preserveBom ? "\uFEFF" : "";
   const lines: string[] = [];
 
   for (const entry of entries) {
@@ -106,9 +108,9 @@ export function buildContentWithFrontmatter(
   }
 
   if (lines.length === 0) {
-    return body;
+    return `${bom}${body}`;
   }
-  return `---\n${lines.join("\n")}\n---\n${body}`;
+  return `${bom}---\n${lines.join("\n")}\n---\n${body}`;
 }
 
 function unquote(value: string): string {

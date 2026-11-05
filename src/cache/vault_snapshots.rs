@@ -294,7 +294,10 @@ impl<'a> SavedEmbeddings<'a> {
                 pruned,
                 "Dropped saved embeddings this Vault no longer needs"
             ),
-            Err(error) => tracing::warn!(%error, "could not prune saved embedding progress"),
+            Err(error) => {
+                self.cache.report_corruption(&error);
+                tracing::warn!(%error, "could not prune saved embedding progress")
+            }
         }
     }
 
@@ -362,6 +365,7 @@ impl<'a> SavedEmbeddings<'a> {
         match saved {
             Ok(()) => self.pending.clear(),
             Err(error) => {
+                self.cache.report_corruption(&error);
                 tracing::warn!(%error, "could not save embedding progress; it will be retried")
             }
         }
@@ -523,6 +527,7 @@ impl SqliteCache {
                 true,
                 freshness,
             )
+            .inspect_err(|message| self.report_corruption(message))
         })();
         // A pause is not a failure. The retained generation was marked stale
         // when the turn began, which is all an unfinished rebuild shows.
@@ -594,6 +599,7 @@ impl SqliteCache {
                 false,
                 VaultSnapshotFreshness::Fresh,
             )
+            .inspect_err(|message| self.report_corruption(message))
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -672,14 +678,19 @@ impl SqliteCache {
     /// Vault can neither publish nor save progress after the rows are gone.
     pub(crate) fn disconnect_vault_snapshot(&self, vault_id: VaultId) -> Result<(), String> {
         self.begin_vault_snapshot_attempt(vault_id)?;
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction()
-            .map_err(|error| format!("start Vault snapshot disconnect: {error}"))?;
-        delete_vault_snapshot(&tx, &vault_id.to_string())?;
-        delete_saved_embeddings(&tx, &vault_id.to_string())?;
-        tx.commit()
-            .map_err(|error| format!("commit Vault snapshot disconnect: {error}"))
+        // A failed statement rolls the transaction back, which clears the
+        // connection's error, so report corruption from the returned message.
+        (|| {
+            let mut conn = self.connection()?;
+            let tx = conn
+                .transaction()
+                .map_err(|error| format!("start Vault snapshot disconnect: {error}"))?;
+            delete_vault_snapshot(&tx, &vault_id.to_string())?;
+            delete_saved_embeddings(&tx, &vault_id.to_string())?;
+            tx.commit()
+                .map_err(|error| format!("commit Vault snapshot disconnect: {error}"))
+        })()
+        .inspect_err(|message| self.report_corruption(message))
     }
 
     pub(crate) fn snapshot_note_count(&self, vault_id: VaultId) -> Result<usize, String> {
