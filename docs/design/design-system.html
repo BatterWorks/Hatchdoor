@@ -2726,8 +2726,8 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="save-state">
       <div class="doc-section-num">§21</div>
       <h2>Save state</h2>
-      <p class="blurb">Autosave removed the Save button, and with it the only evidence a user had that their writing survived. In a vault with agent co-writers and git sync, that evidence is the trust surface of the whole feature, so it gets a permanent slot beside <b>Edit</b>.</p>
-      <p class="blurb">It states what is true <i>now</i> rather than announcing an event: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. The failure state is a click target that opens the conflict review.</p>
+      <p class="blurb">The live editor has no Save button. Its save badge states whether the current text reached the Vault, in a permanent slot beside the view controls.</p>
+      <p class="blurb">It states what is true <i>now</i>: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. Typing again hides that confirmation until the new text saves. A failed save reads &ldquo;Not saving&rdquo;; the notice strip carries the <b>Review</b> button that opens Source for recovery.</p>
       <p class="blurb"><b>The slot sits at the end of the Properties heading line</b> (<a href="#meta">§08</a>), not beside the title. On the title&rsquo;s line the pair took width from it and a long title wrapped around them; the Properties rule already runs the full measure and has the room. Where a note has no properties and no Vault row, that line renders for the actions alone rather than showing a disclosure that opens on to nothing.</p>
       <div class="stage" style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">
         <span class="save-state">Saving…</span>

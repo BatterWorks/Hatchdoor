@@ -61,6 +61,7 @@ import {
   listHeldDrafts,
   loadNoteDraft,
   saveNoteDraft,
+  type NoteDraft,
 } from "../lib/writeDrafts";
 import { NoteEditor, type UploadedAttachment } from "./NoteEditor";
 import type { NoteCandidate } from "../lib/noteCandidates";
@@ -325,7 +326,9 @@ export function NotePage({
   // Pre-#137 drafts recovered into Settings (#151): named here, not silently
   // acted on. Dismissing is per view, not persisted — it returns on every
   // load until the last held draft is dealt with.
-  const [heldDraftsPresent] = useState(() => listHeldDrafts().length > 0);
+  const [heldDraftsPresent, setHeldDraftsPresent] = useState(
+    () => listHeldDrafts().length > 0,
+  );
   const [heldDraftsBannerDismissed, setHeldDraftsBannerDismissed] =
     useState(false);
   const [searchHitCount, setSearchHitCount] = useState(0);
@@ -352,6 +355,10 @@ export function NotePage({
   // `null` until a revision is known. The first one observed is the revision
   // the open note was already read at, not a change to it.
   const lastHandledRevisionRef = useRef<number | null>(null);
+  const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
+  const editVersionRef = useRef(0);
+  const editingRef = useRef(isEditing);
+  editingRef.current = isEditing;
   const autosaveStatusRef = useRef<string>("idle");
   const editorFocusedRef = useRef(false);
   const latestContentRef = useRef("");
@@ -383,6 +390,9 @@ export function NotePage({
     content: string;
   } | null>(null);
   const draftTimerRef = useRef<number | null>(null);
+  // Only copies written by this visit may advance through our save chain.
+  // Matching the timestamp and text leaves another tab's held edit alone.
+  const lastWrittenDraftRef = useRef<NoteDraft | null>(null);
   // The last document the vault confirmed it holds. A debounced write can be
   // scheduled before a save and fire after it, and recreating the draft then
   // would leave text the vault already has sitting in the store under a hash
@@ -424,15 +434,27 @@ export function NotePage({
     if (content === savedContentRef.current) {
       return;
     }
-    const stored = saveNoteDraft(target.vaultId, target.relativePath, {
+    const draft: NoteDraft = {
       vaultId: target.vaultId,
       relativePath: target.relativePath,
       content,
       baseContentHash: target.baseContentHash,
       savedAt: Date.now(),
-    });
+    };
+    const stored = saveNoteDraft(
+      target.vaultId,
+      target.relativePath,
+      draft,
+      () => {
+        setHeldDraftsPresent(true);
+        setHeldDraftsBannerDismissed(false);
+        setRecoveredDraftNotice(null);
+      },
+    );
     if (!stored) {
       setDraftStorageBlocked(true);
+    } else {
+      lastWrittenDraftRef.current = draft;
     }
   }, []);
 
@@ -532,7 +554,8 @@ export function NotePage({
 
   const loadNote = useCallback(
     /** Resolves true when the read became this page's note. */
-    async (hardReload: boolean): Promise<boolean> => {
+    async (hardReload: boolean, protectEdits = false): Promise<boolean> => {
+      const editVersion = editVersionRef.current;
       setError(null);
       // Taken before the skeleton clears `note`: reopening the same note after
       // the source editor closes is still a reload of this note (#627).
@@ -552,6 +575,21 @@ export function NotePage({
         // A reload never trades the open note for another one (#627). Only
         // the first read under a key decides which note that is.
         if (!ownNoteOrMoved(json.note, openPath)) {
+          return false;
+        }
+        // A clean editor when the request left may no longer be clean when
+        // it returns. Even an edit already saved during this read makes its
+        // snapshot too old to replace the editor or seed the next save hash.
+        if (
+          protectEdits &&
+          (editVersion !== editVersionRef.current ||
+            editingRef.current ||
+            editorFocusedRef.current ||
+            autosaveRef.current?.hasUnsaved())
+        ) {
+          if (!autosaveRef.current?.isOwnWrite(json.note.content_hash)) {
+            setNoteChangedOnDisk(true);
+          }
           return false;
         }
         noteLoadedForRef.current = noteKey;
@@ -628,6 +666,7 @@ export function NotePage({
     setRecoveredDraftNotice(null);
     setRestoredCommit(null);
     savedContentRef.current = null;
+    lastWrittenDraftRef.current = null;
   }, [noteKey, writeDraftNow]);
 
   useEffect(() => {
@@ -689,7 +728,7 @@ export function NotePage({
       return;
     }
 
-    void loadNote(false);
+    void loadNote(false, true);
     void loadNoteLinks();
   }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
@@ -924,12 +963,11 @@ export function NotePage({
     [vaultId, note?.relative_path, headingIdsBySourceLine, hiddenHeadingLine],
   );
 
-  const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
-
   // The document differs from the one on disk, from this keystroke on. Read
   // by the revision guard, which must not refetch over unsaved text, and by
   // the reload hold.
   const markDirty = () => {
+    editVersionRef.current += 1;
     if (note && !inlineDirty) {
       setEditBaseHash(note.content_hash);
       setInlineDirty(true);
@@ -1019,13 +1057,13 @@ export function NotePage({
       }
     },
     flushSave,
-    onSaved: (result) => {
+    onSaved: (result, savedContent) => {
       setNote((prev) =>
         prev && result.content_hash
           ? { ...prev, content_hash: result.content_hash }
           : prev,
       );
-      setInlineDirty(false);
+      setInlineDirty(latestContentRef.current !== savedContent);
       // The vault holds this text now, so the local copy has nothing left to
       // rescue. A debounced write scheduled since carries newer text and
       // legitimately recreates it a moment later; one carrying the text that
@@ -1034,7 +1072,38 @@ export function NotePage({
       // Cleared for the file the server wrote, which a reply landing after
       // navigation still names correctly (#627).
       if (result.relative_path) {
-        clearNoteDraft(vaultId, result.relative_path);
+        clearNoteDraft(vaultId, result.relative_path, savedContent);
+        // Typing that continued during this save is based on our own write,
+        // not a displaced edit from another visit. Advance that local copy's
+        // base too, without archiving an ordinary intermediate keystroke.
+        if (result.content_hash) {
+          const pending = draftPendingRef.current;
+          if (
+            pending?.target.vaultId === vaultId &&
+            pending.target.relativePath === result.relative_path &&
+            pending.content === latestContentRef.current
+          ) {
+            pending.target = {
+              ...pending.target,
+              baseContentHash: result.content_hash,
+            };
+          }
+          const draft = loadNoteDraft(vaultId, result.relative_path);
+          const local = lastWrittenDraftRef.current;
+          if (
+            draft &&
+            local &&
+            draft.vaultId === local.vaultId &&
+            draft.relativePath === local.relativePath &&
+            draft.savedAt === local.savedAt &&
+            draft.content === local.content
+          ) {
+            saveNoteDraft(vaultId, result.relative_path, {
+              ...draft,
+              baseContentHash: result.content_hash,
+            });
+          }
+        }
       }
     },
   });
@@ -1049,15 +1118,18 @@ export function NotePage({
   // after a slug changed hands always took that path, #627). Each note starts
   // with saving on. The hash is the one held now; a new note whose read
   // brings another hash moves it through `baseHash`.
-  const { resume: resumeAutosave } = autosave;
+  const { resume: resumeAutosave, discard: discardAutosave } = autosave;
   const autosaveKeyRef = useRef(noteKey);
   useEffect(() => {
     if (autosaveKeyRef.current === noteKey) {
       return;
     }
     autosaveKeyRef.current = noteKey;
+    // The old note's draft was flushed by the route-reset effect above.
+    // Its unsaved flag must not prevent adopting the new note's first hash.
+    discardAutosave();
     resumeAutosave(note?.content_hash ?? "");
-  }, [noteKey, note?.content_hash, resumeAutosave]);
+  }, [noteKey, note?.content_hash, resumeAutosave, discardAutosave]);
 
   // The slug names another file, but that alone does not say whose move it
   // was (#627), so the server is asked who is at the opened path now.
@@ -1263,6 +1335,7 @@ export function NotePage({
   // rather than waiting for blur, and written to the local draft on the same
   // schedule, which is what survives the vault refusing it (#330).
   const handleInProgressChange = (nextContent: string) => {
+    latestContentRef.current = nextContent;
     scheduleDraftWrite(nextContent);
     autosaveRef.current?.touch(nextContent);
   };
@@ -1529,11 +1602,13 @@ export function NotePage({
         editBaseHash,
         { expectedRelativePath: note.relative_path },
       );
-      clearNoteDraft(vaultId, note.relative_path);
+      clearNoteDraft(vaultId, note.relative_path, draftContent);
       if (savedKey !== currentNoteKeyRef.current) {
         return;
       }
       cancelDraftWrite();
+      autosave.discard();
+      autosave.resume(outcome.content_hash ?? note.content_hash);
       setConflict(false);
       setConflictDisk(null);
       setNoteChangedOnDisk(false);
@@ -1890,8 +1965,8 @@ export function NotePage({
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               <span>
-                Unsaved drafts from before the move to multiple Vaults are being
-                held — <Link to="/settings">find them in Settings</Link>.
+                Unsaved drafts are being held.{" "}
+                <Link to="/settings">Find them in Settings</Link>.
               </span>
             </div>
             <button

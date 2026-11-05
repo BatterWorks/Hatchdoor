@@ -49,6 +49,64 @@ describe("useNoteAutosave", () => {
     expect(save).toHaveBeenCalledWith("typing", "h0");
   });
 
+  it("keeps the idle deadline and original base across rerenders", async () => {
+    const send = vi.fn().mockResolvedValue({ content_hash: "saved" });
+    const saved = vi.fn();
+    const hook = renderHook(
+      ({ baseHash }) =>
+        useNoteAutosave({
+          baseHash,
+          enabled: true,
+          save: (content, hash) => send(content, hash),
+          onSaved: (result) => saved(result),
+        }),
+      { initialProps: { baseHash: "h0" } },
+    );
+    act(() => hook.result.current.touch("typed on h0"));
+    act(() => vi.advanceTimersByTime(500));
+    hook.rerender({ baseHash: "external" });
+    await act(async () => vi.advanceTimersByTime(1500));
+    expect(send).toHaveBeenCalledExactlyOnceWith("typed on h0", "h0");
+    expect(saved).toHaveBeenCalledWith({ content_hash: "saved" });
+  });
+
+  it("stops reporting Saved as soon as more text is typed", async () => {
+    const { hook } = setup();
+    await act(async () => hook.result.current.commit("saved text"));
+    expect(hook.result.current.status).toBe("saved");
+    act(() => hook.result.current.touch("not saved yet"));
+    expect(hook.result.current.status).not.toBe("saved");
+  });
+
+  it("does not report Saved when typing continues during a save", async () => {
+    let finish!: (result: { content_hash: string }) => void;
+    const save = vi.fn(
+      () =>
+        new Promise<{ content_hash: string }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { hook } = setup(save);
+    act(() => hook.result.current.commit("first"));
+    act(() => hook.result.current.touch("newer"));
+    await act(async () => finish({ content_hash: "h1" }));
+    expect(hook.result.current.status).not.toBe("saved");
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect(save).toHaveBeenLastCalledWith("newer", "h1");
+  });
+
+  it("warns before unloading refused edits, but not a saved document", async () => {
+    const save = vi.fn().mockRejectedValue(new Error("unavailable"));
+    const { hook } = setup(save);
+    const clean = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+    await act(async () => hook.result.current.commit("refused text"));
+    const dirty = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirty);
+    expect(dirty.defaultPrevented).toBe(true);
+  });
+
   it("coalesces rapid typing into one write", async () => {
     const { hook, save } = setup();
 
@@ -275,7 +333,10 @@ describe("overlapping writes", () => {
     visibility.mockReturnValue("visible");
 
     expect(flushSave).toHaveBeenCalledExactlyOnceWith("still typing", "h0");
-    expect(onSaved).toHaveBeenCalledWith({ content_hash: "h1" });
+    expect(onSaved).toHaveBeenCalledWith(
+      { content_hash: "h1" },
+      "still typing",
+    );
     expect(hook.result.current.status).toBe("saved");
 
     await act(async () => {

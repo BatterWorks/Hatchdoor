@@ -35,6 +35,8 @@ Type `/` at the start of a line for a menu of what a line can be: a heading, a b
 
 Type `[[` and part of a note's title to link to it. Pick one with the arrow keys and `Enter`, and Hatchdoor writes the link in the Vault's link style: `[[Note Title]]` in a wikilink Vault, `[Note Title](path/to/Note%20Title.md)` in a Markdown-link Vault. Only notes in the same Vault are offered. A wikilink in the editor is looked up the way the Reading view looks it up, by title, alias or path, so it reads as resolved or missing the same in both, and clicking it opens that note, at the heading when the link names one. [[Supported Markdown reference#Which link style Hatchdoor writes]] explains how the style is worked out.
 
+The link icon beside an external link opens web addresses (`http` or `https`) and email addresses (`mailto`) only. Other address types do nothing.
+
 Paste or drop an image or another attachment into the editor and Hatchdoor uploads it and writes the embed on a line of its own, beside your caret or where you dropped it. Images show under the line that embeds them. [[How to import and work with attachments]] covers where files land.
 
 ## On a phone
@@ -50,16 +52,18 @@ You can also edit a note's properties, the frontmatter block with its tags, stat
 There is no Save button in the editor. An edit saves when you leave the editor, by clicking elsewhere or pressing `Escape`, and also after about two seconds without typing. A badge above the note shows the state:
 
 - **Saving…**: a save is under way.
-- **Saved HH:MM**: everything up to that point is on disk.
+- **Saved HH:MM**: the current text is on disk. The badge disappears as soon as you type again, until that edit saves.
 - **Not saving**: saving has stopped. See below.
 
 Hatchdoor writes the note exactly as you typed it, with the file's own line endings. Nothing reformats it.
 
 ## If the page goes away mid-edit
 
-Your browser keeps a local copy of what you are typing, and Hatchdoor writes that copy out whenever the tab is closed or hidden. A crash, a reload, a closed tab, or Hatchdoor updating itself in the background cannot take the last few seconds of typing with it.
+Your browser keeps a local copy shortly after you type, and Hatchdoor writes that copy out whenever the tab is closed or hidden. A crash before the local copy is written can still lose the last few keystrokes. Closing or reloading a tab with unsaved text asks for confirmation, including when saving has stopped.
 
 Reopen the note and the unsaved text is back, above a notice saying so, and the interrupted save finishes on its own. If the note changed on disk while you were away, the text is held rather than written over the newer version: the notice sends you to **Source** instead, where you can compare the two.
+
+A successful save removes only a local copy containing the text that was saved. It does not remove a different edit held by another tab or left from an earlier visit. If new typing replaces an edit based on an older version, that older edit moves to Settings, **Unsaved drafts**, where it stays available to restore or discard.
 
 If your browser cannot store that local copy, in private browsing, with a full disk or with site data blocked, a notice says so, because the save is then the only thing keeping your edit.
 
@@ -71,7 +75,7 @@ Hatchdoor also waits before updating itself. A new version installs in the backg
 - **"Edits aren't saving. Hatchdoor could not reach the vault."**: a save failed for any other reason, either because the connection dropped or because the server refused it. Saving stays stopped for this note and does not start again by itself. Your text is kept in the browser: reload the page once the connection is back and the held save goes through, or select **Review** to open **Source** and save from there. If it keeps failing, the problem is on the server, and the server log records every failed save with its cause. See [[How to troubleshoot common problems]].
 - **"This address now opens a different note, so Hatchdoor stopped saving here."**: a note with the same name was created in a folder that sorts earlier, and took over this note's address. Nothing is written into that other note. Your edits are kept for this note's file: click **Open it** to go to the note at its new address, where they come back and are saved. If Hatchdoor could not reach the server to find where the note went, the button reads **Try again** instead.
 - **"This address now opens a different file than ..."**: the note was moved, renamed or deleted outside this page, by an agent, Obsidian or a Git sync, and its address now leads to another file. Hatchdoor cannot tell a move from a delete, so it stops saving and waits. **Open what is here now** opens that file, and puts any unsaved edit under Settings, **Unsaved drafts**, where you can restore it, as a new note at its old place if need be. A move or rename you make in Hatchdoor itself never shows this.
-- **"This note changed on disk while your edit was waiting to save."**: the note moved somewhere else while your edit was stuck (a save the server refused, a connection that is down). Nothing of yours is written over: open **Source** to put the two versions side by side and decide.
+- **"This note changed on disk while your edit was waiting to save."**: another writer changed the note while you were editing, including when a background read began before you started typing and returned afterwards. The page keeps your text and its original version check rather than replacing either with the read result. Open **Source** to put the two versions side by side and decide.
 - **"This note is part of a sync conflict with the Vault's remote."**: the Vault's last sync stopped because this note changed both here and on the remote. You can still edit it, but an edit made before the conflict is resolved may cause the same conflict again. [[How to troubleshoot common problems#Resolving a sync conflict]] explains how to resolve it from the Vault's settings.
 - **`conflict` or `sync stopped` next to the Vault in the sidebar** does not stop your edits. Notes keep saving to disk; only the Vault's Git commit and sync wait until the problem is dealt with from the Vault's settings. See [[How to troubleshoot common problems#Git sync is failing]].
 - If the Vault is read-only, or you are on a public demo, the note shows in Reading view and you can only read it.

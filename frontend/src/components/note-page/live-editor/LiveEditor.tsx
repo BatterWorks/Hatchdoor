@@ -195,8 +195,17 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
         return;
       }
       const openNote = (target: string) => propsRef.current.onOpenNote(target);
-      const openExternal = (url: string) =>
-        window.open(url, "_blank", "noopener,noreferrer");
+      const openExternal = (url: string) => {
+        try {
+          const target = new URL(url);
+          if (["http:", "https:", "mailto:"].includes(target.protocol)) {
+            window.open(url, "_blank", "noopener,noreferrer");
+          }
+        } catch {
+          // Note content is untrusted. Relative or malformed targets are not
+          // external links; note navigation has its own resolver.
+        }
+      };
       const view = new EditorView({
         parent: host,
         state: EditorState.create({

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 /** How long typing inside one unit may pause before the document is flushed. */
 const IDLE_FLUSH_MS = 2000;
@@ -48,7 +54,7 @@ export function useNoteAutosave({
    * already superseded and conflicting on the user's next keystroke.
    */
   flushSave?: Sender;
-  onSaved?: (result: SaveResult) => void;
+  onSaved?: (result: SaveResult, content: string) => void;
 }) {
   const [status, setStatus] = useState<AutosaveStatus>("idle");
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -63,10 +69,19 @@ export function useNoteAutosave({
   const inFlightRef = useRef(false);
   const queuedRef = useRef<string | null>(null);
   const stoppedRef = useRef(false);
+  const unsavedRef = useRef(false);
+  const callbacksRef = useRef({ save, flushSave, onSaved });
+  // New render closures must not tear down the idle timer. Capture them when
+  // a write starts, so an awaited write also keeps its original recipient.
+  useLayoutEffect(() => {
+    callbacksRef.current = { save, flushSave, onSaved };
+  }, [save, flushSave, onSaved]);
 
   useEffect(() => {
-    hashRef.current = baseHash;
-    ownHashesRef.current.add(baseHash);
+    if (!unsavedRef.current && !inFlightRef.current) {
+      hashRef.current = baseHash;
+      ownHashesRef.current.add(baseHash);
+    }
   }, [baseHash]);
 
   const clearTimer = () => {
@@ -94,6 +109,7 @@ export function useNoteAutosave({
       }
 
       inFlightRef.current = true;
+      const { save, onSaved } = callbacksRef.current;
       try {
         let current: string | null = next;
         let send = sendFirst ?? save;
@@ -105,7 +121,7 @@ export function useNoteAutosave({
               hashRef.current = result.content_hash;
               ownHashesRef.current.add(result.content_hash);
             }
-            onSaved?.(result);
+            onSaved?.(result, current);
           } catch (error) {
             stoppedRef.current = true;
             queuedRef.current = null;
@@ -121,21 +137,23 @@ export function useNoteAutosave({
           current = queuedRef.current;
           queuedRef.current = null;
           if (current === null) {
-            setStatus("saved");
-            setSavedAt(new Date());
+            unsavedRef.current = pendingRef.current !== null;
+            setStatus(unsavedRef.current ? "idle" : "saved");
+            if (!unsavedRef.current) setSavedAt(new Date());
           }
         }
       } finally {
         inFlightRef.current = false;
       }
     },
-    [enabled, save, onSaved],
+    [enabled],
   );
 
   /** A unit was committed: write now. */
   const commit = useCallback(
     (next: string) => {
       clearTimer();
+      unsavedRef.current = true;
       pendingRef.current = null;
       void write(next);
     },
@@ -145,6 +163,9 @@ export function useNoteAutosave({
   /** Still typing inside one unit: flush after the idle pause. */
   const touch = useCallback(
     (next: string) => {
+      unsavedRef.current = true;
+      if (!stoppedRef.current)
+        setStatus(inFlightRef.current ? "saving" : "idle");
       pendingRef.current = next;
       clearTimer();
       timerRef.current = window.setTimeout(() => {
@@ -171,6 +192,20 @@ export function useNoteAutosave({
     clearTimer();
     pendingRef.current = null;
     queuedRef.current = null;
+    unsavedRef.current = false;
+  }, []);
+
+  const hasUnsaved = useCallback(() => unsavedRef.current, []);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (unsavedRef.current) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
   }, []);
 
   const resume = useCallback((hash: string) => {
@@ -187,6 +222,7 @@ export function useNoteAutosave({
     // Hiding a tab is not — the page keeps running, so the ordinary queue is
     // both available and more correct than a second send racing the first.
     const flush = (terminating: boolean) => {
+      const { flushSave } = callbacksRef.current;
       // `pendingRef` first, then `queuedRef`: `commit` clears the pending
       // pause, so whenever both hold something the pending one is the later
       // snapshot of the whole document and already contains the queued edit.
@@ -240,7 +276,16 @@ export function useNoteAutosave({
       window.removeEventListener("pagehide", onPageHide);
       clearTimer();
     };
-  }, [write, flushSave, enabled]);
+  }, [write, enabled]);
 
-  return { status, savedAt, commit, touch, isOwnWrite, resume, discard };
+  return {
+    status,
+    savedAt,
+    commit,
+    touch,
+    isOwnWrite,
+    resume,
+    discard,
+    hasUnsaved,
+  };
 }

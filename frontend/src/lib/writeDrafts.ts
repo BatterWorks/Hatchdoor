@@ -119,24 +119,46 @@ export function loadNoteDraft(
  * working store, and the editor goes on promising a safety net that does not
  * exist.
  *
- * Only `NotePage`'s debounced editor draft writer reads it today, and it is the
- * one that matters: it is the writer behind the promise the UI makes while the
- * user types. The other callers — reload-latest, the two conflict resolutions,
- * and Settings' held-draft restore — still discard the result, so a blocked
- * store is silent on those paths. Surfacing it there is unfinished work, and
- * the held-draft restore is the one to start with: it discards the held draft
- * straight after writing the per-note one.
+ * The editor's debounced writer reports failure, and Settings checks the
+ * result before discarding a restored held draft. Reload-latest and the
+ * conflict-resolution callers still discard the result.
+ * `onHeld` tells the editor when an older-base copy was preserved in Settings,
+ * after both storage writes succeed.
  */
 export function saveNoteDraft(
   vaultId: string,
   relativePath: string,
   draft: NoteDraft,
+  onHeld?: () => void,
 ): boolean {
   try {
+    let heldOlderDraft = false;
+    const previous = loadNoteDraft(vaultId, relativePath);
+    if (
+      previous &&
+      previous.baseContentHash !== draft.baseContentHash &&
+      previous.content !== draft.content
+    ) {
+      // Another tab, or an edit after a reload, must not erase a refused
+      // version. Copy it before replacing the active slot; if storage refuses
+      // the copy, the original stays intact and this write reports failure.
+      const held: HeldNoteDraft = {
+        id: `note-path:${vaultId}:${relativePath}:${previous.savedAt}`,
+        kind: "note",
+        slug: relativePath,
+        relativePath,
+        content: previous.content,
+        baseContentHash: previous.baseContentHash,
+        savedAt: previous.savedAt,
+      };
+      window.localStorage.setItem(heldDraftKey(held.id), JSON.stringify(held));
+      heldOlderDraft = true;
+    }
     window.localStorage.setItem(
       noteDraftKey(vaultId, relativePath),
       JSON.stringify({ ...draft, vaultId, relativePath }),
     );
+    if (heldOlderDraft) onHeld?.();
     return true;
   } catch {
     // Storage can fail in private browsing or when quota is exceeded.
@@ -144,8 +166,19 @@ export function saveNoteDraft(
   }
 }
 
-export function clearNoteDraft(vaultId: string, relativePath: string): void {
+/** Omit savedContent only for an explicit discard or transfer. An ordinary
+ * save may remove only the copy of the text it actually wrote. */
+export function clearNoteDraft(
+  vaultId: string,
+  relativePath: string,
+  savedContent?: string,
+): void {
   try {
+    if (
+      savedContent !== undefined &&
+      loadNoteDraft(vaultId, relativePath)?.content !== savedContent
+    )
+      return;
     window.localStorage.removeItem(noteDraftKey(vaultId, relativePath));
   } catch {
     // Ignore storage failures.

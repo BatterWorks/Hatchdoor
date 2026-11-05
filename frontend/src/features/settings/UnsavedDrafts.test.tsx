@@ -8,7 +8,11 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { HeldDraft } from "../../lib/writeDrafts";
+import {
+  loadNoteDraft,
+  saveNoteDraft,
+  type HeldDraft,
+} from "../../lib/writeDrafts";
 import type { VaultSummary } from "../../types";
 import { UnsavedDrafts } from "./UnsavedDrafts";
 
@@ -97,6 +101,57 @@ describe("UnsavedDrafts (#151)", () => {
     // destination note's freshly fetched hash — so the existing stale-draft
     // comparison in NotePage still fires correctly (#151 spec review).
     expect(stored).toContain('"baseContentHash":"abc"');
+  });
+
+  it("keeps the held draft when preserving a destination draft exhausts storage", async () => {
+    const v = vault("vault-1", "Alpha");
+    saveNoteDraft(v.vault_id, "Notes/Orphaned", {
+      vaultId: v.vault_id,
+      relativePath: "Notes/Orphaned",
+      content: "destination edit",
+      baseContentHash: "another-base",
+      savedAt: 1,
+    });
+    const store = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key,
+      value,
+    ) {
+      if (key.startsWith("hatchdoor:heldDraft:"))
+        throw new DOMException("full", "QuotaExceededError");
+      store.call(this, key, value);
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        note: { slug: "orphaned", relative_path: "Notes/Orphaned" },
+      }),
+    );
+    const onDiscard = vi.fn();
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[noteDraft]}
+          vaults={[v]}
+          onDiscard={onDiscard}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Restore" }),
+      ).not.toBeDisabled(),
+    );
+    expect(onDiscard).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        "This draft could not be written. It is still held here.",
+      ),
+    ).toBeInTheDocument();
+    expect(loadNoteDraft(v.vault_id, "Notes/Orphaned")?.content).toBe(
+      "destination edit",
+    );
   });
 
   it("offers a different Vault or a new note when the destination has no such note", async () => {
