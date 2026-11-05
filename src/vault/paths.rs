@@ -21,8 +21,31 @@ pub fn unique_slug(base: &str, by_slug: &HashMap<String, NoteEntry>) -> String {
     }
 }
 
+/// The key a title or path is compared under when case does not count.
+///
+/// NFC first, so a name a Mac stored decomposed (Hangul jamo, kana with a
+/// separate voicing mark) meets the composed spelling a keyboard types (#626).
 pub fn normalize_title(input: &str) -> String {
-    input.trim().to_lowercase()
+    nfc_title(input).to_lowercase()
+}
+
+/// A title or path as it is compared when case counts: trimmed and
+/// NFC-normalised, and nothing else (#626).
+pub fn nfc_title(input: &str) -> String {
+    input.trim().nfc().collect()
+}
+
+/// The slug a note named `stem` claims before any collision suffix: its
+/// NFC-normalised name folded by [`slugify`], or `untitled` when nothing
+/// survives the fold. The indexer and the write layer both derive a note's
+/// slug from this, so they cannot disagree about a decomposed filename.
+pub fn note_slug_base(stem: &str) -> String {
+    let slug = slugify(&nfc_title(stem));
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
+    }
 }
 
 pub fn strip_md_extension(input: &str) -> &str {

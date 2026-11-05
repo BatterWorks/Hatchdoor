@@ -23,9 +23,10 @@ const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
 // Resolution results are stable for the life of the page, and every content
 // change re-runs this effect, so without a cache each keystroke-driven commit
 // re-POSTs every target in the note and widens the settling window. Keyed by
-// `vaultId:target` — wikilinks are always resolved within their own Vault
-// (cross-Vault resolution is ruled out by #62), and the same target string
-// can legitimately resolve differently in different Vaults.
+// Vault, linking note and target: wikilinks are always resolved within their
+// own Vault (cross-Vault resolution is ruled out by #62), and between two
+// namesakes the one nearest the linking note wins (#626), so the same target
+// can name different notes from different notes.
 const resolveCache = new Map<string, ResolvedWikilink | null>();
 
 // Assets resolve relative to the note that embeds them, so the same target in
@@ -37,12 +38,8 @@ const assetResolveCache = new Map<string, string | null>();
 // folder, so like assets they are keyed by the note's path as well.
 const noteLinkResolveCache = new Map<string, ResolvedWikilink | null>();
 
-function cacheKey(vaultId: VaultId, target: string): string {
-  return `${vaultId}:${target}`;
-}
-
-// For targets read relative to the note they are written in: assets and
-// Markdown note links.
+// Every target is read from the note it is written in: assets and Markdown
+// note links by path, wikilinks to break a tie between namesakes.
 function pathCacheKey(
   vaultId: VaultId,
   noteRelativePath: string,
@@ -297,7 +294,7 @@ export function useResolvedWikilinks(
       const { found: map, missing } = fromCache(
         resolveCache,
         uniqueTargets,
-        (target) => cacheKey(vaultId, target),
+        pathKey,
       );
       const { found: assetMap, missing: missingAssets } = fromCache(
         assetResolveCache,
@@ -343,7 +340,7 @@ export function useResolvedWikilinks(
                 ? { slug: result.slug, archived: result.archived }
                 : null;
               map.set(result.target, resolved);
-              resolveCache.set(cacheKey(vaultId, result.target), resolved);
+              resolveCache.set(pathKey(result.target), resolved);
             }
             for (const result of json.note_link_results ?? []) {
               const resolved = result.slug
@@ -399,7 +396,7 @@ export async function resolveNoteTargets(
 ): Promise<Map<string, ResolvedWikilink | null>> {
   const unique = [...new Set(targets.filter((target) => target.length > 0))];
   const { found, missing } = fromCache(resolveCache, unique, (target) =>
-    cacheKey(vaultId, target),
+    pathCacheKey(vaultId, noteRelativePath, target),
   );
   if (missing.length === 0) {
     return found;
@@ -424,7 +421,10 @@ export async function resolveNoteTargets(
           ? { slug: result.slug, archived: result.archived }
           : null;
         found.set(result.target, resolved);
-        resolveCache.set(cacheKey(vaultId, result.target), resolved);
+        resolveCache.set(
+          pathCacheKey(vaultId, noteRelativePath, result.target),
+          resolved,
+        );
       }
     }
   } catch {

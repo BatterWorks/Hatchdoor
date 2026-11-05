@@ -2530,9 +2530,9 @@ fn move_note_rewrites_a_path_qualified_backlink_to_the_new_full_path() {
 
 #[test]
 fn move_note_falls_back_to_the_full_path_when_the_new_title_collides() {
-    // Two notes would carry the title "Renamed" after the move, and a bare
-    // title resolves through `by_title` to a deterministic first path. The
-    // full path is the only form that still names the moved note.
+    // Two notes would carry the title "Renamed" after the move, so a bare
+    // title could reach either. The full path is the only form that still
+    // names the moved note.
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     fs::create_dir_all(root.join("Notes")).expect("notes");
@@ -5384,4 +5384,322 @@ fn tag_rename_and_delete_skip_a_dangling_markdown_symlink() {
     let deleted = apply_delete(root, "review");
     assert_eq!(deleted.notes.len(), 1);
     assert_eq!(read(root, "Tagged.md"), "---\ntags: []\n---\nbody\n");
+}
+
+// #626: a rename or delete rewrites only the links that name the note, and
+// copies every other link's bytes through.
+
+fn duplicate_name_rewrite_vault() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("links/a")).expect("a");
+    fs::create_dir_all(root.join("links/b")).expect("b");
+    fs::write(root.join("links/a/Duplicate Name.md"), "a").expect("a note");
+    fs::write(root.join("links/b/Duplicate Name.md"), "b").expect("b note");
+    fs::write(
+        root.join("Linker.md"),
+        "- [[b/Duplicate Name]]\n- [[a/Duplicate Name]]\n",
+    )
+    .expect("linker");
+    tmp
+}
+
+#[test]
+fn rename_leaves_a_link_qualified_for_a_namesake_byte_for_byte() {
+    let tmp = duplicate_name_rewrite_vault();
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink("a/Duplicate Name")
+        .expect("a")
+        .clone();
+    assert_eq!(entry.relative_path, "links/a/Duplicate Name");
+
+    move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "links/a/Renamed A.md",
+        &content_hash("a"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "- [[b/Duplicate Name]]\n- [[links/a/Renamed A]]\n"
+    );
+}
+
+#[test]
+fn delete_leaves_a_link_qualified_for_a_namesake_intact() {
+    let tmp = duplicate_name_rewrite_vault();
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink("a/Duplicate Name")
+        .expect("a")
+        .clone();
+
+    delete_note(root, &index, &entry, &content_hash("a")).expect("delete");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "- [[b/Duplicate Name]]\n- \n"
+    );
+}
+
+#[test]
+fn rename_of_a_note_without_backlinks_rewrites_nothing() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("README.md"), "readme").expect("readme");
+    fs::write(root.join("Home networking.md"), "# Setup\n").expect("home");
+    fs::write(root.join("Unrelated.md"), "alone").expect("unrelated");
+    let bystander = "[[README | the readme]] and [[Home networking #Setup]] and [[README\\| cell]]";
+    fs::write(root.join("Bystander.md"), bystander).expect("bystander");
+    let index = build(root);
+    let entry = index.find_by_slug("unrelated").expect("unrelated").clone();
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "Renamed Unrelated.md",
+        &content_hash("alone"),
+    )
+    .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(
+        fs::read_to_string(root.join("Bystander.md")).expect("bystander"),
+        bystander
+    );
+}
+
+#[test]
+fn rename_keeps_the_spacing_around_a_retargeted_link_target() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Plan.md"), "plan").expect("plan");
+    fs::write(
+        root.join("Linker.md"),
+        "[[Plan | the plan]] and [[ Plan #Goals]]",
+    )
+    .expect("linker");
+    let index = build(root);
+    let entry = index.find_by_slug("plan").expect("plan").clone();
+
+    move_or_rename_note(root, &index, &entry, "Roadmap.md", &content_hash("plan")).expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "[[Roadmap | the plan]] and [[ Roadmap #Goals]]"
+    );
+}
+
+#[test]
+fn a_non_utf8_note_with_an_unrelated_spaced_link_blocks_nothing() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("README.md"), "readme").expect("readme");
+    fs::write(root.join("One.md"), "one").expect("one");
+    fs::write(root.join("Two.md"), "two").expect("two");
+    fs::write(root.join("Three.md"), "three").expect("three");
+    fs::write(root.join("Legacy.md"), b"Caf\xe9 [[README | readme]]\n").expect("legacy");
+
+    let index = build(root);
+    let one = index.find_by_slug("one").expect("one").clone();
+    move_or_rename_note(root, &index, &one, "One renamed.md", &content_hash("one"))
+        .expect("rename is not blocked");
+
+    let index = build(root);
+    let two = index.find_by_slug("two").expect("two").clone();
+    move_or_rename_note(root, &index, &two, "Moved/Two.md", &content_hash("two"))
+        .expect("move is not blocked");
+
+    let index = build(root);
+    let three = index.find_by_slug("three").expect("three").clone();
+    delete_note(root, &index, &three, &content_hash("three")).expect("delete is not blocked");
+
+    assert_eq!(
+        fs::read(root.join("Legacy.md")).expect("legacy"),
+        b"Caf\xe9 [[README | readme]]\n"
+    );
+}
+
+#[test]
+fn rename_leaves_a_link_to_the_exact_case_namesake_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("UPPER lower MiXeD.md"), "first").expect("first");
+    fs::write(root.join("upper LOWER mixed.md"), "second").expect("second");
+    fs::write(root.join("Linker.md"), "[[upper LOWER mixed]]").expect("linker");
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink("UPPER lower MiXeD")
+        .expect("first")
+        .clone();
+
+    let outcome = move_or_rename_note(root, &index, &entry, "Shouting.md", &content_hash("first"))
+        .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "[[upper LOWER mixed]]"
+    );
+}
+
+#[test]
+fn rename_leaves_a_link_to_a_generated_slug_alone() {
+    let tmp = duplicate_name_rewrite_vault();
+    let root = tmp.path();
+    fs::write(root.join("Future.md"), "[[Duplicate Name 2]]").expect("future");
+    let index = build(root);
+    let second = index
+        .find_by_slug("duplicate-name-2")
+        .expect("second")
+        .clone();
+
+    move_or_rename_note(
+        root,
+        &index,
+        &second,
+        "links/b/Renamed B.md",
+        &content_hash("b"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Future.md")).expect("future"),
+        "[[Duplicate Name 2]]"
+    );
+}
+
+#[test]
+fn rename_of_a_decomposed_filename_rewrites_a_composed_link() {
+    use unicode_normalization::UnicodeNormalization;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let korean_nfd: String = "한국어".nfd().collect();
+    fs::write(root.join(format!("{korean_nfd}.md")), "k").expect("korean");
+    fs::write(root.join("Linker.md"), "[[한국어|Korean]]").expect("linker");
+    let index = build(root);
+    let entry = index.resolve_wikilink("한국어").expect("korean").clone();
+
+    let outcome =
+        move_or_rename_note(root, &index, &entry, "Korean.md", &content_hash("k")).expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "[[Korean|Korean]]"
+    );
+}
+
+#[test]
+fn move_pins_the_moved_notes_own_link_that_a_nearer_namesake_would_take() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a")).expect("a");
+    fs::create_dir_all(root.join("b")).expect("b");
+    fs::write(root.join("a/Notes.md"), "a notes").expect("a notes");
+    fs::write(root.join("b/Notes.md"), "b notes").expect("b notes");
+    fs::write(root.join("a/Plan.md"), "See [[Notes]]").expect("plan");
+    let index = build(root);
+    let plan = index.find_by_slug("plan").expect("plan").clone();
+
+    move_or_rename_note(
+        root,
+        &index,
+        &plan,
+        "b/Plan.md",
+        &content_hash("See [[Notes]]"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("b/Plan.md")).expect("plan"),
+        "See [[a/Notes]]"
+    );
+    let after = build(root);
+    let moved = after.resolve_wikilink("b/Plan").expect("moved");
+    let a_notes = after.resolve_wikilink("a/Notes").expect("a notes");
+    assert_eq!(
+        after.outgoing_by_slug[&moved.slug],
+        vec![a_notes.slug.clone()]
+    );
+}
+
+#[test]
+fn rename_pins_another_notes_link_that_the_renamed_note_would_capture() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a")).expect("a");
+    fs::write(root.join("Roadmap.md"), "root roadmap").expect("roadmap");
+    fs::write(root.join("a/Plan.md"), "plan").expect("plan");
+    fs::write(root.join("a/L.md"), "[[Roadmap]] and [[Plan]]").expect("linker");
+    let index = build(root);
+    let plan = index.find_by_slug("plan").expect("plan").clone();
+
+    move_or_rename_note(root, &index, &plan, "a/Roadmap.md", &content_hash("plan"))
+        .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("a/L.md")).expect("linker"),
+        "[[/Roadmap]] and [[a/Roadmap]]"
+    );
+}
+
+#[test]
+fn move_to_the_root_beside_a_nearer_namesake_anchors_the_backlink() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a")).expect("a");
+    fs::create_dir_all(root.join("b")).expect("b");
+    fs::write(root.join("a/Plan.md"), "a plan").expect("a plan");
+    fs::write(root.join("b/Plan.md"), "b plan").expect("b plan");
+    fs::write(root.join("b/L.md"), "[[a/Plan]]").expect("linker");
+    let index = build(root);
+    let a_plan = index.resolve_wikilink("a/Plan").expect("a plan").clone();
+
+    move_or_rename_note(root, &index, &a_plan, "Plan.md", &content_hash("a plan")).expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("b/L.md")).expect("linker"),
+        "[[/Plan]]"
+    );
+    let after = build(root);
+    let linker = after.resolve_wikilink("b/L").expect("linker");
+    let moved = after.resolve_wikilink("/Plan").expect("moved");
+    assert_eq!(moved.relative_path, "Plan");
+    assert_eq!(
+        after.outgoing_by_slug[&linker.slug],
+        vec![moved.slug.clone()]
+    );
+}
+
+#[test]
+fn relocated_breaks_ties_in_the_order_a_rebuild_does() {
+    // `a/Plan` sorts before `a b/Plan` folder by folder, but after it as a
+    // string. From the root both are one hop away, so claim order decides.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a b")).expect("a b");
+    fs::create_dir_all(root.join("x/y")).expect("x/y");
+    fs::write(root.join("a b/Plan.md"), "r").expect("r");
+    fs::write(root.join("x/y/Plan.md"), "m").expect("m");
+    fs::write(root.join("Home.md"), "[[Plan]]").expect("home");
+    let index = build(root);
+    let moving = index.resolve_wikilink("x/y/Plan").expect("m").clone();
+
+    move_or_rename_note(root, &index, &moving, "a/Plan.md", &content_hash("m")).expect("move");
+
+    let home = fs::read_to_string(root.join("Home.md")).expect("home");
+    let after = build(root);
+    let reached = after
+        .resolve_wikilink_from(home.trim_start_matches("[[").trim_end_matches("]]"), "")
+        .expect("reached");
+    assert_eq!(reached.relative_path, "a b/Plan", "home was {home:?}");
 }

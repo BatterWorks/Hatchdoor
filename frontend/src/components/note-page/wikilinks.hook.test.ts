@@ -172,6 +172,34 @@ describe("resolveNoteTargets (#544)", () => {
     expect(bodies).toHaveLength(1);
   });
 
+  it("asks again for a target written in a different note (#626)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        bodies.push(body);
+        // Between two namesakes the server picks the one nearest the note.
+        const slug = body.note_path === "a/Home.md" ? "plan" : "plan-2";
+        return jsonResponse({
+          vault_id: "vault-nearest",
+          results: [{ target: "Plan", slug, archived: false }],
+          asset_results: [],
+        });
+      },
+    );
+
+    const fromA = await resolveNoteTargets("vault-nearest", "a/Home.md", [
+      "Plan",
+    ]);
+    const fromB = await resolveNoteTargets("vault-nearest", "b/Home.md", [
+      "Plan",
+    ]);
+
+    expect(fromA.get("Plan")).toEqual({ slug: "plan", archived: false });
+    expect(fromB.get("Plan")).toEqual({ slug: "plan-2", archived: false });
+    expect(bodies).toHaveLength(2);
+  });
+
   it("leaves a target unresolved when the server cannot be reached", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const result = await resolveNoteTargets("vault-offline", "Home.md", [

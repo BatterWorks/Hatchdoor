@@ -880,7 +880,7 @@ impl<'a> VaultReadCore<'a> {
             .iter()
             .map(|raw_target| {
                 index
-                    .resolve_wikilink(raw_target)
+                    .resolve_wikilink_from(raw_target, note_dir)
                     .filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(visible)
             })

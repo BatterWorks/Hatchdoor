@@ -493,9 +493,9 @@ pub(crate) fn encode_link_path(path: &str, angle: bool) -> String {
 }
 
 /// Notes addressed by path and by filename, for resolving Markdown note links
-/// through [`resolve_path_ladder`]. Keys are lowercased the way
-/// `VaultIndex::by_path_title` is, and the first note to claim a path keeps
-/// it, in the same layer-priority order.
+/// through [`resolve_path_ladder`]. Keys are folded by `normalize_title`, as
+/// wikilink titles are, and the first note to claim a path keeps it, in the
+/// same layer-priority order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NotePaths {
     /// Normalised Vault-relative path without `.md` to slug.
