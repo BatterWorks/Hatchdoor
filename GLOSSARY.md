@@ -120,7 +120,7 @@ The notes a query selects, projected as rows carrying the properties the query a
 _Avoid_: Computed content, rendered note
 
 **Section**:
-A heading and everything under it up to the next heading of the same or a higher level, heading line included and subsections included. A heading inside a fenced code block opens no section. It is the unit `replace_section` writes and `get_note_section` reads, by one shared rule. The frontmatter block and the text before the first heading are not sections.
+A heading and everything under it up to the next heading of the same or a higher level, heading line included and subsections included. A heading starts after frontmatter with at most three leading spaces and no leading tab. A hash line inside fenced or indented code opens no section. It is the unit `replace_section` writes and `get_note_section` reads, by one shared rule. The frontmatter block and the text before the first heading are not sections.
 _Avoid_: Block, part, chapter
 
 **Heading path**:

@@ -5567,6 +5567,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_section_reports_heading_not_found_for_yaml_comments_in_every_mode() {
+        let (state, _tmp) = write_state();
+        let path = registered_vault_path(&state).join("Home.md");
+        let body = "---\ntitle: Home\n# status: draft\ntags: [a]\n---\nIntro\n\n## Log\nMonday\n";
+        std::fs::write(&path, body).expect("fixture");
+        for mode in ["replace", "before", "after"] {
+            let reply = call_tool(
+                &state,
+                "replace_section",
+                json!({
+                    "slug": "home",
+                    "heading": "# status: draft",
+                    "mode": mode,
+                    "content": "new\n",
+                    "expected_content_hash": crate::cache::parse::content_hash(body)
+                }),
+            )
+            .await;
+            let result = &reply["result"];
+            assert_eq!(result["isError"], true, "{reply:#}");
+            assert_eq!(result["structuredContent"]["code"], "heading_not_found");
+            assert_eq!(result["structuredContent"]["retryable"], false);
+            assert_eq!(std::fs::read(&path).expect("read"), body.as_bytes());
+        }
+    }
+
+    #[tokio::test]
     async fn replace_section_overwrites_and_rejects_invalid_mode() {
         let (state, _tmp) = write_state();
         let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");

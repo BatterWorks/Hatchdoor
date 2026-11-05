@@ -187,7 +187,13 @@ const SURFACES = [
   {
     id: "write-mutations",
     label: "Note mutation behaviour",
-    paths: ["src/vault_mutation.rs", "src/vault/write.rs", "src/vault/write/"],
+    paths: [
+      "src/vault_mutation.rs",
+      "src/vault/write.rs",
+      "src/vault/write/",
+      "src/vault/sections.rs",
+      "src/vault_read/sections.rs",
+    ],
     notes: [
       `${GET_STARTED}/Search and change notes with your agent.md`,
       `${REFERENCE}/MCP tools reference.md`,

@@ -999,9 +999,80 @@ fn replace_section_rejects_missing_heading() {
             "x",
             &content_hash(body),
         ),
-        Err(WriteError::InvalidInput(_))
+        Err(WriteError::HeadingNotFound(_))
     ));
     assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
+fn replace_section_never_targets_a_frontmatter_comment() {
+    for mode in [
+        SectionMode::Replace,
+        SectionMode::Before,
+        SectionMode::After,
+    ] {
+        let body = "---\ntitle: W\n# status: draft\ntags: [a]\n---\nIntro\n\n## Log\nMonday\n";
+        let (tmp, path, entry) = partial_write_note(body);
+        let error = replace_section(
+            &entry,
+            "# status: draft",
+            mode,
+            "# status: draft\nnew\n",
+            &content_hash(body),
+        )
+        .expect_err("YAML comment is not a section");
+        assert!(matches!(error, WriteError::HeadingNotFound(_)));
+        assert_eq!(fs::read(&path).expect("read"), body.as_bytes());
+        drop(tmp);
+    }
+}
+
+#[test]
+fn replace_section_edits_only_the_body_when_yaml_has_the_same_heading() {
+    for ending in ["\n", "\r\n"] {
+        for (mode, expected_section) in [
+            (SectionMode::Replace, "# Tasks\nnew\n"),
+            (SectionMode::Before, "# Tasks\nnew\n# Tasks\nold\n"),
+            (SectionMode::After, "# Tasks\nold\n# Tasks\nnew\n"),
+        ] {
+            let prefix = "---\ntitle: W\n# Tasks\n# ```\ntags: [a]\n---\nIntro\n\n";
+            let suffix = "# Later\nkeep";
+            let body = format!("{prefix}# Tasks\nold\n{suffix}").replace('\n', ending);
+            let (_tmp, path, entry) = partial_write_note(&body);
+            replace_section(
+                &entry,
+                "# Tasks",
+                mode,
+                "# Tasks\nnew\n",
+                &content_hash(&body),
+            )
+            .expect("only the body heading matches");
+            assert_eq!(
+                fs::read(&path).expect("read"),
+                format!("{prefix}{expected_section}{suffix}")
+                    .replace('\n', ending)
+                    .as_bytes()
+            );
+        }
+    }
+}
+
+#[test]
+fn replace_section_keeps_indented_code_with_the_section_it_replaces() {
+    let body = "# Setup\n\nRun this:\n\n    # install the deps\n\t# tabbed code\n    ```sh\n    echo done\n\n   # Usage\nkeep\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "# Setup",
+        SectionMode::Replace,
+        "# Setup\nnew\n",
+        &content_hash(body),
+    )
+    .expect("replace the entire section including its code");
+    assert_eq!(
+        fs::read(&path).expect("read"),
+        b"# Setup\nnew\n   # Usage\nkeep\n"
+    );
 }
 
 #[test]

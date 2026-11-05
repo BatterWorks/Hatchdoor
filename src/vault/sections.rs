@@ -4,9 +4,24 @@
 
 use std::ops::Range;
 
-use crate::cache::parse::parse_fence_marker;
+use crate::cache::parse::{frontmatter_span, parse_fence_marker};
 
-/// One ATX heading outside any fenced code block.
+/// Where the body begins, just past a leading frontmatter block's closing
+/// line, or zero when no complete block is present. Reads and writes use the
+/// same canonical frontmatter span and keep offsets relative to the file.
+pub(crate) fn body_start(content: &str) -> usize {
+    let Some((_, inner_end)) = frontmatter_span(content) else {
+        return 0;
+    };
+    // `inner_end` sits on the `\n` before the closing `---`.
+    let closing = inner_end + 1;
+    match content[closing..].find('\n') {
+        Some(newline) => closing + newline + 1,
+        None => content.len(),
+    }
+}
+
+/// One body ATX heading outside fenced or indented code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SectionHeading<'a> {
     /// Byte offset of the heading's line in the scanned content.
@@ -34,9 +49,9 @@ pub(crate) struct NoteSections<'a> {
 }
 
 impl<'a> NoteSections<'a> {
-    /// Every heading in `content`.
+    /// Every body heading in `content`, excluding leading frontmatter.
     pub(crate) fn scan(content: &'a str) -> Self {
-        Self::scan_from(content, 0)
+        Self::scan_from(content, body_start(content))
     }
 
     /// Every heading at or after byte `start`, which must sit on a line
@@ -49,7 +64,14 @@ impl<'a> NoteSections<'a> {
         let mut offset = start;
         for line in content[start..].split_inclusive('\n') {
             let body = line.strip_suffix('\n').unwrap_or(line);
-            let trimmed = body.trim_start();
+            let trimmed = body.trim_start_matches(' ');
+            // Headings and fence markers allow at most three leading spaces,
+            // never a tab. In particular, an indented fence cannot change the
+            // state of a surrounding fenced block.
+            if body.len() - trimmed.len() >= 4 || trimmed.starts_with('\t') {
+                offset += line.len();
+                continue;
+            }
             if let Some((marker, min_len)) = fenced_marker {
                 if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
                     && close_marker == marker
@@ -208,7 +230,7 @@ mod tests {
         let sections = NoteSections::scan_from(content, start);
         assert_eq!(sections.headings().len(), 1);
         assert_eq!(sections.span(0), start..content.len());
-        // The whole-content scan the write layer runs still sees both.
-        assert_eq!(NoteSections::scan(content).headings().len(), 2);
+        // A whole-note scan applies the same frontmatter boundary.
+        assert_eq!(NoteSections::scan(content).headings().len(), 1);
     }
 }

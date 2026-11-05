@@ -111,6 +111,19 @@ async function commit(root, message, ...paragraphs) {
   ]);
 }
 
+for (const source of ["src/vault/sections.rs", "src/vault_read/sections.rs"]) {
+  test(`${source} triggers the section contract's MCP documentation review`, async () => {
+    const root = await fixture();
+    await write(root, source, "// corrected section recognition\n");
+    await addChangelogEntry(root);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Note mutation behaviour/);
+    assert.ok(result.stderr.includes(MCP_NOTE));
+    assert.ok(result.stderr.includes(source));
+  });
+}
+
 async function addChangelogEntry(root) {
   await write(
     root,

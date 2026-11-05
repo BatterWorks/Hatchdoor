@@ -20,7 +20,7 @@ pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
     split_wikilink_asset_body,
 };
-pub(crate) use sections::NoteSections;
+pub(crate) use sections::{NoteSections, body_start};
 pub use types::{
     ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,
