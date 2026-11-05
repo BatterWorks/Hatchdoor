@@ -3565,7 +3565,13 @@ async fn every_hatchdoor_write_shows_on_the_next_links_read() {
     assert_eq!(backlinks("target"), ["home", "other"]);
 
     writes
-        .update_note(vault_id, "home", "# Home\n\nno links", &hash_of("home"))
+        .update_note(
+            vault_id,
+            "home",
+            "# Home\n\nno links",
+            &hash_of("home"),
+            None,
+        )
         .await
         .expect("edit");
     assert_eq!(outgoing_slugs(&runtime, "home"), Vec::<String>::new());

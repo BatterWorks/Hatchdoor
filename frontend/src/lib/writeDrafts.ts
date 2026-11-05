@@ -1,17 +1,26 @@
+/** Current note drafts, keyed by Vault and path (#627). */
+const NOTE_DRAFT_PREFIX = "hatchdoor:draft:note-path:";
+/** Earlier note drafts, keyed by slug: `<slug>` before #137, then
+ * `<vaultId>:<slug>`. Neither is read as a note's draft any more; both are
+ * swept into the held-draft store by `collectLegacyHeldDrafts`. */
+const SLUG_DRAFT_PREFIX = "hatchdoor:draft:note:";
+
 export type NoteDraft = {
   vaultId: string;
-  slug: string;
+  /** The Vault-relative path of the note the draft was typed into, as the
+   * note read reports it. */
+  relativePath: string;
   content: string;
   baseContentHash: string;
   savedAt: number;
 };
 
-/** Keyed by both `vaultId` and `slug`: a slug is only unique within its own
- * Vault, and without the Vault ID an unsaved draft for one Vault's note could
- * surface — confusingly, not silently, since staleness is still hash-checked
- * — while editing a same-slug note in a different Vault. */
-export function noteDraftKey(vaultId: string, slug: string): string {
-  return `hatchdoor:draft:note:${vaultId}:${slug}`;
+/** Keyed by Vault and Vault-relative path (#627). A slug is not a note's
+ * identity: it moves to another file when a same-named note appears earlier in
+ * path order (ADR-24), and a draft keyed by it was restored into, and
+ * autosaved into, whichever note held the slug next. A path names one file. */
+export function noteDraftKey(vaultId: string, relativePath: string): string {
+  return `${NOTE_DRAFT_PREFIX}${vaultId}:${relativePath}`;
 }
 
 export function createDraftKey(): string {
@@ -68,26 +77,31 @@ export function clearCreateDraft(): void {
   }
 }
 
-export function loadNoteDraft(vaultId: string, slug: string): NoteDraft | null {
+export function loadNoteDraft(
+  vaultId: string,
+  relativePath: string,
+): NoteDraft | null {
   try {
-    const raw = window.localStorage.getItem(noteDraftKey(vaultId, slug));
+    const raw = window.localStorage.getItem(
+      noteDraftKey(vaultId, relativePath),
+    );
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<NoteDraft>;
     if (
       typeof parsed.vaultId !== "string" ||
-      typeof parsed.slug !== "string" ||
+      typeof parsed.relativePath !== "string" ||
       typeof parsed.content !== "string" ||
       typeof parsed.baseContentHash !== "string" ||
       typeof parsed.savedAt !== "number"
     ) {
       return null;
     }
-    if (parsed.vaultId !== vaultId || parsed.slug !== slug) {
+    if (parsed.vaultId !== vaultId || parsed.relativePath !== relativePath) {
       return null;
     }
     return {
       vaultId: parsed.vaultId,
-      slug: parsed.slug,
+      relativePath: parsed.relativePath,
       content: parsed.content,
       baseContentHash: parsed.baseContentHash,
       savedAt: parsed.savedAt,
@@ -115,13 +129,13 @@ export function loadNoteDraft(vaultId: string, slug: string): NoteDraft | null {
  */
 export function saveNoteDraft(
   vaultId: string,
-  slug: string,
+  relativePath: string,
   draft: NoteDraft,
 ): boolean {
   try {
     window.localStorage.setItem(
-      noteDraftKey(vaultId, slug),
-      JSON.stringify({ ...draft, vaultId, slug }),
+      noteDraftKey(vaultId, relativePath),
+      JSON.stringify({ ...draft, vaultId, relativePath }),
     );
     return true;
   } catch {
@@ -130,15 +144,13 @@ export function saveNoteDraft(
   }
 }
 
-export function clearNoteDraft(vaultId: string, slug: string): void {
+export function clearNoteDraft(vaultId: string, relativePath: string): void {
   try {
-    window.localStorage.removeItem(noteDraftKey(vaultId, slug));
+    window.localStorage.removeItem(noteDraftKey(vaultId, relativePath));
   } catch {
     // Ignore storage failures.
   }
 }
-
-const NOTE_DRAFT_PREFIX = "hatchdoor:draft:note:";
 
 /**
  * Remove note drafts older than `maxAgeMs`. Drafts are only meant to bridge an
@@ -154,7 +166,12 @@ export function pruneNoteDrafts(
     const staleKeys: string[] = [];
     for (let i = 0; i < window.localStorage.length; i += 1) {
       const key = window.localStorage.key(i);
-      if (!key || !key.startsWith(NOTE_DRAFT_PREFIX)) {
+      if (
+        !key ||
+        !(
+          key.startsWith(NOTE_DRAFT_PREFIX) || key.startsWith(SLUG_DRAFT_PREFIX)
+        )
+      ) {
         continue;
       }
       const raw = window.localStorage.getItem(key);
@@ -179,10 +196,11 @@ export function pruneNoteDrafts(
 }
 
 /**
- * A draft recovered from before Vault qualification (#137). A pre-#137 note
- * draft was keyed by slug alone, and the standalone create draft has never
- * carried a Vault at all — neither can be trusted to mean the same note (or
- * placed in the same Vault) once notes are addressed by Vault + slug, so both
+ * A note draft that cannot be trusted to mean the note it would be restored
+ * into. A pre-#137 draft was keyed by slug alone, so it names no Vault; a
+ * draft from #137 to #627 was keyed by Vault and slug, and a slug moves to
+ * another file when a same-named note appears earlier in path order (ADR-24).
+ * The standalone create draft has never carried a Vault at all. All of them
  * move here for explicit recovery rather than being silently reused. Held
  * drafts never age out; `discardHeldDraft` is the only deletion path.
  */
@@ -190,6 +208,9 @@ export type HeldNoteDraft = {
   id: string;
   kind: "note";
   slug: string;
+  /** Set when the draft was held by path (#627): the Vault-relative path of
+   * the file it was typed into. Restore looks that path up, never `slug`. */
+  relativePath?: string;
   content: string;
   baseContentHash: string;
   savedAt: number;
@@ -247,6 +268,9 @@ export function listHeldDrafts(): HeldDraft[] {
             id: parsed.id,
             kind: "note",
             slug: parsed.slug,
+            ...(typeof parsed.relativePath === "string"
+              ? { relativePath: parsed.relativePath }
+              : {}),
             content: parsed.content,
             baseContentHash: parsed.baseContentHash,
             savedAt: parsed.savedAt,
@@ -278,6 +302,35 @@ export function listHeldDrafts(): HeldDraft[] {
   return drafts.sort((a, b) => b.savedAt - a.savedAt);
 }
 
+/**
+ * Move one note's path-keyed draft into the held-draft store (#627), for a
+ * note page about to open another file at the same address. The file the
+ * draft was typed into may be gone or moved, and no page will look for it
+ * under its old path, so it goes where Settings lists it for explicit
+ * recovery. The held entry carries the old path as `relativePath`: restore
+ * looks that exact path up and, finding no note there, offers to create one
+ * at it. Its `slug` holds the same path, only for display. The id carries
+ * the time, so holding the same path twice keeps both. Returns whether a
+ * draft was held.
+ */
+export function holdNoteDraft(vaultId: string, relativePath: string): boolean {
+  const draft = loadNoteDraft(vaultId, relativePath);
+  if (!draft) {
+    return false;
+  }
+  saveHeldDraft({
+    id: `note-path:${vaultId}:${relativePath}:${draft.savedAt}`,
+    kind: "note",
+    slug: relativePath,
+    relativePath,
+    content: draft.content,
+    baseContentHash: draft.baseContentHash,
+    savedAt: draft.savedAt,
+  });
+  clearNoteDraft(vaultId, relativePath);
+  return true;
+}
+
 export function discardHeldDraft(id: string): void {
   try {
     window.localStorage.removeItem(heldDraftKey(id));
@@ -287,12 +340,11 @@ export function discardHeldDraft(id: string): void {
 }
 
 /**
- * Sweep pre-#137 drafts into the held-draft store. A legacy note draft's key
- * has no `:` after the shared `hatchdoor:draft:note:` prefix (the current
- * format is `...note:<vaultId>:<slug>`, and a Vault ID never contains `:`),
- * which distinguishes it from an ordinary current-format draft without
- * inspecting its content. The standalone create draft has no Vault-qualified
- * form to compare against — any existing one is legacy by definition.
+ * Sweep slug-keyed note drafts into the held-draft store: every key under
+ * `hatchdoor:draft:note:`, whether pre-#137 (`<slug>`) or Vault-qualified
+ * (`<vaultId>:<slug>`). Current drafts live under `hatchdoor:draft:note-path:`
+ * and are never touched. The standalone create draft has no Vault-qualified
+ * form to compare against, so any existing one is legacy by definition.
  *
  * Idempotent and safe to call unconditionally: every source key this moves is
  * deleted as part of the move, so a second call finds nothing left to do.
@@ -311,12 +363,8 @@ export function collectLegacyHeldDrafts(): HeldDraft[] {
     const legacyRaw: string[] = [];
     for (let i = 0; i < window.localStorage.length; i += 1) {
       const key = window.localStorage.key(i);
-      if (!key || !key.startsWith(NOTE_DRAFT_PREFIX)) {
+      if (!key || !key.startsWith(SLUG_DRAFT_PREFIX)) {
         continue;
-      }
-      const remainder = key.slice(NOTE_DRAFT_PREFIX.length);
-      if (remainder.includes(":")) {
-        continue; // current `<vaultId>:<slug>` shape — not legacy.
       }
       staleKeys.push(key);
       const raw = window.localStorage.getItem(key);
@@ -327,6 +375,7 @@ export function collectLegacyHeldDrafts(): HeldDraft[] {
     for (const raw of legacyRaw) {
       try {
         const parsed = JSON.parse(raw) as {
+          vaultId?: unknown;
           slug?: unknown;
           content?: unknown;
           baseContentHash?: unknown;
@@ -338,8 +387,11 @@ export function collectLegacyHeldDrafts(): HeldDraft[] {
           typeof parsed.baseContentHash === "string" &&
           typeof parsed.savedAt === "number"
         ) {
+          // Two Vaults can each have held a draft under the same slug.
+          const vaultPart =
+            typeof parsed.vaultId === "string" ? `${parsed.vaultId}:` : "";
           saveHeldDraft({
-            id: `note:${parsed.slug}`,
+            id: `note:${vaultPart}${parsed.slug}`,
             kind: "note",
             slug: parsed.slug,
             content: parsed.content,

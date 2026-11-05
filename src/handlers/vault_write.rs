@@ -69,6 +69,11 @@ pub struct VaultCreateNoteRequest {
 pub struct VaultUpdateNoteRequest {
     pub content: String,
     pub expected_content_hash: String,
+    /// The Vault-relative path the caller opened under this slug (#627).
+    /// When the slug now names another file the write is refused with
+    /// `409 note_moved`. Optional so existing clients keep working.
+    #[serde(default)]
+    pub expected_relative_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,7 +175,9 @@ pub(crate) fn mutation_error_response(error: VaultOperationError) -> Response {
         "write_recovery_required" => StatusCode::INTERNAL_SERVER_ERROR,
         // A note holding a link the operation cannot rewrite is Vault state
         // the caller has to change before retrying, like a write conflict.
-        "write_conflict" | "capability_unavailable" | "link_rewrite_unsupported" => {
+        // A slug that now names another note (#627) is the same kind of
+        // state mismatch: the caller has to reopen the note, not resend.
+        "write_conflict" | "capability_unavailable" | "link_rewrite_unsupported" | "note_moved" => {
             StatusCode::CONFLICT
         }
         "invalid_write_input" | "noise_excluded_write" | "layer_marker_write" => {
@@ -315,6 +322,7 @@ pub async fn vault_scoped_update_note_handler(
             &slug,
             &payload.content,
             &payload.expected_content_hash,
+            payload.expected_relative_path.as_deref(),
         )
         .await
     {
@@ -738,6 +746,7 @@ mod tests {
 
         assert_eq!(map("write_conflict").status(), StatusCode::CONFLICT);
         assert_eq!(map("capability_unavailable").status(), StatusCode::CONFLICT);
+        assert_eq!(map("note_moved").status(), StatusCode::CONFLICT);
         assert_eq!(map("invalid_write_input").status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             map("noise_excluded_write").status(),

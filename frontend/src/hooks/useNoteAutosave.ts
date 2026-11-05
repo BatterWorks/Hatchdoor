@@ -5,7 +5,11 @@ const IDLE_FLUSH_MS = 2000;
 
 export type AutosaveStatus = "idle" | "saving" | "saved" | "conflict" | "error";
 
-export type SaveResult = { content_hash?: string | null };
+export type SaveResult = {
+  content_hash?: string | null;
+  /** The file the server wrote, as the note read spells it (#627). */
+  relative_path?: string | null;
+};
 
 /** One attempt to put the whole document, against the hash it is an edit of. */
 export type Sender = (
@@ -160,6 +164,15 @@ export function useNoteAutosave({
     [],
   );
 
+  /** Drop every edit not yet sent: the page is about to open another file
+   * at this address, and a pause or queue left over would write this one's
+   * text there (#627). The page keeps that text in its draft. */
+  const discard = useCallback(() => {
+    clearTimer();
+    pendingRef.current = null;
+    queuedRef.current = null;
+  }, []);
+
   const resume = useCallback((hash: string) => {
     stoppedRef.current = false;
     hashRef.current = hash;
@@ -229,5 +242,5 @@ export function useNoteAutosave({
     };
   }, [write, flushSave, enabled]);
 
-  return { status, savedAt, commit, touch, isOwnWrite, resume };
+  return { status, savedAt, commit, touch, isOwnWrite, resume, discard };
 }

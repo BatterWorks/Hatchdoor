@@ -237,18 +237,20 @@ impl<'a> VaultMutationCore<'a> {
     }
 
     /// Replace one note's whole content, under optimistic concurrency by
-    /// expected content hash.
+    /// expected content hash and, when given, the Vault-relative path the
+    /// caller believes the slug names (#627).
     pub async fn update_note(
         &self,
         vault_id: VaultId,
         slug: &str,
         content: &str,
         expected_content_hash: &str,
+        expected_relative_path: Option<&str>,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let target = self.open(vault_id)?;
         let _guard = target.acquire_mutation().await?;
         target
-            .update_note(slug, content, expected_content_hash)
+            .update_note(slug, content, expected_content_hash, expected_relative_path)
             .await
     }
 
@@ -893,14 +895,27 @@ impl VaultMutation {
     }
 
     /// Replace one note's whole content.
+    ///
+    /// A slug moves when a same-named note appears earlier in path order
+    /// (ADR-24), and two files with the same content share a hash, so the
+    /// hash alone cannot tell the note the caller opened from the one that
+    /// now holds its slug. `expected_relative_path` can: when the slug names
+    /// a different file, the write is refused with `note_moved` before the
+    /// hash is compared (#627).
     pub async fn update_note(
         &self,
         slug: &str,
         content: &str,
         expected_content_hash: &str,
+        expected_relative_path: Option<&str>,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let index = self.authoritative_index().await?;
         let entry = self.note_entry(&index, slug)?;
+        if let Some(expected) = expected_relative_path
+            && expected != entry.relative_path
+        {
+            return Err(self.note_moved(slug, expected));
+        }
         self.replace_entry(
             &index,
             entry,
@@ -1488,6 +1503,19 @@ impl VaultMutation {
             .ok_or_else(|| self.note_not_found(relative_path))
     }
 
+    /// The slug now names a different file than the one the caller opened.
+    /// Not retryable: the same request would land in the same other note.
+    fn note_moved(&self, slug: &str, expected_relative_path: &str) -> VaultOperationError {
+        VaultOperationError::new(
+            "note_moved",
+            format!(
+                "Note {slug} no longer names {expected_relative_path}: another note took over its slug. Nothing was written."
+            ),
+            Some(self.vault_id),
+            false,
+        )
+    }
+
     fn note_not_found(&self, slug: &str) -> VaultOperationError {
         VaultOperationError::new(
             "note_not_found",
@@ -1916,7 +1944,7 @@ mod tests {
 
         workspace
             .summarized("tighten the intro")
-            .update_note("home", "# Home\n\nrewritten\n", &hash("# Home\n"))
+            .update_note("home", "# Home\n\nrewritten\n", &hash("# Home\n"), None)
             .await
             .expect("update");
 
@@ -1992,7 +2020,7 @@ mod tests {
 
         workspace
             .summarized("never happened")
-            .update_note("home", "# Home\n\nrewritten\n", &hash("stale"))
+            .update_note("home", "# Home\n\nrewritten\n", &hash("stale"), None)
             .await
             .expect_err("stale hash is refused");
 
@@ -2009,6 +2037,7 @@ mod tests {
                 "home",
                 "# Home\n\nrewritten\n",
                 &hash("# Home\n"),
+                None,
             )
             .await
             .expect("update");
@@ -2029,6 +2058,7 @@ mod tests {
                 "home",
                 "clobbered",
                 "not-the-current-hash",
+                None,
             )
             .await
             .expect_err("stale hash must be refused");
@@ -2036,6 +2066,55 @@ mod tests {
         assert_code(&error, "write_conflict");
         assert!(error.retryable);
         assert_eq!(workspace.read("Home.md"), "# Home\n");
+    }
+
+    /// #627: a same-named note earlier in path order takes the slug over
+    /// (ADR-24). Same content means the same hash, so only the path can tell
+    /// the opened note from the one now answering to its slug.
+    #[tokio::test]
+    async fn update_note_refuses_when_the_slug_now_names_another_file() {
+        let workspace = workspace(Fixture::new(&[
+            ("z/Plan.md", "body\n"),
+            ("a/Plan.md", "body\n"),
+        ]));
+        let error = workspace
+            .core()
+            .update_note(
+                workspace.vault_id,
+                "plan",
+                "typed in z\n",
+                &hash("body\n"),
+                Some("z/Plan"),
+            )
+            .await
+            .expect_err("a slug naming another file must be refused");
+
+        assert_code(&error, "note_moved");
+        assert!(!error.retryable);
+        assert_eq!(workspace.read("a/Plan.md"), "body\n");
+        assert_eq!(workspace.read("z/Plan.md"), "body\n");
+    }
+
+    #[tokio::test]
+    async fn update_note_writes_when_the_expected_path_still_matches() {
+        let workspace = workspace(Fixture::new(&[
+            ("z/Plan.md", "body\n"),
+            ("a/Plan.md", "body\n"),
+        ]));
+        workspace
+            .core()
+            .update_note(
+                workspace.vault_id,
+                "plan-2",
+                "typed in z\n",
+                &hash("body\n"),
+                Some("z/Plan"),
+            )
+            .await
+            .expect("the note at the expected path takes the write");
+
+        assert_eq!(workspace.read("z/Plan.md"), "typed in z\n");
+        assert_eq!(workspace.read("a/Plan.md"), "body\n");
     }
 
     #[tokio::test]
@@ -2102,7 +2181,7 @@ mod tests {
         let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]).disabled());
         let update = workspace
             .core()
-            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"))
+            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"), None)
             .await
             .expect_err("disabled Vault");
         assert_code(&update, "vault_disabled");
@@ -2121,7 +2200,7 @@ mod tests {
         let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]).pull_only());
         let update = workspace
             .core()
-            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"))
+            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"), None)
             .await
             .expect_err("pull-only Vault");
         assert_code(&update, "capability_unavailable");
@@ -2700,7 +2779,7 @@ mod tests {
         let irrelevant = hash("# Home\n");
 
         let mut refusals = vec![
-            core.update_note(vault_id, "nowhere", "x", &irrelevant)
+            core.update_note(vault_id, "nowhere", "x", &irrelevant, None)
                 .await
                 .expect_err("update"),
             core.append_to_note(vault_id, "nowhere", "x", &irrelevant)
@@ -2741,7 +2820,7 @@ mod tests {
         // An empty slug names no note either, and must not depend on how the
         // lookup happens to treat a degenerate key.
         refusals.push(
-            core.update_note(vault_id, "   ", "x", &irrelevant)
+            core.update_note(vault_id, "   ", "x", &irrelevant, None)
                 .await
                 .expect_err("empty slug"),
         );
@@ -2958,6 +3037,7 @@ mod tests {
                 "home",
                 "x",
                 &hash("# Home\n"),
+                None,
             )
             .await
             .expect_err("unknown Vault");

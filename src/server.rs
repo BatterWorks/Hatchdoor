@@ -6262,6 +6262,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_scoped_update_note_refuses_a_slug_that_moved_to_another_file() {
+        // #627: the wire proof for `expected_relative_path`. `a/Plan` sorts
+        // first, so it holds `plan`; a write meant for `z/Plan` sent to that
+        // slug is refused rather than landing in `a/Plan`.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let notes = tmp.path().join("notes");
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &notes,
+            &[("z/Plan.md", "body\n"), ("a/Plan.md", "body\n")],
+            0,
+        )
+        .await;
+
+        let note_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/plan"))
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let note = json_body(note_response).await["note"].clone();
+        assert_eq!(note["relative_path"], "a/Plan");
+        let hash = note["content_hash"].as_str().expect("hash").to_string();
+
+        let moved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/plan"))
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"typed\n","expected_content_hash":"{hash}","expected_relative_path":"z/Plan"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(moved.status(), StatusCode::CONFLICT);
+        let body = json_body(moved).await;
+        assert_eq!(body["code"], "note_moved");
+        assert_eq!(body["retryable"], false);
+        assert_eq!(
+            std::fs::read_to_string(notes.join("a/Plan.md")).expect("read"),
+            "body\n"
+        );
+
+        let matching = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/plan"))
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"typed\n","expected_content_hash":"{hash}","expected_relative_path":"a/Plan"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(matching.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn vault_scoped_update_note_rejects_payload_missing_expected_hash() {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_id = create_vault_with_files(

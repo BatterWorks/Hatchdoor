@@ -322,7 +322,7 @@ pub(super) async fn update_note_tool(
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
         .mutation(args.commit_summary)
-        .update_note(&slug, &args.content, &args.expected_content_hash)
+        .update_note(&slug, &args.content, &args.expected_content_hash, None)
         .await
         .map_err(mutation_error)?;
     Ok(note_write_result(vault.vault_id, outcome))

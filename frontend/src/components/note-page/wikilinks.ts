@@ -462,6 +462,45 @@ export function cachedAssetHref(
 }
 
 /**
+ * The slug of the note at exactly `relativePath` (as a note read spells it,
+ * without `.md`), `null` when no note is there, or `undefined` when the server
+ * could not be asked (#627). Asked as a root-anchored Markdown note link,
+ * which resolves by path alone, never by a same-named note's title. Uncached:
+ * it is asked right after a slug changed hands.
+ */
+export async function findNoteAtPath(
+  vaultId: VaultId,
+  relativePath: string,
+): Promise<string | null | undefined> {
+  const target = `/${relativePath.split("/").map(encodeURIComponent).join("/")}.md`;
+  try {
+    const res = await apiFetch(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targets: [],
+          asset_targets: [],
+          note_link_targets: [target],
+          note_path: relativePath,
+        }),
+      },
+    );
+    if (!res.ok) {
+      return undefined;
+    }
+    const json = (await res.json()) as VaultResolveBatchResponse;
+    const hit = json.note_link_results?.find(
+      (result) => result.target === target,
+    );
+    return hit ? hit.slug : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Which file each of `targets` names from the note at `noteRelativePath`, by
  * the server's attachment resolution. Uncached: it is asked once per insert,
  * about a file that may have only just been uploaded.
