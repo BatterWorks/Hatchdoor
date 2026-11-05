@@ -1687,8 +1687,8 @@ fn copy_chunks_and_vectors(
         let chunk_id: i64 = tx
             .query_row(
                 "INSERT INTO vault_chunks(vault_id, note_slug, ordinal, heading_path, content, \
-                 byte_start, byte_end, content_hash, tags, aliases) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING id",
+                 byte_start, byte_end, content_hash, tags, aliases, keyword_text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING id",
                 params![
                     vault_id,
                     note_slug,
@@ -1700,6 +1700,7 @@ fn copy_chunks_and_vectors(
                     content_hash,
                     tags,
                     aliases,
+                    super::keyword::keyword_index_text(&content),
                 ],
                 |row| row.get(0),
             )

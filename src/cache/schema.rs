@@ -9,7 +9,7 @@ use crate::embed::{Embedder, PENDING_IDENTITY};
 // cache on any other version is wiped and rebuilt from Markdown on startup,
 // except one on `PREVIOUS_SCHEMA_VERSION` while a migration from it exists
 // (ADR-50).
-pub(super) const SCHEMA_VERSION: &str = "12";
+pub(super) const SCHEMA_VERSION: &str = "13";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -133,7 +133,7 @@ impl SqliteCache {
         if !matches!(existing_schema_version(&conn)?, SchemaState::Previous) {
             return Ok(());
         }
-        match migrate_from_previous_schema(&mut conn, embedding_dim) {
+        match migrate_from_previous_schema(&mut conn) {
             Ok(()) => {
                 info!(
                     old = PREVIOUS_SCHEMA_VERSION,
@@ -228,6 +228,7 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         DROP TRIGGER IF EXISTS vault_chunk_fts_ad;
         DROP TRIGGER IF EXISTS vault_chunk_fts_ai;
         DROP TABLE IF EXISTS vault_chunk_fts;
+        DROP VIEW IF EXISTS vault_chunk_keyword_source;
         DROP TABLE IF EXISTS vault_chunks;
         DROP TABLE IF EXISTS vault_headings;
         DROP TABLE IF EXISTS vault_tags;
@@ -254,6 +255,47 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("failed to wipe stale SQLite cache: {e}"))
+}
+
+/// The keyword index over `vault_chunks` and the triggers that keep it in
+/// step (#634). It reads `keyword_text` where a chunk has one, through the
+/// `vault_chunk_keyword_source` view, so text with no CJK, kana, Hangul or
+/// Thai is not stored twice. The tokenizer keeps Thai vowel and tone marks
+/// inside a token; only Thai text contains them.
+pub(super) fn vault_chunk_keyword_index_sql() -> String {
+    format!(
+        r#"
+        CREATE VIEW IF NOT EXISTS vault_chunk_keyword_source AS
+            SELECT id, vault_id, COALESCE(keyword_text, content) AS keyword_text
+            FROM vault_chunks;
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_fts USING fts5(
+            vault_id UNINDEXED,
+            keyword_text,
+            content='vault_chunk_keyword_source',
+            content_rowid='id',
+            tokenize='unicode61 remove_diacritics 2 tokenchars ''{thai_marks}'''
+        );
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ai AFTER INSERT ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(rowid, vault_id, keyword_text)
+                VALUES (new.id, new.vault_id, COALESCE(new.keyword_text, new.content));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ad AFTER DELETE ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, keyword_text)
+                VALUES ('delete', old.id, old.vault_id, COALESCE(old.keyword_text, old.content));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_au AFTER UPDATE ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, keyword_text)
+                VALUES ('delete', old.id, old.vault_id, COALESCE(old.keyword_text, old.content));
+            INSERT INTO vault_chunk_fts(rowid, vault_id, keyword_text)
+                VALUES (new.id, new.vault_id, COALESCE(new.keyword_text, new.content));
+        END;
+        "#,
+        thai_marks = super::keyword::THAI_MARKS,
+    )
 }
 
 /// The per-Vault vector tables. `vault_key` is an INTEGER metadata column, so
@@ -484,6 +526,9 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             content_hash TEXT NOT NULL,
             tags TEXT,
             aliases TEXT,
+            -- What the keyword index reads in place of `content`, or NULL
+            -- when that is `content` itself (`keyword::keyword_index_text`).
+            keyword_text TEXT,
             FOREIGN KEY (vault_id, note_slug)
                 REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
         );
@@ -493,30 +538,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         CREATE INDEX IF NOT EXISTS idx_vault_chunks_content_hash
             ON vault_chunks(vault_id, content_hash);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_fts USING fts5(
-            vault_id UNINDEXED,
-            content,
-            content='vault_chunks',
-            content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ai AFTER INSERT ON vault_chunks BEGIN
-            INSERT INTO vault_chunk_fts(rowid, vault_id, content)
-                VALUES (new.id, new.vault_id, new.content);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ad AFTER DELETE ON vault_chunks BEGIN
-            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, content)
-                VALUES ('delete', old.id, old.vault_id, old.content);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_au AFTER UPDATE ON vault_chunks BEGIN
-            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, content)
-                VALUES ('delete', old.id, old.vault_id, old.content);
-            INSERT INTO vault_chunk_fts(rowid, vault_id, content)
-                VALUES (new.id, new.vault_id, new.content);
-        END;
+        {keyword_index}
 
         -- The integer each Vault's vectors are filed under. Kept apart from
         -- `vault_snapshots`, whose row every publication deletes and
@@ -555,6 +577,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         "#,
         dim = embedding_dim,
         vector_tables = vault_vector_tables_sql(embedding_dim),
+        keyword_index = vault_chunk_keyword_index_sql(),
         version = SCHEMA_VERSION
     );
     conn.execute_batch(&sql)

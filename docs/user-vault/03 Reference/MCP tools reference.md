@@ -216,7 +216,7 @@ Collection-scoped results (`search_notes`, `get_tree`, `get_stats`, `get_graph`,
 
 Notes inside a tree carry `title` and `slug` but no `vault_id`: the tree they sit in already names its Vault, once. Results that mix Vaults in one flat list still put `vault_id` on every hit: `search_notes`, `recently_modified`, `query_notes` and `find_text`.
 
-Keyword `search_notes` uses the first 8,192 bytes of `query`, cut between characters, and at most 64 distinct terms, ignoring case for duplicates. Its SQLite work has one 750 ms deadline. A query that exceeds it returns `search_unavailable` with a time-limit message; try fewer terms. Semantic search is unchanged.
+Keyword `search_notes` uses the first 8,192 bytes of `query`, cut between characters, and at most 64 distinct terms, ignoring case for duplicates. Its SQLite work has one 750 ms deadline. A query that exceeds it returns `search_unavailable` with a time-limit message; try fewer terms. Semantic search is unchanged. A word in Chinese, Japanese, Korean or Thai is searched as its overlapping character pairs, using at most its first 24 characters; see [[How indexing and search work]].
 
 `get_frontmatter` refuses a block whose inner text exceeds 16,384 bytes, or whose closing delimiter is missing, with `invalid_frontmatter`. `get_note` still returns the file so it can be repaired. A leading UTF-8 byte order mark is accepted before the frontmatter delimiter, and property edits keep it at the start of the file.
 

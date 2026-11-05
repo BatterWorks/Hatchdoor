@@ -40,6 +40,8 @@ Hatchdoor has two search modes, **Semantic** (the default) and **Keyword**, and 
 - **Semantic** embeds your query with the model that embedded your notes, then finds the closest vectors. It matches by meaning, so a query can find a note that never uses the query's words.
 - **Keyword** runs against SQLite's FTS5 full-text index, which ranks notes by the query words they contain. It matches any query word, not necessarily the whole string. Use `find_text` over MCP when you need every occurrence of one exact string.
 
+Chinese, Japanese, Korean and Thai are written without spaces between words, so the keyword index cannot tell where one word ends. It stores every pair of neighbouring characters in those scripts instead, and searches for a word as its pairs in order. `本文` therefore finds `漢字が混ざった本文です`, and a single character such as `本` finds every note it appears in. The index does not know the language's words, so a query can also match where its characters meet across two words. A query word in these scripts uses its first 24 characters, which is enough to pin a phrase down. Text is compared in its composed Unicode form, so a Korean note saved with decomposed characters is found by a query typed normally.
+
 Keyword search uses the first 8,192 bytes of the query, cut between characters, and at most 64 distinct terms, ignoring case for duplicates. Repeating a word does not give it more weight. Its SQLite work has a 750 ms deadline shared across candidate windows, so an expensive or abandoned query cannot keep a reader slot indefinitely. A timed-out search reports `search_unavailable` with a message asking for fewer terms. These limits apply to the browser, HTTP and MCP alike; Semantic search is unchanged.
 
 > [!warning]

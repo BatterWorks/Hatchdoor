@@ -3,6 +3,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use unicode_normalization::UnicodeNormalization;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSnapshot {
     pub mtime_ns: i64,
@@ -396,7 +398,11 @@ pub(crate) fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
 pub fn build_fts_query(input: &str) -> Option<String> {
     let tokens = fts_query_terms(input)
         .into_iter()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .map(|token| {
+            let (phrase, prefix) = super::keyword::keyword_query_phrase(&token);
+            let star = if prefix { "*" } else { "" };
+            format!("\"{}\"{star}", phrase.replace('"', "\"\""))
+        })
         .collect::<Vec<_>>();
 
     if tokens.is_empty() {
@@ -407,7 +413,10 @@ pub fn build_fts_query(input: &str) -> Option<String> {
 }
 
 /// Keyword work is bounded before SQLite sees it. Keep first-occurrence order
-/// so the compact snippet uses exactly the terms the query searches.
+/// so the compact snippet uses exactly the terms the query searches. The
+/// query is NFC-normalised before it is split, a Thai mark stays inside its
+/// term, and a CJK, kana, Hangul or Thai term keeps at most 24 characters,
+/// because the keyword index reads text the same way (#634).
 pub fn fts_query_terms(input: &str) -> Vec<String> {
     const MAX_QUERY_BYTES: usize = 8 * 1024;
     const MAX_QUERY_TERMS: usize = 64;
@@ -417,17 +426,37 @@ pub fn fts_query_terms(input: &str) -> Vec<String> {
     }
     let mut seen = HashSet::new();
     input[..end]
-        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-'))
+        .nfc()
+        .collect::<String>()
+        .split(|ch: char| {
+            !(ch.is_alphanumeric() || ch == '_' || ch == '-' || super::keyword::is_bigram_char(ch))
+        })
         .filter(|token| !token.is_empty())
+        .map(|token| super::keyword::bounded_query_term(token).to_owned())
         .filter(|token| seen.insert(token.to_lowercase()))
         .take(MAX_QUERY_TERMS)
-        .map(ToOwned::to_owned)
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cjk_and_thai_terms_become_pair_phrases() {
+        assert_eq!(
+            build_fts_query("日本語 本 notes").as_deref(),
+            Some("\"日本 本語\" OR \"本\"* OR \"notes\"")
+        );
+        assert_eq!(fts_query_terms("ที่นี่ ok"), ["ที่นี่", "ok"]);
+        let decomposed = "한국어".nfd().collect::<String>();
+        assert_eq!(fts_query_terms(&decomposed), ["한국어"]);
+        // Composed before splitting, so a decomposed accent stays in its word.
+        assert_eq!(
+            fts_query_terms("tie\u{302}\u{301}ng Việt"),
+            ["tiếng", "Việt"]
+        );
+    }
 
     #[test]
     fn repeated_keyword_terms_are_searched_once() {

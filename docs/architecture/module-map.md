@@ -2470,6 +2470,7 @@ backend checks.
 
 - `src/cache/mod.rs`
 - `src/cache/chunk_ops.rs`
+- `src/cache/keyword.rs`
 - `src/cache/migrate.rs`
 - `src/cache/parse.rs`
 - `src/cache/populate.rs`
@@ -2550,8 +2551,22 @@ recovery stays unavailable and is retried by the executor's waiter.
 The shared frontmatter parser accepts a leading UTF-8 BOM while retaining byte
 offsets into the original file. It refuses inner YAML over 16,384 bytes before
 parsing and reports an unclosed block as invalid. `fts_query_terms` uses at most
-8,192 bytes and 64 case-insensitively distinct terms, in first-occurrence order;
-query construction and compact snippets share those same bounded terms.
+8,192 bytes and 64 case-insensitively distinct terms, in first-occurrence order,
+NFC-normalised before splitting, and keeps at most 24 characters of a term
+holding CJK, kana, Hangul or Thai; query construction and compact snippets
+share those same bounded terms.
+
+The crate-private `keyword` module decides how the keyword index reads CJK
+ideographs, kana, Hangul and Thai (#634). `keyword_index_text` rewrites each
+run of them as overlapping two-character tokens followed by the run's last
+character, and NFC-normalises all text; it returns `None` when the result is
+the chunk text itself, which is then not stored twice. `keyword_query_phrase`
+gives a query term the same rewrite as an FTS5 phrase, leaving out the lone
+last character of a run that ends the term and turning a one-character final
+run into a prefix. `is_bigram_char` and `run_units` are consumed by
+`search/compact.rs` so a snippet finds the word the index matched. The
+offline evaluation's legacy `note_fts` is not rewritten, so a CJK query there
+finds only text whose pairs happen to be separate tokens.
 
 **Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec. Its tests capture log lines with runtime composition's
@@ -2569,7 +2584,7 @@ and embedder identity/dimensions.
 
 **Invariants:**
 
-- A chunk row's `content` holds `Chunk::stored_content`, the text with fence marker lines, and the keyword index is built from that column; vectors and `content_hash` come from `Chunk::content`, the text without them (#532). The `chunk_stored_text` metadata key names the shape of the stored text. A build that finds a different value, or none, sends every note through the write path once, which re-chunks it and reuses its vectors by hash, so a change to the stored shape costs no embedding and no schema bump.
+- A chunk row's `content` holds `Chunk::stored_content`, the text with fence marker lines, and the keyword index is built from that column, read through `keyword_text` where the chunk has one (the `vault_chunk_keyword_source` view, with the tokenizer `unicode61 remove_diacritics 2` plus Thai vowel and tone marks as token characters); vectors and `content_hash` come from `Chunk::content`, the text without them (#532). The `chunk_stored_text` metadata key names the shape of the stored text. A build that finds a different value, or none, sends every note through the write path once, which re-chunks it and reuses its vectors by hash, so a change to the stored shape costs no embedding and no schema bump.
 - SQLite is rebuildable and never authoritative (ADR-01).
 - Keep embedded SQLite, FTS5, sqlite-vec, WAL, one writer, and pooled
   query-only reads (ADR-06).
@@ -2591,9 +2606,14 @@ and embedder identity/dimensions.
   `prepare_for_embedder` when a model loads and before it installs it, so no
   search reaches a cache still waiting to migrate. If that call fails, the
   model is installed anyway and semantic search reports `search_unavailable`
-  until an Index turn's own model check succeeds. The migration commits only
-  once its row-count, identical-vector, Vault-mapping, self-retrieval and
-  integrity checks pass, and any failure wipes and rebuilds. Seeding a
+  until an Index turn's own model check succeeds. The current migration
+  (12 to 13, #634) writes no vector table: it fills `keyword_text` from the
+  stored chunk text and rebuilds only the keyword index. It commits only once
+  ADR-50's row-count, identical-vector (a BLAKE3 digest of every vector row
+  before and after), Vault-mapping and self-retrieval checks pass, the
+  keyword index holds one entry per chunk and passes FTS5's
+  `integrity-check`, and `PRAGMA integrity_check` passes; any failure wipes
+  and rebuilds. Seeding a
   candidate never copies a snapshot's recorded `schema_version` over the
   candidate's own. The next schema bump replaces the migration rather than
   adding a second one.
@@ -2705,7 +2725,7 @@ and assemble helpers, and its request/result/response types are retired.
 
 **Consumed dependencies:** `SqliteCache`, its published Vault snapshot/cache
 query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
-scope/envelope, vault metadata/types, `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet), and `chunk::is_fence_marker` (read by `compact.rs` to leave fenced blocks out of one).
+scope/envelope, vault metadata/types, `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet), `cache::keyword::{is_bigram_char, run_units}` (how the index splits CJK, kana, Hangul and Thai runs, read by `compact.rs` for the same purpose), and `chunk::is_fence_marker` (read by `compact.rs` to leave fenced blocks out of one).
 
 **Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
 `VaultSearchCore::search`, full hits only), MCP search tools (which also consume `compact::CompactSearchResponse`), offline evaluation runners,
@@ -2763,7 +2783,7 @@ and future Vault-scoped MCP adapters.
   costs an embedding on a query whose Vaults turn out not to participate, and
   reports an unhealthy embedder ahead of a bad layer name or an unavailable
   single Vault, both of which need the pinned generation to detect.
-- Outside a tag response, a compact snippet is a verbatim slice of the chunk's prose: fenced blocks are dropped first, marker lines included, found by `chunk::is_fence_marker`, the rule chunking itself uses (#532), and the blank lines a dropped block leaves are closed up to one. A chunk with no prose has an empty snippet. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes); in a semantic response, or when no word is found, it is the start of the chunk. A tag response has no matched chunk: its hit content is the line `Matched tag: #<tag>`, and the snippet is that line. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
+- Outside a tag response, a compact snippet is a verbatim slice of the chunk's prose: fenced blocks are dropped first, marker lines included, found by `chunk::is_fence_marker`, the rule chunking itself uses (#532), and the blank lines a dropped block leaves are closed up to one. A chunk with no prose has an empty snippet. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes, and a CJK, kana, Hangul or Thai run as the overlapping pairs `cache::keyword` indexes); in a semantic response, or when no word is found, it is the start of the chunk. A tag response has no matched chunk: its hit content is the line `Matched tag: #<tag>`, and the snippet is that line. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
 - A structure-only frontend Search pilot must not modify these paths.
 
 **Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
