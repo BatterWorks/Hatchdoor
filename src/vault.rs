@@ -34,3 +34,4 @@ pub use write::{
     list_note_attachments, move_attachment, move_or_rename_note, note_exists_conflict, note_target,
     rename_attachment, rename_tag, replace_section, update_note, update_note_frontmatter,
 };
+pub(crate) use write::{normalize_attachment_relative_path, normalize_note_relative_path};

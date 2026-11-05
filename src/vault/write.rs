@@ -21,6 +21,7 @@ pub use notes::{
     replace_section, update_note, update_note_frontmatter,
 };
 pub use paths::allowed_attachment_extensions;
+pub(crate) use paths::{normalize_attachment_relative_path, normalize_note_relative_path};
 pub use tags::{
     NestedTag, TagDelete, TagDeleteError, TagDeleteNote, TagRename, TagRenameError, TagRenameNote,
     UnsupportedTagNote, delete_tag, rename_tag,

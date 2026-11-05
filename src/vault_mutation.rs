@@ -31,8 +31,9 @@ use crate::vault::{
     TagRename, TagRenameError, VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
     check_attachment_import_target, check_note_content_hash, create_note, delete_attachment,
     delete_note, delete_tag, edit_note, import_attachment_bytes, move_attachment,
-    move_or_rename_note, note_exists_conflict, note_target, rename_attachment, rename_tag,
-    replace_section, update_note, update_note_frontmatter,
+    move_or_rename_note, normalize_attachment_relative_path, normalize_note_relative_path,
+    note_exists_conflict, note_target, rename_attachment, rename_tag, replace_section, update_note,
+    update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
 use crate::vault_read::VaultReadCore;
@@ -872,7 +873,7 @@ impl VaultMutation {
         overwrite: bool,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         self.reject_marker_write(relative_path)?;
-        self.reject_noise_write(relative_path)?;
+        self.reject_noise_note_write(relative_path)?;
         // A metadata-only catalog, not the full index: `create_note` has no
         // pre-write entry to read a slug from, so it needs this to compute
         // one, but never touches the (expensive, content-reading) wikilink
@@ -1093,7 +1094,7 @@ impl VaultMutation {
         let entry = self.note_entry(&index, slug)?;
         let archive_prefix = self.archive_prefix()?;
         let archive_folder = archive_prefix.trim().trim_matches('/');
-        self.reject_noise_write(&format!(
+        self.reject_noise_note_write(&format!(
             "{archive_folder}/{}",
             file_name_of(&entry.relative_path)
         ))?;
@@ -1146,7 +1147,7 @@ impl VaultMutation {
         target_relative_path: String,
         expected_content_hash: &str,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
-        self.reject_noise_write(&target_relative_path)?;
+        self.reject_noise_note_write(&target_relative_path)?;
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
@@ -1212,7 +1213,7 @@ impl VaultMutation {
     ) -> Result<(), VaultOperationError> {
         let target_relative_path = &note_upload_path(target_relative_path);
         self.reject_marker_write(target_relative_path)?;
-        self.reject_noise_write(target_relative_path)?;
+        self.reject_noise_note_write(target_relative_path)?;
         let Some(expected_content_hash) = expected_content_hash else {
             let target = self.note_target(target_relative_path).await?;
             if target.exists {
@@ -1257,7 +1258,7 @@ impl VaultMutation {
                 .await;
         };
         self.reject_marker_write(target_relative_path)?;
-        self.reject_noise_write(target_relative_path)?;
+        self.reject_noise_note_write(target_relative_path)?;
         let index = self.authoritative_index().await?;
         let entry = self.note_at_path(&index, target_relative_path).await?;
         self.replace_entry(
@@ -1299,7 +1300,9 @@ impl VaultMutation {
         self.reject_marker_write(source_relative_path)?;
         self.reject_marker_write(new_filename)?;
         self.reject_noise_write(source_relative_path)?;
-        self.reject_noise_write(&sibling_path(source_relative_path, new_filename))?;
+        let source_path = normalize_attachment_relative_path(source_relative_path)
+            .map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.reject_excluded_path(&sibling_path(&source_path, new_filename.trim()))?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
@@ -1493,20 +1496,29 @@ impl VaultMutation {
         )
     }
 
-    /// Refuse a write whose target path matches this Vault's own
-    /// noise-exclusion patterns: the index applies the same matcher, so the
-    /// file would land on disk yet be invisible to every read surface.
-    /// Applied to an attachment operation's source as well as its destination
-    /// since #247. What a Vault excludes as noise - `.obsidian/` and the rest
-    /// of the built-in set, plus this Vault's own patterns - is not content,
-    /// and until the upload allowlist stopped gating files already in the
-    /// Vault it was that list, by accident, keeping the attachment tools out
-    /// of an Obsidian configuration folder. This is the policy that was
-    /// actually meant, and the Vault already states it.
+    /// Check the note filename the write layer will use, including `.md`,
+    /// rather than the caller's possibly extension-free spelling.
+    fn reject_noise_note_write(&self, path: &str) -> Result<(), VaultOperationError> {
+        let normalized = normalize_note_relative_path(path)
+            .map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.reject_excluded_path(&normalized)
+    }
+
+    /// Refuse paths the index would hide, after the write layer's separator
+    /// normalisation. Attachment operations check both source and destination;
+    /// an excluded file such as `.obsidian/app.json` is not content to manage.
     fn reject_noise_write(&self, path: &str) -> Result<(), VaultOperationError> {
+        let normalized = normalize_attachment_relative_path(path)
+            .map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.reject_excluded_path(&normalized)
+    }
+
+    /// Match an already-normalised path without trimming it again: removing a
+    /// leading `./` can expose whitespace that belongs to a real folder name.
+    fn reject_excluded_path(&self, path: &str) -> Result<(), VaultOperationError> {
         let exclude = ExcludeMatcher::new(self.control.definition().exclude_patterns())
             .map_err(|error| self.internal(error))?;
-        if exclude.is_excluded(std::path::Path::new(path.trim()), false) {
+        if exclude.is_excluded(std::path::Path::new(path), false) {
             return Err(VaultOperationError::new(
                 "noise_excluded_write",
                 format!(
@@ -2179,12 +2191,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_note_refuses_a_target_this_vaults_own_patterns_exclude() {
-        let workspace = workspace(Fixture::new(&[]).excluding(&["*.tmp"]));
+        let workspace = workspace(Fixture::new(&[]).excluding(&["*.excalidraw.md"]));
         let error = workspace
             .core()
             .create_note(
                 workspace.vault_id,
-                "Notes/scratch.tmp",
+                "Notes/Drawing.excalidraw",
                 "# Ignored\n",
                 false,
             )
@@ -2192,7 +2204,164 @@ mod tests {
             .expect_err("noise target must be refused");
 
         assert_code(&error, "noise_excluded_write");
-        assert!(!workspace.exists("Notes/scratch.tmp"));
+        assert!(!workspace.exists("Notes/Drawing.excalidraw.md"));
+    }
+
+    #[tokio::test]
+    async fn create_note_cannot_overwrite_trash_through_backslashes() {
+        let workspace = workspace(Fixture::new(&[(
+            ".hatchdoor-trash/Precious.md",
+            "precious bytes\n",
+        )]));
+        for path in [
+            ".hatchdoor-trash/Precious.md",
+            r".hatchdoor-trash\Precious.md",
+        ] {
+            let error = workspace
+                .core()
+                .create_note(workspace.vault_id, path, "CLOBBERED", true)
+                .await
+                .expect_err("trash must be protected for either separator");
+            assert_code(&error, "noise_excluded_write");
+            assert_eq!(
+                workspace.read(".hatchdoor-trash/Precious.md"),
+                "precious bytes\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_note_matches_the_final_md_filename_not_the_callers_extension() {
+        let workspace = workspace(Fixture::new(&[]));
+        let created = workspace
+            .core()
+            .create_note(workspace.vault_id, r"Notes\x.tmp", "visible\n", false)
+            .await
+            .expect("a Markdown note is not a temporary file");
+        assert_eq!(created.relative_path.as_deref(), Some("Notes/x.tmp"));
+        assert_eq!(workspace.read("Notes/x.tmp.md"), "visible\n");
+    }
+
+    #[tokio::test]
+    async fn note_exclusion_checks_preserve_whitespace_in_path_components() {
+        let workspace = workspace(Fixture::new(&[]).excluding(&["[ ]private/"]));
+        let error = workspace
+            .core()
+            .create_note(workspace.vault_id, "./ private/Secret", "hidden\n", false)
+            .await
+            .expect_err("the actual space-prefixed destination is excluded");
+        assert_code(&error, "noise_excluded_write");
+        assert!(!workspace.exists(" private/Secret.md"));
+    }
+
+    #[tokio::test]
+    async fn note_exclusion_checks_allow_visible_whitespace_prefixed_folders() {
+        let workspace = workspace(Fixture::new(&[]));
+        workspace
+            .core()
+            .create_note(workspace.vault_id, "./ .obsidian/Note", "visible\n", false)
+            .await
+            .expect("a space-prefixed folder is not the Obsidian configuration folder");
+        assert_eq!(workspace.read(" .obsidian/Note.md"), "visible\n");
+        assert!(!workspace.exists(".obsidian"));
+    }
+
+    #[tokio::test]
+    async fn attachment_rename_checks_preserve_whitespace_in_the_source_directory() {
+        let workspace = workspace(
+            Fixture::new(&[(" Media/payload.png", "payload\n")])
+                .excluding(&["[ ]Media/blocked.png"]),
+        );
+        let error = workspace
+            .core()
+            .rename_attachment(workspace.vault_id, "./ Media/payload.png", "blocked.png")
+            .await
+            .expect_err("the actual sibling destination is excluded");
+        assert_code(&error, "noise_excluded_write");
+        assert_eq!(workspace.read(" Media/payload.png"), "payload\n");
+        assert!(!workspace.exists(" Media/blocked.png"));
+    }
+
+    #[tokio::test]
+    async fn note_moves_and_archive_check_normalized_destinations() {
+        for folder in ["private/", r"private\"] {
+            let workspace = workspace(
+                Fixture::new(&[("Home.md", "# Home\n")])
+                    .excluding(&["private/", "*.excalidraw.md"])
+                    .archiving_into(folder),
+            );
+            let core = workspace.core();
+            let id = workspace.vault_id;
+            let current = hash("# Home\n");
+            for error in [
+                core.move_note(id, "home", folder, &current)
+                    .await
+                    .unwrap_err(),
+                core.move_rename_note(id, "home", &format!("{folder}Home"), &current)
+                    .await
+                    .unwrap_err(),
+                core.move_rename_note(id, "home", "Drawing.excalidraw", &current)
+                    .await
+                    .unwrap_err(),
+                core.archive_note(id, "home", &current).await.unwrap_err(),
+            ] {
+                assert_code(&error, "noise_excluded_write");
+            }
+            assert_eq!(workspace.read("Home.md"), "# Home\n");
+            assert!(!workspace.exists("private"));
+            assert!(!workspace.exists("Drawing.excalidraw.md"));
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_destinations_and_upload_checks_cannot_bypass_exclusions() {
+        let workspace = workspace(
+            Fixture::new(&[("Media/payload.png", "payload\n")])
+                .excluding(&["Media/blocked.png", "*.excalidraw.md"]),
+        );
+        let core = workspace.core();
+        let id = workspace.vault_id;
+        for target in [
+            ".obsidian/plugins/x/main.js",
+            r".obsidian\plugins\x\main.js",
+        ] {
+            for error in [
+                core.move_attachment(id, "Media/payload.png", target)
+                    .await
+                    .unwrap_err(),
+                core.import_attachment(id, target, b"bytes".to_vec(), 1024, false)
+                    .await
+                    .unwrap_err(),
+                core.check_attachment_import(id, target, false)
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert_code(&error, "noise_excluded_write");
+            }
+            assert_eq!(workspace.read("Media/payload.png"), "payload\n");
+            assert!(!workspace.exists(".obsidian"));
+        }
+        for source in ["Media/payload.png", r"Media\payload.png"] {
+            let error = core
+                .rename_attachment(id, source, " blocked.png ")
+                .await
+                .unwrap_err();
+            assert_code(&error, "noise_excluded_write");
+            assert_eq!(workspace.read("Media/payload.png"), "payload\n");
+            assert!(!workspace.exists("Media/blocked.png"));
+        }
+        for path in [
+            "Notes/Drawing.excalidraw.md",
+            r"Notes\Drawing.excalidraw.MD",
+        ] {
+            let error = core.check_note_upload(id, path, None).await.unwrap_err();
+            assert_code(&error, "noise_excluded_write");
+            let error = core
+                .upload_note(id, path, b"drawing".to_vec(), 1024, None)
+                .await
+                .unwrap_err();
+            assert_code(&error, "noise_excluded_write");
+        }
     }
 
     #[tokio::test]
@@ -2257,20 +2426,22 @@ mod tests {
         let core = workspace.core();
         let vault_id = workspace.vault_id;
 
-        for error in [
-            core.move_attachment(vault_id, ".obsidian/app.json", "Media/app.json")
-                .await
-                .expect_err("move must refuse"),
-            core.rename_attachment(vault_id, ".obsidian/app.json", "stolen.json")
-                .await
-                .expect_err("rename must refuse"),
-            core.delete_attachment(vault_id, ".obsidian/app.json")
-                .await
-                .expect_err("delete must refuse"),
-        ] {
-            assert_code(&error, "noise_excluded_write");
+        for source in [".obsidian/app.json", r".obsidian\app.json"] {
+            for error in [
+                core.move_attachment(vault_id, source, "Media/app.json")
+                    .await
+                    .expect_err("move must refuse"),
+                core.rename_attachment(vault_id, source, "stolen.json")
+                    .await
+                    .expect_err("rename must refuse"),
+                core.delete_attachment(vault_id, source)
+                    .await
+                    .expect_err("delete must refuse"),
+            ] {
+                assert_code(&error, "noise_excluded_write");
+            }
+            assert_eq!(workspace.read(".obsidian/app.json"), "{}");
         }
-        assert!(workspace.exists(".obsidian/app.json"));
     }
 
     // -----------------------------------------------------------------

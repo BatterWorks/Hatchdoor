@@ -1635,7 +1635,10 @@ tag delete (`delete_tag` with `TagDelete`, `TagDeleteNote`, `TagDeleteError`,
 and `NestedTag`, #258), the path-addressed note checks a note upload makes
 before its bytes arrive (`note_target` with `NoteTarget`,
 `note_exists_conflict`, and `check_note_content_hash`, #303), allowed
-attachment extensions, `WriteOutcome`, `WriteError`, and `UnrewritableNote`,
+attachment extensions, the crate-visible `normalize_note_relative_path` and
+`normalize_attachment_relative_path` shared with the mutation core so exclusion
+checks use the same separators and note extension as writes (#624),
+`WriteOutcome`, `WriteError`, and `UnrewritableNote`,
 which `WriteError::LinkRewriteUnsupported` carries (#360).
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
@@ -2098,7 +2101,8 @@ primitive: resolving the Vault ID to a control block and refusing a missing,
 disabled, or runtime-less Vault; the mutation capability check; the per-Vault
 mutation lock; building the authoritative index off the async runtime;
 resolving the slug to an entry; refusing a write to a path this Vault's own
-exclusion patterns would make invisible; resolving the archive prefix from the
+exclusion patterns would make invisible, using the write layer's shared path
+normalisers before matching, including `.md` for note targets (#624); resolving the archive prefix from the
 Vault's own archive folder or the instance default; running the blocking write
 off the async runtime; recording what that write did in the Vault's
 `git::WriteLedger`, so the commit that eventually records it can say so
