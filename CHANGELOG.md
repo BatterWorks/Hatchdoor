@@ -7,6 +7,7 @@
 - Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
 
 ### Fixed
+- Wikilinks now reach the note their author meant. `[[b/Plan]]` opens `b/Plan` instead of the first `Plan` in the Vault, a link whose capitals match a note's exactly beats one that matches with case ignored, a link between two same-named notes picks the one nearest the linking note, and `[[Meeting 2]]` shows as a broken link when no such note exists instead of opening the second `Meeting`. Links typed on most keyboards now reach Korean or Japanese notes whose filenames a Mac stored in decomposed form. Renaming or deleting a note now changes only the links that clearly point at it: a link written for a same-named note elsewhere is left alone, a link the move would hand to a same-named note gets its folder path written in, other links keep their exact spacing, and a note that is not valid UTF-8 no longer blocks renames, moves and deletes of notes it does not link to. Korean and Japanese notes with decomposed filenames get a new address once, which breaks old bookmarks to them. [#626]
 - Section edits no longer mistake YAML comments for headings and erase the rest of a note, or refuse a body heading because a frontmatter comment has the same text. Section reads and writes also leave indented code inside its enclosing section instead of treating its `#` lines as headings. [#625]
 - Writes now check exclusion patterns against the filename they actually use, after converting backslashes to slashes and adding `.md` for notes. Alternate path spellings can no longer overwrite trashed notes, change Obsidian settings or move files into excluded folders. A note named `x.tmp` is allowed because its file is `x.tmp.md`, while `Drawing.excalidraw` is refused when `*.excalidraw.md` is excluded. [#624]
 - Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
@@ -16,6 +17,7 @@
 [#623]: https://github.com/BatterWorks/Hatchdoor/issues/623
 [#624]: https://github.com/BatterWorks/Hatchdoor/issues/624
 [#625]: https://github.com/BatterWorks/Hatchdoor/issues/625
+[#626]: https://github.com/BatterWorks/Hatchdoor/issues/626
 
 ## v2.9.0 - 2026-10-27
 

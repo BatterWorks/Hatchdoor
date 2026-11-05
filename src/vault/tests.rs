@@ -844,3 +844,180 @@ fn markdown_links_in_each_inserted_path_form_resolve_and_count_as_backlinks() {
     assert_eq!(backlinks.len(), 1);
     assert_eq!(backlinks[0].relative_path, "Archive/Short");
 }
+
+// #626: a wikilink names the note its author meant, or none at all.
+
+fn duplicate_name_vault() -> tempfile::TempDir {
+    let dir = tempdir().expect("temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("links/a")).expect("create a");
+    fs::create_dir_all(root.join("links/b")).expect("create b");
+    fs::write(root.join("links/a/Duplicate Name.md"), "a").expect("write a");
+    fs::write(root.join("links/b/Duplicate Name.md"), "b").expect("write b");
+    fs::write(
+        root.join("links/ambiguous links.md"),
+        "[[a/Duplicate Name]] [[b/Duplicate Name]] [[links/b/Duplicate Name]]",
+    )
+    .expect("write ambiguous links");
+    dir
+}
+
+#[test]
+fn resolve_wikilink_matches_a_partial_folder_path_as_a_suffix() {
+    let dir = duplicate_name_vault();
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    let b = vault
+        .resolve_wikilink("b/Duplicate Name")
+        .expect("b resolves");
+    assert_eq!(b.relative_path, "links/b/Duplicate Name");
+    let a = vault
+        .resolve_wikilink("a/Duplicate Name")
+        .expect("a resolves");
+    assert_eq!(a.relative_path, "links/a/Duplicate Name");
+    let full = vault
+        .resolve_wikilink("links/b/Duplicate Name")
+        .expect("full path resolves");
+    assert_eq!(full.relative_path, "links/b/Duplicate Name");
+}
+
+#[test]
+fn link_graph_gives_each_qualified_link_its_own_edge() {
+    let dir = duplicate_name_vault();
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let source = vault.resolve_wikilink("ambiguous links").expect("source");
+    let a = vault.resolve_wikilink("a/Duplicate Name").expect("a");
+    let b = vault.resolve_wikilink("b/Duplicate Name").expect("b");
+
+    assert_eq!(
+        vault.outgoing_by_slug[&source.slug],
+        vec![a.slug.clone(), b.slug.clone()]
+    );
+}
+
+#[test]
+fn resolve_wikilink_prefers_an_exact_case_title() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("UPPER lower MiXeD.md"), "first").expect("write");
+    fs::write(dir.path().join("upper LOWER mixed.md"), "second").expect("write");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let resolved = vault
+        .resolve_wikilink("upper LOWER mixed")
+        .expect("resolves");
+    assert_eq!(resolved.relative_path, "upper LOWER mixed");
+    let resolved = vault
+        .resolve_wikilink("UPPER lower MiXeD")
+        .expect("resolves");
+    assert_eq!(resolved.relative_path, "UPPER lower MiXeD");
+    // A case-folded match still resolves when no exact one exists.
+    assert!(vault.resolve_wikilink("upper lower mixed").is_some());
+}
+
+#[test]
+fn resolve_wikilink_ignores_a_generated_suffix_slug() {
+    let dir = duplicate_name_vault();
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    assert!(vault.find_by_slug("duplicate-name-2").is_some());
+    assert!(vault.resolve_wikilink("Duplicate Name 2").is_none());
+    assert!(vault.resolve_wikilink("duplicate-name-2").is_none());
+    // A note's own slug still reaches it.
+    assert!(vault.resolve_wikilink("duplicate-name").is_some());
+}
+
+#[test]
+fn resolve_wikilink_reaches_a_decomposed_filename_from_a_composed_link() {
+    use unicode_normalization::UnicodeNormalization;
+
+    let dir = tempdir().expect("temp dir");
+    let korean_nfd: String = "한국어".nfd().collect();
+    let kana_nfd: String = "がっこう".nfd().collect();
+    assert_ne!(korean_nfd, "한국어");
+    fs::write(dir.path().join(format!("{korean_nfd}.md")), "k").expect("write korean");
+    fs::write(dir.path().join(format!("{kana_nfd}.md")), "j").expect("write kana");
+    fs::write(dir.path().join("Linker.md"), "[[한국어]] [[がっこう]]").expect("write linker");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let korean = vault.resolve_wikilink("한국어").expect("korean resolves");
+    assert_eq!(korean.title, korean_nfd);
+    assert_eq!(korean.slug, "한국어");
+    assert!(vault.resolve_wikilink("がっこう").is_some());
+    assert_eq!(vault.outgoing_by_slug["linker"].len(), 2);
+}
+
+#[test]
+fn resolve_wikilink_from_a_folder_prefers_the_nearest_namesake() {
+    let dir = duplicate_name_vault();
+    fs::write(dir.path().join("links/b/Sibling.md"), "[[Duplicate Name]]").expect("write");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let sibling = vault.resolve_wikilink("Sibling").expect("sibling");
+    let b = vault.resolve_wikilink("b/Duplicate Name").expect("b");
+    assert_eq!(vault.outgoing_by_slug[&sibling.slug], vec![b.slug.clone()]);
+}
+
+#[test]
+fn resolve_wikilink_by_slug_keeps_the_folder_qualifier() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a")).expect("a");
+    fs::create_dir_all(dir.path().join("b")).expect("b");
+    fs::write(dir.path().join("a/11 - Used.md"), "a").expect("a");
+    fs::write(dir.path().join("b/11 - Used.md"), "b").expect("b");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let found = vault
+        .resolve_wikilink_match("b/11 — Used", "")
+        .expect("punctuation-drifted link resolves");
+    assert_eq!(found.entry.relative_path, "b/11 - Used");
+    assert!(found.unique);
+    let from_b = vault
+        .resolve_wikilink_match("11 — Used", "b")
+        .expect("resolves from b");
+    assert_eq!(from_b.entry.relative_path, "b/11 - Used");
+    // From the root the two are equally near: a tie, not a unique match.
+    let tie = vault.resolve_wikilink_match("11 — Used", "").expect("tie");
+    assert!(!tie.unique);
+}
+
+#[test]
+fn resolve_wikilink_by_slug_reaches_a_note_that_lost_its_slug_to_a_counter() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a")).expect("a");
+    fs::create_dir_all(dir.path().join("b")).expect("b");
+    fs::write(dir.path().join("a/Meeting.md"), "a").expect("a");
+    fs::write(dir.path().join("b/Meeting.md"), "b").expect("b");
+    fs::create_dir_all(dir.path().join("z")).expect("z");
+    fs::write(dir.path().join("z/Meeting 2.md"), "z").expect("z");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let owner = vault.resolve_wikilink("Meeting 2").expect("title");
+    assert_eq!(owner.relative_path, "z/Meeting 2");
+    assert_ne!(owner.slug, "meeting-2");
+    let by_slug = vault.resolve_wikilink("meeting-2").expect("slug");
+    assert_eq!(by_slug.relative_path, "z/Meeting 2");
+}
+
+#[test]
+fn resolve_wikilink_reads_a_leading_slash_as_the_vault_root() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a/b")).expect("a/b");
+    fs::create_dir_all(dir.path().join("b")).expect("b");
+    fs::write(dir.path().join("Plan.md"), "root").expect("root");
+    fs::write(dir.path().join("a/Plan.md"), "a").expect("a");
+    fs::write(dir.path().join("b/Plan.md"), "b").expect("b");
+    fs::write(dir.path().join("a/b/Plan.md"), "ab").expect("ab");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let root = vault.resolve_wikilink_from("/Plan", "a").expect("root");
+    assert_eq!(root.relative_path, "Plan");
+    let anchored = vault
+        .resolve_wikilink_from("/b/Plan", "a")
+        .expect("anchored");
+    assert_eq!(anchored.relative_path, "b/Plan");
+    // Unanchored, a full path still beats a nearer suffix match.
+    let full = vault.resolve_wikilink_from("b/Plan", "a").expect("full");
+    assert_eq!(full.relative_path, "b/Plan");
+    let suffix = vault.resolve_wikilink_from("a/b/Plan", "").expect("suffix");
+    assert_eq!(suffix.relative_path, "a/b/Plan");
+}

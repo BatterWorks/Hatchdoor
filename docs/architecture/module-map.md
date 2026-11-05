@@ -1598,6 +1598,7 @@ watching, and application startup.
   with the write layer's rewriters, and no escape reaches
   `normalize_link_target`, which would read it as a path separator (#252).
 - A Section's span has one implementation, `NoteSections::span`. Neither `replace_section` nor a section read computes it another way (#502).
+- Wikilink resolution has one rule, `VaultIndex::resolve_wikilink_match`, which the link graph, the read core's resolve and resolve-batch reads and the write layer's rewriters all call (#626). The cache's older `SqliteCache::resolve_wikilink` is called only by its own tests and is due to go (#653). A target holding `/` matches a note's Vault-relative path in full or as a whole-segment suffix before any title fallback, and a leading `/` allows the full path alone; then the last segment matches a title with case folded; then its slug matches the slug a note's name folds to (`by_name_slug`), never a generated collision suffix such as `meeting-2`, so a link to a note that does not exist stays broken (ADR-28), and a folder the target names still ranks first there. Within a tier a full path beats a suffix, exact case beats folded case, the default surface beats a layer, and the note nearest the linking note's folder (the Vault root when there is none) wins; a remaining tie goes to path order and is reported as not unique. Titles, path keys, slugs and targets are compared NFC-normalised (`normalize_title`, `nfc_title`, `note_slug_base`), so a decomposed filename meets a composed link; the stored title and path keep their bytes.
 - A note link is a wikilink or a Markdown link whose destination, once any
   `#anchor` is removed, ends `.md` (ADR-28), and both feed the same outgoing
   and backlink records. A Markdown target resolves by path from the linking
@@ -1724,6 +1725,18 @@ write API/types, and configuration for archive or upload limits.
   nothing. A list it empties stays as `tags: []`: the key is kept and the
   block never stripped, unlike `update_note_frontmatter` deleting its last key.
 - Delete is recoverable trash; archive is move-based (ADR-11).
+- A rename, move or delete changes only a wikilink that resolves, from its
+  own note's folder, uniquely to the moved note; any other link, one that
+  ties with a namesake included, is copied through byte for byte, unless the
+  move would hand it to a different note: `VaultIndex::relocated` answers
+  which note each link reaches afterwards, and a link that would change is
+  pinned to its note's full path, `/`-anchored for a root-level note. A link
+  retargeted to the moved note is checked the same way and takes the first
+  of its bare title, the new full path and the `/`-anchored path that reaches
+  it. A pin is a change like any other, so a non-UTF-8 note holding one
+  refuses the operation as #360 describes. A
+  retargeted link swaps its target alone and keeps the whitespace around it
+  and everything after it (#626).
 - A rewritten backlink keeps its shape, and a link that resolved before a
   move still resolves after it: a path-qualified link takes the new full path,
   and any target without a folder path, whether a title, a title whose
@@ -1853,7 +1866,8 @@ against one
 catalog build, rather than one build per target. `resolve_batch`
 generalizes it to note *and* asset targets over that same one build (#158),
 taking the embedding note's Vault-relative directory because an asset target
-resolves relative to the note that names it; assets are returned as
+resolves relative to the note that names it, and a wikilink target's tie
+between namesakes goes to the one nearest it (#626); assets are returned as
 Vault-relative paths, since an asset has no slug. Resolution does not apply
 the browse surface: an embed only resolves for a caller already reading the
 note that contains it. Fetching the resolved asset does, through
@@ -4961,7 +4975,9 @@ wikilink resolution — `useResolvedWikilinks` now sends embed and PDF targets t
 them to the resolved Vault-relative path (#158), keeping the note-relative
 reading as the fallback for anything unresolved, including the first render
 before the batch returns; its asset cache is keyed by note path as well as
-target, because the same filename in notes at two depths can be two files; it
+target, because the same filename in notes at two depths can be two files,
+and so is its wikilink cache, because a tie between namesakes goes to the
+one nearest the linking note (#626); it
 also sends Markdown note links (ADR-28, found by `markdownLinks.ts`, which
 skips code, images and wikilinks) as `note_link_targets` and rewrites each
 destination to the same note route, archived route or `/__missing__/` form a

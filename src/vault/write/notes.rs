@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cache::parse::content_hash;
-use crate::vault::paths::{slugify, strip_md_extension};
+use crate::vault::paths::{note_slug_base, strip_md_extension};
 use crate::vault::sections::NoteSections;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
@@ -235,10 +235,7 @@ fn slug_for_relative_path(
     exclude_slug: Option<&str>,
 ) -> String {
     let stem = relative_path.rsplit('/').next().unwrap_or(relative_path);
-    let mut base = slugify(stem);
-    if base.is_empty() {
-        base = "untitled".to_string();
-    }
+    let base = note_slug_base(stem);
     let priority = slug_priority(catalog, relative_path, path);
 
     let mut idx = 1usize;
