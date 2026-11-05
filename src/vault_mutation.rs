@@ -2256,6 +2256,83 @@ mod tests {
         assert_eq!(workspace.read("Home.md"), "# Overwritten\n");
     }
 
+    /// #630: refused as a retryable conflict, so a client retried into the
+    /// same symlink, each time leaving a sidecar holding its content.
+    #[tokio::test]
+    async fn an_overwrite_onto_a_symlinked_note_is_refused_for_good_and_leaves_nothing() {
+        let workspace = workspace(Fixture::new(&[]));
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("target.md");
+        std::fs::write(&target, "outside\n").expect("outside note");
+        std::os::unix::fs::symlink(&target, workspace.vault_path.join("Out.md")).expect("link");
+
+        let error = workspace
+            .core()
+            .create_note(workspace.vault_id, "Out.md", "# Leaked\n", true)
+            .await
+            .expect_err("a symlinked note must not be replaced");
+
+        assert_code(&error, "invalid_write_input");
+        assert!(!error.retryable);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside\n");
+        let names: Vec<_> = std::fs::read_dir(&workspace.vault_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["Out.md".to_string()]);
+    }
+
+    /// #630: a root stored through a symlink reported itself writable while
+    /// every write failed, because the write layer refuses to follow a
+    /// symlink anywhere above a note. The API stores canonical paths, so
+    /// only a hand-edited or old registry holds one.
+    #[tokio::test]
+    async fn a_vault_whose_stored_root_is_a_symlink_takes_writes() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        let state = workspace._directory.path().join("state/vaults.json");
+        let link = workspace._directory.path().join("vlink");
+        std::os::unix::fs::symlink(&workspace.vault_path, &link).expect("root link");
+        let real = std::fs::canonicalize(&workspace.vault_path).expect("canonical root");
+        let registry = std::fs::read_to_string(&state).expect("registry");
+        let real_json = serde_json::to_string(&real).expect("real path as JSON");
+        let link_json = serde_json::to_string(&link).expect("link path as JSON");
+        assert!(registry.contains(&real_json), "registry stores the root");
+        std::fs::write(&state, registry.replace(&real_json, &link_json)).expect("hand edit");
+        let store = VaultRegistryStore::new(state);
+        let crate::vault_registry::VaultRegistryState::Ready(snapshot) =
+            store.load().expect("reload registry")
+        else {
+            panic!("registry recovery");
+        };
+        assert_eq!(
+            store.vault_path(&snapshot.definitions().next().expect("definition")),
+            link,
+            "the registry now stores the symlink"
+        );
+        // A restart is what activates a hand-edited registry.
+        let restarted = VaultCollectionRuntime::new();
+        restarted.reconcile(&store, &snapshot);
+        let core = VaultMutationCore::new(
+            &workspace.cache,
+            &restarted,
+            std::sync::Arc::clone(&workspace.settings),
+            crate::git::WriteOrigin::web(),
+        );
+
+        let capabilities = core
+            .write_capabilities(workspace.vault_id)
+            .expect("capabilities");
+        assert!(capabilities.enabled());
+        core.create_note(workspace.vault_id, "New.md", "# New\n", false)
+            .await
+            .expect("a Vault reported writable must take a write");
+        core.append_to_note(workspace.vault_id, "home", "more\n", &hash("# Home\n"))
+            .await
+            .expect("an existing note, reached through the index, takes a write too");
+        assert_eq!(workspace.read("New.md"), "# New\n");
+    }
+
     #[tokio::test]
     async fn create_note_refuses_a_path_that_escapes_the_vault_root() {
         let workspace = workspace(Fixture::new(&[]));

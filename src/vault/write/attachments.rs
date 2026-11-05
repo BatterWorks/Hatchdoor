@@ -7,7 +7,7 @@ use crate::vault::LayerMap;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
-use super::fs_ops::{MutationJournal, atomic_write_bytes};
+use super::fs_ops::{MutationJournal, atomic_create_bytes_with_before_commit, atomic_write_bytes};
 use super::paths::{
     create_parent_dir_inside_root, ensure_existing_path_inside_root,
     ensure_movable_attachment_path, ensure_uploadable_attachment_path,
@@ -55,6 +55,28 @@ pub fn import_attachment_bytes(
     max_bytes: u64,
     overwrite: bool,
 ) -> Result<AttachmentOutcome, WriteError> {
+    import_attachment_bytes_with_hook(
+        vault_root,
+        target_relative_path,
+        bytes,
+        max_bytes,
+        overwrite,
+        || {},
+    )
+}
+
+/// The import, with a hook that runs after the existence check and before
+/// the commit, where a test stands in for Obsidian or Syncthing creating the
+/// file. Without `overwrite` it fires once the bytes are prepared beside the
+/// target, the narrowest form of that window.
+fn import_attachment_bytes_with_hook(
+    vault_root: &Path,
+    target_relative_path: &str,
+    bytes: &[u8],
+    max_bytes: u64,
+    overwrite: bool,
+    before_commit: impl FnOnce(),
+) -> Result<AttachmentOutcome, WriteError> {
     let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
     ensure_uploadable_attachment_path(&target_path)?;
     create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
@@ -72,7 +94,20 @@ pub fn import_attachment_bytes(
     // behind after the response reports an error.
     let layers = LayerMap::collect(vault_root).map_err(WriteError::Io)?;
 
-    atomic_write_bytes(&target_path, bytes)?;
+    if overwrite {
+        before_commit();
+        atomic_write_bytes(&target_path, bytes)?;
+    } else {
+        // The check above is a fast answer only. A file created at this
+        // name since then, by anything outside Hatchdoor, is refused at the
+        // commit itself rather than replaced, as `create_note` does (#630).
+        atomic_create_bytes_with_before_commit(&target_path, bytes, before_commit).map_err(
+            |error| match error {
+                WriteError::Conflict(_) => already_exists(target_relative_path),
+                other => other,
+            },
+        )?;
+    }
 
     // No caller-supplied index here (imports do not rebuild one), so use the
     // marker snapshot collected before the write to report the new asset's layer.
@@ -106,12 +141,16 @@ fn ensure_import_target_free(
     overwrite: bool,
 ) -> Result<(), WriteError> {
     if target_path.exists() && !overwrite {
-        return Err(WriteError::Conflict(format!(
-            "Attachment already exists: {}",
-            normalize_attachment_relative_path(target_relative_path)?
-        )));
+        return Err(already_exists(target_relative_path));
     }
     Ok(())
+}
+
+fn already_exists(target_relative_path: &str) -> WriteError {
+    match normalize_attachment_relative_path(target_relative_path) {
+        Ok(normalized) => WriteError::Conflict(format!("Attachment already exists: {normalized}")),
+        Err(error) => error,
+    }
 }
 
 pub fn move_attachment(
@@ -346,5 +385,56 @@ mod tests {
             !vault.path().join(target).exists(),
             "a failed import must not leave an attachment on disk"
         );
+    }
+
+    /// #630: the import checked the name was free, then committed with a
+    /// plain rename, so a file Obsidian or Syncthing created in between was
+    /// silently replaced.
+    #[test]
+    fn an_import_refuses_a_file_created_after_its_existence_check() {
+        let vault = tempdir().expect("vault");
+        let target = vault.path().join("image.png");
+
+        let error = import_attachment_bytes_with_hook(
+            vault.path(),
+            "image.png",
+            b"imported",
+            1024,
+            false,
+            || fs::write(&target, b"synced meanwhile").expect("racing file"),
+        )
+        .expect_err("a file that appeared after the check must not be replaced");
+
+        assert!(
+            matches!(&error, WriteError::Conflict(message) if message == "Attachment already exists: image.png"),
+            "got {error:?}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"synced meanwhile");
+        let leftovers: Vec<_> = fs::read_dir(vault.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "no sidecar may remain: {leftovers:?}");
+    }
+
+    #[test]
+    fn an_overwriting_import_onto_a_folder_is_refused_without_a_sidecar() {
+        let vault = tempdir().expect("vault");
+        fs::create_dir(vault.path().join("trap.png")).expect("folder");
+
+        let error = import_attachment_bytes(vault.path(), "trap.png", b"image", 1024, true)
+            .expect_err("a folder is not an attachment to replace");
+
+        assert!(
+            matches!(error, WriteError::InvalidInput(_)),
+            "got {error:?}"
+        );
+        let names: Vec<_> = fs::read_dir(vault.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("trap.png")]);
     }
 }
