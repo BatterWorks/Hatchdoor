@@ -261,18 +261,17 @@ docker compose up -d
 ```
 
 Docker Compose binds Hatchdoor to a non-loopback container interface, so a
-first run without a web token stops safely and prints a fresh, recoverable
-token. Retrieve it with:
+first run without a web token stops safely and saves a fresh token, readable by
+its owner only, in `data/state/new-web-token.env`. The token never goes to the
+log. Add it to `.env`:
 
 ```bash
-docker compose logs hatchdoor
+sudo cat data/state/new-web-token.env >> .env
 ```
 
-Copy the printed `HATCHDOOR_WEB_BEARER_TOKEN=...` assignment into `.env`, then
-start again with `docker compose up -d`. The token is deliberately not stored
-by Hatchdoor; use the one from that refusal or generate a new long random token.
-Once the server is running, open `http://localhost:42824` and enter it in the
-browser prompt.
+Then start again with `docker compose up -d`, or set any long random value as
+`HATCHDOOR_WEB_BEARER_TOKEN` yourself. Once the server is running, open
+`http://localhost:42824` and enter it in the browser prompt.
 
 ### 4. Choose Your Search Model
 

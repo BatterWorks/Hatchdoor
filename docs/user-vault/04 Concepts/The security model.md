@@ -20,10 +20,19 @@ The first two decide who can reach Hatchdoor and what they can do. The third let
 
 ## Web bearer token
 
-The web token guards the browser and the HTTP API: Settings, model setup, and every `/api/v1/vaults/...` route when a token is configured. Hatchdoor reads it from `Authorization: Bearer <token>`, or from an `access_token` query parameter where a header cannot be set, as in an `<img>` tag that points at an attachment. It compares tokens in constant time, so the time an answer takes reveals nothing about how much of a guessed token was right.
+The web token guards the browser and the HTTP API: Settings, model setup, and every `/api/v1/vaults/...` route when a token is configured. Hatchdoor reads it from `Authorization: Bearer <token>` (the word `Bearer` in any case, followed by any number of spaces), or from an `access_token` query parameter where a header cannot be set, as in an `<img>` tag that points at an attachment. It compares tokens in constant time, so the time an answer takes reveals nothing about how much of a guessed token was right.
 
 > [!warning]
-> With a `HOST` that is not a loopback address and no web token, Hatchdoor refuses to start. It generates a token, prints it, and asks you to add it to `.env`. You cannot skip this check. [[Install Hatchdoor with Docker Compose]] shows what it looks like.
+> With a `HOST` that is not a loopback address and no web token, Hatchdoor refuses to start. It generates a token, saves it in `new-web-token.env` in its state folder (`data/state` with the shipped `compose.yaml`), and asks you to add that line to `.env`. The token never appears in the log, so it does not linger in `docker compose logs` or anywhere logs are shipped. You cannot skip this check. [[Install Hatchdoor with Docker Compose]] shows what it looks like.
+
+### Running without a web token
+
+On a loopback address (`HOST=127.0.0.1`, the default outside Docker) the web token is optional. Without one, the browser and `curl` on the same computer reach everything with no password. A web page you visit in that browser must not, so Hatchdoor checks two headers on every request instead:
+
+- **The address the request was sent to (`Host`).** It must be `localhost`, `127.0.0.1` or `[::1]`, on any port, or the host of **Public address** (`HATCHDOOR_PUBLIC_URL`). Anything else gets `403`. This stops DNS rebinding, where a website points its own name at `127.0.0.1` and so becomes able to read and write your Vaults from your browser.
+- **The page that sent a change.** A request that changes something (anything but a read) is refused with `403` when its `Origin` is another website. Hatchdoor's own page, an origin on `HATCHDOOR_MCP_ALLOWED_ORIGINS` and Public address are accepted. With no `Origin`, a `Sec-Fetch-Site: cross-site` header is refused too. `curl` sends neither and is unaffected.
+
+Behind a proxy that forwards your own domain name to a token-less loopback Hatchdoor, set Public address to that address, or set a web token. Neither check runs once a web token is set, or in demo mode, and `/mcp` keeps its own Origin check described below.
 
 ## MCP bearer token
 

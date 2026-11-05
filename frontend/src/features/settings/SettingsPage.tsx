@@ -179,7 +179,7 @@ const COPY: Record<
   HATCHDOOR_MCP_ALLOWED_ORIGINS: {
     section: "agents",
     label: "Websites allowed to connect",
-    help: "Assistants running inside a browser must come from one of these addresses. Separated by commas.",
+    help: "Assistants running inside a browser must come from one of these addresses. With no web token set, pages from these addresses may also change notes. Separated by commas.",
   },
   HATCHDOOR_PUBLIC_URL: {
     section: "agents",

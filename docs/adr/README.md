@@ -162,6 +162,7 @@ Copy this for a new record:
 - **Context:** A self-hosted app is easy to misconfigure into exposing a private vault (binding `0.0.0.0` without auth; enabling a public demo alongside write surfaces).
 - **Decision:** Refuse to start in unsafe configurations rather than warn: no non-loopback bind without `HATCHDOOR_WEB_BEARER_TOKEN`; demo mode is incompatible with MCP or git sync and refuses to boot together.
 - **Consequences:** Misconfiguration fails loudly at startup instead of silently exposing data; operators must set a token before going public.
+- **Note (#629):** The loopback exemption assumed that only processes on the same machine could reach a loopback port. A browser breaks that assumption: any page it loads can send requests to `127.0.0.1`, and DNS rebinding makes such a page same-origin with the API. The exemption stays, and a token-less instance now closes that gap itself: it answers only requests whose `Host` is a loopback name or `HATCHDOOR_PUBLIC_URL`'s host, and refuses a state-changing request from another site: an `Origin` that is not its own, the public URL's or on the MCP allow-list, or, with no `Origin`, `Sec-Fetch-Site: cross-site` (`auth::require_local_host_and_origin`). The refused non-loopback start no longer logs its generated token (ADR-08): it saves it to `new-web-token.env` in the state directory, mode 0600, and logs the path.
 - **Evidence:** `server.rs` (`check_web_auth_posture`, `check_demo_mode_posture`, `check_demo_mode_registry_posture`); CHANGELOG F-01.
 
 ## ADR-08 — Bearer-token auth with a query-param fallback
@@ -178,6 +179,7 @@ Copy this for a new record:
 - **Context:** MCP exposes the whole vault to agents and is mounted at `/mcp`, outside the web-auth layer. Browser-originated JSON-RPC also invites DNS-rebinding attacks.
 - **Decision:** MCP is disabled unless explicitly enabled. Even read-only MCP requires its own bearer token. Requests are checked against an Origin allowlist (localhost variants only) to block DNS rebinding. The Streamable-HTTP protocol is implemented directly.
 - **Consequences:** Enabling agent access is a conscious, credentialed step; the vault is never exposed by simply turning MCP on.
+- **Note (#629):** The same allow-list also admits a cross-site write to the web API on an instance with no web token (`auth::require_local_host_and_origin`, see the ADR-07 note). Its matching is unchanged.
 - **Evidence:** `mcp/config.rs` (`validate`, `validate_mcp_request`, Origin matching); `mcp/tools/{read,write}.rs`.
 
 ## ADR-10 — Optional git sync as a debounced background task

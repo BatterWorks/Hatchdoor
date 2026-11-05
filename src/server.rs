@@ -23,8 +23,8 @@ use tracing::{error, info, warn};
 
 use crate::app_state::AppState;
 use crate::auth::{
-    AssetReadTokens, WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_read_token,
-    require_web_or_live_mcp_token, require_web_token,
+    AssetReadTokens, WebOrLiveMcpToken, WebToken, require_local_host_and_origin,
+    require_web_or_live_mcp_read_token, require_web_or_live_mcp_token, require_web_token,
 };
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
@@ -93,24 +93,84 @@ async fn shutdown_signal() {
 /// Refuse to serve mutating routes unauthenticated on a public interface. A
 /// non-loopback bind with no web token would let anyone on the network
 /// create/overwrite/delete vault notes, guarded only by a log line.
+///
+/// The refusal hands the operator a ready token, but never through the log
+/// (ADR-08), where it would outlive the start in container logs and any log
+/// shipper (#629). It is saved to [`NEW_WEB_TOKEN_FILE`] in `state_dir`,
+/// readable by its owner only, and the message names that file. A file left by
+/// an earlier refused start is reused, so a restart loop offers one token.
 pub fn check_web_auth_posture(
     host: &str,
     has_web_token: bool,
     demo_mode: bool,
+    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     if demo_mode {
         return Ok(());
     }
     if !is_loopback_host(host) && !has_web_token {
-        let token = crate::auth::generate_bearer_token()?;
+        let next_step = match save_new_web_token(state_dir) {
+            Ok(path) => format!(
+                "A new token is saved in {path}: add the line in that file to .env, then \
+                 restart. With the shipped compose.yaml that file is data/state/{NEW_WEB_TOKEN_FILE} \
+                 next to it.",
+                path = path.display()
+            ),
+            Err(error) => format!(
+                "Could not save a new token ({error}). Set HATCHDOOR_WEB_BEARER_TOKEN in .env \
+                 to a long random value, for example from `openssl rand -hex 32`, then restart."
+            ),
+        };
         return Err(format!(
             "HOST={host} is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to \
-             start unauthenticated on a public interface. Paste this freshly generated token into \
-             .env, then restart: HATCHDOOR_WEB_BEARER_TOKEN={token} . Or bind to 127.0.0.1. For \
-             a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
+             start unauthenticated on a public interface. {next_step} Or bind to 127.0.0.1. \
+             For a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
         ));
     }
     Ok(())
+}
+
+/// The file a refused start leaves its generated web token in, as one
+/// `HATCHDOOR_WEB_BEARER_TOKEN=...` line ready for `.env`.
+pub(crate) const NEW_WEB_TOKEN_FILE: &str = "new-web-token.env";
+
+const NEW_WEB_TOKEN_KEY: &str = "HATCHDOOR_WEB_BEARER_TOKEN=";
+
+/// Save a generated web token to `state_dir`, or keep the one an earlier
+/// refused start saved there, and return the file's path.
+fn save_new_web_token(state_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = state_dir.join(NEW_WEB_TOKEN_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path)
+        && existing
+            .trim()
+            .strip_prefix(NEW_WEB_TOKEN_KEY)
+            .is_some_and(|token| !token.trim().is_empty())
+    {
+        return Ok(path);
+    }
+    let token = crate::auth::generate_bearer_token()?;
+    std::fs::create_dir_all(state_dir)
+        .map_err(|error| format!("could not create {}: {error}", state_dir.display()))?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not replace {}: {error}", path.display())),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    std::io::Write::write_all(
+        &mut file,
+        // The leading newline keeps `cat file >> .env` from joining the
+        // token onto a last line that lacks one.
+        format!("\n{NEW_WEB_TOKEN_KEY}{token}\n").as_bytes(),
+    )
+    .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(path)
 }
 
 /// Refuse a demo start whose operator still has legacy instance-wide Git
@@ -618,8 +678,12 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // Outside every auth layer and mounted in demo mode too, like `/health`;
     // the web token only decides whether private pages are served.
     let docs = docs_router(web_bearer_token.clone());
+    // #629: with no web token (a loopback bind, ADR-07) the Host and Origin
+    // checks are all that keep other websites out. `/mcp` is merged after this
+    // layer: it requires its own token and keeps its own Origin check (ADR-09).
+    let tokenless = web_bearer_token.is_none() && !state.demo_mode;
 
-    Router::new()
+    let web = Router::new()
         .route("/health", get(health_handler))
         .route(READINESS_PATH, get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
@@ -632,7 +696,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(transfers)
         .merge(folders)
         .merge(version_routes)
-        .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
         // when multiple Vaults contain the same slug. The legacy slug-only
@@ -658,7 +721,17 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .fallback_service(
             ServeDir::new("frontend/dist")
                 .fallback(get(spa_not_found_handler).with_state(state.clone())),
-        )
+        );
+    let web = if tokenless {
+        web.layer(axum::middleware::from_fn_with_state(
+            state.runtime_config.clone(),
+            require_local_host_and_origin,
+        ))
+    } else {
+        web
+    };
+
+    web.merge(mcp)
         .layer(
             TraceLayer::new(MakeFailureClassifier)
                 // Custom span so the URI logged never contains the raw web token
@@ -1153,10 +1226,21 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
+    // Only the registry's location is read here; nothing is written to it
+    // before the refusals below have passed.
+    let state_dir = VaultRegistryStore::at_default_path()
+        .path()
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
     if let Err(message) = check_web_auth_posture(
         &config.host,
         config.web_bearer_token.is_some(),
         config.demo_mode,
+        &state_dir,
     ) {
         error!("{message}");
         std::process::exit(1);
@@ -1872,40 +1956,95 @@ mod tests {
 
     #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
-        // Non-loopback host with no web token must refuse to start.
+        // Non-loopback host with no web token must refuse to start, and the
+        // refusal must not carry the generated token (#629).
         for host in ["0.0.0.0", "192.168.1.50", "::"] {
-            let error =
-                check_web_auth_posture(host, false, false).expect_err("public bind rejected");
+            let state = tempfile::TempDir::new().expect("temp dir");
+            let error = check_web_auth_posture(host, false, false, state.path())
+                .expect_err("public bind rejected");
 
             assert!(error.contains(&format!("HOST={host}")));
-            assert!(error.contains("HATCHDOOR_WEB_BEARER_TOKEN="));
-            assert!(error.contains("Paste this freshly generated token into .env"));
-
-            let generated_token = error
-                .split("HATCHDOOR_WEB_BEARER_TOKEN=")
-                .nth(1)
-                .and_then(|value| value.split_whitespace().next())
-                .expect("generated token in .env assignment");
-            assert_eq!(generated_token.len(), 43);
+            let file = state.path().join(NEW_WEB_TOKEN_FILE);
+            assert!(error.contains(&file.display().to_string()), "{error}");
+            let saved = std::fs::read_to_string(&file).expect("token file");
+            let token = saved
+                .trim()
+                .strip_prefix("HATCHDOOR_WEB_BEARER_TOKEN=")
+                .expect("one .env line");
+            assert_eq!(token.len(), 43);
             assert!(
-                generated_token
+                token
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
             );
+            assert!(!error.contains(token), "the token must stay out of the log");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&file)
+                    .expect("metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
         }
         // A token makes any host acceptable.
-        assert!(check_web_auth_posture("0.0.0.0", true, false).is_ok());
+        let state = tempfile::TempDir::new().expect("temp dir");
+        assert!(check_web_auth_posture("0.0.0.0", true, false, state.path()).is_ok());
         // Every loopback spelling accepted without a token has a corresponding
         // structurally valid listener address (covered in config tests).
         for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
-            assert!(check_web_auth_posture(host, false, false).is_ok(), "{host}");
+            assert!(
+                check_web_auth_posture(host, false, false, state.path()).is_ok(),
+                "{host}"
+            );
         }
+        assert!(
+            !state.path().join(NEW_WEB_TOKEN_FILE).exists(),
+            "an accepted start saves no token"
+        );
+    }
+
+    #[test]
+    fn web_auth_posture_offers_the_same_token_across_refused_restarts() {
+        let state = tempfile::TempDir::new().expect("temp dir");
+        let nested = state.path().join("not-yet-created");
+        let first = check_web_auth_posture("0.0.0.0", false, false, &nested).expect_err("refused");
+        let file = nested.join(NEW_WEB_TOKEN_FILE);
+        let saved = std::fs::read_to_string(&file).expect("token file");
+        let second = check_web_auth_posture("0.0.0.0", false, false, &nested).expect_err("refused");
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read_to_string(&file).expect("token file"), saved);
+
+        // An empty or foreign file is replaced with a fresh token.
+        std::fs::write(&file, "").expect("blank it");
+        check_web_auth_posture("0.0.0.0", false, false, &nested).expect_err("refused");
+        assert!(
+            std::fs::read_to_string(&file)
+                .expect("token file")
+                .starts_with("\nHATCHDOOR_WEB_BEARER_TOKEN="),
+            "a leading newline keeps `>> .env` from joining two lines"
+        );
+    }
+
+    #[test]
+    fn web_auth_posture_explains_a_token_it_could_not_save() {
+        let state = tempfile::TempDir::new().expect("temp dir");
+        // A file where the state directory should be makes saving impossible.
+        let blocked = state.path().join("blocked");
+        std::fs::write(&blocked, "").expect("file");
+        let error = check_web_auth_posture("0.0.0.0", false, false, &blocked.join("state"))
+            .expect_err("refused");
+        assert!(error.contains("Could not save a new token"), "{error}");
+        assert!(error.contains("openssl rand -hex 32"), "{error}");
+        assert!(!error.contains("HATCHDOOR_WEB_BEARER_TOKEN="), "{error}");
     }
 
     #[test]
     fn web_auth_posture_allows_public_bind_in_demo_mode() {
-        assert!(check_web_auth_posture("0.0.0.0", false, true).is_ok());
-        assert!(check_web_auth_posture("::", false, true).is_ok());
+        let state = tempfile::TempDir::new().expect("temp dir");
+        assert!(check_web_auth_posture("0.0.0.0", false, true, state.path()).is_ok());
+        assert!(check_web_auth_posture("::", false, true, state.path()).is_ok());
     }
 
     #[test]
@@ -2347,6 +2486,226 @@ mod tests {
             builder = builder.header("authorization", format!("Bearer {token}"));
         }
         builder.body(Body::from(body)).expect("request")
+    }
+
+    fn tokenless_request(method: &str, uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_refuses_a_host_that_is_not_this_machine() {
+        // #629 G1-01: a DNS-rebinding page sends its own name as Host.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        for host in [
+            "rebind.attacker.example:42824",
+            "rebind.attacker.example",
+            "127.0.0.1.attacker.example",
+            "192.168.1.20:42824",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "GET",
+                    "/api/v1/vaults",
+                    &[("host", host)],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{host}");
+        }
+        // A Host that is not text is refused, never skipped.
+        let mut request = tokenless_request("GET", "/api/v1/vaults", &[]);
+        request.headers_mut().insert(
+            header::HOST,
+            axum::http::HeaderValue::from_bytes(b"\xffevil").expect("opaque header"),
+        );
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        for host in [
+            "127.0.0.1:42824",
+            "localhost:5173",
+            "LOCALHOST",
+            "[::1]:42824",
+            "127.0.0.1",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "GET",
+                    "/api/v1/vaults",
+                    &[("host", host)],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_accepts_its_public_url_host() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_PUBLIC_URL".to_string(),
+                "https://Notes.example.com/hatchdoor".to_string(),
+            )])
+            .expect("save public URL");
+        let response = app
+            .clone()
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[("host", "notes.example.com")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[("host", "other.example.com")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_refuses_a_cross_site_upload_and_writes_nothing() {
+        // #629 G1-01: a cross-site multipart form needs no rebinding at all.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let root = tmp.path().join("attachments");
+        let vault_id = create_vault_with_files(&app, "Attachments", &root, &[], 0).await;
+
+        for (name, value) in [
+            ("origin", "https://evil.example"),
+            ("origin", "null"),
+            ("sec-fetch-site", "cross-site"),
+        ] {
+            let mut request = attachment_upload_request(&vault_id, "evil.png", None);
+            request.headers_mut().insert(
+                axum::http::HeaderName::from_static(name),
+                axum::http::HeaderValue::from_static(value),
+            );
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_static("127.0.0.1:42824"),
+            );
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{name}: {value}");
+        }
+        assert!(!root.join("evil.png").exists(), "nothing is written");
+
+        // The same upload from the app's own page, or from curl, still works.
+        for origin in [
+            Some("http://127.0.0.1:42824"),
+            Some("http://localhost:5173"),
+            None,
+        ] {
+            let mut request = attachment_upload_request(&vault_id, "ok.png", None);
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_static("127.0.0.1:42824"),
+            );
+            if let Some(origin) = origin {
+                request.headers_mut().insert(
+                    header::ORIGIN,
+                    axum::http::HeaderValue::from_str(origin).expect("origin"),
+                );
+                request.headers_mut().insert(
+                    axum::http::HeaderName::from_static("sec-fetch-site"),
+                    axum::http::HeaderValue::from_static("same-origin"),
+                );
+            }
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{origin:?}");
+            std::fs::remove_file(root.join("ok.png")).expect("uploaded");
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_refuses_a_cross_site_model_setup_post() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        for path in [
+            "/api/model/accept-gemma",
+            "/api/model/decline-gemma",
+            "/api/model/retry",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "POST",
+                    path,
+                    &[
+                        ("host", "127.0.0.1:42824"),
+                        ("origin", "https://evil.example"),
+                    ],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_configured_web_token_or_demo_mode_skips_the_host_check() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let response = app
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[
+                    ("host", "notes.example.com"),
+                    ("authorization", "Bearer web-secret"),
+                ],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let response = app
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[("host", "demo.example.com")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_web_api_accepts_the_bearer_scheme_in_any_case() {
+        // #629 G1-03: RFC 7235 makes the scheme name case-insensitive.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        for (header, expected) in [
+            ("Bearer web-secret", StatusCode::OK),
+            ("bearer web-secret", StatusCode::OK),
+            ("BEARER web-secret", StatusCode::OK),
+            ("Bearer  web-secret", StatusCode::OK),
+            ("Bearer\tweb-secret", StatusCode::OK),
+            ("bearer wrong-secret", StatusCode::UNAUTHORIZED),
+            ("Basic web-secret", StatusCode::UNAUTHORIZED),
+            ("Bearerweb-secret", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "GET",
+                    "/api/v1/vaults",
+                    &[("authorization", header)],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{header:?}");
+        }
     }
 
     #[tokio::test]
@@ -10018,13 +10377,17 @@ mod tests {
     }
 
     async fn get_page(app: &Router, uri: &str) -> (StatusCode, String) {
+        get_page_at(app, uri, "attacker.example").await
+    }
+
+    async fn get_page_at(app: &Router, uri: &str, host: &str) -> (StatusCode, String) {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(uri)
                     // A link preview must never be built from these.
-                    .header("host", "attacker.example")
+                    .header("host", host)
                     .header("x-forwarded-host", "forwarded.example")
                     .header("x-forwarded-proto", "https")
                     .body(Body::empty())
@@ -10225,8 +10588,10 @@ mod tests {
                 (format!("/v/{vault_id}/n/no-such-note"), StatusCode::OK),
                 ("/nope".to_string(), StatusCode::NOT_FOUND),
             ] {
+                // Without a web token the instance answers only its own names
+                // (#629), so the page is asked for at the public address.
                 assert_eq!(
-                    get_page(&app, &uri).await,
+                    get_page_at(&app, &uri, "notes.example.com").await,
                     (status, BUILT_PAGE.to_string()),
                     "{uri} with token {web_bearer_token:?}"
                 );

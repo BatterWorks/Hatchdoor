@@ -37,12 +37,9 @@ pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(
     }
 
     if let Some(expected_token) = &config.bearer_token {
-        let expected = format!("Bearer {expected_token}");
-        let authorized = headers
-            .get(header::AUTHORIZATION)
-            .and_then(header_to_str)
-            .map(|value| crate::auth::constant_time_eq(value.as_bytes(), expected.as_bytes()))
-            .unwrap_or(false);
+        let authorized = crate::auth::presented_bearer(headers).is_some_and(|presented| {
+            crate::auth::constant_time_eq(presented.as_bytes(), expected_token.as_bytes())
+        });
         if !authorized {
             return Err(Box::new(jsonrpc_error_response(
                 StatusCode::UNAUTHORIZED,
@@ -128,6 +125,28 @@ mod tests {
         let result = validate_mcp_request(&HeaderMap::new(), &config);
         let response = *result.expect_err("read-only MCP without a token must be rejected");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn validate_mcp_request_accepts_the_bearer_scheme_in_any_case() {
+        let mut config = McpConfig::disabled();
+        config.enabled = true;
+        config.bearer_token = Some("secret".to_string());
+        for (value, accepted) in [
+            ("Bearer secret", true),
+            ("bearer secret", true),
+            ("BEARER  secret", true),
+            ("bearer wrong", false),
+            ("Bearersecret", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_static(value));
+            assert_eq!(
+                validate_mcp_request(&headers, &config).is_ok(),
+                accepted,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
