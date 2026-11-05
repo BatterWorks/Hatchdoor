@@ -1118,6 +1118,7 @@ impl VaultMutation {
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
+        let intent_log = self.control.intent_log();
         let outcome = self
             .run_write("archive", slug, move || {
                 archive_note(
@@ -1126,6 +1127,7 @@ impl VaultMutation {
                     &entry,
                     &archive_prefix,
                     &expected_content_hash,
+                    Some(&intent_log),
                 )
             })
             .await?;
@@ -1143,9 +1145,16 @@ impl VaultMutation {
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
+        let intent_log = self.control.intent_log();
         let outcome = self
             .run_write("delete", slug, move || {
-                delete_note(&vault_path, &index, &entry, &expected_content_hash)
+                delete_note(
+                    &vault_path,
+                    &index,
+                    &entry,
+                    &expected_content_hash,
+                    Some(&intent_log),
+                )
             })
             .await?;
         Ok(NoteWriteOutcome::resolve(&layers, outcome))
@@ -1167,6 +1176,7 @@ impl VaultMutation {
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
+        let intent_log = self.control.intent_log();
         let outcome = self
             .run_write(label, addressed, move || {
                 move_or_rename_note(
@@ -1175,6 +1185,7 @@ impl VaultMutation {
                     &entry,
                     &target_relative_path,
                     &expected_content_hash,
+                    Some(&intent_log),
                 )
             })
             .await?;
@@ -1301,8 +1312,15 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
         let target_path = target_relative_path.to_string();
+        let intent_log = self.control.intent_log();
         self.run_write("move attachment", source_relative_path, move || {
-            move_attachment(&vault_path, &index, &source_path, &target_path)
+            move_attachment(
+                &vault_path,
+                &index,
+                &source_path,
+                &target_path,
+                Some(&intent_log),
+            )
         })
         .await
     }
@@ -1323,8 +1341,15 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
         let new_filename = new_filename.to_string();
+        let intent_log = self.control.intent_log();
         self.run_write("rename attachment", source_relative_path, move || {
-            rename_attachment(&vault_path, &index, &source_path, &new_filename)
+            rename_attachment(
+                &vault_path,
+                &index,
+                &source_path,
+                &new_filename,
+                Some(&intent_log),
+            )
         })
         .await
     }
@@ -1344,8 +1369,9 @@ impl VaultMutation {
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
+        let intent_log = self.control.intent_log();
         self.run_write("delete attachment", source_relative_path, move || {
-            delete_attachment(&vault_path, &index, &source_path)
+            delete_attachment(&vault_path, &index, &source_path, Some(&intent_log))
         })
         .await
     }
@@ -1368,15 +1394,18 @@ impl VaultMutation {
         let old_tag = old_tag.to_string();
         let new_tag = new_tag.to_string();
         let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
-            return offload(move || rename_tag(&vault_path, &catalog, &old_tag, &new_tag, None))
-                .await
-                .map_err(|error| tag_rename_error(self.vault_id, error));
+            return offload(move || {
+                rename_tag(&vault_path, &catalog, &old_tag, &new_tag, None, None)
+            })
+            .await
+            .map_err(|error| tag_rename_error(self.vault_id, error));
         };
         let addressed = format!(
             "#{} -> #{}",
             old_tag.trim_start_matches('#'),
             new_tag.trim_start_matches('#')
         );
+        let intent_log = self.control.intent_log();
         self.run_recorded("rename tag", &addressed, tag_rename_error, move || {
             rename_tag(
                 &vault_path,
@@ -1384,6 +1413,7 @@ impl VaultMutation {
                 &old_tag,
                 &new_tag,
                 Some(&expected_plan_hash),
+                Some(&intent_log),
             )
         })
         .await
@@ -1400,13 +1430,20 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let tag = tag.to_string();
         let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
-            return offload(move || delete_tag(&vault_path, &catalog, &tag, None))
+            return offload(move || delete_tag(&vault_path, &catalog, &tag, None, None))
                 .await
                 .map_err(|error| tag_delete_error(self.vault_id, error));
         };
         let addressed = format!("#{}", tag.strip_prefix('#').unwrap_or(&tag).to_lowercase());
+        let intent_log = self.control.intent_log();
         self.run_recorded("delete tag", &addressed, tag_delete_error, move || {
-            delete_tag(&vault_path, &catalog, &tag, Some(&expected_plan_hash))
+            delete_tag(
+                &vault_path,
+                &catalog,
+                &tag,
+                Some(&expected_plan_hash),
+                Some(&intent_log),
+            )
         })
         .await
     }
@@ -2794,6 +2831,84 @@ mod tests {
         );
         assert!(workspace.exists("Home.md"));
         assert!(!workspace.exists(".trash/Home.md"));
+    }
+
+    /// #631: every multi-note write the core runs records its plan in the
+    /// Vault's intent log before its first step. With the log's folder
+    /// blocked, each one is refused and changes nothing, which shows the
+    /// core hands every one of them the log.
+    #[tokio::test]
+    async fn every_multi_note_write_records_its_plan_first() {
+        let workspace = workspace(Fixture::new(&[
+            ("Home.md", "---\ntags: [old]\n---\n# Home\n![[pic.png]]\n"),
+            ("Other.md", "# Other\n[[Home]]\n"),
+            ("pic.png", "png"),
+        ]));
+        let state = workspace
+            ._directory
+            .path()
+            .join("state")
+            .join("write-intents");
+        std::fs::write(&state, "a file where the record folder goes").expect("block");
+        let core = workspace.core();
+        let id = workspace.vault_id;
+        let home = hash("---\ntags: [old]\n---\n# Home\n![[pic.png]]\n");
+
+        let refusals = [
+            core.rename_note(id, "home", "Renamed", &home)
+                .await
+                .map(|_| ()),
+            core.move_note(id, "home", "Folder", &home)
+                .await
+                .map(|_| ()),
+            core.archive_note(id, "home", &home).await.map(|_| ()),
+            core.delete_note(id, "home", &home).await.map(|_| ()),
+            core.move_attachment(id, "pic.png", "media/pic.png")
+                .await
+                .map(|_| ()),
+            core.rename_attachment(id, "pic.png", "photo.png")
+                .await
+                .map(|_| ()),
+            core.delete_attachment(id, "pic.png").await.map(|_| ()),
+        ];
+        for refusal in refusals {
+            let error = refusal.expect_err("refused without a record");
+            assert!(
+                error.message.contains("could not record this change"),
+                "{error:?}"
+            );
+        }
+        let plan = core
+            .rename_tag(id, "old", "new", None)
+            .await
+            .expect("a plan writes nothing and needs no record");
+        let error = core
+            .rename_tag(id, "old", "new", plan.plan_hash.as_deref())
+            .await
+            .expect_err("refused without a record");
+        assert!(
+            error.message.contains("could not record this change"),
+            "{error:?}"
+        );
+        let plan = core
+            .delete_tag(id, "old", None)
+            .await
+            .expect("a plan writes nothing and needs no record");
+        let error = core
+            .delete_tag(id, "old", plan.plan_hash.as_deref())
+            .await
+            .expect_err("refused without a record");
+        assert!(
+            error.message.contains("could not record this change"),
+            "{error:?}"
+        );
+
+        assert!(workspace.exists("Home.md"));
+        assert!(workspace.exists("pic.png"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.vault_path.join("Home.md")).expect("home"),
+            "---\ntags: [old]\n---\n# Home\n![[pic.png]]\n"
+        );
     }
 
     #[tokio::test]

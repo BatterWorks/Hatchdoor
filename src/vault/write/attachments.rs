@@ -8,6 +8,7 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
 use super::fs_ops::{MutationJournal, atomic_create_bytes_with_before_commit, atomic_write_bytes};
+use super::intent::IntentLog;
 use super::paths::{
     create_parent_dir_inside_root, ensure_existing_path_inside_root,
     ensure_movable_attachment_path, ensure_uploadable_attachment_path,
@@ -158,12 +159,14 @@ pub fn move_attachment(
     index: &VaultIndex,
     source_relative_path: &str,
     target_relative_path: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<AttachmentOutcome, WriteError> {
     move_attachment_with_hook(
         vault_root,
         index,
         source_relative_path,
         target_relative_path,
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -173,6 +176,7 @@ fn move_attachment_with_hook(
     index: &VaultIndex,
     source_relative_path: &str,
     target_relative_path: &str,
+    intent_log: Option<&IntentLog>,
     after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
@@ -183,6 +187,7 @@ fn move_attachment_with_hook(
         &source_path,
         &target_path,
         None,
+        intent_log,
         after_phase,
     )
 }
@@ -192,19 +197,27 @@ pub fn rename_attachment(
     index: &VaultIndex,
     source_relative_path: &str,
     new_filename: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
     let filename = normalize_staged_filename(new_filename)?;
     let target_path = source_path.parent().unwrap_or(vault_root).join(filename);
-    move_attachment_by_paths_with_hook(vault_root, index, &source_path, &target_path, None, |_| {
-        Ok(())
-    })
+    move_attachment_by_paths_with_hook(
+        vault_root,
+        index,
+        &source_path,
+        &target_path,
+        None,
+        intent_log,
+        |_| Ok(()),
+    )
 }
 
 pub fn delete_attachment(
     vault_root: &Path,
     index: &VaultIndex,
     source_relative_path: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
     // Checked before the trash path is derived from it, so a refusal never
@@ -220,6 +233,7 @@ pub fn delete_attachment(
         &source_path,
         &trash_path,
         Some(trash_relative),
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -230,6 +244,7 @@ fn move_attachment_by_paths_with_hook(
     source_path: &Path,
     target_path: &Path,
     trashed_path: Option<String>,
+    intent_log: Option<&IntentLog>,
     mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<AttachmentOutcome, WriteError> {
     if target_path.exists() {
@@ -257,7 +272,10 @@ fn move_attachment_by_paths_with_hook(
     );
     refuse_unrewritable(unrewritable)?;
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
-    let mut journal = MutationJournal::new(vault_root);
+    let mut journal = MutationJournal::new(vault_root, intent_log);
+    if let Err(error) = journal.begin("move attachment", &[(source_path, target_path)], &rewrites) {
+        return Err(journal.rollback(error));
+    }
     if let Err(error) = journal.move_file(MutationPhase::Asset, source_path, target_path) {
         return Err(journal.rollback(error));
     }
@@ -278,6 +296,7 @@ fn move_attachment_by_paths_with_hook(
         Ok(attachment) => attachment,
         Err(error) => return Err(journal.rollback(error)),
     };
+    journal.finish();
     let mut affected_paths = rewritten;
     affected_paths.push(source_path.to_path_buf());
     affected_paths.push(target_path.to_path_buf());
@@ -303,6 +322,7 @@ pub(super) fn move_attachment_with_failure(
         index,
         source_relative_path,
         target_relative_path,
+        None,
         after_phase,
     )
 }

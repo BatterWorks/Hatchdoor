@@ -10,6 +10,7 @@ use crate::cache::parse::content_hash;
 use crate::rename_flags::{RenameFlag, rename_flagged_at};
 use crate::vault::types::NoteEntry;
 
+use super::intent::{IntentLog, IntentRecord};
 use super::types::{MutationPhase, TextRewrite, WriteError};
 
 enum Compensation {
@@ -28,16 +29,93 @@ enum Compensation {
     },
 }
 
+/// The steps of one multi-note write, so a failure part-way can undo them.
+///
+/// The undo lives in memory and lasts as long as the process. What outlives
+/// it is the plan, which [`MutationJournal::begin`] writes to the Vault's
+/// [`IntentLog`] before the first step and which [`MutationJournal::finish`]
+/// and [`MutationJournal::rollback`] remove, so a process that dies part-way
+/// leaves the record a later activation finishes (#631, ADR-51).
 pub(super) struct MutationJournal {
     vault_root: PathBuf,
+    /// The Vault's intent log, once [`MutationJournal::begin`] has written
+    /// this journal's plan to it. Only a journal that wrote the record
+    /// removes it, so a write refused because an earlier record is still
+    /// waiting leaves that record alone.
+    recorded: Option<IntentLog>,
+    intent_log: Option<IntentLog>,
     completed: Vec<Compensation>,
+    /// Step boundaries passed, for the tests that stop the write at each.
+    #[cfg(test)]
+    steps: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The step boundary at which the tests' simulated crash happens: the
+    /// journal panics there, which unwinds past every rollback and leaves
+    /// the record behind exactly as a dead process would.
+    static CRASH_AFTER_STEPS: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Make this thread's next journals panic once they have passed `steps` step
+/// boundaries: 0 is just after the record is written, and each completed
+/// move or rewrite is one more.
+#[cfg(test)]
+pub(super) fn crash_after_steps(steps: Option<usize>) {
+    CRASH_AFTER_STEPS.set(steps);
 }
 
 impl MutationJournal {
-    pub(super) fn new(vault_root: &Path) -> Self {
+    /// `intent_log` is `None` only for a caller with no state folder, which
+    /// is a test: every Vault the runtime activates has one.
+    pub(super) fn new(vault_root: &Path, intent_log: Option<&IntentLog>) -> Self {
         Self {
             vault_root: vault_root.to_path_buf(),
+            recorded: None,
+            intent_log: intent_log.cloned(),
             completed: Vec::new(),
+            #[cfg(test)]
+            steps: 0,
+        }
+    }
+
+    /// Record the whole plan durably before its first step. A plan that
+    /// cannot be recorded is refused, and nothing has changed yet.
+    pub(super) fn begin(
+        &mut self,
+        operation: &str,
+        moves: &[(&Path, &Path)],
+        rewrites: &[TextRewrite],
+    ) -> Result<(), WriteError> {
+        if let Some(intent_log) = self.intent_log.take() {
+            intent_log.record(&IntentRecord::new(
+                &self.vault_root,
+                operation,
+                moves,
+                rewrites,
+            )?)?;
+            self.recorded = Some(intent_log);
+        }
+        self.step_boundary();
+        Ok(())
+    }
+
+    /// The operation finished: its record goes.
+    pub(super) fn finish(self) {
+        if let Some(intent_log) = &self.recorded {
+            intent_log.clear();
+        }
+    }
+
+    fn step_boundary(&mut self) {
+        #[cfg(test)]
+        {
+            let passed = self.steps;
+            self.steps += 1;
+            if CRASH_AFTER_STEPS.get() == Some(passed) {
+                panic!("simulated crash after {passed} steps");
+            }
         }
     }
 
@@ -98,6 +176,7 @@ impl MutationJournal {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
             });
+            self.step_boundary();
         }
         result.map_err(MoveError::into_write_error)
     }
@@ -167,6 +246,7 @@ impl MutationJournal {
                     applied_hash: content_hash(&rewrite.content),
                     original_modified,
                 });
+                self.step_boundary();
             }
             result?;
         }
@@ -186,7 +266,23 @@ impl MutationJournal {
         self.rollback_with_observer(cause, observer)
     }
 
+    /// Undo every completed step, then remove the record: the caller is
+    /// told the outcome, so a later activation must not finish what this
+    /// one reported as failed, even when the undo was incomplete and the
+    /// failure says so.
     fn rollback_with_observer(
+        &mut self,
+        cause: WriteError,
+        observer: impl FnMut(&'static str),
+    ) -> WriteError {
+        let error = self.undo_completed(cause, observer);
+        if let Some(intent_log) = self.recorded.take() {
+            intent_log.clear();
+        }
+        error
+    }
+
+    fn undo_completed(
         &mut self,
         cause: WriteError,
         mut observer: impl FnMut(&'static str),
@@ -382,7 +478,7 @@ fn atomic_write_bytes_if_unchanged(
 /// A conditional write that leaves the note carrying `modified` rather than
 /// the time of the write. `None` means the original time could not be read,
 /// and the note takes a fresh one as any other write would.
-fn atomic_write_if_unchanged_keeping_modified(
+pub(super) fn atomic_write_if_unchanged_keeping_modified(
     path: &Path,
     content: &str,
     expected_content_hash: &str,
@@ -400,7 +496,7 @@ fn atomic_write_if_unchanged_keeping_modified(
 
 /// Read the modification time a bookkeeping rewrite should keep. A failure
 /// only costs the note its old timestamp, so it is logged, not raised.
-fn captured_modified_time(path: &Path) -> Option<SystemTime> {
+pub(super) fn captured_modified_time(path: &Path) -> Option<SystemTime> {
     match fs::symlink_metadata(path).and_then(|metadata| metadata.modified()) {
         Ok(modified) => Some(modified),
         Err(error) => {
@@ -2511,7 +2607,7 @@ mod tests {
         let dst_dir = root.join("dst");
         fs::create_dir(&dst_dir).expect("dst dir");
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_file(MutationPhase::Asset, &binary, &dst_dir.join("photo.jpg"))
             .expect("binary asset move");
@@ -2563,7 +2659,7 @@ mod tests {
             },
         ];
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_file(
                 MutationPhase::Asset,
@@ -2601,7 +2697,7 @@ mod tests {
         let destination = root.join("taken.png");
         fs::write(&destination, "the user's own file").unwrap();
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         let cause = journal
             .move_file(MutationPhase::Asset, &source, &destination)
             .expect_err("an occupied destination refuses the move");
@@ -2626,7 +2722,7 @@ mod tests {
         fs::write(&source, "original").unwrap();
         let expected = content_hash("original");
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         // Something lands inside the directory gate standing at the source
         // name, so the gate will not clear once the move has committed.
         let result =
@@ -2662,7 +2758,7 @@ mod tests {
                 content: "rewritten second\n".to_string(),
             },
         ];
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
 
         let cause = journal
             .apply_rewrites(rewrites)
@@ -2691,7 +2787,7 @@ mod tests {
         fs::write(&note_source, "note").expect("note");
         fs::write(&asset_source, "asset").expect("asset");
         fs::write(&backlink, "original backlink").expect("backlink");
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_note(&note_source, &note_destination, &content_hash("note"))
             .expect("move note");
@@ -2756,7 +2852,7 @@ mod tests {
                 content: "rewritten second\n".to_string(),
             },
         ];
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
 
         let cause = journal
             .apply_rewrites_with_before_commit(rewrites, |path| {
@@ -2793,7 +2889,7 @@ mod tests {
         let backlink = root.join("Backlink.md");
         fs::write(&note_source, "note").expect("note");
         fs::write(&backlink, "original backlink").expect("backlink");
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_note(&note_source, &note_destination, &content_hash("note"))
             .expect("move note");

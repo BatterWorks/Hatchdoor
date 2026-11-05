@@ -251,7 +251,17 @@ that production inventory are still checked for stale paths and duplicates.
   definition and resolved Markdown root, the stored root with every symlink
   in it resolved before the retain-or-replace comparison, so the write
   layer's no-follow walk can reach it (#630); a root that cannot be resolved,
-  a missing folder, keeps its stored path. It also owns capability-specific activation/local
+  a missing folder, keeps its stored path. A block activated Active, and a
+  managed Git block the moment its checkout makes it available, first calls
+  `vault::repair_interrupted_writes` with its `IntentLog`
+  (`<registry folder>/write-intents/<vault-id>.json`), which finishes a
+  multi-note write a dead process left recorded and sweeps the Vault's
+  leftover temporary files, before the watcher starts or a write is admitted.
+  It does so once per Vault per process (`repair_once`): every later
+  activation, an edit or a quick disable and re-enable among them, can overlap
+  a write of the retiring block that owns those files (#631, ADR-51). The
+  block hands the same `IntentLog` to the mutation core through
+  `intent_log()`. It also owns capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
   independently cancellable watcher. Its `index_turn` (`VaultIndexTurn`:
   `running` or `waiting`, absent when idle) is the Vault's place in the
@@ -1642,12 +1652,14 @@ watching, and application startup.
 - `src/vault/write/attachments.rs`
 - `src/vault/write/frontmatter.rs`
 - `src/vault/write/fs_ops.rs`
+- `src/vault/write/intent.rs`
 - `src/vault/write/notes.rs`
 - `src/vault/write/paths.rs`
 - `src/vault/write/rewrites.rs`
 - `src/vault/write/tags.rs`
 - `src/vault/write/types.rs`
 - `src/vault/write/tests.rs`
+- `src/vault/write/tests/journaled.rs`
 
 **Public contract:** write functions and result/error types re-exported from
 `src/vault.rs`, including note CRUD-by-move, section/edit primitives,
@@ -1662,13 +1674,21 @@ attachment extensions, the crate-visible `normalize_note_relative_path` and
 `normalize_attachment_relative_path` shared with the mutation core so exclusion
 checks use the same separators and note extension as writes (#624),
 `WriteOutcome`, `WriteError`, and `UnrewritableNote`,
-which `WriteError::LinkRewriteUnsupported` carries (#360).
+which `WriteError::LinkRewriteUnsupported` carries (#360). Since #631 every
+multi-note write (`move_or_rename_note`, `archive_note`, `delete_note`,
+`move_attachment`, `rename_attachment`, `delete_attachment`, and the applying
+`rename_tag` and `delete_tag`) takes the Vault's `IntentLog` as its last
+argument, `None` only in tests, and the layer exports `IntentLog`,
+`repair_interrupted_writes` and its `WriteRepair` report for Vault
+activation (ADR-51).
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
 (ADR-13), and its second caller is the Vault-wide tag rename and delete in
 `tags.rs` (#242, #258).
 
-**Consumed dependencies:** vault index/types, the local filesystem, the
+**Consumed dependencies:** vault index/types, the local filesystem (and,
+for the intent record, the `write-intents/` folder beside the Vault registry,
+written with `serde_json`), the
 filesystem rename-flag capability (`src/rename_flags.rs`) that decides whether
 a commit can use `renameat2`'s flags here, and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
@@ -1686,7 +1706,11 @@ the link graph can never disagree about where a target ends (#252).
 which since #186 is the sole caller of every write primitive. The one
 exception is `list_note_attachments`, a read that lives here for its path
 handling and is called by the MCP `list_note_attachments` tool through the
-core's own `write_operation_error` translation.
+core's own `write_operation_error` translation. The other is
+`repair_interrupted_writes` (#631, ADR-51), which Vault activation in
+`src/vault_runtime.rs` calls once per Vault per process, before the Vault
+admits a write. It moves and rewrites files outside the mutation core, so
+what it changes reaches Git as an outside edit, without a write record.
 
 **Coordination paths:** `src/vault_mutation.rs`, Git write records, frontend
 write API/types, and configuration for archive or upload limits.
@@ -1752,7 +1776,8 @@ write API/types, and configuration for archive or upload limits.
   name without a namespace, or any note whose rewritten text the indexer would
   not read back as exactly the promised tags. The writes go through
   `MutationJournal` one note at a time, and a failure restores every note
-  already written.
+  already written. A process that dies part-way leaves the plan's record,
+  which the Vault's next activation finishes (ADR-51).
 - A tag delete (#258) shares the rename's handshake, frontmatter editor,
   read-back backstop and journal, with its own fingerprint. It removes one
   exact tag from frontmatter `tags` values and never edits a note body. It is
@@ -1761,6 +1786,26 @@ write API/types, and configuration for archive or upload limits.
   bodies, and the delete promises that a search for the tag then finds
   nothing. A list it empties stays as `tags: []`: the key is kept and the
   block never stripped, unlike `update_note_frontmatter` deleting its last key.
+- A multi-note write survives the process dying part-way (#631, ADR-51).
+  `MutationJournal::begin` writes the whole plan, every move and every
+  rewrite with its plan-time hash, its resulting hash and its text, to the
+  Vault's `IntentLog` and syncs it before the first step; a plan that cannot
+  be recorded is refused before anything changes. `finish` removes the
+  record on success, and `rollback` removes it once the in-process undo has
+  run, complete or not, because the caller has been told the outcome. A
+  record still present at activation belongs to a dead process:
+  `repair_interrupted_writes` leaves the Vault as it was when no step had
+  landed (removing a move's reservation folder), and otherwise rolls every
+  remaining step forward, never rewriting a note whose hash is neither the
+  plan's base nor its result, which it names as needing attention instead,
+  and rewriting no backlink while a planned move cannot be finished. A step
+  that fails with an I/O error keeps the record for the next start. `begin`
+  never replaces a record already there: the write is refused, and only a
+  journal that wrote the record removes it. The repair then moves every
+  `.<name>.hatchdoor-tmp-<32 hex>` file outside `.git` to
+  `write-intents/<vault-id>.leftovers/`, since one can hold the only copy of
+  an outside edit, and logs each action. A record from a newer schema, or
+  one that cannot be read, is logged and left in place.
 - Delete is recoverable trash; archive is move-based (ADR-11).
 - A rename, move or delete changes only a wikilink that resolves, from its
   own note's folder, uniquely to the moved note; any other link, one that
@@ -2242,8 +2287,9 @@ authoritative index and mutation lock, `VaultControlBlock::mark_snapshot_behind_
 (which labels the Vault's published SQLite snapshot stale through the cache's
 `mark_vault_snapshot_behind_write`) and `VaultControlBlock::report_write` (which
 sends the Vault ID on the watcher intent channel so the server requests Commit
-and Index turns) (#324), `AppState::vault_archive_prefix`, and the live
-settings snapshot.
+and Index turns) (#324), `VaultControlBlock::intent_log`, which every
+multi-note write receives (#631, ADR-51), `AppState::vault_archive_prefix`,
+and the live settings snapshot.
 
 **Consumers:** `handlers/vault_write.rs` (all eight routes) and
 `mcp/tools/write.rs` (every write tool standalone, and every one except

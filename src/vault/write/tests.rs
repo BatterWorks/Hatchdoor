@@ -7,6 +7,114 @@ use super::*;
 use crate::cache::parse::{content_hash, extract_tags};
 use crate::vault::types::{VaultIndex, VaultScanConfig};
 
+mod journaled;
+
+// The multi-note writes take the Vault's intent log as their last argument
+// (#631). These tests exercise what the writes do, not the record, so they
+// call them without one through these wrappers; `journaled.rs` covers the
+// record and the repair.
+
+fn move_or_rename_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &crate::vault::types::NoteEntry,
+    target_relative_path: &str,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    super::move_or_rename_note(
+        vault_root,
+        index,
+        entry,
+        target_relative_path,
+        expected_content_hash,
+        None,
+    )
+}
+
+fn archive_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &crate::vault::types::NoteEntry,
+    archive_prefix: &str,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    super::archive_note(
+        vault_root,
+        index,
+        entry,
+        archive_prefix,
+        expected_content_hash,
+        None,
+    )
+}
+
+fn delete_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &crate::vault::types::NoteEntry,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    super::delete_note(vault_root, index, entry, expected_content_hash, None)
+}
+
+fn move_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    target_relative_path: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    super::move_attachment(
+        vault_root,
+        index,
+        source_relative_path,
+        target_relative_path,
+        None,
+    )
+}
+
+fn rename_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    new_filename: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    super::rename_attachment(vault_root, index, source_relative_path, new_filename, None)
+}
+
+fn delete_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    super::delete_attachment(vault_root, index, source_relative_path, None)
+}
+
+fn rename_tag(
+    vault_root: &Path,
+    index: &VaultIndex,
+    old_tag: &str,
+    new_tag: &str,
+    expected_plan_hash: Option<&str>,
+) -> Result<TagRename, TagRenameError> {
+    super::rename_tag(
+        vault_root,
+        index,
+        old_tag,
+        new_tag,
+        expected_plan_hash,
+        None,
+    )
+}
+
+fn delete_tag(
+    vault_root: &Path,
+    index: &VaultIndex,
+    tag: &str,
+    expected_plan_hash: Option<&str>,
+) -> Result<TagDelete, TagDeleteError> {
+    super::delete_tag(vault_root, index, tag, expected_plan_hash, None)
+}
+
 fn build(root: &Path) -> VaultIndex {
     VaultIndex::build(root).expect("build index")
 }

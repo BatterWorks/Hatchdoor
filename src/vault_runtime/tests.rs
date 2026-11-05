@@ -3940,3 +3940,105 @@ async fn a_definition_edit_drops_the_retained_asset_catalogue() {
     assert!(vault.runtime().indexed_assets().is_none());
     assert!(!vault.on_demo("images/visible.png"));
 }
+
+/// #631: a record a dead process left is finished when its Vault is
+/// activated, before the watcher starts or a write can reach it, and the
+/// temporary files that process left are removed.
+#[test]
+fn activating_a_vault_finishes_the_write_a_dead_process_left() {
+    use crate::cache::parse::content_hash;
+
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("vault");
+    // The rename had moved the note and rewritten one backlink of two.
+    std::fs::write(vault_path.join("Hub Renamed.md"), "# Hub\n").expect("moved note");
+    std::fs::write(vault_path.join("a.md"), "[[Hub Renamed]]\n").expect("rewritten");
+    std::fs::write(vault_path.join("b.md"), "[[Hub]]\n").expect("not yet");
+    let leftover = ".b.md.hatchdoor-tmp-0123456789abcdef0123456789abcdef";
+    std::fs::write(vault_path.join(leftover), "[[Hub Renamed]]\n").expect("leftover");
+    let one = add_local_vault(&registry, &empty, "Notes", vault_path.clone());
+    let vault_id = vault_id_named(&one, "Notes");
+    let record = directory
+        .path()
+        .join("state/write-intents")
+        .join(format!("{vault_id}.json"));
+    std::fs::create_dir_all(record.parent().expect("folder")).expect("folder");
+    let rewrite = |path: &str, original: &str| {
+        serde_json::json!({
+            "path": path,
+            "original_hash": content_hash(original),
+            "applied_hash": content_hash("[[Hub Renamed]]\n"),
+            "content": "[[Hub Renamed]]\n",
+        })
+    };
+    std::fs::write(
+        &record,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "operation": "move note",
+            "moves": [{"source": "Hub.md", "destination": "Hub Renamed.md"}],
+            "rewrites": [rewrite("a.md", "[[Hub]]\n"), rewrite("b.md", "[[Hub]]\n")],
+        }))
+        .expect("record json"),
+    )
+    .expect("record");
+
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &one);
+
+    assert!(collection.runtime(vault_id).is_some());
+    assert_eq!(
+        std::fs::read_to_string(vault_path.join("b.md")).expect("b"),
+        "[[Hub Renamed]]\n"
+    );
+    assert!(!record.exists(), "the record is removed once finished");
+    assert!(!vault_path.join(leftover).exists());
+}
+
+/// An edit of a running Vault rotates its control block while a write of
+/// the retiring block may still be in flight. That write's temporary files
+/// and record are not leftovers, so the rotation repairs nothing.
+#[test]
+fn editing_a_running_vault_does_not_sweep_its_in_flight_files() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("vault");
+    let one = add_local_vault(&registry, &empty, "Notes", vault_path.clone());
+    let vault_id = vault_id_named(&one, "Notes");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &one);
+    let in_flight = ".a.md.hatchdoor-tmp-0123456789abcdef0123456789abcdef";
+    std::fs::write(vault_path.join(in_flight), "being written").expect("in flight");
+
+    let edited = registry
+        .edit(
+            one.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Renamed".to_string(),
+                source: RegistryVaultSource::Local {
+                    path: vault_path.clone(),
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("rename the Vault");
+    collection.reconcile(&registry, &edited);
+
+    assert!(vault_path.join(in_flight).exists());
+}
