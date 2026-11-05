@@ -64,6 +64,33 @@ pub(crate) const BATCH_MAX_READ_ITEMS: usize = 50;
 /// expensive per item than a read.
 pub(crate) const BATCH_MAX_WRITE_ITEMS: usize = 20;
 
+/// Legacy `initialize` handshakes one bearer token may open per rolling
+/// minute (#632). Each opens a session that holds memory until it closes, so
+/// `initialize` has its own budget beside the tool quota.
+pub(crate) const INITIALIZES_PER_MINUTE: usize = 60;
+
+/// Live legacy sessions one bearer token may hold at once (#632).
+pub(crate) const MAX_SESSIONS_PER_TOKEN: usize = 32;
+
+/// Live legacy sessions the instance holds at once, across tokens (#632).
+/// Today the instance has one MCP token, so the per-token cap binds first;
+/// this keeps the total bounded should a second token ever exist.
+pub(crate) const MAX_SESSIONS: usize = 64;
+
+/// How long a legacy session may go without a second request before it is
+/// closed to make room (#632). A real client sends
+/// `notifications/initialized` at once; one that never does held a session
+/// for rmcp's whole five-minute keep-alive.
+pub(crate) const UNCONFIRMED_SESSION_GRACE: Duration = Duration::from_secs(30);
+
+/// How often the transport closes silent sessions without waiting for the
+/// next handshake to do it.
+pub(crate) const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Retry-After advertised when the session caps are full: a session frees
+/// when its client closes it, goes silent past the grace above, or idles out.
+pub(crate) const SESSION_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// How the transport middleware classified one POST body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestClass {
@@ -267,6 +294,136 @@ impl RateLimiter {
         let guard = self.try_acquire(RequestClass::ToolCall).await?;
         self.check_quota(token, std::time::Instant::now())?;
         Ok(guard)
+    }
+}
+
+/// The legacy sessions this transport opened, by session ID (#632). rmcp
+/// keeps the sessions themselves and has no cap; this table attributes each to
+/// the token that opened it so the caps above can hold. It is pruned against
+/// rmcp's own list of live sessions, so a session rmcp closed (by `DELETE`,
+/// idle timeout or shutdown) stops counting without any notice from rmcp.
+#[derive(Default)]
+pub struct SessionRegistry {
+    table: Mutex<SessionTable>,
+}
+
+#[derive(Default)]
+struct SessionTable {
+    initializes: HashMap<Arc<str>, VecDeque<std::time::Instant>>,
+    sessions: HashMap<String, TrackedSession>,
+    /// Handshakes admitted and still running, so concurrent ones cannot all
+    /// pass the cap check before any of them is recorded.
+    pending: HashMap<Arc<str>, usize>,
+}
+
+struct TrackedSession {
+    token: Arc<str>,
+    opened: std::time::Instant,
+    /// Set once a request after `initialize` names the session.
+    confirmed: bool,
+}
+
+/// One admitted handshake's place under the caps, held until its session is
+/// recorded or the handshake fails. Dropping it gives the place back.
+pub struct SessionReservation {
+    registry: Arc<SessionRegistry>,
+    token: Arc<str>,
+}
+
+impl Drop for SessionReservation {
+    fn drop(&mut self) {
+        let mut table = self.registry.table.lock().expect("session table");
+        if let Some(pending) = table.pending.get_mut(&self.token) {
+            *pending = pending.saturating_sub(1);
+            if *pending == 0 {
+                table.pending.remove(&self.token);
+            }
+        }
+    }
+}
+
+impl SessionReservation {
+    /// Record the session the handshake opened.
+    pub fn opened(self, session_id: &str, now: std::time::Instant) {
+        let mut table = self.registry.table.lock().expect("session table");
+        table.sessions.insert(
+            session_id.to_string(),
+            TrackedSession {
+                token: self.token.clone(),
+                opened: now,
+                confirmed: false,
+            },
+        );
+    }
+}
+
+impl SessionRegistry {
+    /// Forget every session `is_live` says rmcp no longer holds, and hand back
+    /// the IDs of sessions that never sent a second request within
+    /// [`UNCONFIRMED_SESSION_GRACE`], already forgotten here, for the caller
+    /// to close in rmcp.
+    pub fn prune(&self, is_live: impl Fn(&str) -> bool, now: std::time::Instant) -> Vec<String> {
+        let mut table = self.table.lock().expect("session table");
+        table.sessions.retain(|id, _| is_live(id));
+        let silent: Vec<String> = table
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                !session.confirmed
+                    && now.duration_since(session.opened) >= UNCONFIRMED_SESSION_GRACE
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &silent {
+            table.sessions.remove(id);
+        }
+        silent
+    }
+
+    /// Admit one legacy `initialize` on `token`, or say how long to wait:
+    /// it must fit the token's handshake budget and both session caps. Call
+    /// [`Self::prune`] first so closed sessions do not count.
+    pub fn admit(
+        self: &Arc<Self>,
+        token: &McpBearerToken,
+        now: std::time::Instant,
+    ) -> Result<SessionReservation, Duration> {
+        let mut table = self.table.lock().expect("session table");
+        let held_by_token = table
+            .sessions
+            .values()
+            .filter(|session| session.token == token.0)
+            .count()
+            + table.pending.get(&token.0).copied().unwrap_or(0);
+        let held = table.sessions.len() + table.pending.values().sum::<usize>();
+        if held_by_token >= MAX_SESSIONS_PER_TOKEN || held >= MAX_SESSIONS {
+            return Err(SESSION_RETRY_AFTER);
+        }
+        let window = table.initializes.entry(token.0.clone()).or_default();
+        while let Some(&oldest) = window.front() {
+            if now.duration_since(oldest) < QUOTA_WINDOW {
+                break;
+            }
+            window.pop_front();
+        }
+        if window.len() >= INITIALIZES_PER_MINUTE {
+            let oldest = window[0];
+            return Err(QUOTA_WINDOW.saturating_sub(now.duration_since(oldest)));
+        }
+        window.push_back(now);
+        *table.pending.entry(token.0.clone()).or_default() += 1;
+        Ok(SessionReservation {
+            registry: Arc::clone(self),
+            token: token.0.clone(),
+        })
+    }
+
+    /// Note that a request after `initialize` named `session_id`.
+    pub fn confirm(&self, session_id: &str) {
+        let mut table = self.table.lock().expect("session table");
+        if let Some(session) = table.sessions.get_mut(session_id) {
+            session.confirmed = true;
+        }
     }
 }
 
@@ -490,6 +647,138 @@ mod tests {
             .check_quota_units(&t, now, 3)
             .expect("the three units still left are all there");
         assert!(limiter.check_quota(&t, now).is_err(), "and now it is full");
+    }
+
+    fn open_sessions(
+        registry: &Arc<SessionRegistry>,
+        t: &McpBearerToken,
+        prefix: &str,
+        count: usize,
+        now: std::time::Instant,
+    ) {
+        for i in 0..count {
+            registry
+                .admit(t, now)
+                .expect("within the caps")
+                .opened(&format!("{prefix}{i}"), now);
+        }
+    }
+
+    #[test]
+    fn sessions_past_the_per_token_cap_are_refused_until_one_closes() {
+        let registry = Arc::new(SessionRegistry::default());
+        let t = token("tok");
+        let start = std::time::Instant::now();
+        open_sessions(&registry, &t, "s", MAX_SESSIONS_PER_TOKEN, start);
+        for i in 0..MAX_SESSIONS_PER_TOKEN {
+            registry.confirm(&format!("s{i}"));
+        }
+        let later = start + QUOTA_WINDOW;
+        assert_eq!(
+            registry.admit(&t, later).err(),
+            Some(SESSION_RETRY_AFTER),
+            "the cap holds"
+        );
+        assert!(
+            registry.admit(&token("other"), later).is_ok(),
+            "another token has its own cap"
+        );
+        // rmcp closed one (a DELETE, or its idle timeout): it stops counting.
+        let closed = registry.prune(|id| id != "s0", later);
+        assert!(
+            closed.is_empty(),
+            "confirmed sessions are never closed here"
+        );
+        assert!(registry.admit(&t, later).is_ok());
+    }
+
+    #[test]
+    fn the_instance_wide_cap_holds_across_tokens() {
+        let registry = Arc::new(SessionRegistry::default());
+        let start = std::time::Instant::now();
+        for n in 0..(MAX_SESSIONS / MAX_SESSIONS_PER_TOKEN) {
+            open_sessions(
+                &registry,
+                &token(&format!("t{n}")),
+                &format!("t{n}-"),
+                MAX_SESSIONS_PER_TOKEN,
+                start,
+            );
+        }
+        assert_eq!(
+            registry.admit(&token("fresh"), start).err(),
+            Some(SESSION_RETRY_AFTER)
+        );
+    }
+
+    #[test]
+    fn a_session_that_never_sends_a_second_request_is_closed_after_the_grace() {
+        let registry = Arc::new(SessionRegistry::default());
+        let t = token("tok");
+        let start = std::time::Instant::now();
+        open_sessions(&registry, &t, "s", 2, start);
+        registry.confirm("s1");
+        assert!(
+            registry
+                .prune(|_| true, start + Duration::from_secs(1))
+                .is_empty(),
+            "still inside the grace"
+        );
+        assert_eq!(
+            registry.prune(|_| true, start + UNCONFIRMED_SESSION_GRACE),
+            vec!["s0".to_string()],
+            "only the silent one is handed back to close"
+        );
+        assert!(
+            registry
+                .prune(|_| true, start + UNCONFIRMED_SESSION_GRACE)
+                .is_empty(),
+            "and it is forgotten here"
+        );
+    }
+
+    #[test]
+    fn initialize_has_its_own_per_minute_budget() {
+        let registry = Arc::new(SessionRegistry::default());
+        let t = token("tok");
+        let start = std::time::Instant::now();
+        for i in 0..INITIALIZES_PER_MINUTE {
+            // Each handshake fails, so no session is held and only the
+            // handshake budget can refuse.
+            drop(
+                registry
+                    .admit(&t, start + Duration::from_millis(i as u64))
+                    .expect("within budget"),
+            );
+        }
+        let wait = registry
+            .admit(&t, start + Duration::from_secs(10))
+            .err()
+            .expect("the handshake past the budget is refused");
+        assert_eq!(wait, QUOTA_WINDOW - Duration::from_secs(10));
+        assert!(
+            registry.admit(&t, start + QUOTA_WINDOW).is_ok(),
+            "the window rolls"
+        );
+    }
+
+    #[test]
+    fn concurrent_handshakes_cannot_all_pass_the_cap_check() {
+        let registry = Arc::new(SessionRegistry::default());
+        let t = token("tok");
+        let now = std::time::Instant::now();
+        let held: Vec<_> = (0..MAX_SESSIONS_PER_TOKEN)
+            .map(|_| registry.admit(&t, now).expect("within the cap"))
+            .collect();
+        assert!(
+            registry.admit(&t, now).is_err(),
+            "in-flight handshakes count"
+        );
+        drop(held);
+        assert!(
+            registry.admit(&t, now).is_ok(),
+            "a failed handshake gives its place back"
+        );
     }
 
     #[test]

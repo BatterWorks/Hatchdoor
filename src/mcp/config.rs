@@ -44,6 +44,12 @@ pub const MAX_ORDINARY_MCP_REQUEST_BYTES: u64 = 128 * 1024;
 /// JSON-RPC framing beyond the encoded attachment field itself.
 const MCP_REQUEST_OVERHEAD_BYTES: u64 = 64 * 1024;
 
+/// The most decoded bytes a base64 reply can carry (#632): base64 grows bytes
+/// by 4/3, and a reply is limited to `MAX_JSONRPC_RESPONSE_BYTES`, less the
+/// same framing allowance a request gets. About 5.95 MiB.
+pub const MAX_REPLY_BASE64_BYTES: u64 =
+    (super::protocol::MAX_JSONRPC_RESPONSE_BYTES as u64 - MCP_REQUEST_OVERHEAD_BYTES) / 4 * 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpConfig {
     pub enabled: bool,
@@ -155,12 +161,22 @@ impl McpConfig {
         Ok(())
     }
 
+    /// The base64 cap every base64 tool applies, on decoded bytes (#632): the
+    /// smaller of `HATCHDOOR_MCP_MAX_BASE64_BYTES` and [`MAX_REPLY_BASE64_BYTES`].
+    /// The setting accepts up to 512 MiB, but a reply cannot carry more than
+    /// the latter, so `get_attachment` refuses a larger file with its
+    /// structured code before reading it, and `get_attachment_import_config`
+    /// and `import_attachment` use the same number so it is advertised once.
+    pub fn base64_limit(&self) -> u64 {
+        self.max_base64_bytes.min(MAX_REPLY_BASE64_BYTES)
+    }
+
     /// Bound the transport body from the capability snapshot selected for this
     /// request. Read-only MCP never needs inline attachment bytes, while write
-    /// mode admits the configured decoded base64 allowance plus wire framing.
+    /// mode admits the effective decoded base64 allowance plus wire framing.
     pub fn request_body_limit(&self) -> usize {
         let attachment_request_limit = self
-            .max_base64_bytes
+            .base64_limit()
             .saturating_mul(4)
             .div_ceil(3)
             .saturating_add(MCP_REQUEST_OVERHEAD_BYTES);

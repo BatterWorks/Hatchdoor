@@ -159,12 +159,19 @@ async fn dispatch_tools_call(
         }
         "refresh_vault" if config.write_enabled => read::refresh_vault_tool(state, arguments).await,
         write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
-            let vault = write::scoped_vault(&state, &arguments, config)?;
-            // This is the same per-Vault mutation lock used by the V1 HTTP
-            // adapter.  The legacy instance-wide AppState lock deliberately
-            // does not participate in this scoped path.
-            let _guard = write::acquire_mutation(&vault).await?;
-            write::dispatch_write_tool(state, &vault, name, arguments, config).await
+            // One block, so a refusal from resolving or locking the Vault (an
+            // unknown, disabled or read-only Vault) reaches the tool-level
+            // rendering below like the tool's own failures do, as a
+            // structured tool error rather than a JSON-RPC error (#632).
+            async {
+                let vault = write::scoped_vault(&state, &arguments, config)?;
+                // This is the same per-Vault mutation lock used by the V1 HTTP
+                // adapter.  The legacy instance-wide AppState lock deliberately
+                // does not participate in this scoped path.
+                let _guard = write::acquire_mutation(&vault).await?;
+                write::dispatch_write_tool(state, &vault, name, arguments, config).await
+            }
+            .await
         }
         write_op if write::WRITE_OPS.contains(&write_op) => {
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
@@ -277,7 +284,9 @@ pub(super) async fn dispatch_read_tool(
         "list_note_attachments" => read::list_note_attachments_tool(state, arguments).await,
         // Fetching an attachment's bytes is a read, like list_note_attachments;
         // it needs `config` for the base64 encoding's size cap.
-        "get_attachment" => read::get_attachment_tool(state, arguments, config).await,
+        "get_attachment" => {
+            read::get_attachment_tool(state, arguments, config, config.base64_limit()).await
+        }
         // Reading a Note's frontmatter projection is a read, like reading the
         // Note itself.
         "get_frontmatter" => read::get_frontmatter_tool(state, arguments).await,

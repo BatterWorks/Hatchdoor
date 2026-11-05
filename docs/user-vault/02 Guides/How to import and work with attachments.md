@@ -24,7 +24,7 @@ Every upload, from the browser or an agent, is held to the same file types and t
 | --- | --- | --- |
 | Extensions | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | |
 | HTTP upload (Web UI, upload links, and agents holding a token) | | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, 10 MiB |
-| Agent downloads (download links and `get_attachment` base64), and the MCP base64 upload fallback `import_attachment` | | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded |
+| Agent downloads (download links and `get_attachment` base64), and the MCP base64 upload fallback `import_attachment` | | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded; the base64 tools stop at about 5.95 MiB even when it is set higher |
 
 You can change both limits in **Settings → Uploads** without a restart. See [[Settings and environment variables reference]].
 
@@ -75,7 +75,7 @@ To re-import over a note that already exists, pass `overwrite: true` and `expect
 | `encoding` | Returns | When to use it |
 | --- | --- | --- |
 | `url` (default) | `content.download_url`, a download link, and `content.expires_at` | The default. The link is a full address that carries its own credential, so fetch it as it is, for example `curl -o manual.pdf '<download_url>'`, with no token. It works for that one file, any number of times, for five minutes. Call `get_attachment` again for a new one. It is held to the same size ceiling and rate quota as the base64 path (see [[The security model]]). |
-| `base64` | `content.content`, the bytes inline | The fallback, for a client that cannot make an HTTP request outside MCP. Limited by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` as `import_attachment`. A file over it is refused with its measured size, never cut short. |
+| `base64` | `content.content`, the bytes inline | The fallback, for a client that cannot make an HTTP request outside MCP. Limited by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` as `import_attachment`, and never above about 5.95 MiB, what one reply can carry. A file over it is refused with its measured size, never cut short. |
 
 `get_attachment` is a read. It works whenever MCP is on, with write mode on or off.
 
