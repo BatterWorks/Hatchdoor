@@ -44,8 +44,12 @@ describe("buildContentWithFrontmatter", () => {
   it("does not remove an independent byte order mark from the note body", () => {
     const content = "\uFEFF---\ntitle: Old\n---\n\uFEFFBody";
     const { body } = splitFrontmatter(content);
-    const entries = [{ id: "title", key: "title", value: "New", kind: "text" as const }];
-    expect(buildContentWithFrontmatter(entries, body, true)).toBe("\uFEFF---\ntitle: New\n---\n\uFEFFBody");
+    const entries = [
+      { id: "title", key: "title", value: "New", kind: "text" as const },
+    ];
+    expect(buildContentWithFrontmatter(entries, body, true)).toBe(
+      "\uFEFF---\ntitle: New\n---\n\uFEFFBody",
+    );
   });
 
   it("keeps the byte order mark at the beginning through property edits", () => {
