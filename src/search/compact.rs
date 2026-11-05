@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
-use crate::cache::keyword::{is_bigram_char, run_units};
+use crate::cache::keyword::{is_bigram_char, is_trailing_jamo, run_tokens};
 use crate::cache::parse::fts_query_terms;
 use crate::chunk::is_fence_marker;
 use crate::vault_registry::VaultId;
@@ -152,23 +152,15 @@ fn tokens(chars: &[(usize, char)]) -> Vec<Token> {
     let mut index = 0;
     while index < chars.len() {
         if is_bigram_char(chars[index].1) {
-            let units = run_units(&plain, index);
-            for pair in units.windows(2) {
+            for token in run_tokens(&plain, index) {
+                index = token.end;
                 tokens.push(Token {
-                    start: pair[0].0,
-                    end: pair[1].1,
-                    folded: fold_run(pair[0].0, pair[1].1),
-                    run_len: None,
+                    start: token.start,
+                    end: token.end,
+                    folded: fold_run(token.start, token.end),
+                    run_len: token.run_len,
                 });
             }
-            let (start, end) = units[units.len() - 1];
-            tokens.push(Token {
-                start,
-                end,
-                folded: fold_run(start, end),
-                run_len: Some(units.len()),
-            });
-            index = end;
             continue;
         }
         if !is_letter_or_digit(chars[index].1) {
@@ -365,7 +357,7 @@ fn joined(chars: &[(usize, char)], at: usize) -> bool {
         // The tag characters that spell a subdivision flag.
         || ('\u{E0020}'..='\u{E007F}').contains(&current)
         // The vowel and final of a Hangul syllable stored decomposed.
-        || ('\u{1160}'..='\u{11FF}').contains(&current)
+        || is_trailing_jamo(current)
         || splits_a_flag
 }
 

@@ -782,14 +782,13 @@ fn error(vault_id: Option<VaultId>, code: &str, message: &str, retryable: bool) 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Condvar, mpsc};
     use std::time::Duration;
-    use unicode_normalization::UnicodeNormalization;
 
     use tempfile::TempDir;
+    use unicode_normalization::UnicodeNormalization;
 
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};

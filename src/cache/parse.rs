@@ -413,9 +413,10 @@ pub fn build_fts_query(input: &str) -> Option<String> {
 }
 
 /// Keyword work is bounded before SQLite sees it. Keep first-occurrence order
-/// so the compact snippet uses exactly the terms the query searches. Terms
-/// come back NFC-normalised, and a Thai mark stays inside its term, because
-/// the keyword index treats both that way (#634).
+/// so the compact snippet uses exactly the terms the query searches. The
+/// query is NFC-normalised before it is split, a Thai mark stays inside its
+/// term, and a CJK, kana, Hangul or Thai term keeps at most 24 characters,
+/// because the keyword index reads text the same way (#634).
 pub fn fts_query_terms(input: &str) -> Vec<String> {
     const MAX_QUERY_BYTES: usize = 8 * 1024;
     const MAX_QUERY_TERMS: usize = 64;
@@ -425,11 +426,13 @@ pub fn fts_query_terms(input: &str) -> Vec<String> {
     }
     let mut seen = HashSet::new();
     input[..end]
+        .nfc()
+        .collect::<String>()
         .split(|ch: char| {
             !(ch.is_alphanumeric() || ch == '_' || ch == '-' || super::keyword::is_bigram_char(ch))
         })
         .filter(|token| !token.is_empty())
-        .map(|token| token.nfc().collect::<String>())
+        .map(|token| super::keyword::bounded_query_term(token).to_owned())
         .filter(|token| seen.insert(token.to_lowercase()))
         .take(MAX_QUERY_TERMS)
         .collect()
@@ -448,6 +451,8 @@ mod tests {
         assert_eq!(fts_query_terms("ที่นี่ ok"), ["ที่นี่", "ok"]);
         let decomposed = "한국어".nfd().collect::<String>();
         assert_eq!(fts_query_terms(&decomposed), ["한국어"]);
+        // Composed before splitting, so a decomposed accent stays in its word.
+        assert_eq!(fts_query_terms("tie\u{302}\u{301}ng Việt"), ["tiếng", "Việt"]);
     }
 
     #[test]

@@ -133,7 +133,7 @@ impl SqliteCache {
         if !matches!(existing_schema_version(&conn)?, SchemaState::Previous) {
             return Ok(());
         }
-        match migrate_from_previous_schema(&mut conn, embedding_dim) {
+        match migrate_from_previous_schema(&mut conn) {
             Ok(()) => {
                 info!(
                     old = PREVIOUS_SCHEMA_VERSION,

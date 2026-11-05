@@ -26,7 +26,9 @@ pub(crate) const THAI_MARKS: &str = "\u{0E31}\u{0E34}\u{0E35}\u{0E36}\u{0E37}\u{
 
 /// Whether `ch` belongs to a script the keyword index splits into pairs:
 /// CJK ideographs, kana, Hangul and Thai. Punctuation in those blocks, such
-/// as `、` or `・`, is not included and separates runs as any other does.
+/// as `、` or `・`, is not included and separates runs as any other does, and
+/// so is a combining mark other than [`THAI_MARKS`], such as a kana voicing
+/// mark with no precomposed form: the tokenizer splits at those too.
 pub(crate) fn is_bigram_char(ch: char) -> bool {
     let in_block = matches!(
         u32::from(ch),
@@ -49,12 +51,37 @@ pub(crate) fn is_bigram_char(ch: char) -> bool {
             | 0xFFA0..=0xFFDC // halfwidth Hangul
             | 0x20000..=0x3FFFF // CJK extensions B and later
     );
-    in_block && (ch.is_alphanumeric() || is_combining_mark(ch))
+    in_block && (THAI_MARKS.contains(ch) || (ch.is_alphanumeric() && !is_combining_mark(ch)))
+}
+
+/// The most characters of CJK, kana, Hangul or Thai one query word keeps.
+/// Every character beyond the first is one more token the phrase must look
+/// up, so an unbroken 8 KB run would cost thousands of lookups; 24
+/// characters already pin a phrase down.
+const MAX_QUERY_RUN_CHARS: usize = 24;
+
+/// `term`, cut after [`MAX_QUERY_RUN_CHARS`] characters when it holds CJK,
+/// kana, Hangul or Thai, never between a character and its marks.
+pub(crate) fn bounded_query_term(term: &str) -> &str {
+    if !term.chars().any(is_bigram_char) {
+        return term;
+    }
+    let mut kept = 0;
+    for (at, ch) in term.char_indices() {
+        if is_combining_mark(ch) || is_trailing_jamo(ch) {
+            continue;
+        }
+        if kept == MAX_QUERY_RUN_CHARS {
+            return &term[..at];
+        }
+        kept += 1;
+    }
+    term
 }
 
 /// A Hangul vowel or final consonant jamo, which renders as one syllable with
 /// the jamo or syllable before it.
-fn is_trailing_jamo(ch: char) -> bool {
+pub(crate) fn is_trailing_jamo(ch: char) -> bool {
     matches!(u32::from(ch), 0x1160..=0x11FF | 0xD7B0..=0xD7FF)
 }
 
@@ -65,11 +92,44 @@ fn is_hangul(ch: char) -> bool {
     )
 }
 
+/// One token the keyword index makes from a run: a pair of neighbouring
+/// characters, or the run's last character alone. Character indices, end
+/// exclusive.
+pub(crate) struct RunToken {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    /// For the run's lone last character, the run's length in characters.
+    pub(crate) run_len: Option<usize>,
+}
+
+/// The tokens of the run of [`is_bigram_char`] characters starting at
+/// `start`, in order: every overlapping pair, then the last character alone.
+/// The last token's `end` is where the run stops.
+pub(crate) fn run_tokens(chars: &[char], start: usize) -> Vec<RunToken> {
+    let units = run_units(chars, start);
+    let mut tokens = units
+        .windows(2)
+        .map(|pair| RunToken {
+            start: pair[0].0,
+            end: pair[1].1,
+            run_len: None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(&(start, end)) = units.last() {
+        tokens.push(RunToken {
+            start,
+            end,
+            run_len: Some(units.len()),
+        });
+    }
+    tokens
+}
+
 /// The units of the run of [`is_bigram_char`] characters starting at
 /// `start`, as `(start, end)` character indices, end exclusive. A unit is one
 /// character and the marks, or Hangul jamo, that render with it, so a pair
 /// never begins with a mark and a decomposed syllable counts once.
-pub(crate) fn run_units(chars: &[char], start: usize) -> Vec<(usize, usize)> {
+fn run_units(chars: &[char], start: usize) -> Vec<(usize, usize)> {
     let mut units: Vec<(usize, usize)> = Vec::new();
     let mut index = start;
     while index < chars.len() && is_bigram_char(chars[index]) {
@@ -125,21 +185,19 @@ fn split_runs(text: &str, query: bool) -> (String, bool) {
             index += 1;
             continue;
         }
-        let units = run_units(&chars, index);
-        let end = units.last().map_or(index + 1, |unit| unit.1);
+        let tokens = run_tokens(&chars, index);
+        let end = tokens.last().map_or(index + 1, |token| token.end);
         let ends_term = query && !chars[end..].iter().any(|ch| ch.is_alphanumeric());
         out.push(' ');
-        for pair in units.windows(2) {
-            out.extend(&chars[pair[0].0..pair[1].1]);
+        for token in &tokens {
+            let lone_last_of_longer_run = token.run_len.is_some_and(|len| len > 1);
+            if ends_term && lone_last_of_longer_run {
+                continue;
+            }
+            out.extend(&chars[token.start..token.end]);
             out.push(' ');
         }
-        if !(ends_term && units.len() > 1)
-            && let Some(&(start, end)) = units.last()
-        {
-            out.extend(&chars[start..end]);
-            out.push(' ');
-        }
-        prefix = ends_term && units.len() == 1;
+        prefix = ends_term && tokens.len() == 1;
         index = end;
     }
     (out, prefix)
@@ -195,6 +253,12 @@ mod tests {
         let chars = "한국".nfd().collect::<Vec<_>>();
         assert_eq!(chars.len(), 6);
         assert_eq!(run_units(&chars, 0), [(0, 3), (3, 6)]);
+        let tokens = run_tokens(&chars, 0);
+        let spans = tokens
+            .iter()
+            .map(|token| (token.start, token.end, token.run_len))
+            .collect::<Vec<_>>();
+        assert_eq!(spans, [(0, 6, None), (3, 6, Some(2))]);
     }
 
     #[test]
@@ -212,6 +276,27 @@ mod tests {
         assert_eq!(
             keyword_query_phrase(&"한국어".nfd().collect::<String>()),
             ("한국 국어".into(), false)
+        );
+    }
+
+    #[test]
+    fn a_long_query_run_is_cut_at_a_character_boundary() {
+        let long = "漢".repeat(40);
+        assert_eq!(bounded_query_term(&long), "漢".repeat(24));
+        assert_eq!(bounded_query_term(&"x".repeat(40)), "x".repeat(40));
+        let thai = "ที่".repeat(30);
+        assert_eq!(
+            bounded_query_term(&thai),
+            "ที่".repeat(24),
+            "a mark stays with its letter"
+        );
+    }
+
+    #[test]
+    fn a_kana_voicing_mark_with_no_precomposed_form_separates_runs() {
+        assert_eq!(
+            keyword_index_text("カ\u{309A}キ").as_deref(),
+            Some(" カ \u{309A} キ ")
         );
     }
 

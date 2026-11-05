@@ -2552,8 +2552,9 @@ The shared frontmatter parser accepts a leading UTF-8 BOM while retaining byte
 offsets into the original file. It refuses inner YAML over 16,384 bytes before
 parsing and reports an unclosed block as invalid. `fts_query_terms` uses at most
 8,192 bytes and 64 case-insensitively distinct terms, in first-occurrence order,
-each NFC-normalised; query construction and compact snippets share those same
-bounded terms.
+NFC-normalised before splitting, and keeps at most 24 characters of a term
+holding CJK, kana, Hangul or Thai; query construction and compact snippets
+share those same bounded terms.
 
 The crate-private `keyword` module decides how the keyword index reads CJK
 ideographs, kana, Hangul and Thai (#634). `keyword_index_text` rewrites each
@@ -2608,11 +2609,11 @@ and embedder identity/dimensions.
   until an Index turn's own model check succeeds. The current migration
   (12 to 13, #634) writes no vector table: it fills `keyword_text` from the
   stored chunk text and rebuilds only the keyword index. It commits only once
-  the vector row counts per Vault are unchanged, the keyword index holds one
-  entry per chunk and passes FTS5's `integrity-check`, and `PRAGMA
-  integrity_check` passes; any failure wipes and rebuilds. A migration that
-  rewrites vectors adds ADR-50's identical-vector, Vault-mapping and
-  self-retrieval checks. Seeding a
+  ADR-50's row-count, identical-vector (a BLAKE3 digest of every vector row
+  before and after), Vault-mapping and self-retrieval checks pass, the
+  keyword index holds one entry per chunk and passes FTS5's
+  `integrity-check`, and `PRAGMA integrity_check` passes; any failure wipes
+  and rebuilds. Seeding a
   candidate never copies a snapshot's recorded `schema_version` over the
   candidate's own. The next schema bump replaces the migration rather than
   adding a second one.

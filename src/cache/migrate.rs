@@ -9,8 +9,9 @@
 //! a new `vault_chunks.keyword_text` column (`keyword::keyword_index_text`).
 //! The migration fills that column from the chunk text the cache already
 //! holds and rebuilds only the keyword index from it. No vector table is
-//! written, so their rows cannot change; the row-count check proves no
-//! cascade touched them.
+//! written, and ADR-50's checks prove it: the rows per Vault, a BLAKE3 digest
+//! of every vector row, every row's Vault against its chunk's, and a sample
+//! of vectors finding themselves.
 
 use std::collections::BTreeMap;
 
@@ -21,22 +22,41 @@ use super::schema::{SCHEMA_VERSION, vault_chunk_keyword_index_sql};
 
 pub(super) const PREVIOUS_SCHEMA_VERSION: &str = "12";
 
-const VECTOR_TABLES: [&str; 2] = ["vault_chunk_vectors", "vault_chunk_vectors_demoted"];
+/// How many stored vectors per Vault and table must find themselves by KNN.
+const SELF_RETRIEVAL_SAMPLE: usize = 16;
+
+/// One per-Vault vector table.
+struct VectorTable {
+    name: &'static str,
+    /// Has the `layer` partition key, which a self-retrieval query must pin.
+    partitioned: bool,
+}
+
+const VECTOR_TABLES: [VectorTable; 2] = [
+    VectorTable {
+        name: "vault_chunk_vectors",
+        partitioned: false,
+    },
+    VectorTable {
+        name: "vault_chunk_vectors_demoted",
+        partitioned: true,
+    },
+];
 
 /// Run the whole migration in one transaction and commit only after every
 /// check has passed. The error names the step or check that failed. On error
 /// the caller wipes the cache rather than trusting the rollback (ADR-50).
-pub(super) fn migrate_from_previous_schema(
-    conn: &mut Connection,
-    _embedding_dim: usize,
-) -> Result<(), String> {
+pub(super) fn migrate_from_previous_schema(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|error| format!("start migration: {error}"))?;
 
     let mut before = Vec::new();
-    for table in VECTOR_TABLES {
-        before.push(vectors_per_vault(&tx, table)?);
+    for table in &VECTOR_TABLES {
+        before.push((
+            vectors_per_vault(&tx, table.name)?,
+            vector_digest(&tx, table)?,
+        ));
     }
 
     tx.execute_batch(
@@ -56,13 +76,22 @@ pub(super) fn migrate_from_previous_schema(
     )
     .map_err(|error| format!("rebuild the keyword index: {error}"))?;
 
-    for (table, before) in VECTOR_TABLES.into_iter().zip(&before) {
-        let after = vectors_per_vault(&tx, table)?;
-        if &after != before {
+    for (table, (rows_before, digest_before)) in VECTOR_TABLES.iter().zip(&before) {
+        let rows_after = vectors_per_vault(&tx, table.name)?;
+        if &rows_after != rows_before {
             return Err(format!(
-                "row count check failed on {table}: {before:?} before, {after:?} after"
+                "row count check failed on {}: {rows_before:?} before, {rows_after:?} after",
+                table.name
             ));
         }
+        if &vector_digest(&tx, table)? != digest_before {
+            return Err(format!(
+                "identical-vector check failed on {}: the vector rows changed",
+                table.name
+            ));
+        }
+        check_vault_of_chunk(&tx, table.name)?;
+        check_self_retrieval(&tx, table)?;
     }
     check_keyword_index(&tx)?;
 
@@ -94,6 +123,144 @@ fn vectors_per_vault(tx: &Transaction<'_>, table: &str) -> Result<BTreeMap<i64, 
         .map_err(|error| format!("count rows in {table}: {error}"))?;
     rows.collect::<rusqlite::Result<_>>()
         .map_err(|error| format!("count rows in {table}: {error}"))
+}
+
+/// A BLAKE3 digest of every row of `table` (chunk, Vault key, layer and
+/// vector bytes) in chunk order, so equal digests before and after mean
+/// every vector is byte for byte the one it was.
+fn vector_digest(tx: &Transaction<'_>, table: &VectorTable) -> Result<blake3::Hash, String> {
+    let layer = if table.partitioned { "layer" } else { "NULL" };
+    let mut statement = tx
+        .prepare(&format!(
+            "SELECT chunk_id, vault_key, {layer}, embedding FROM {} ORDER BY chunk_id",
+            table.name
+        ))
+        .map_err(|error| format!("read vectors in {}: {error}", table.name))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("read vectors in {}: {error}", table.name))?;
+    let mut hasher = blake3::Hasher::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("read vectors in {}: {error}", table.name))?
+    {
+        let read = |error| format!("read vectors in {}: {error}", table.name);
+        let chunk_id: i64 = row.get(0).map_err(read)?;
+        let vault_key: i64 = row.get(1).map_err(read)?;
+        let layer: Option<String> = row.get(2).map_err(read)?;
+        let embedding: Vec<u8> = row.get(3).map_err(read)?;
+        hasher.update(&chunk_id.to_le_bytes());
+        hasher.update(&vault_key.to_le_bytes());
+        let layer = layer.unwrap_or_default();
+        hasher.update(&(layer.len() as u64).to_le_bytes());
+        hasher.update(layer.as_bytes());
+        hasher.update(&(embedding.len() as u64).to_le_bytes());
+        hasher.update(&embedding);
+    }
+    Ok(hasher.finalize())
+}
+
+/// Every vector row must be filed under its chunk's Vault.
+fn check_vault_of_chunk(tx: &Transaction<'_>, table: &str) -> Result<(), String> {
+    let (total, matched): (i64, i64) = tx
+        .query_row(
+            &format!(
+                "SELECT (SELECT COUNT(*) FROM {table}),
+                        (SELECT COUNT(*) FROM {table} v
+                             JOIN vault_chunks c ON c.id = v.chunk_id
+                             JOIN vault_keys k ON k.vault_key = v.vault_key
+                             WHERE k.vault_id = c.vault_id)"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("map {table} to chunks: {error}"))?;
+    if total != matched {
+        return Err(format!(
+            "Vault mapping check failed on {table}: {matched} of {total} rows belong to \
+             their chunk's Vault"
+        ));
+    }
+    Ok(())
+}
+
+/// For every Vault, a sample of its stored vectors, spread over its rows,
+/// must each come back from a KNN query for themselves, filtered to their
+/// own Vault (and layer). Identical vectors tie at distance zero, so a
+/// window holding only exact copies proves the same thing.
+fn check_self_retrieval(tx: &Transaction<'_>, table: &VectorTable) -> Result<(), String> {
+    let layer = if table.partitioned { "layer" } else { "NULL" };
+    let rows = {
+        let mut statement = tx
+            .prepare(&format!(
+                "SELECT vault_key, chunk_id, {layer} FROM {} ORDER BY vault_key, chunk_id",
+                table.name
+            ))
+            .map_err(|error| format!("sample {}: {error}", table.name))?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+            .map_err(|error| format!("sample {}: {error}", table.name))?
+    };
+    let mut per_vault: BTreeMap<i64, Vec<(i64, Option<String>)>> = BTreeMap::new();
+    for (vault_key, chunk_id, layer) in rows {
+        per_vault
+            .entry(vault_key)
+            .or_default()
+            .push((chunk_id, layer));
+    }
+    let layer_filter = if table.partitioned {
+        " AND layer = ?4"
+    } else {
+        ""
+    };
+    let knn = format!(
+        "SELECT chunk_id, distance FROM {name} \
+         WHERE embedding MATCH ?1 AND k = ?2 AND vault_key = ?3{layer_filter} \
+         ORDER BY distance",
+        name = table.name,
+    );
+    let sample = format!("SELECT embedding FROM {} WHERE chunk_id = ?1", table.name);
+    let window = SELF_RETRIEVAL_SAMPLE as i64;
+    for (vault_key, chunks) in per_vault {
+        let step = chunks.len().div_ceil(SELF_RETRIEVAL_SAMPLE).max(1);
+        for (chunk_id, layer) in chunks.iter().step_by(step) {
+            let embedding: Vec<u8> = tx
+                .query_row(&sample, params![chunk_id], |row| row.get(0))
+                .map_err(|error| format!("read sample vector from {}: {error}", table.name))?;
+            let mut statement = tx
+                .prepare(&knn)
+                .map_err(|error| format!("prepare self-retrieval on {}: {error}", table.name))?;
+            let hit = |row: &rusqlite::Row<'_>| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?));
+            let found = if table.partitioned {
+                statement
+                    .query_map(params![embedding, window, vault_key, layer], hit)
+                    .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+            } else {
+                statement
+                    .query_map(params![embedding, window, vault_key], hit)
+                    .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+            }
+            .map_err(|error| format!("run self-retrieval on {}: {error}", table.name))?;
+            let found_itself = found.iter().any(|&(id, _)| id == *chunk_id)
+                || (found.len() as i64 == window
+                    && found.iter().all(|&(_, distance)| distance == 0.0));
+            if !found_itself {
+                return Err(format!(
+                    "self-retrieval check failed on {}: chunk {chunk_id} is not its own \
+                     nearest neighbour",
+                    table.name
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Store the keyword text of every chunk whose text the keyword index reads
@@ -438,7 +605,7 @@ mod tests {
         conn.execute_batch("DROP TRIGGER vault_chunk_fts_au;")
             .expect("a half-built keyword index");
 
-        let failure = super::migrate_from_previous_schema(&mut conn, 384)
+        let failure = super::migrate_from_previous_schema(&mut conn)
             .expect_err("a missing trigger must fail the migration");
         assert!(failure.contains("drop the old keyword index"), "{failure}");
         let (version, column, index): (String, bool, bool) = conn
@@ -460,6 +627,38 @@ mod tests {
         assert!(
             index,
             "the old keyword index must be back after the rollback"
+        );
+    }
+
+    #[test]
+    fn a_vector_filed_under_another_vaults_key_fails_the_mapping_check() {
+        let (_directory, path) = previous_version_cache();
+        let cache = SqliteCache::open(&path, 384).expect("open");
+        let mut conn = cache.connection().expect("conn");
+        conn.execute(
+            "UPDATE vault_chunk_vectors SET vault_key = (SELECT MAX(vault_key) FROM vault_keys)
+             WHERE chunk_id = (SELECT MIN(chunk_id) FROM vault_chunk_vectors)",
+            [],
+        )
+        .expect("misfile one vector");
+
+        let failure = super::migrate_from_previous_schema(&mut conn)
+            .expect_err("a misfiled vector must fail the migration");
+        assert!(
+            failure.contains("Vault mapping check failed on vault_chunk_vectors"),
+            "{failure}"
+        );
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("version");
+        assert_eq!(
+            version,
+            super::PREVIOUS_SCHEMA_VERSION,
+            "nothing may commit"
         );
     }
 
