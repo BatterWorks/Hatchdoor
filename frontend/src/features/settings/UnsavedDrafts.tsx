@@ -5,9 +5,9 @@
  * create draft, which has never carried a Vault at all. None can be silently
  * reused, so they surface here for explicit, one-row-at-a-time recovery
  * instead. A restored note draft is filed under the path of the note the
- * destination read found. This is a migration artefact, not a standing
- * feature: the section withdraws for good once the last held draft is dealt
- * with.
+ * destination read found. It also holds edits displaced by newer typing or
+ * by a note's address changing hands. The section hides when no held drafts
+ * remain and returns whenever another edit needs recovery.
  */
 
 import { useState } from "react";
@@ -154,13 +154,17 @@ function DraftRow({
       const found = (await res.json()) as {
         note: { slug: string; relative_path: string };
       };
-      saveNoteDraft(destination, found.note.relative_path, {
+      const stored = saveNoteDraft(destination, found.note.relative_path, {
         vaultId: destination,
         relativePath: found.note.relative_path,
         content: draft.content,
         baseContentHash: draft.baseContentHash,
         savedAt: Date.now(),
       });
+      if (!stored) {
+        setMessage("This draft could not be written. It is still held here.");
+        return;
+      }
       onDiscard(draft.id);
       navigate(
         `/v/${encodeURIComponent(destination)}/n/${encodeURIComponent(found.note.slug)}?restoreEdit=1`,
@@ -272,9 +276,8 @@ export function UnsavedDrafts({
         <div>
           <h2 className="settings-sec-title">Unsaved drafts</h2>
           <p className="settings-sec-blurb">
-            Recently viewed notes and open folders were reset for the move to
-            multiple Vaults. These drafts, typed before that, were kept exactly
-            as you left them — restore each into a Vault, or discard it.
+            These unsaved edits are kept in this browser. Restore each into a
+            Vault, or discard it.
           </p>
         </div>
       </div>

@@ -41,6 +41,41 @@ describe("writeDrafts", () => {
     expect(loadNoteDraft("vault-1", "Notes/Home")).toBeNull();
   });
 
+  it("clears only the draft whose text was confirmed saved", () => {
+    saveNoteDraft("vault-1", "Home.md", {
+      vaultId: "vault-1",
+      relativePath: "Home.md",
+      content: "refused edit",
+      baseContentHash: "old",
+      savedAt: 1,
+    });
+    clearNoteDraft("vault-1", "Home.md", "another tab's text");
+    expect(loadNoteDraft("vault-1", "Home.md")?.content).toBe("refused edit");
+    clearNoteDraft("vault-1", "Home.md", "refused edit");
+    expect(loadNoteDraft("vault-1", "Home.md")).toBeNull();
+  });
+
+  it("holds an older-base draft before replacing it with a new edit", () => {
+    saveNoteDraft("vault-1", "Home.md", {
+      vaultId: "vault-1",
+      relativePath: "Home.md",
+      content: "refused edit",
+      baseContentHash: "old",
+      savedAt: 1,
+    });
+    saveNoteDraft("vault-1", "Home.md", {
+      vaultId: "vault-1",
+      relativePath: "Home.md",
+      content: "new edit",
+      baseContentHash: "new",
+      savedAt: 2,
+    });
+    clearNoteDraft("vault-1", "Home.md", "new edit");
+    expect(listHeldDrafts().map((draft) => draft.content)).toEqual([
+      "refused edit",
+    ]);
+  });
+
   // #627: two notes can share a name, and a slug moves between them. A draft
   // typed into one is never offered to the other.
   it("keeps drafts for two same-named notes apart", () => {

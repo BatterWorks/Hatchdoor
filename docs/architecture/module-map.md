@@ -5297,17 +5297,33 @@ asks for in one pass into one request, which `NotePage` points at the
 reading view's `resolveNoteTargets`, so a link resolves by title, alias or
 path as it does in Reading view and a click on `[[Note#Heading]]` opens the
 note at the heading), autosave
-scheduling and save state, and attachment acceptance and insertion (#558: `attachmentRejection` takes the upload limit, `null` for unknown, and both editors call `attachmentRejectionAtCurrentLimit`, which checks the extension first and then holds the file to the limit `writeApi.ts`'s `fetchAttachmentMaxBytes` reads). `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
+scheduling and save state (#628: the two-second deadline survives callback
+rerenders, pending text retains its base hash, `hasUnsaved()` reports pending
+or refused text synchronously, and `onSaved(result, content)` names the exact
+text confirmed; Saved is withheld while newer typing is pending, and unsaved
+text holds a browser `beforeunload` warning), and attachment acceptance and insertion (#558: `attachmentRejection` takes the upload limit, `null` for unknown, and both editors call `attachmentRejectionAtCurrentLimit`, which checks the extension first and then holds the file to the limit `writeApi.ts`'s `fetchAttachmentMaxBytes` reads). `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
-`UnsavedDrafts.tsx`; ordinary per-note and create drafts
+`UnsavedDrafts.tsx`; `saveNoteDraft` also copies a displaced draft based on another hash into the
+held store before replacing it (#628), refusing the new draft write if the
+copy fails. Its optional `onHeld` callback tells the note page to show the
+Settings notice after both writes succeed, without duplicating the storage
+policy in the page. `clearNoteDraft` takes optional `savedContent`: ordinary save
+callers supply the confirmed text so another tab's or an older refused draft
+is not removed; only explicit discard/transfer omits it. `NotePage` surfaces a
+newly held draft through the Settings notice. The live editor's external-link
+opener allows only HTTP, HTTPS and mailto, including table links. The
+revision refresh rechecks focus, source editing, pending edits and an edit
+counter when its read returns, keeping the editor and flagging an external
+change rather than replacing text typed during the request.
+Ordinary per-note and create drafts
 (`saveNoteDraft`/`loadNoteDraft`/`clearNoteDraft`/`saveCreateDraft`/
 `loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) keep their shape, with
 one change: `saveNoteDraft` returns whether the write actually landed (#330).
 `NotePage`'s debounced editor draft writer — the one behind the promise the UI
-makes while the user types — raises a notice on a `false`; the reload-latest,
-conflict-resolution and held-draft-restore call sites still discard it, so a
-blocked store stays silent on those paths and surfacing it there is unfinished.
+makes while the user types, raises a notice on a `false`. Settings' held-draft
+restore checks that result before deleting its source or navigating (#628);
+reload-latest and conflict-resolution callers still discard it.
 `collectLegacyHeldDrafts` reads every key before it writes any, the same
 two-phase shape `pruneNoteDrafts` uses, because writing into a storage area
 mid-enumeration can shift entries behind the `key(i)` cursor and skip drafts.
@@ -5644,33 +5660,25 @@ passing its `demoMode` down as `ZeroVaultState`'s `demoMode` prop) — belt and
 suspenders alongside the invariant below, since the zero-Vault state renders
 on a route demo visitors can otherwise reach.
 
-`UnsavedDrafts.tsx` (#151) is a second "This server" nav entry, shown only
-while `lib/writeDrafts.ts`'s `listHeldDrafts()` returns at least one draft
-recovered from before Vault qualification (#137): a pre-#137 note draft was
-keyed by slug alone, and the standalone create draft has never carried a
-Vault. Each row lets the operator pick a destination Vault (pre-filled only
-at exactly one enabled Vault), then Restore or Discard independently — no
-batch action, since drafts need not share a Vault. Restoring a note draft
-checks the destination Vault for a note at that slug before acting: found,
-it seeds that Vault's ordinary `lib/writeDrafts.ts` per-note draft slot and
-navigates to `NotePage` with `?restoreEdit=1`, which `NotePage.tsx` (#151)
-reads once to open the editor the same way its own Edit button would, then
-strips the marker; not found, the row offers a different Vault or restoring
-the text as a new note (preserving the standalone create draft's own
-`folder`, or an empty folder for a recovered note draft, which carries only
-a slug) through `OpenCreateDraft`, a typed callback `UnsavedDrafts.tsx`
-exports and `App.tsx` supplies: it seeds the standalone create draft and
-calls `hooks/useNoteActions.ts`'s `openCreateDialog` with an explicit target
-Vault ID (its second, optional parameter, added for this ticket) rather than
-the Vault `resolvePrimaryVaultId` would otherwise infer from the currently
-open note. A restored note draft keeps its own `baseContentHash` — the
-version it was actually typed against — rather than the destination note's
-current hash, so `NotePage.tsx`'s existing stale-draft comparison still
-fires correctly. `relativeTime.ts`'s `formatWhen` (accepting either an ISO
-string or an epoch-ms number) is the one relative-age ladder both this
-section's draft rows and the Git/index status console share. The section is
-a migration artefact, not a standing feature: it withdraws for good once the
-last held draft is discarded or restored. `NotePage.tsx` separately shows a
+`UnsavedDrafts.tsx` (#151) is a second "This server" nav entry while
+`lib/writeDrafts.ts`'s `listHeldDrafts()` returns any held draft. It covers
+legacy slug-keyed drafts, drafts held when a note's address changes hands
+(#627), and older-base edits displaced by newer typing (#628). Each row
+independently offers Restore or Discard and a destination picker, pre-filled
+only when exactly one Vault can accept writes. A path-held draft resolves
+its exact path through `findNoteAtPath`; a legacy draft is checked by slug.
+When a note exists, restore seeds its path-keyed draft slot, preserving the
+held draft's own `baseContentHash`, and opens `NotePage` with `?restoreEdit=1`.
+The page opens Source and removes that marker from history. If storing the
+restored draft fails, including failure to preserve an existing destination
+draft, the source remains held and the row reports failure without navigating
+(#628). When no note exists, the row offers another Vault or restoration as
+a new note through `RestoreCreateDraft`, supplied by `App.tsx`: the full held
+text is written directly, and the held copy is removed only after success.
+Create drafts retain their folder; held note drafts use an empty folder and
+their recorded name or path. `relativeTime.ts`'s `formatWhen` accepts an ISO
+string or epoch-ms number for both draft ages and Git/index status. The
+section hides while empty and returns whenever another draft is held. `NotePage.tsx` separately shows a
 dismissible (per view, not persisted) notice above the note body — naming
 only that drafts are held and linking to this section, not repeating this
 section's own explanation of what was cleared — whenever any held draft

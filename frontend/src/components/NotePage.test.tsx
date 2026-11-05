@@ -381,11 +381,13 @@ describe("NotePage held-draft recovery (#151)", () => {
 
     renderNote("vault-1", { vaults: [] });
 
-    const notice = await screen.findByText(/find them in Settings/);
+    const notice = await screen.findByText(/find them in Settings/i);
     expect(notice.closest("a")).toHaveAttribute("href", "/settings");
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
-    expect(screen.queryByText(/find them in Settings/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/find them in Settings/i),
+    ).not.toBeInTheDocument();
   });
 
   it("never shows the held-drafts notice in demo mode, even with a held draft present (#152)", async () => {
@@ -428,7 +430,9 @@ describe("NotePage held-draft recovery (#151)", () => {
     await waitFor(() => {
       expect(screen.getByText("Body")).toBeInTheDocument();
     });
-    expect(screen.queryByText(/find them in Settings/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/find them in Settings/i),
+    ).not.toBeInTheDocument();
   });
 
   it("opens the editor with a recovered draft on ?restoreEdit=1 and strips the marker", async () => {
@@ -502,7 +506,10 @@ describe("NotePage crash-safe inline editing (#330)", () => {
     content: string,
     hash = "hash",
     vaultId = "vault-1",
-    { refuseWrites = false }: { refuseWrites?: boolean } = {},
+    {
+      refuseWrites = false,
+      refusalStatus = 503,
+    }: { refuseWrites?: boolean; refusalStatus?: number } = {},
   ): Sent[] {
     const sent: Sent[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -513,7 +520,7 @@ describe("NotePage crash-safe inline editing (#330)", () => {
           if (refuseWrites) {
             return jsonResponse(
               { code: "vault_unavailable", message: "Vault is unavailable" },
-              503,
+              refusalStatus,
             );
           }
           return jsonResponse({
@@ -564,6 +571,166 @@ describe("NotePage crash-safe inline editing (#330)", () => {
       });
     });
   }
+
+  it("keeps typing and its original hash when a delayed revision read lands", async () => {
+    let reads = 0;
+    let finishRead!: () => void;
+    let disk = "Body on disk.\n";
+    let diskHash = "hash";
+    const writes: Array<{ content: string; expected_content_hash: string }> =
+      [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        writes.push(body);
+        if (body.expected_content_hash !== diskHash) {
+          return jsonResponse({ message: "changed on disk" }, 409);
+        }
+        disk = body.content;
+        return jsonResponse({
+          content_hash: "saved",
+          relative_path: "Home.md",
+        });
+      }
+      if (url.endsWith("/notes/home")) {
+        reads += 1;
+        if (reads > 1)
+          await new Promise<void>((resolve) => {
+            finishRead = resolve;
+          });
+        return jsonResponse({
+          vault_id: "vault-1",
+          note: {
+            title: "Home",
+            slug: "home",
+            relative_path: "Home.md",
+            content: disk,
+            content_hash: diskHash,
+            layer: null,
+          },
+        });
+      }
+      if (url.includes("/resolve-batch")) return jsonResponse({ results: [] });
+      return jsonResponse({}, 404);
+    });
+    const { setRevision } = renderNoteAtRevision("vault-1", [], 1);
+    await screen.findByRole("textbox", { name: "Note body" });
+    disk = "EXTERNAL CHANGE\n";
+    diskHash = "external";
+    setRevision(2);
+    await waitFor(() => expect(reads).toBe(2));
+    fireEvent.focus(screen.getByRole("textbox", { name: "Note body" }));
+    typeInOpenBlock("Body on disk. TYPED\n");
+    await act(async () => finishRead());
+    expect(
+      screen.getByRole("textbox", { name: "Note body" }),
+    ).toHaveTextContent("TYPED");
+    expect(
+      screen.getByText(
+        /This note changed on disk while your edit was waiting to save/,
+      ),
+    ).toBeInTheDocument();
+    await act(async () => window.dispatchEvent(new Event("pagehide")));
+    expect(writes[0].expected_content_hash).toBe("hash");
+    expect(disk).toBe("EXTERNAL CHANGE\n");
+    expect(loadNoteDraft("vault-1", "Home.md")?.content).toContain("TYPED");
+  });
+
+  it("idle-saves one character despite an unrelated revision while focused", async () => {
+    const sent = mockVault("Body\n");
+    const { setRevision } = renderNoteAtRevision("vault-1", [], 1);
+    const editor = await screen.findByRole("textbox", { name: "Note body" });
+    fireEvent.focus(editor);
+    typeInOpenBlock("Bodyx\n");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    setRevision(2);
+    await waitFor(() => expect(sent).toHaveLength(1), { timeout: 3000 });
+    expect(JSON.parse(String(sent[0].init.body)).content).toBe("Bodyx\n");
+  });
+
+  it("holds a refused edit across reload and a different idle save", async () => {
+    const first = mockVault("Body\n", "hash", "vault-1", {
+      refuseWrites: true,
+      refusalStatus: 409,
+    });
+    const view = renderNote("vault-1", { vaults: [] });
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Refused edit\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(first).toHaveLength(1));
+    await screen.findByText(/This note changed somewhere else/);
+    view.unmount();
+    vi.restoreAllMocks();
+    const second = mockVault("Another writer's text\n", "external");
+    renderNote("vault-1", { vaults: [] });
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Unrelated edit after reload\n");
+    await waitFor(() => expect(second).toHaveLength(1), { timeout: 3000 });
+    expect(listHeldDrafts().map((draft) => draft.content)).toContain(
+      "Refused edit\n",
+    );
+    expect(
+      screen.getByRole("link", { name: /find them in Settings/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("stops warning about a refused inline edit after a successful Source save", async () => {
+    mockVault("Body\n", "hash", "vault-1", { refuseWrites: true });
+    renderNote("vault-1", { vaults: [] });
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Refused edit\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await screen.findByText(/Hatchdoor could not reach the vault/);
+    vi.restoreAllMocks();
+    const sent = mockVault("Body\n");
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    await screen.findByRole("button", { name: "Save" });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await screen.findByRole("button", { name: "Source" });
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("does not archive ordinary typing that continues across its own save", async () => {
+    mockVault("Body\n");
+    const serve = vi.mocked(fetch).getMockImplementation()!;
+    let finish!: () => void;
+    let first = true;
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      if (init?.method === "PUT" && first) {
+        first = false;
+        return new Promise<Response>((resolve) => {
+          finish = () => resolve(serve(input, init));
+        });
+      }
+      return serve(input, init);
+    });
+    renderNote("vault-1", { vaults: [] });
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("First edit\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    typeInOpenBlock("Second edit\n");
+    await waitFor(
+      () =>
+        expect(loadNoteDraft("vault-1", "Home.md")?.content).toBe(
+          "Second edit\n",
+        ),
+      { timeout: 1500 },
+    );
+    typeInOpenBlock("Third edit\n");
+    await act(async () => finish());
+    await waitFor(
+      () =>
+        expect(loadNoteDraft("vault-1", "Home.md")?.content).toBe(
+          "Third edit\n",
+        ),
+      { timeout: 1500 },
+    );
+    expect(listHeldDrafts()).toEqual([]);
+  });
 
   it("restores an unsaved inline edit from its draft after a reload", async () => {
     saveNoteDraft("vault-1", "Home.md", {
@@ -930,6 +1097,37 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     });
   }
 
+  it("saves the next note against its own hash after the previous save was refused", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    renderWithNav();
+    await screen.findByRole("textbox", { name: "Note body" });
+    disk.home = { content: "External change\n", hash: "home-2" };
+    typeInOpenBlock("Refused home edit\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await screen.findByText(/This note changed somewhere else/);
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    await screen.findByText("Other body.");
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    typeInOpenBlock("Other body, edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(JSON.parse(String(sent[1].init.body)).expected_content_hash).toBe(
+      "other-1",
+    );
+    await waitFor(() =>
+      expect(disk.other.content).toBe("Other body, edited.\n"),
+    );
+    expect(loadNoteDraft("vault-1", "home.md")?.content).toBe(
+      "Refused home edit\n",
+    );
+  });
+
   it("drops the conflict review when the user navigates to another note", async () => {
     const disk = {
       home: { content: "Home body.\n", hash: "home-1" },
@@ -1012,7 +1210,7 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("never restores a draft older than the last inline save into source mode", async () => {
+  it("keeps an older refused draft available after an unrelated inline save", async () => {
     // A source-mode draft left behind against a version that has since moved.
     saveNoteDraft("vault-1", "home.md", {
       vaultId: "vault-1",
@@ -1040,8 +1238,8 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     const textarea = (await screen.findByRole(
       "textbox",
     )) as HTMLTextAreaElement;
-    expect(textarea.value).toBe("First paragraph, saved inline.");
-    expect(screen.queryByText(/Restored an earlier draft/)).toBeNull();
+    expect(textarea.value).toBe("An old source-mode draft.");
+    expect(screen.getByText(/Restored an earlier draft/)).toBeInTheDocument();
   });
 
   // Found in the live pass for #331: the history for the note just opened was

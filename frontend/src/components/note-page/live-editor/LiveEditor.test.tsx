@@ -77,6 +77,30 @@ describe("LiveEditor", () => {
     expect(onCommit).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["javascript:alert(1)", false],
+    ["JaVaScRiPt:alert(1)", false],
+    ["data:text/html,hello", false],
+    ["vbscript:msgbox(1)", false],
+    ["https://example.org/report", true],
+    ["http://example.org/report", true],
+    ["mailto:reader@example.org", true],
+  ])("opens only allowed external link targets: %s", (url, allowed) => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const { container } = mount({ value: `Intro\n\n[x](${url})\n` });
+    const link = container.querySelector<HTMLElement>(".cm-atomic-link");
+    expect(link).not.toBeNull();
+    vi.spyOn(link!, "getClientRects").mockReturnValue([
+      { right: 100, top: 0, bottom: 20 },
+    ] as unknown as DOMRectList);
+    link!.style.fontSize = "16px";
+    fireEvent.click(link!, { clientX: 99, clientY: 10 });
+    if (allowed)
+      expect(open).toHaveBeenCalledWith(url, "_blank", "noopener,noreferrer");
+    else expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it("takes a new value from outside without reporting it as a change", () => {
     const { view, onChange, rerender, props } = mount();
     // An expression, not an attribute string: in JSX `"\n"` is two characters.
