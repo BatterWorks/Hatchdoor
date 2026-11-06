@@ -127,9 +127,6 @@ pub struct AppConfig {
     pub demo_mode: bool,
     /// Folder prefix (with trailing slash) treated as archived in resolve results.
     pub archive_prefix: String,
-    /// Extra noise-exclusion patterns from `HATCHDOOR_EXCLUDE` (gitignore
-    /// syntax), appended to the built-in defaults. Empty when unset.
-    pub exclude_patterns: Vec<String>,
     /// Whether demoted-layer vectors are embedded (`HATCHDOOR_EMBED_LAYERS`,
     /// default true). Surfaced here only for the effective-config startup log;
     /// the cache reads the same env var when it persists the value.
@@ -170,7 +167,6 @@ impl AppConfig {
             web_bearer_token,
             demo_mode,
             archive_prefix: "90-archive/".to_string(),
-            exclude_patterns: Vec::new(),
             embed_layers: true,
         })
     }
@@ -186,7 +182,6 @@ impl AppConfig {
             .required("HATCHDOOR_ARCHIVE_PREFIX")?
             .trim()
             .to_string();
-        self.exclude_patterns = parse_exclude_patterns(snapshot.required("HATCHDOOR_EXCLUDE")?);
         self.embed_layers =
             crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_EMBED_LAYERS")?);
         Ok(())

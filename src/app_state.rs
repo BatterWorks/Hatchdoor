@@ -150,17 +150,6 @@ impl AppState {
         Self::runtime_archive_prefix(snapshot)
     }
 
-    pub fn runtime_scan_config(
-        snapshot: &crate::runtime_config::ConfigSnapshot,
-    ) -> Result<Arc<VaultScanConfig>, String> {
-        let patterns = snapshot
-            .setting("HATCHDOOR_EXCLUDE")
-            .map(|setting| crate::config::parse_exclude_patterns(&setting.value))
-            .ok_or_else(|| "runtime configuration is missing HATCHDOOR_EXCLUDE".to_string())?;
-        Ok(Arc::new(VaultScanConfig {
-            exclude: crate::vault::ExcludeMatcher::new(&patterns)?,
-        }))
-    }
 }
 
 /// Build a generic `500` response, logging the real detail rather than leaking
