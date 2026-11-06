@@ -176,6 +176,67 @@ fn create_note_rejects_traversal_and_writes_markdown() {
     );
 }
 
+/// `create_note "Upper.MD"` wrote `Upper.MD.md` while the index ignored
+/// `.MD` (#637): the extension now counts in any case on both sides.
+#[test]
+fn create_note_keeps_an_upper_case_extension() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let outcome = create_note(root, "Upper.MD", "# Upper", false, &build(root)).expect("create");
+    assert!(root.join("Upper.MD").exists());
+    assert!(!root.join("Upper.MD.md").exists());
+    assert_eq!(outcome.relative_path.as_deref(), Some("Upper"));
+    assert_eq!(outcome.slug.as_deref(), Some("upper"));
+    assert!(build(root).find_by_slug("upper").is_some());
+
+    // Overwriting addresses the same file rather than writing a twin.
+    create_note(root, "Upper.MD", "# Again", true, &build(root)).expect("overwrite");
+    assert_eq!(
+        fs::read_to_string(root.join("Upper.MD")).expect("read"),
+        "# Again\n"
+    );
+    for empty in [".MD", "Folder/.Md"] {
+        assert!(matches!(
+            create_note(root, empty, "x", false, &build(root)),
+            Err(WriteError::InvalidInput(_))
+        ));
+    }
+}
+
+/// A name that differs from an existing note only in its extension's case
+/// names that note: on a case-sensitive filesystem a second file there would
+/// be hidden by the index's twin rule, and the reply would name the other
+/// note's slug (#637).
+#[test]
+fn an_extension_case_variant_names_the_existing_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Report.md"), "# Report\n").expect("note");
+    fs::write(root.join("Other.md"), "# Other\n").expect("note");
+
+    assert!(matches!(
+        create_note(root, "Report.MD", "# Twin", false, &build(root)),
+        Err(WriteError::Conflict(_))
+    ));
+    let outcome =
+        create_note(root, "Report.MD", "# Replaced", true, &build(root)).expect("overwrite");
+    assert_eq!(outcome.slug.as_deref(), Some("report"));
+    assert!(!root.join("Report.MD").exists(), "no twin written");
+    assert_eq!(
+        fs::read_to_string(root.join("Report.md")).expect("read"),
+        "# Replaced\n"
+    );
+
+    let index = build(root);
+    let other = index.find_by_slug("other").expect("other");
+    let hash = content_hash(&fs::read_to_string(&other.path).expect("read"));
+    assert!(matches!(
+        move_or_rename_note(root, &index, other, "Report.Md", &hash),
+        Err(WriteError::Conflict(_))
+    ));
+    assert!(root.join("Other.md").exists());
+}
+
 #[test]
 fn create_note_computes_its_slug_from_a_metadata_only_catalog() {
     // issue #101: the write API must fill in a create response's slug from

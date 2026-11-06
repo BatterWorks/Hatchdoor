@@ -629,10 +629,7 @@ fn count_markdown_notes(root: &Path, exclude_patterns: &[String]) -> Option<usiz
     Some(
         entries
             .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_type().is_file()
-                    && entry.path().extension().and_then(|ext| ext.to_str()) == Some("md")
-            })
+            .filter(|entry| entry.file_type().is_file() && crate::vault::is_note_path(entry.path()))
             .count(),
     )
 }

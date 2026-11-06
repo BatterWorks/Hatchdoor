@@ -20,8 +20,10 @@ pub(crate) use note_file::grow_past_note_bound;
 #[cfg(all(test, unix))]
 pub(crate) use note_file::make_fifo;
 pub(crate) use note_file::{
-    BoundedReadError, MAX_NOTE_BYTES, read_bounded, read_note_text, read_open_bounded,
+    BoundedReadError, MAX_NOTE_BYTES, note_file_name, read_bounded, read_note_text,
+    read_open_bounded,
 };
+pub(crate) use paths::is_note_path;
 #[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{

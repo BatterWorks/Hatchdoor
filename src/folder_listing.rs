@@ -467,7 +467,7 @@ fn is_hidden(name: &str) -> bool {
 
 /// The test the Vault index applies when it collects notes.
 fn is_markdown(name: &OsStr) -> bool {
-    Path::new(name).extension() == Some(OsStr::new("md"))
+    crate::vault::is_note_path(Path::new(name))
 }
 
 /// Whether the registry would accept this folder as a local Vault root as

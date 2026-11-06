@@ -12,6 +12,18 @@ The index is built from the Vault's Markdown and holds nothing that is not in yo
 
 Hatchdoor checks the cache for physical damage when it opens it. Damage found then, or during a later cache operation, moves the cache and any journal files to `.corrupt-...` files beside it and rebuilds every active Vault from Markdown. Search and indexed listings may be unavailable until their Vault's index is rebuilt. The note files are not changed. If recovery fails, the Vault's error says why and Hatchdoor keeps retrying.
 
+## Which files are notes
+
+A note is a file whose name ends in `.md`, in any case: `Report.md`, `Report.MD` and `Report.Md` are all notes, to the reads and the write tools alike. Everything else is an attachment or ignored. A name that differs from an existing note only in the case of its extension names that note: creating `Report.MD` next to `Report.md` is refused as a conflict, and overwriting it replaces `Report.md`. If a folder already holds both, Hatchdoor lists the `.md` one and logs the other.
+
+Some folders are never content. Hatchdoor ignores `.git/`, `.obsidian/`, `.trash/` and `.hatchdoor-trash/`, and the files `.DS_Store`, `*.tmp` and `*.sync-conflict-*`, before it applies a Vault's own `exclude_patterns`. A pattern starting with `!` brings one back, as in a `.gitignore` file: `!.git/` lists a Markdown file kept inside the repository folder. Patterns match case as written, except a note's `.md` extension: `*.excalidraw.md` also leaves out `Drawing.excalidraw.MD`.
+
+Odd files cost only themselves:
+
+- A folder Hatchdoor may not open, such as a `lost+found` owned by another user, is skipped and logged. The rest of the Vault still reads, writes and indexes. Only a Vault folder that cannot be opened at all takes the Vault offline. Any other read error, such as a network share failing for a moment, still fails that indexing pass, which is retried, so notes do not drop out of search while the share recovers.
+- A file or folder whose name is not valid UTF-8 has no name Hatchdoor can address, so it is left out and logged. The write tools refuse such names too.
+- A note whose bytes are not valid UTF-8, such as a Latin-1 export from an older tool, stays listed in the tree, search, the graph and the statistics. Search and `find_text` read it with the bad bytes replaced. Opening it, reading its frontmatter, outline or sections, or downloading it is refused with `note_unreadable`, which retrying does not change, and editing it with `invalid_write_input`. Re-save it as UTF-8 to read or edit it.
+
 ## What happens when a note changes
 
 A file watcher notices every file created, edited or deleted under the Vault: Markdown, attachments and `.hatchdoor-layer` markers. A marker counts because changing one moves notes between layers without touching their content. Hatchdoor waits about half a second after a change, so a burst of saves becomes one reindex pass. It never waits more than five seconds, so a long editing session cannot hold the index back.

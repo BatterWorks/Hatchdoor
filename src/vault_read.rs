@@ -1882,6 +1882,14 @@ fn note_read_error(
             format!("note '{slug}' is not a regular file"),
             false,
         ),
+        // Retrying cannot help, so every exact read reports it the same way
+        // (#637); `find_text` still matches the note's text lossily.
+        BoundedReadError::NotUtf8 => unavailable(
+            vault_id,
+            "note_unreadable",
+            format!("note '{slug}' is not valid UTF-8"),
+            false,
+        ),
         BoundedReadError::Io(error) => unavailable(
             vault_id,
             io_code,
@@ -3635,6 +3643,41 @@ mod tests {
         assert_eq!(error.public_code(), "note_too_large");
     }
 
+    /// Opening such a note answered a retryable `vault_read_unavailable`
+    /// while the outline and frontmatter reads answered `note_unreadable`;
+    /// retrying never helps, so every exact read now says the latter (#637).
+    #[test]
+    fn every_exact_read_refuses_a_note_that_is_not_utf8_the_same_way() {
+        let workspace = workspace(&[("Notes", &[("Odd.md", "# Odd")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault = workspace.vault_ids[0];
+        std::fs::write(
+            workspace.vault_paths[0].join("Odd.md"),
+            b"# Odd\n\nlone continuation byte \x80\n",
+        )
+        .expect("write bytes");
+
+        let mut codes = Vec::new();
+        let error = reads.exact_note(vault, "odd").expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        let Err(error) = reads.exact_note_for_download(vault, "odd") else {
+            panic!("a download read the note");
+        };
+        codes.push((error.public_code().to_string(), error.retryable));
+        let error = reads.note_outline(vault, "odd").expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        let error = reads
+            .exact_note_frontmatter(vault, "odd")
+            .expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        let error = reads.note_attachments(vault, "odd").expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        for (code, retryable) in codes {
+            assert_eq!(code, "note_unreadable");
+            assert!(!retryable);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_exact_read_of_a_note_replaced_by_a_fifo_finds_no_note_without_blocking() {
@@ -3650,6 +3693,55 @@ mod tests {
         // that appears between that walk and the read.
         assert!(reads.exact_note(vault, "odd").expect("read").is_none());
         assert!(reads.note_outline(vault, "odd").expect("read").is_none());
+    }
+
+    /// A note with an upper-case extension and one whose bytes are not UTF-8
+    /// are listed, counted and matched like any other (#637).
+    #[test]
+    fn a_text_match_reads_odd_notes_the_index_lists() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[("Upper.MD", "upper unique-token"), ("Home.md", "home")],
+        )]);
+        let vault = workspace.vault_ids[0];
+        let root = &workspace.vault_paths[0];
+        std::fs::create_dir_all(root.join("encoding")).expect("folder");
+        std::fs::write(
+            root.join("encoding/invalid-utf8-bytes.md"),
+            b"lone continuation byte \x80 here",
+        )
+        .expect("write bytes");
+        workspace
+            .cache
+            .replace_vault_snapshot(
+                vault,
+                &VaultIndex::build(root).expect("index"),
+                &StubEmbedder::new(384),
+            )
+            .expect("publish snapshot");
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let response = found(&reads, VaultScope::One(vault), &text("unique-token"));
+        assert_eq!(found_paths(&response), ["Upper"]);
+        assert_eq!(response.total_unread, 0);
+        let response = found(
+            &reads,
+            VaultScope::One(vault),
+            &text("lone continuation byte"),
+        );
+        assert_eq!(found_paths(&response), ["encoding/invalid-utf8-bytes"]);
+        assert_eq!(response.total_unread, 0);
+
+        let statistics = reads
+            .statistics(VaultScope::One(vault))
+            .expect("statistics")
+            .data;
+        assert_eq!(statistics[0].note_count, 3, "every file on disk is counted");
+        let note = reads
+            .exact_note(vault, "upper")
+            .expect("read")
+            .expect("Upper.MD is a note");
+        assert_eq!(note.note.content, "upper unique-token");
     }
 
     #[test]

@@ -48,8 +48,39 @@ pub fn note_slug_base(stem: &str) -> String {
     }
 }
 
+/// Whether a path names a note: its extension is `md` in any case. The one
+/// answer to "is this a note?" for the index and the write layer alike (#247,
+/// #637), so a `Report.MD` the index lists is a note the write tools accept.
+pub fn is_note_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// Whether a walk may skip the entry `error` names and carry on: a folder or
+/// file this process may not open, or one deleted while the walk was on its
+/// way (#637). Any other error, such as a share's I/O error, fails the walk
+/// as before, so a passing fault is retried rather than read as notes
+/// disappearing. An unreadable Vault root is never skipped.
+pub(super) fn walk_error_costs_only_itself(error: &walkdir::Error) -> bool {
+    error.depth() > 0
+        && error.io_error().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            )
+        })
+}
+
+/// `input` without a trailing `.md`, matched in any case like
+/// [`is_note_path`], so `Report.MD` and `Report.md` both become `Report`.
 pub fn strip_md_extension(input: &str) -> &str {
-    input.strip_suffix(".md").unwrap_or(input)
+    match input.len().checked_sub(3) {
+        Some(stem) if input.is_char_boundary(stem) && input[stem..].eq_ignore_ascii_case(".md") => {
+            &input[..stem]
+        }
+        _ => input,
+    }
 }
 
 pub fn normalize_link_target(input: &str) -> String {

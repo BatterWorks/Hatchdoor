@@ -8,7 +8,10 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use super::layers::MARKER_FILE_NAME;
 
 /// Applied before any user pattern, so a user `!` negation can reinstate one.
-pub const DEFAULT_EXCLUDE_PATTERNS: [&str; 6] = [
+pub const DEFAULT_EXCLUDE_PATTERNS: [&str; 7] = [
+    // A Git-backed Vault's repository: walking its objects slowed every read,
+    // and a `.md` inside it was served as a note (#637).
+    ".git/",
     ".obsidian/",
     ".trash/",
     ".hatchdoor-trash/",
@@ -61,9 +64,20 @@ impl ExcludeMatcher {
         if relative.file_name().and_then(|n| n.to_str()) == Some(MARKER_FILE_NAME) {
             return false;
         }
-        self.inner
-            .matched_path_or_any_parents(relative, is_dir)
-            .is_ignore()
+        let excluded = |path: &Path| {
+            self.inner
+                .matched_path_or_any_parents(path, is_dir)
+                .is_ignore()
+        };
+        // A note's extension counts in any case (#637), so `*.excalidraw.md`
+        // also covers `Drawing.excalidraw.MD`: otherwise a case variant would
+        // carry an excluded note into the index. Other patterns match case as
+        // written, as Git's do.
+        excluded(relative)
+            || (!is_dir
+                && super::paths::is_note_path(relative)
+                && relative.extension().is_some_and(|ext| ext != "md")
+                && excluded(&relative.with_extension("md")))
     }
 
     /// Every pattern handed to the builder, with where it came from, for the
@@ -176,5 +190,23 @@ mod tests {
         assert!(!matcher.is_excluded(Path::new("a"), false));
         assert!(!matcher.is_excluded(Path::new("ab"), false));
         assert!(!matcher.is_excluded(Path::new("a[b"), false));
+    }
+
+    /// A note's extension counts in any case (#637), so a note pattern covers
+    /// every case of it; other patterns keep Git's case-sensitive match.
+    #[test]
+    fn a_note_pattern_covers_every_case_of_the_extension() {
+        let m = matcher(&["*.excalidraw.md", "Media/*.PNG"]);
+        for path in [
+            "Drawing.excalidraw.md",
+            "a/Drawing.excalidraw.MD",
+            "D.excalidraw.Md",
+        ] {
+            assert!(m.is_excluded(Path::new(path), false), "{path}");
+        }
+        assert!(!m.is_excluded(Path::new("Drawing.excalidraw.MD"), true));
+        assert!(!m.is_excluded(Path::new("Media/x.png"), false));
+        assert!(m.is_excluded(Path::new(".git/hooks-readme.md"), false));
+        assert!(!matcher(&["!.git/"]).is_excluded(Path::new(".git/hooks-readme.md"), false));
     }
 }

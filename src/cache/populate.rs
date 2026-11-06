@@ -1415,6 +1415,26 @@ fn upsert_note_if_changed(
             let hash = content_hash(&content);
             (content, hash)
         }
+        // Indexed lossily, the way `find_text` matches it, so the note stays in
+        // the tree, search, graph and totals rather than vanishing (#637).
+        Err(crate::vault::BoundedReadError::NotUtf8) => {
+            match crate::vault::read_bounded(&entry.path, crate::vault::MAX_NOTE_BYTES) {
+                Ok(bytes) => {
+                    tracing::warn!(
+                        path = %entry.relative_path,
+                        "Note is not valid UTF-8; indexing its text with the bad bytes replaced"
+                    );
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    let hash = content_hash(&content);
+                    (content, hash)
+                }
+                Err(error) => {
+                    return Ok(UpsertOutcome::Unreadable {
+                        reason: format!("failed reading note '{}': {error}", entry.path.display()),
+                    });
+                }
+            }
+        }
         Err(error @ crate::vault::BoundedReadError::TooLarge { .. }) => {
             tracing::warn!(
                 path = %entry.relative_path,
@@ -3477,12 +3497,17 @@ mod chunk_integration_tests {
     }
 
     #[test]
-    fn non_utf8_note_is_skipped_without_failing_the_vault() {
+    fn non_utf8_note_is_indexed_lossily_without_failing_the_vault() {
         // A single unreadable file used to abort the whole indexing turn, so a
-        // Vault holding one binary `.md` had no search index at all.
+        // Vault holding one binary `.md` had no search index at all. Skipping
+        // it then hid it from every listing while `find_text` reported nothing
+        // unread, so it is now indexed with its bad bytes replaced (#637).
         let dir = make_vault(&[("a.md", "# A\n\nbody A"), ("b.md", "# B\n\nbody B")]);
-        std::fs::write(dir.path().join("binary.md"), [0xff_u8, 0xfe, 0x00, 0x9c])
-            .expect("write binary note");
+        std::fs::write(
+            dir.path().join("binary.md"),
+            b"# Binary\n\nlone continuation byte \x80 here\n",
+        )
+        .expect("write binary note");
 
         let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
@@ -3496,7 +3521,15 @@ mod chunk_integration_tests {
         let note_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
             .expect("count");
-        assert_eq!(note_count, 2, "the two readable notes still index");
+        assert_eq!(note_count, 3, "every note is listed, the odd one included");
+        let binary_chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = 'binary'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count chunks");
+        assert!(binary_chunks > 0, "its text is searchable");
     }
 
     #[test]
@@ -3781,7 +3814,7 @@ mod chunk_integration_tests {
         });
 
         let lines = logs.lines();
-        for message in ["Per-note embedding failed", "Skipping unreadable note"] {
+        for message in ["Per-note embedding failed", "Note is not valid UTF-8"] {
             assert!(
                 lines
                     .iter()

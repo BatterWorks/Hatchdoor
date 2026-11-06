@@ -46,10 +46,14 @@ pub(crate) fn normalize_note_relative_path(input: &str) -> Result<String, WriteE
         ));
     }
     let mut normalized = parts.join("/");
-    if !normalized.ends_with(".md") {
+    // Any case, like the index (#637): `Report.MD` names that note rather
+    // than a new `Report.MD.md`.
+    let stem = crate::vault::paths::strip_md_extension(&normalized);
+    if stem.len() == normalized.len() {
         normalized.push_str(".md");
     }
-    if normalized == ".md" || normalized.ends_with("/.md") {
+    let stem = crate::vault::paths::strip_md_extension(&normalized);
+    if stem.is_empty() || stem.ends_with('/') {
         return Err(WriteError::InvalidInput(
             "note filename cannot be empty".to_string(),
         ));
@@ -127,7 +131,21 @@ pub(super) fn resolve_new_note_path(
 ) -> Result<PathBuf, WriteError> {
     let root = canonical_root(vault_root)?;
     let normalized = normalize_note_relative_path(relative_path)?;
-    let path = vault_root.join(&normalized);
+    let mut path = vault_root.join(&normalized);
+    // `Report.MD` names an existing `Report.md`, and the other way round: a
+    // note's extension counts in any case (#637), so a second file differing
+    // only there would be a twin the index hides, and the write would report
+    // the other note's slug. Resolving to the existing file makes a create a
+    // conflict, an overwrite replace that note, and a move refuse it.
+    if fs::symlink_metadata(&path).is_err() {
+        let existing = vault_root.join(crate::vault::note_file_name(
+            vault_root,
+            crate::vault::paths::strip_md_extension(&normalized),
+        ));
+        if fs::symlink_metadata(&existing).is_ok() {
+            path = existing;
+        }
+    }
     if let Some(parent) = path.parent()
         && parent.exists()
     {
@@ -170,9 +188,7 @@ pub(super) fn resolve_existing_attachment_path(
 /// the asset-reference parser so "is this a note or an attachment?" has one
 /// answer across the write layer (#247).
 pub(super) fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    crate::vault::is_note_path(path)
 }
 
 /// The gate on operations over a file the Vault already stores: a move, a

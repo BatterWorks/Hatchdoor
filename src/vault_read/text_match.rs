@@ -17,7 +17,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::cache::vault_snapshots::{VaultSnapshotNote, VaultSnapshotRead};
 use crate::search::LayerSelection;
-use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, body_start, read_bounded};
+use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, body_start, note_file_name, read_bounded};
 use crate::vault_registry::VaultId;
 
 use super::VaultReadError;
@@ -258,7 +258,10 @@ impl CompiledTextMatch {
         // it. A root that cannot be resolved leaves every Note unread.
         let root = std::fs::canonicalize(root).ok();
         for note in selected {
-            let file_path = format!("{}.md", note.relative_path);
+            let file_path = match root.as_deref() {
+                Some(root) => note_file_name(root, &note.relative_path),
+                None => format!("{}.md", note.relative_path),
+            };
             let shown = found.notes.len() < self.limit;
             let snippets_wanted = if shown { self.snippets_per_note } else { 0 };
             let mut places = TextMatchPlaces::default();
@@ -476,9 +479,9 @@ fn read_note_file(root: Option<&Path>, file_path: &str) -> Result<String, TextMa
     // `outputSchema` it connected with and would refuse a new value.
     let bytes = read_bounded(&path, MAX_NOTE_BYTES).map_err(|error| match error {
         BoundedReadError::Io(error) => reason(error),
-        BoundedReadError::TooLarge { .. } | BoundedReadError::NotRegular => {
-            TextMatchUnreadReason::Unreadable
-        }
+        BoundedReadError::TooLarge { .. }
+        | BoundedReadError::NotRegular
+        | BoundedReadError::NotUtf8 => TextMatchUnreadReason::Unreadable,
     })?;
     Ok(match String::from_utf8(bytes) {
         Ok(content) => content,

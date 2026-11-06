@@ -3185,14 +3185,22 @@ mod tests {
 
     /// A note a build cannot read is missing from its workload, not gone from
     /// the Vault, so its saved vectors survive the prune.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_note_keeps_its_saved_vectors() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the process's effective user and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads a file whatever its permissions say
+        }
         let cache = SqliteCache::in_memory(384).expect("open cache");
         let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
         let (directory, index_before) = index(THREE_NOTES);
 
         interrupted_build(&cache, id, &index_before, "stub-384", 2);
-        std::fs::write(directory.path().join("A.md"), b"# A\n\n\xff\xfe not text")
+        // Not invalid UTF-8: such a note is now indexed lossily (#637).
+        let note = directory.path().join("A.md");
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o000))
             .expect("make A unreadable");
         let index_after = VaultIndex::build(directory.path()).expect("rebuild index");
 
@@ -3203,6 +3211,7 @@ mod tests {
             2,
             "A's saved vector outlives a pass that could not read A"
         );
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o644)).expect("restore A");
     }
 
     /// Removing a Vault deletes its saved progress; disabling keeps it, the

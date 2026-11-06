@@ -4684,13 +4684,13 @@ mod tests {
             "# Crlf\nline one\nline two\n"
         );
 
-        // An upper-case extension is still a note, written with `.md`.
+        // An upper-case extension is still a note, written as named (#637).
         let answer = mint_upload_link(&app, &vault_id, "Imports/Upper.MD", false, None).await;
         assert_eq!(answer["result"]["structuredContent"]["upload_kind"], "note");
         let uploaded = post_upload(&app, minted_url(&answer), b"# Upper\n").await;
         assert_eq!(uploaded.status(), StatusCode::OK);
         assert_eq!(json_body(uploaded).await["relative_path"], "Imports/Upper");
-        assert!(vault_root.join("Imports/Upper.md").exists());
+        assert!(vault_root.join("Imports/Upper.MD").exists());
         assert!(!vault_root.join("Imports/Upper.MD.md").exists());
     }
 

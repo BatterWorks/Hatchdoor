@@ -8,9 +8,10 @@ use super::layers::LayerMap;
 use super::links::build_link_graph;
 use super::markdown_links::{NotePaths, note_link_target};
 use super::paths::{
-    content_snippet, folder_distance, is_servable_asset, nfc_title, normalize_link_target,
-    normalize_title, note_slug_base, relative_note_path_without_ext, resolve_path_ladder, slugify,
-    split_wikilink_note_body, unique_slug,
+    content_snippet, folder_distance, is_note_path, is_servable_asset, nfc_title,
+    normalize_link_target, normalize_title, note_slug_base, relative_note_path_without_ext,
+    resolve_path_ladder, slugify, split_wikilink_note_body, unique_slug,
+    walk_error_costs_only_itself,
 };
 use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata, SearchHit,
@@ -77,13 +78,22 @@ impl VaultIndex {
                     }
             })
         {
-            let entry = entry.map_err(io::Error::other)?;
+            // One folder or file this process may not open costs only itself
+            // (#637); see `walk_error_costs_only_itself` for what still fails.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if walk_error_costs_only_itself(&error) => {
+                    tracing::warn!(%error, "Skipping a Vault entry the catalogue cannot read");
+                    continue;
+                }
+                Err(error) => return Err(io::Error::other(error)),
+            };
             let path = entry.path();
 
             if !entry.file_type().is_file() {
                 continue;
             }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            if !is_note_path(path) {
                 // Assets ride the walk the notes already pay for: no extra
                 // traversal, and no file is read, so the asset index costs a
                 // string per attachment.
@@ -100,10 +110,52 @@ impl VaultIndex {
                 }
                 continue;
             }
+            // A path that is not UTF-8 has no relative path or title to give
+            // it, and the write layer refuses one, so it is left out rather
+            // than listed under a name it shares with others (#637).
+            if relative_note_path_without_ext(&root, path).is_none() {
+                tracing::warn!(
+                    path = %path.display(),
+                    "Skipping a note whose path is not valid UTF-8"
+                );
+                continue;
+            }
             markdown_paths.push(path.to_path_buf());
         }
 
         markdown_paths.sort();
+        // `Report.md` and `Report.MD` in one folder would share one relative
+        // path, which names one note everywhere. The lower-case one is kept,
+        // the name a link or a write without an extension reaches (#637).
+        let mut by_relative: HashMap<String, usize> = HashMap::new();
+        let mut twins = HashSet::new();
+        for (position, path) in markdown_paths.iter().enumerate() {
+            let Some(relative) = relative_note_path_without_ext(&root, path) else {
+                continue;
+            };
+            if let Some(&kept) = by_relative.get(&relative) {
+                let lower_case = |path: &Path| path.extension().is_some_and(|ext| ext == "md");
+                let (keep, drop) = if lower_case(path) && !lower_case(&markdown_paths[kept]) {
+                    (position, kept)
+                } else {
+                    (kept, position)
+                };
+                tracing::warn!(
+                    kept = %markdown_paths[keep].display(),
+                    skipped = %markdown_paths[drop].display(),
+                    "Skipping a note whose name differs from another only in its extension's case"
+                );
+                twins.insert(drop);
+                by_relative.insert(relative, keep);
+            } else {
+                by_relative.insert(relative, position);
+            }
+        }
+        let mut position = 0;
+        markdown_paths.retain(|_| {
+            position += 1;
+            !twins.contains(&(position - 1))
+        });
         // Default-surface notes claim their slugs first, so a compiled page
         // beats the source it was compiled from on a title collision.
         // `sort_by_cached_key` is stable, so path order is preserved within each
@@ -118,14 +170,16 @@ impl VaultIndex {
         });
 
         for path in markdown_paths {
+            // Every path here is UTF-8 and under the root: the walk dropped
+            // the rest.
+            let Some(relative_without_ext) = relative_note_path_without_ext(&root, &path) else {
+                continue;
+            };
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or("Untitled")
+                .unwrap_or(&relative_without_ext)
                 .to_string();
-
-            let relative_without_ext =
-                relative_note_path_without_ext(&root, &path).unwrap_or_else(|| stem.clone());
 
             let name_slug = note_slug_base(&stem);
             let slug = unique_slug(&name_slug, &by_slug);
