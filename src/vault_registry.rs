@@ -1360,6 +1360,14 @@ fn normalize_optional_branch(branch: Option<String>) -> Result<Option<String>, V
             "Git branch must not contain control characters",
         ));
     }
+    // Git's own rule, so a name no remote can hold (`a..b`, `x.lock`, a
+    // trailing slash) is refused here instead of failing every clone (#638).
+    if branch
+        .as_ref()
+        .is_some_and(|branch| !git2::Branch::name_is_valid(branch).unwrap_or(false))
+    {
+        return Err(invalid_source("Git branch is not a valid branch name"));
+    }
     Ok(branch)
 }
 

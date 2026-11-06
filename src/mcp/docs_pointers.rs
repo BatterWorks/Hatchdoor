@@ -107,6 +107,12 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
     ("write_failed", WRITE_FAILING),
     ("write_recovery_required", WRITE_FAILING),
     ("managed_git_authentication_failed", GIT_FAILING),
+    ("managed_git_branch_not_found", GIT_FAILING),
+    ("managed_git_unsupported_file_names", GIT_FAILING),
+    (
+        "existing_git_local_history_unsupported_file_names",
+        GIT_FAILING,
+    ),
     ("managed_git_remote_unreachable", GIT_FAILING),
     ("managed_git_install_failed", GIT_FAILING),
     ("managed_git_push_rejected", GIT_FAILING),

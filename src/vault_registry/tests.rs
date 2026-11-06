@@ -832,6 +832,50 @@ fn malformed_https_repository_urls_save_nothing() {
     }
 }
 
+/// #638: a branch name Git itself refuses would fail every clone, so it is
+/// refused when the Vault is saved. A valid name with a slash is kept.
+#[test]
+fn a_branch_name_git_refuses_saves_nothing() {
+    let add = |branch: &str| {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("state/vaults.json");
+        let result = VaultRegistryStore::new(&path).add(
+            0,
+            NewVaultDefinition {
+                name: "Branch".to_string(),
+                enabled: true,
+                source: VaultSource::ManagedGit {
+                    repository_url: "https://example.test/notes.git".to_string(),
+                    branch: Some(branch.to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        );
+        (result, path.exists())
+    };
+    for branch in ["a..b", "topic.lock", "trailing/", "with space", "-dash"] {
+        let (result, saved) = add(branch);
+        assert!(
+            matches!(
+                result,
+                Err(VaultRegistryError::InvalidDefinition(
+                    VaultDefinitionError::InvalidSource(_)
+                ))
+            ),
+            "{branch}"
+        );
+        assert!(!saved, "{branch}");
+    }
+    let (result, saved) = add("release/2.9");
+    assert!(result.is_ok() && saved);
+}
+
 /// Issue #97's reopening finding 2: a per-Vault managed-Git poll interval
 /// shorter than `MIN_MANAGED_GIT_POLL_INTERVAL_SECS` (mirroring
 /// `git::managed_task::BACKOFF_MAX`) must be rejected rather than silently

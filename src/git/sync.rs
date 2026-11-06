@@ -5,12 +5,15 @@ use git2::{Repository, Signature};
 use super::config::{GitConfig, GitMode};
 use super::managed_task::ManagedGitOutcome;
 use super::message::WriteLedger;
-use crate::vault_work::VaultWorkError;
+use crate::vault_work::{VaultWorkError, VaultWorkErrorDetail};
 
-/// Result of the local commit phase: whether a new commit was created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of the local commit phase: whether a new commit was created, and
+/// the changed files inside the Vault it left out because their names are not
+/// valid UTF-8, each written with its undecodable bytes as `\xNN` (#638).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitOutcome {
     pub committed: bool,
+    pub left_out: Vec<String>,
 }
 
 /// All errors are non-fatal to the server; they are recorded and surfaced.
@@ -32,6 +35,9 @@ pub enum GitError {
     Remote(String),
     /// Any other libgit2 failure.
     Other(String),
+    /// Everything else was committed; these files inside the Vault were left
+    /// out because their names are not valid UTF-8 (#638).
+    UnsupportedFileNames { files: Vec<String> },
 }
 
 impl std::fmt::Display for GitError {
@@ -52,6 +58,9 @@ impl std::fmt::Display for GitError {
             ),
             GitError::Remote(m) => write!(f, "git remote error: {m}"),
             GitError::Other(m) => write!(f, "git error: {m}"),
+            GitError::UnsupportedFileNames { files } => {
+                f.write_str(&super::left_out_message(files))
+            }
         }
     }
 }
@@ -188,14 +197,25 @@ pub fn run_local_history_git_turn(
         author_email,
     };
     validate_local_repo(&config).map_err(classify_local_history_error)?;
+    let mut left_out = Vec::new();
     let committed = ledger
         .commit_batch(|batch| {
             commit_local(&config, &[], |changed| {
                 batch.message(&config.vault_path, changed)
             })
-            .map(|outcome| outcome.committed)
+            .map(|outcome| {
+                left_out = outcome.left_out;
+                outcome.committed
+            })
         })
         .map_err(classify_local_history_error)?;
+    // Reported only after the rest committed, so one undecodable name never
+    // holds back every other note (#638).
+    if !left_out.is_empty() {
+        return Err(classify_local_history_error(
+            GitError::UnsupportedFileNames { files: left_out },
+        ));
+    }
     Ok(if committed {
         ManagedGitOutcome::Synchronized
     } else {
@@ -250,6 +270,17 @@ fn classify_local_history_error(error: GitError) -> VaultWorkError {
             "existing_git_local_history_git_error",
             "Git could not record this Vault's local history",
         ),
+        // Repository-relative names, never host paths, so they may reach the
+        // status in full.
+        GitError::UnsupportedFileNames { files } => {
+            tracing::warn!(%error, "Local history Git turn left files out");
+            return VaultWorkError::new(
+                "existing_git_local_history_unsupported_file_names",
+                error.to_string(),
+                false,
+            )
+            .with_detail(VaultWorkErrorDetail::AffectedPaths(files.clone()));
+        }
     };
     tracing::warn!(code, %error, "Local history Git turn failed");
     let retryable = matches!(error, GitError::Remote(_) | GitError::Other(_));
@@ -412,11 +443,9 @@ pub fn has_uncommitted_changes(config: &GitConfig) -> Result<bool, GitError> {
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo.statuses(Some(&mut opts))?;
     let vault_relative = vault_relative_path(&repo, config)?;
-    Ok(statuses.iter().any(|entry| {
-        entry
-            .path()
-            .is_ok_and(|path| status_path_is_in_vault(path, &vault_relative))
-    }))
+    Ok(statuses
+        .iter()
+        .any(|entry| super::status_bytes_in_vault(entry.path_bytes(), &vault_relative)))
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -442,8 +471,7 @@ pub fn commit_local(
 ) -> Result<CommitOutcome, GitError> {
     let _ = paths;
     let repo = Repository::discover(&config.vault_path)?;
-    let committed = commit_working_tree(&repo, config, message)?;
-    Ok(CommitOutcome { committed })
+    commit_working_tree(&repo, config, message)
 }
 
 /// Stage all Vault-subtree drift from a fresh in-memory index seeded at HEAD
@@ -454,7 +482,7 @@ fn commit_working_tree(
     repo: &Repository,
     config: &GitConfig,
     message: impl FnOnce(&[PathBuf]) -> String,
-) -> Result<bool, GitError> {
+) -> Result<CommitOutcome, GitError> {
     reject_unfinished_operation(repo)?;
     let mut index = repo.index()?;
     let head_commit = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
@@ -465,13 +493,17 @@ fn commit_working_tree(
     } else {
         index.clear()?;
     }
-    let changed = stage_vault_drift(repo, &mut index, &vault_relative)?;
+    let (changed, left_out) = stage_vault_drift(repo, &mut index, &vault_relative)?;
     let tree_oid = index.write_tree_to(repo)?;
     let tree = repo.find_tree(tree_oid)?;
 
     if let Some(parent) = head_commit {
         if parent.tree()?.id() == tree_oid {
-            return Ok(false); // nothing staged differs from HEAD
+            // nothing staged differs from HEAD
+            return Ok(CommitOutcome {
+                committed: false,
+                left_out,
+            });
         }
         let sig = signature(config)?;
         repo.commit(
@@ -495,7 +527,10 @@ fn commit_working_tree(
         stage_vault_drift(repo, &mut worktree_index, &vault_relative)?;
         worktree_index.write()?;
     }
-    Ok(true)
+    Ok(CommitOutcome {
+        committed: true,
+        left_out,
+    })
 }
 
 /// Refuse to commit a checkout that is part-way through a merge, rebase,
@@ -552,10 +587,6 @@ fn vault_relative_path(repo: &Repository, config: &GitConfig) -> Result<PathBuf,
     Ok(relative.to_path_buf())
 }
 
-fn status_path_is_in_vault(status_path: &str, vault_relative: &Path) -> bool {
-    vault_relative.as_os_str().is_empty() || Path::new(status_path).starts_with(vault_relative)
-}
-
 fn has_staged_vault_changes(repo: &Repository, vault_relative: &Path) -> Result<bool, GitError> {
     let statuses = repo.statuses(None)?;
     let staged = git2::Status::INDEX_NEW
@@ -567,22 +598,24 @@ fn has_staged_vault_changes(repo: &Repository, vault_relative: &Path) -> Result<
         if found {
             return Ok(true);
         }
-        let path = entry.path().map_err(|error| {
-            GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
-        })?;
-        Ok(status_path_is_in_vault(path, vault_relative) && entry.status().intersects(staged))
+        Ok(
+            super::status_bytes_in_vault(entry.path_bytes(), vault_relative)
+                && entry.status().intersects(staged),
+        )
     })
 }
 
 /// Add or remove exactly the changed, non-ignored paths reported by Git inside
 /// the configured Vault. Working from status entries rather than a pathspec
 /// keeps special characters in the Vault directory literal. Returns the paths
-/// it staged, relative to the Vault root.
+/// it staged, relative to the Vault root, and the changed paths inside the
+/// Vault it left out because their names are not valid UTF-8, escaped and
+/// relative to the repository (#638).
 fn stage_vault_drift(
     repo: &Repository,
     index: &mut git2::Index,
     vault_relative: &Path,
-) -> Result<Vec<PathBuf>, GitError> {
+) -> Result<(Vec<PathBuf>, Vec<String>), GitError> {
     let mut options = git2::StatusOptions::new();
     options
         .include_untracked(true)
@@ -590,13 +623,15 @@ fn stage_vault_drift(
         .renames_head_to_index(false)
         .renames_index_to_workdir(false);
     let mut staged = Vec::new();
+    let mut left_out = Vec::new();
     for entry in repo.statuses(Some(&mut options))?.iter() {
-        let path = entry.path().map_err(|error| {
-            GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
-        })?;
-        if !status_path_is_in_vault(path, vault_relative) {
+        if !super::status_bytes_in_vault(entry.path_bytes(), vault_relative) {
             continue;
         }
+        let Ok(path) = entry.path() else {
+            left_out.push(super::escaped_path(entry.path_bytes()));
+            continue;
+        };
         let relative_path = Path::new(path);
         let worktree_path = repo
             .workdir()
@@ -614,7 +649,7 @@ fn stage_vault_drift(
                 .to_path_buf(),
         );
     }
-    Ok(staged)
+    Ok((staged, left_out))
 }
 
 #[cfg(test)]
@@ -841,6 +876,52 @@ mod tests {
                 .content(),
             b"operator staging",
             "Local history must not overwrite the operator's staged Vault content"
+        );
+    }
+
+    /// #638: one file name that is not valid UTF-8 is left out and named,
+    /// and every other change in the Vault still commits.
+    #[test]
+    fn an_undecodable_file_name_is_left_out_and_named_while_the_rest_commits() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        fs::write(root.path().join("README.md"), "root readme").expect("root readme");
+        commit_all(&repo, "initial commit");
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        let odd = vault_path.join(std::ffi::OsStr::from_bytes(b"caf\xe9-latin1.md"));
+        if fs::write(&odd, "odd\n").is_err() {
+            // A filesystem that refuses non-UTF-8 names cannot hold the case.
+            return;
+        }
+        fs::write(vault_path.join("After.md"), "# after\n").expect("new note");
+
+        let error = run_local_history_git_turn(
+            vault_path.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("the left-out file is reported");
+
+        assert_eq!(
+            error.code(),
+            "existing_git_local_history_unsupported_file_names"
+        );
+        assert!(!error.retryable());
+        assert!(
+            error.message().contains("notes/caf\\xe9-latin1.md"),
+            "{}",
+            error.message()
+        );
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        assert!(
+            head.tree()
+                .expect("tree")
+                .get_path(Path::new("notes/After.md"))
+                .is_ok(),
+            "the decodable note was committed"
         );
     }
 

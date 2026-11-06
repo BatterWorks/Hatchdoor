@@ -71,9 +71,9 @@ The agent name is a label the client chooses for itself, not proof of who wrote.
 These appear when the behaviour you chose talks to a remote, which is **Pull-only** or **Two-way**, for a folder or a managed checkout:
 
 - **Repository URL**: required for Pull-only and Two-way. Local history does not show it, having nothing to fetch or push.
-- **Branch** (optional): leave blank to track the remote's default branch.
+- **Branch** (optional): leave blank to track the remote's default branch. A name Git does not allow, such as `a..b`, is refused when you save, and a branch the remote does not have stops the Vault with **branch not found** instead of retrying.
 - **Folder within the repository** (optional): leave blank to use the repository root as the Vault.
-- **Sign-in**: **No sign-in** for a public repository, or **Access token** for a private one. The token works over HTTPS only, is never shown again once saved, and is stored apart from every other secret Hatchdoor holds.
+- **Sign-in**: **No sign-in** for a public repository, or **Access token** for a private one. The token works over HTTPS only, is never shown again once saved, and is stored apart from every other secret Hatchdoor holds. Hatchdoor sends it only to the host and port in the **Repository URL**, so a remote that redirects elsewhere never receives it.
 - **Sync schedule**: how often Hatchdoor checks the remote when you don't sync by hand. Hatchdoor cannot be told when something is pushed, so it has to ask. It can be anything from 1 minute to 1440 minutes (24 hours). The default is the slowest, once a day, so set a shorter interval for a Vault you want kept current.
 
 The schedule is measured from the Vault's last completed check and survives a restart: Hatchdoor remembers when each Vault last checked, so a restart or a redeploy resumes the countdown and does not start a new one. A Vault already past its interval when Hatchdoor starts syncs straight away, and one still inside its interval waits out the rest.
