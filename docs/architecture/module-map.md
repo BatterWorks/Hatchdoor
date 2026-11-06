@@ -194,7 +194,7 @@ that production inventory are still checked for stale paths and duplicates.
   goes through, adding no second execution lane, and skips disabled Vaults,
   which have no active runtime.
   The one dispatch loop binds each turn's instance-wide Git commit identity
-  from that turn's own settings snapshot (`git_author_defaults`) rather than
+  from that turn's own settings snapshot (`git::config::author_defaults`) rather than
   from a value captured at startup, so a saved `HATCHDOOR_GIT_AUTHOR_NAME` or
   `HATCHDOOR_GIT_AUTHOR_EMAIL` applies to the next Git turn of any Vault
   without its own commit identity, with no restart.
@@ -539,7 +539,7 @@ the collection concludes from a finished turn. The executor is assembled once
 at startup and binds one immutable `ConfigSnapshot` at the start of every
 turn, so an admitted operation observes a single configuration view while a
 saved setting still reaches the next turn without a restart — that is where
-`git_author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
+`git::config::author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
 commit identity, overridden per Vault by
 `git::config::resolve_commit_identity`) and `HATCHDOOR_EMBED_LAYERS` are read.
 `recover_corrupt_cache`, started once by `server.rs` and stopped on shutdown,
@@ -880,7 +880,8 @@ LEGACY_MIGRATION_DOC_URL}`,
 types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
-operations (a configured Git branch must pass `git2::Branch::name_is_valid`,
+operations, `edit_prepared` with its `PendingEdit` and
+`PreparedEditError` (#639), (a configured Git branch must pass `git2::Branch::name_is_valid`,
 #638), store-owned `vault_path` resolution for runtime consumers, the
 crate-private `ensure_outside_instance_state` containment check the folder
 listing reuses to hide instance state,
@@ -971,6 +972,25 @@ falling back to `AppState::runtime_archive_prefix` when absent. Both the HTTP an
 writes through Vault collection management, which owns the
 `create_vault`/`edit_vault` request and credential-patch types they share.
 Frontend, cache, and search adapters remain separately owned later packets.
+
+Issue #639: an `ExistingGit` `LocalHistory` source on a plain folder (no `.git`
+entry and nothing `git2::Repository::open` opens there; a folder inside
+another repository counts, and gets a nested repository) is valid. `add` and
+`edit` (switching to Local history, not an edit of a Vault already on it at
+that folder) create its repository with
+`git2::Repository::init` under the registry write lock, after the revision
+check and just before the save, with no commit and no `.gitignore` (the
+generated files `init_local_repo` ignores can never sit inside a registered
+Vault). When the save then fails, the `.git` it created is removed again; no
+other writer can have relied on it meanwhile. Modes with a remote still
+require a working checkout. `enable` and an ordinary edit never create one:
+a Local-history source whose repository went missing (a lost `.git`, an unmounted drive) is
+refused as `InvalidSource`. `edit_prepared` is `edit` with a caller step run
+at the same point, under the lock, given a `PendingEdit` (the previous
+source, the previous commit identity, whether the source identity changed);
+a refusal there saves nothing and comes back as `PreparedEditError::Prepare`.
+Undoing that step after a failed save is the caller's part. Vault collection
+management is its one caller.
 
 The folder listing consumes `load`, `vault_path` and
 `ensure_outside_instance_state` to flag registered Vaults and skip folders
@@ -2413,6 +2433,21 @@ turn and notifies a definition change, because `VaultDefinition` equality
 cannot observe a credential value change (#97's and #98's reopening
 findings).
 
+An edit that changes a managed Git Vault's source identity (#639) goes
+through `VaultRegistryStore::edit_prepared`: before the change is saved,
+`git::retire_managed_checkout` commits the old checkout's pending notes and
+moves it into the Vault's `retired-checkouts/` folder, so the next Git turn
+clones the new identity. A failure refuses the edit with
+`checkout_set_aside_failed` (HTTP `409`), its retryability taken from the Git
+error, and nothing is saved or moved. When the registry save itself fails
+after the checkout moved, `git::restore_retired_checkout` puts it back; a
+failure to do so is logged with the archive's place. Every set-aside is
+logged too, so the report survives a response that is lost. The response's optional
+`retired_checkout` (`RetiredCheckoutReport`: the archive path relative to the
+state directory, whether notes were committed, and the commits the old
+remote lacks) reports what was kept; Settings shows it after the identity
+round trip.
+
 Discovery reports registry recovery as `recovery` when the persisted registry
 file itself is unreadable, and lists no Vaults then (#150). The
 credential-replacement retry skips a disabled Vault, which would otherwise
@@ -2422,8 +2457,10 @@ gain a Git schedule entry that disconnect never deactivates (#325).
 management tools reached it by calling handler functions with hand-built axum
 extractors and decoding the HTTP response body. No wire shape changed.
 
-**Consumed dependencies:** `VaultRegistryStore::{load, add, edit, enable,
-disable, disconnect}`, `VaultCollectionRuntime::{snapshot,
+**Consumed dependencies:** `VaultRegistryStore::{load, add, edit_prepared,
+enable, disable, disconnect}`, `git::{retire_managed_checkout,
+restore_retired_checkout}` and
+`git::config::{author_defaults, resolve_commit_identity}`, `VaultCollectionRuntime::{snapshot,
 reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
 notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
@@ -2911,7 +2948,8 @@ three are on a live path; `validate_repo`, `init_local_repo`, and
 lifecycle and the boot-time legacy validation in #185 and are retained
 deliberately by that ticket's explicit keep list. The crate-private
 `parse_mode` and `non_empty_setting` helpers serve the startup parse of the
-legacy settings for the demo posture check. `resolve_commit_identity` (issue #130)
+legacy settings for the demo posture check, and `non_empty_setting` also feeds
+`author_defaults`, read on every Git turn and by a managed identity change. `resolve_commit_identity` (issue #130)
 resolves one Vault's own configured `VaultCommitIdentity`
 (`vault_registry.rs`) if set, else the instance-wide
 `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` defaults; the Vault
@@ -2976,6 +3014,25 @@ projection (`vault_read.rs`'s `statistics_detail`) is its only consumer.
 removed and `Ok(None)` in its place (#267): a commit turn must open no network
 connection, and cloning is one, so it reuses the checkout a Vault already has
 and reports "nothing here yet" rather than creating one.
+
+`retire_managed_checkout` (#639) sets a managed checkout aside before its
+Vault's source identity changes: under a freshly acquired lease (refused as
+`managed_git_checkout_busy` while a turn holds it) it reaches the checkout
+through `reuse_recorded_checkout`, which validates against what the receipt
+says the checkout was cloned from rather than the current definition, commits
+pending Vault drift in a Two-way checkout, counts the commits the remote
+branch lacks, and `set_aside_checkout` moves the checkout and its receipt
+into `vaults/<id>/retired-checkouts/<UTC timestamp>/`. A commit failure moves
+nothing. A checkout that no longer validates is moved without a commit, which
+keeps every file. Nothing deletes from `retired-checkouts/`, and
+`discard_interrupted_acquisition` never touches it. It returns
+`RetiredCheckout`, or `None` when no checkout exists yet. A move that fails is
+the non-retryable `ManagedCheckoutError::SetAsideFailed`
+(`managed_git_set_aside_failed`). `restore_retired_checkout` and
+`restore_set_aside_checkout` move a set-aside checkout back for an edit whose
+save failed, refusing rather than overwrite a checkout that appeared since.
+`config::author_defaults` reads the instance-wide commit identity from a
+settings snapshot for the executor's turns and for this.
 
 `ManagedSyncConfig`, `ManagedSyncMode`, `ManagedSyncOutcome`,
 `ManagedSyncError`, and `synchronize_managed_checkout` form the next shared-core

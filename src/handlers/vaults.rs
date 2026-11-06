@@ -147,6 +147,7 @@ fn management_error_response(error: VaultOperationError) -> Response {
         | "identity_change_requires_disabled"
         | "identity_change_requires_confirmation"
         | "registry_revision_conflict"
+        | "checkout_set_aside_failed"
         | "vault_disabled"
         | "capability_unavailable" => StatusCode::CONFLICT,
         // Retry-after-operator-action, or retry-after-the-runtime-settles.
@@ -432,6 +433,7 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             ("registry_revision_conflict", StatusCode::CONFLICT),
+            ("checkout_set_aside_failed", StatusCode::CONFLICT),
             ("vault_disabled", StatusCode::CONFLICT),
             ("capability_unavailable", StatusCode::CONFLICT),
             (

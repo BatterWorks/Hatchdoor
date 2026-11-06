@@ -542,12 +542,14 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
             NewVaultDefinition {
                 name: "Not Git".to_string(),
                 enabled: true,
+                // Only Local history creates a repository in a plain folder
+                // (#639); a mode with a remote needs a real checkout.
                 source: VaultSource::ExistingGit {
-                    repository_path: not_repository,
-                    repository_url: None,
+                    repository_path: not_repository.clone(),
+                    repository_url: Some("https://example.test/owner/notes.git".to_string()),
                     branch: None,
                     vault_subdirectory: None,
-                    mode: VaultGitMode::LocalHistory,
+                    mode: VaultGitMode::PullOnly,
                     poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
@@ -561,6 +563,244 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
         error,
         VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
     ));
+    assert!(!not_repository.join(".git").exists());
+}
+
+fn local_history_source(repository_path: PathBuf) -> VaultSource {
+    VaultSource::ExistingGit {
+        repository_path,
+        repository_url: None,
+        branch: None,
+        vault_subdirectory: None,
+        mode: VaultGitMode::LocalHistory,
+        poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+    }
+}
+
+/// Local history on a plain folder creates the repository there, with no
+/// commit and no other file, and saves the Vault (#639).
+#[test]
+fn local_history_on_a_plain_folder_creates_its_repository() {
+    let directory = tempdir().expect("temporary directory");
+    let folder = directory.path().join("plain");
+    std::fs::create_dir(&folder).expect("create folder");
+    std::fs::write(folder.join("Note.md"), "# Note\n").expect("write note");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+
+    let committed = store
+        .add(
+            0,
+            NewVaultDefinition {
+                source: local_history_source(folder.clone()),
+                ..local_definition("Plain", folder.clone(), true)
+            },
+        )
+        .expect("Local history on a plain folder is accepted");
+
+    assert_eq!(committed.revision(), 1);
+    let repository = git2::Repository::open(&folder).expect("a repository now exists");
+    assert!(repository.head().is_err(), "no commit was made");
+    let mut entries = std::fs::read_dir(&folder)
+        .expect("list folder")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries, [".git", "Note.md"], "nothing else was written");
+}
+
+/// Switching a plain local folder to Local history, the Settings flow, goes
+/// through the same creation; an add the registry then refuses removes the
+/// repository it made (#639).
+#[test]
+fn switching_a_local_vault_to_local_history_creates_the_repository_and_a_refused_add_does_not() {
+    let directory = tempdir().expect("temporary directory");
+    let folder = directory.path().join("plain");
+    std::fs::create_dir(&folder).expect("create folder");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = store
+        .add(0, local_definition("Plain", folder.clone(), true))
+        .expect("add Local Vault");
+    let vault_id = added.definitions().next().expect("definition").vault_id();
+    store.disable(1, vault_id).expect("disable");
+
+    let edited = store
+        .edit(
+            2,
+            vault_id,
+            VaultDefinitionEdit {
+                source: local_history_source(folder.clone()),
+                ..local_edit("Plain", folder.clone(), true)
+            },
+        )
+        .expect("switch to Local history");
+    assert!(matches!(
+        edited.definitions().next().expect("definition").source(),
+        VaultSource::ExistingGit {
+            mode: VaultGitMode::LocalHistory,
+            ..
+        }
+    ));
+    assert!(git2::Repository::open(&folder).is_ok());
+    store.enable(3, vault_id).expect("enable");
+
+    let other = directory.path().join("other");
+    std::fs::create_dir(&other).expect("create second folder");
+    let stale = store
+        .add(
+            0,
+            NewVaultDefinition {
+                source: local_history_source(other.clone()),
+                ..local_definition("Other", other.clone(), true)
+            },
+        )
+        .expect_err("a stale revision saves nothing");
+    assert!(matches!(stale, VaultRegistryError::RevisionConflict { .. }));
+    assert!(
+        !other.join(".git").exists(),
+        "a change refused on its revision creates no repository"
+    );
+}
+
+/// A folder inside another repository has no repository of its own, so
+/// Local history creates one there, nested in the outer one (#639).
+#[test]
+fn local_history_inside_another_repository_creates_its_own() {
+    let directory = tempdir().expect("temporary directory");
+    let outer = directory.path().join("outer");
+    git2::Repository::init(&outer).expect("outer repository");
+    let inner = outer.join("inner");
+    std::fs::create_dir(&inner).expect("inner folder");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+
+    store
+        .add(
+            0,
+            NewVaultDefinition {
+                source: local_history_source(inner.clone()),
+                ..local_definition("Inner", inner.clone(), true)
+            },
+        )
+        .expect("a folder inside a repository is plain");
+
+    assert!(inner.join(".git").is_dir());
+}
+
+/// Enabling never creates a repository: one that went missing was lost or
+/// is not mounted, so the Vault stays off and says so.
+#[test]
+fn enabling_a_local_history_vault_whose_repository_went_missing_is_refused() {
+    let directory = tempdir().expect("temporary directory");
+    let folder = directory.path().join("plain");
+    std::fs::create_dir(&folder).expect("create folder");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = store
+        .add(
+            0,
+            NewVaultDefinition {
+                source: local_history_source(folder.clone()),
+                ..local_definition("Plain", folder.clone(), false)
+            },
+        )
+        .expect("add");
+    let vault_id = added.definitions().next().expect("definition").vault_id();
+    std::fs::remove_dir_all(folder.join(".git")).expect("lose the repository");
+
+    let refused = store.enable(1, vault_id).expect_err("enable refused");
+
+    assert!(
+        matches!(&refused, VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(message)) if message.contains("is missing")),
+        "{refused:?}"
+    );
+    assert!(!folder.join(".git").exists(), "nothing was created");
+
+    // Nor does an ordinary edit, which would otherwise let the Vault on.
+    store
+        .edit(
+            1,
+            vault_id,
+            VaultDefinitionEdit {
+                source: local_history_source(folder.clone()),
+                ..local_edit("Renamed", folder.clone(), false)
+            },
+        )
+        .expect("an ordinary edit saves");
+    assert!(!folder.join(".git").exists(), "the edit created nothing");
+    assert!(store.enable(2, vault_id).is_err());
+}
+
+/// A save that fails after the repository was created removes it again.
+#[cfg(unix)]
+#[test]
+fn a_failed_save_removes_the_local_history_repository_it_created() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid only reads the process's effective user ID.
+    if unsafe { libc::geteuid() } == 0 {
+        // Root writes into a read-only folder, so the save cannot be made
+        // to fail this way.
+        return;
+    }
+    let directory = tempdir().expect("temporary directory");
+    let folder = directory.path().join("plain");
+    std::fs::create_dir(&folder).expect("create folder");
+    let state = directory.path().join("state");
+    std::fs::create_dir(&state).expect("state folder");
+    let store = VaultRegistryStore::new(state.join("vaults.json"));
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+
+    let failed = store.add(
+        0,
+        NewVaultDefinition {
+            source: local_history_source(folder.clone()),
+            ..local_definition("Plain", folder.clone(), true)
+        },
+    );
+
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("restore");
+    assert!(
+        matches!(failed, Err(VaultRegistryError::Storage(_))),
+        "{failed:?}"
+    );
+    assert!(!folder.join(".git").exists(), "the repository was removed");
+}
+
+/// A refusal from the caller's preparation step saves nothing and removes
+/// a repository the edit created.
+#[test]
+fn an_edit_its_preparation_refuses_saves_nothing() {
+    let directory = tempdir().expect("temporary directory");
+    let folder = directory.path().join("plain");
+    std::fs::create_dir(&folder).expect("create folder");
+    let store = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let added = store
+        .add(0, local_definition("Plain", folder.clone(), false))
+        .expect("add Local Vault");
+    let vault_id = added.definitions().next().expect("definition").vault_id();
+
+    let mut seen = None;
+    let refused = store
+        .edit_prepared(
+            1,
+            vault_id,
+            VaultDefinitionEdit {
+                source: local_history_source(folder.clone()),
+                ..local_edit("Plain", folder.clone(), true)
+            },
+            |pending| {
+                seen = Some((pending.identity_changed, pending.previous.clone()));
+                Err("no")
+            },
+        )
+        .expect_err("preparation refused");
+
+    assert!(matches!(refused, super::PreparedEditError::Prepare("no")));
+    let (identity_changed, previous) = seen.expect("preparation ran");
+    assert!(identity_changed);
+    assert!(matches!(previous, VaultSource::Local { .. }));
+    assert!(!folder.join(".git").exists());
+    let VaultRegistryState::Ready(snapshot) = store.load().expect("load") else {
+        panic!("registry ready");
+    };
+    assert_eq!(snapshot.revision(), 1, "nothing was saved");
 }
 
 #[test]

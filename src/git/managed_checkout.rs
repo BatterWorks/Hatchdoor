@@ -85,6 +85,9 @@ pub enum ManagedCheckoutError {
     /// repository again on every backoff (#638).
     BranchNotFound,
     ValidationFailed,
+    /// The checkout could not be moved into, or back out of, the Vault's
+    /// `retired-checkouts/` folder (#639). The string says why.
+    SetAsideFailed(String),
     /// The checkout could not be installed at its final name. The string says
     /// why, because the first report of this reached an operator as a bare
     /// "install failed" with the errno thrown away, and the cause was a
@@ -108,6 +111,12 @@ impl std::fmt::Display for ManagedCheckoutError {
                 "managed checkout could not be installed: {reason}"
             );
         }
+        if let Self::SetAsideFailed(reason) = self {
+            return write!(
+                formatter,
+                "managed checkout could not be set aside: {reason}"
+            );
+        }
         let message = match self {
             Self::StateDirectoryUnavailable => "managed checkout state directory is unavailable",
             Self::OwnershipUnavailable => "managed checkout is already owned by another process",
@@ -117,7 +126,9 @@ impl std::fmt::Display for ManagedCheckoutError {
             Self::AuthenticationFailed => "managed checkout authentication failed",
             Self::BranchNotFound => "managed checkout branch was not found on the remote",
             Self::ValidationFailed => "managed checkout validation failed",
-            Self::AtomicInstallFailed(_) => unreachable!("handled above"),
+            Self::AtomicInstallFailed(_) | Self::SetAsideFailed(_) => {
+                unreachable!("handled above")
+            }
         };
         formatter.write_str(message)
     }
@@ -205,6 +216,135 @@ pub fn reuse_existing_checkout(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(ManagedCheckoutError::DestinationInvalid),
     }
+}
+
+/// The checkout this Vault has on disk, validated against what its receipt
+/// says it was cloned from rather than against the Vault's current
+/// definition. Used to set a checkout aside when that definition's identity
+/// changes (#639): the definition may already name another remote, and an
+/// older change may have left the two apart.
+///
+/// `Ok(None)` means there is no checkout on disk. A checkout that is there
+/// but does not validate against its receipt is `ValidationFailed`.
+pub fn reuse_recorded_checkout(
+    lease: &ManagedCheckoutLease,
+    state_directory: &Path,
+    vault_id: VaultId,
+) -> Result<Option<(ManagedCheckout, String)>, ManagedCheckoutError> {
+    let destination = lease.vault_directory.join("repository");
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(ManagedCheckoutError::DestinationInvalid);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ManagedCheckoutError::DestinationInvalid),
+    }
+    let receipt = read_receipt(&lease.vault_directory)?;
+    let request = ManagedCheckoutRequest {
+        state_directory: state_directory.to_path_buf(),
+        vault_id,
+        repository_url: receipt.repository_url.clone(),
+        branch: Some(receipt.resolved_branch.clone()),
+        vault_subdirectory: receipt.vault_subdirectory.clone(),
+        credentials: None,
+    };
+    let checkout = reuse_checkout(&destination, &lease.vault_directory, &request)?;
+    Ok(Some((checkout, receipt.repository_url)))
+}
+
+/// The folder, under the Vault's own state directory, that holds checkouts
+/// set aside by an identity change. Nothing ever deletes from it.
+const RETIRED_DIRECTORY: &str = "retired-checkouts";
+
+/// Move this Vault's checkout and its receipt into a new, timestamped folder
+/// under `retired-checkouts/`, so the next Git turn clones afresh (#639).
+/// Returns that folder, or `None` when there was no checkout to move.
+///
+/// Moves, never copies or deletes: every file the checkout held, committed
+/// or not, is still there afterwards. The caller holds the Vault's lease, so
+/// no Git turn can be using the checkout meanwhile.
+pub fn set_aside_checkout(
+    lease: &ManagedCheckoutLease,
+) -> Result<Option<PathBuf>, ManagedCheckoutError> {
+    let set_aside_failed = |stage: &str, error: std::io::Error| {
+        ManagedCheckoutError::SetAsideFailed(format!("{stage}: {error}"))
+    };
+    let repository = lease.vault_directory.join("repository");
+    match fs::symlink_metadata(&repository) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(set_aside_failed("inspect", error)),
+    }
+    let retired = ensure_directory_inside(
+        &lease.vault_directory,
+        &lease.vault_directory.join(RETIRED_DIRECTORY),
+    )?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let mut archive = None;
+    for attempt in 1..=100 {
+        let name = if attempt == 1 {
+            stamp.clone()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let candidate = retired.join(name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                archive = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(set_aside_failed("create the archive folder", error)),
+        }
+    }
+    let archive = archive.ok_or_else(|| {
+        ManagedCheckoutError::SetAsideFailed("no free archive folder name".to_string())
+    })?;
+    fs::rename(&repository, archive.join("repository"))
+        .map_err(|error| set_aside_failed("move the checkout", error))?;
+    // The receipt describes the checkout just moved, so it goes with it. A
+    // receipt left behind is harmless: with no checkout beside it, the next
+    // turn clones and writes a new one. So a failure here is logged rather
+    // than reported, once the checkout itself has moved.
+    match fs::rename(
+        lease.vault_directory.join(RECEIPT_FILE),
+        archive.join(RECEIPT_FILE),
+    ) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not move a set-aside checkout's receipt with it");
+        }
+    }
+    Ok(Some(archive))
+}
+
+/// Put a checkout [`set_aside_checkout`] moved back where it was, for an
+/// identity change that was then not saved (#639). Refuses rather than
+/// overwrite a checkout that appeared meanwhile; the archive then stays as
+/// it is, which loses nothing.
+pub fn restore_set_aside_checkout(
+    lease: &ManagedCheckoutLease,
+    archive: &Path,
+) -> Result<(), ManagedCheckoutError> {
+    let repository = lease.vault_directory.join("repository");
+    if fs::symlink_metadata(&repository).is_ok() {
+        return Err(ManagedCheckoutError::SetAsideFailed(
+            "a checkout already exists where the old one would go back".to_string(),
+        ));
+    }
+    fs::rename(archive.join("repository"), &repository).map_err(|error| {
+        ManagedCheckoutError::SetAsideFailed(format!("move the checkout back: {error}"))
+    })?;
+    if let Err(error) = fs::rename(
+        archive.join(RECEIPT_FILE),
+        lease.vault_directory.join(RECEIPT_FILE),
+    ) {
+        tracing::warn!(%error, "could not move a restored checkout's receipt back with it");
+    }
+    let _ = fs::remove_dir(archive);
+    Ok(())
 }
 
 fn acquire_new_checkout(

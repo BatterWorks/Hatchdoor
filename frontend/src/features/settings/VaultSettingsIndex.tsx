@@ -38,6 +38,9 @@ import {
   recoverPausedVault,
   recoveryBranchName,
   recoveryBranchUrl,
+  type RetiredCheckout,
+  retiredCheckoutNote,
+  savedMessage,
   REPOSITORY_URL_REQUIRED_MESSAGE,
   requestJson,
   sameSourceIdentity,
@@ -674,6 +677,7 @@ export function VaultSettingsDetail({
       vault?: VaultSummary;
       registry_revision?: number;
       message?: string;
+      retired_checkout?: RetiredCheckout;
     };
     if (!editResult.ok || editPayload.registry_revision === undefined) {
       const rollback = await recoverPausedVault(vaultId);
@@ -715,8 +719,9 @@ export function VaultSettingsDetail({
     };
     if (!enableResult.ok) {
       setRecoveryPending(true);
+      const kept = retiredCheckoutNote(editPayload.retired_checkout);
       setFailure(
-        "This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.",
+        `This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.${kept ? ` ${kept}` : ""}`,
       );
       setBusy(false);
       return;
@@ -731,7 +736,7 @@ export function VaultSettingsDetail({
       if (enablePayload.registry_revision !== undefined)
         setRevision(enablePayload.registry_revision);
     }
-    setMessage("Saved.");
+    setMessage(savedMessage(editPayload.retired_checkout));
     setBusy(false);
   };
 

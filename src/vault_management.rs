@@ -29,16 +29,17 @@ use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::app_state::AppState;
 use crate::git::GitPollingClock;
 use crate::vault::{LinkPathForm, LinkStyle};
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::{
-    HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
-    VaultDefinitionEdit, VaultDefinitionError, VaultId, VaultRegistryError, VaultRegistryRecovery,
-    VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState, VaultSource,
+    HttpsCredentials, NewVaultDefinition, PendingEdit, PreparedEditError, VaultCommitIdentity,
+    VaultDefinition, VaultDefinitionEdit, VaultDefinitionError, VaultId, VaultRegistryError,
+    VaultRegistryRecovery, VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState,
+    VaultSource,
 };
 use crate::vault_runtime::{
     CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
@@ -170,6 +171,25 @@ pub struct VaultMutationResponse {
     /// write does not advance it, so it cannot say whether a collection read
     /// includes a write. That read's participants can.
     pub collection_revision: u64,
+    /// Present only on an edit that changed a managed Git Vault's
+    /// repository, branch or folder and found a checkout to set aside (#639).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_checkout: Option<RetiredCheckoutReport>,
+}
+
+/// The old checkout a managed Git Vault's identity change set aside (#639).
+/// Its work is kept, never deleted: the next Git turn clones the new remote
+/// afresh, and anything the old remote never received stays in the archive.
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
+pub struct RetiredCheckoutReport {
+    /// Where the old checkout now lives, relative to the instance state
+    /// directory.
+    pub archive: String,
+    /// Whether notes not yet committed were committed there before it moved.
+    pub committed: bool,
+    /// Commits in the old checkout that its remote does not have. Only the
+    /// archive holds them.
+    pub unpushed_commits: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
@@ -313,6 +333,7 @@ pub(crate) const MANAGEMENT_ERROR_CODES: &[&str] = &[
     "identity_change_requires_disabled",
     "identity_change_requires_confirmation",
     "registry_revision_conflict",
+    "checkout_set_aside_failed",
     "vault_disabled",
     "capability_unavailable",
     "vault_registry_recovery_required",
@@ -721,11 +742,31 @@ impl<'a> VaultCollectionManagement<'a> {
             archive_folder: request.archive_folder,
             commit_identity: request.commit_identity,
         };
+        let mut retired = None;
         let snapshot = self
             .state
             .vault_registry
-            .edit(request.expected_registry_revision, vault_id, edit)
-            .map_err(|error| registry_error(error, Some(vault_id)))?;
+            .edit_prepared(
+                request.expected_registry_revision,
+                vault_id,
+                edit,
+                |pending| {
+                    retired = self.retire_managed_checkout(vault_id, &pending)?;
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                PreparedEditError::Registry(error) => {
+                    // The save failed after the checkout was set aside: put it
+                    // back, so the Vault keeps the checkout of the remote its
+                    // definition still names.
+                    if let Some(retired) = &retired {
+                        self.restore_retired_checkout(vault_id, retired);
+                    }
+                    registry_error(error, Some(vault_id))
+                }
+                PreparedEditError::Prepare(error) => error,
+            })?;
 
         self.reconcile_after_commit(&snapshot)
             .await
@@ -740,7 +781,101 @@ impl<'a> VaultCollectionManagement<'a> {
             // Git/capability state after a real secret rotation.
             self.state.vaults.notify_definition_changed(vault_id);
         }
-        Ok(self.mutation_response(&snapshot, Some(vault_id)))
+        let mut response = self.mutation_response(&snapshot, Some(vault_id));
+        response.retired_checkout = retired.map(|retired| RetiredCheckoutReport {
+            archive: retired.archive.to_string_lossy().into_owned(),
+            committed: retired.committed,
+            unpushed_commits: retired.unpushed_commits,
+        });
+        Ok(response)
+    }
+
+    /// Set a managed Git Vault's checkout aside when a validated edit is about
+    /// to change its repository, branch or folder (#639), so the next Git
+    /// turn clones the new identity instead of failing validation against
+    /// the old checkout forever. Runs before the edit is saved: when the old
+    /// checkout's notes cannot be committed, the edit is refused and the
+    /// checkout stays where it is.
+    ///
+    /// This also covers a change away from managed Git: a later change back
+    /// would otherwise find a checkout of whatever remote it last named.
+    fn retire_managed_checkout(
+        &self,
+        vault_id: VaultId,
+        pending: &PendingEdit<'_>,
+    ) -> Result<Option<crate::git::RetiredCheckout>, VaultOperationError> {
+        let VaultSource::ManagedGit { mode, .. } = pending.previous else {
+            return Ok(None);
+        };
+        if !pending.identity_changed {
+            return Ok(None);
+        }
+        let state_directory = self.managed_state_directory();
+        let (default_name, default_email) =
+            crate::git::config::author_defaults(&self.state.runtime_config.snapshot());
+        let (author_name, author_email) = crate::git::config::resolve_commit_identity(
+            pending.previous_commit_identity,
+            &default_name,
+            &default_email,
+        );
+        crate::git::retire_managed_checkout(
+            &state_directory,
+            vault_id,
+            *mode,
+            &author_name,
+            &author_email,
+        )
+        .map_err(|error| {
+            VaultOperationError::new(
+                "checkout_set_aside_failed",
+                format!(
+                    "Nothing changed: the Vault's current checkout could not be set aside, so it and its notes stay where they are. {}",
+                    error.message()
+                ),
+                Some(vault_id),
+                error.retryable(),
+            )
+        })
+        .inspect(|retired| {
+            if let Some(retired) = retired {
+                info!(
+                    %vault_id,
+                    archive = %retired.archive.display(),
+                    committed = retired.committed,
+                    unpushed_commits = retired.unpushed_commits,
+                    "set a managed checkout aside for an identity change"
+                );
+            }
+        })
+    }
+
+    /// Move a checkout [`Self::retire_managed_checkout`] set aside back, for
+    /// an edit whose save then failed. A failure is logged with the archive's
+    /// place: the checkout is still whole there, and the next turn clones
+    /// afresh.
+    fn restore_retired_checkout(&self, vault_id: VaultId, retired: &crate::git::RetiredCheckout) {
+        match crate::git::restore_retired_checkout(
+            &self.managed_state_directory(),
+            vault_id,
+            &retired.archive,
+        ) {
+            Ok(()) => info!(%vault_id, "put a set-aside checkout back after a failed save"),
+            Err(error) => error!(
+                %vault_id,
+                archive = %retired.archive.display(),
+                error = %error.message(),
+                "could not put a set-aside checkout back after a failed save; it stays in its archive"
+            ),
+        }
+    }
+
+    /// The instance state directory: the folder holding the registry file,
+    /// where managed checkouts live. The executor derives it the same way.
+    fn managed_state_directory(&self) -> std::path::PathBuf {
+        self.state.vault_registry.path().parent().map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        )
     }
 
     /// Enable or disable an existing Vault definition.
@@ -977,6 +1112,7 @@ impl<'a> VaultCollectionManagement<'a> {
             vault,
             registry_revision: snapshot.revision(),
             collection_revision: collection_snapshot.collection_revision,
+            retired_checkout: None,
         }
     }
 
@@ -1477,6 +1613,204 @@ mod tests {
             VaultCapabilities::default(),
             "a demo offers no retry for a Vault a visitor cannot retry"
         );
+    }
+
+    fn two_way_source(url: &str, vault_subdirectory: Option<&str>) -> VaultSource {
+        VaultSource::ManagedGit {
+            repository_url: url.to_string(),
+            branch: None,
+            vault_subdirectory: vault_subdirectory.map(std::path::PathBuf::from),
+            mode: VaultGitMode::TwoWay,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+        }
+    }
+
+    /// A disabled Two-way managed Vault with a checkout of `url` on disk, the
+    /// way a first clone leaves it: one commit, `origin` and the receipt
+    /// naming `url`. Returns the Vault and its checkout folder.
+    async fn disabled_vault_with_checkout(
+        state: &AppState,
+        url: &str,
+        vault_subdirectory: Option<&str>,
+    ) -> (VaultId, std::path::PathBuf) {
+        VaultCollectionManagement::new(state)
+            .create(CreateVaultRequest {
+                enabled: false,
+                ..create_request("Remote notes", two_way_source(url, vault_subdirectory))
+            })
+            .await
+            .expect("create the disabled Vault");
+        let vault_id = ready_snapshot(state).vault_ids().next().expect("one Vault");
+        let vault_directory = state
+            .vault_registry
+            .path()
+            .parent()
+            .expect("state directory")
+            .join("vaults")
+            .join(vault_id.to_string());
+        let checkout = vault_directory.join("repository");
+        let notes = vault_subdirectory.map_or_else(|| checkout.clone(), |sub| checkout.join(sub));
+        std::fs::create_dir_all(&notes).expect("checkout folders");
+        let repository = git2::Repository::init(&checkout).expect("checkout repository");
+        std::fs::write(notes.join("Home.md"), "# Home\n").expect("note");
+        let mut index = repository.index().expect("index");
+        index
+            .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+            .expect("stage");
+        let tree = repository
+            .find_tree(index.write_tree().expect("tree"))
+            .expect("tree");
+        let signature = git2::Signature::now("Test", "test@example.test").expect("signature");
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "first", &tree, &[])
+            .expect("commit");
+        repository.remote("origin", url).expect("origin");
+        let branch = repository
+            .head()
+            .expect("HEAD")
+            .shorthand()
+            .expect("branch")
+            .to_string();
+        std::fs::write(
+            vault_directory.join(".hatchdoor-managed-checkout.json"),
+            serde_json::json!({
+                "repository_url": url,
+                "resolved_branch": branch,
+                "vault_subdirectory": vault_subdirectory,
+            })
+            .to_string(),
+        )
+        .expect("receipt");
+        (vault_id, checkout)
+    }
+
+    fn identity_edit(revision: u64, source: VaultSource) -> EditVaultRequest {
+        EditVaultRequest {
+            expected_registry_revision: revision,
+            name: "Remote notes".to_string(),
+            source,
+            exclude_patterns: Vec::new(),
+            https_credentials: HttpsCredentialsPatch::Keep,
+            confirm_identity_change: true,
+            archive_folder: None,
+            commit_identity: None,
+        }
+    }
+
+    /// #639: a confirmed URL change on a managed Vault commits the old
+    /// checkout's pending note, moves the checkout into the Vault's
+    /// `retired-checkouts/` folder and reports it, so the next turn clones
+    /// the new remote instead of failing validation for good.
+    #[tokio::test]
+    async fn a_managed_identity_change_sets_the_old_checkout_aside_and_reports_it() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) =
+            disabled_vault_with_checkout(&state, "https://example.test/owner/old.git", None).await;
+        std::fs::write(checkout.join("After.md"), "after\n").expect("note not yet committed");
+
+        let response = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                identity_edit(
+                    ready_snapshot(&state).revision(),
+                    two_way_source("https://example.test/owner/new.git", None),
+                ),
+            )
+            .await
+            .expect("the identity change saves");
+
+        let retired = response
+            .retired_checkout
+            .expect("the old checkout is reported");
+        assert!(retired.committed);
+        assert_eq!(
+            retired.unpushed_commits, 2,
+            "its remote never received either"
+        );
+        assert!(!checkout.exists(), "the next turn clones afresh");
+        let state_directory = state
+            .vault_registry
+            .path()
+            .parent()
+            .expect("state directory")
+            .canonicalize()
+            .expect("canonical state directory");
+        let archived = state_directory.join(&retired.archive).join("repository");
+        assert!(archived.join("After.md").is_file());
+        let archived_repository = git2::Repository::open(&archived).expect("archived repository");
+        let head = archived_repository
+            .head()
+            .expect("HEAD")
+            .peel_to_tree()
+            .expect("tree");
+        assert!(head.get_path(std::path::Path::new("After.md")).is_ok());
+        assert!(matches!(
+            ready_snapshot(&state)
+                .definition(vault_id)
+                .expect("definition")
+                .source(),
+            VaultSource::ManagedGit { repository_url, .. }
+                if repository_url == "https://example.test/owner/new.git"
+        ));
+    }
+
+    /// #639: when the old checkout's notes cannot be committed, the edit is
+    /// refused, the definition is unchanged and the checkout stays put.
+    #[tokio::test]
+    async fn a_managed_identity_change_whose_notes_cannot_be_committed_changes_nothing() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) = disabled_vault_with_checkout(
+            &state,
+            "https://example.test/owner/old.git",
+            Some("vault"),
+        )
+        .await;
+        // A change outside the Vault folder is one a Vault commit refuses.
+        std::fs::write(checkout.join("Outside.md"), "outside\n").expect("outside change");
+        let revision = ready_snapshot(&state).revision();
+
+        let refused = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                identity_edit(
+                    revision,
+                    two_way_source("https://example.test/owner/new.git", Some("vault")),
+                ),
+            )
+            .await
+            .expect_err("the edit is refused");
+
+        assert_eq!(refused.code, "checkout_set_aside_failed");
+        assert!(refused.message.starts_with("Nothing changed"));
+        assert_eq!(ready_snapshot(&state).revision(), revision, "nothing saved");
+        assert!(checkout.join("Outside.md").is_file(), "nothing moved");
+    }
+
+    /// An edit that keeps the managed source's identity never touches the
+    /// checkout.
+    #[tokio::test]
+    async fn an_ordinary_edit_leaves_the_managed_checkout_alone() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) =
+            disabled_vault_with_checkout(&state, "https://example.test/owner/old.git", None).await;
+
+        let response = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                EditVaultRequest {
+                    confirm_identity_change: false,
+                    name: "Renamed notes".to_string(),
+                    ..identity_edit(
+                        ready_snapshot(&state).revision(),
+                        two_way_source("https://example.test/owner/old.git", None),
+                    )
+                },
+            )
+            .await
+            .expect("an ordinary edit saves");
+
+        assert!(response.retired_checkout.is_none());
+        assert!(checkout.join("Home.md").is_file());
     }
 
     /// #325: replacing credentials on a *disabled* remote-backed Vault used to

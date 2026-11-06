@@ -2724,7 +2724,7 @@ fn git_author_defaults_follow_a_saved_settings_change_without_a_restart() {
     let runtime_config = RuntimeConfig::for_tests();
 
     assert_eq!(
-        git_author_defaults(&runtime_config.snapshot()),
+        crate::git::config::author_defaults(&runtime_config.snapshot()),
         ("Hatchdoor".to_string(), "hatchdoor@localhost".to_string()),
         "an unconfigured instance falls back to the documented defaults"
     );
@@ -2745,7 +2745,7 @@ fn git_author_defaults_follow_a_saved_settings_change_without_a_restart() {
     // A turn dispatched after the save binds a fresh snapshot, exactly as
     // `VaultWorkExecutor::run` does.
     assert_eq!(
-        git_author_defaults(&runtime_config.snapshot()),
+        crate::git::config::author_defaults(&runtime_config.snapshot()),
         (
             "Second Author".to_string(),
             "second@example.test".to_string()

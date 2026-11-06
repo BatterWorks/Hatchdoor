@@ -527,3 +527,35 @@ export async function recoverPausedVault(
   clearRecoveryPending(vaultId);
   return { ok: true, message: "This Vault is back.", vault: payload.vault };
 }
+
+/** What an identity change of a managed checkout set aside (#639): the old
+ * checkout moves to an archive in Hatchdoor's state folder and the Vault
+ * clones its new remote afresh. */
+export type RetiredCheckout = {
+  archive: string;
+  committed: boolean;
+  unpushed_commits: number;
+};
+
+/** Where an identity change kept the old checkout and what only it holds,
+ * or nothing when no checkout was set aside. */
+export function retiredCheckoutNote(
+  retired: RetiredCheckout | undefined,
+): string {
+  if (!retired) return "";
+  const committed = retired.committed
+    ? " Notes not yet committed were committed there first."
+    : "";
+  const unpushed =
+    retired.unpushed_commits === 0
+      ? ""
+      : retired.unpushed_commits === 1
+        ? " It holds 1 commit the old remote never received."
+        : ` It holds ${retired.unpushed_commits} commits the old remote never received.`;
+  return `The previous checkout was kept in Hatchdoor's state folder at ${retired.archive}.${committed}${unpushed}`;
+}
+
+export function savedMessage(retired: RetiredCheckout | undefined): string {
+  const note = retiredCheckoutNote(retired);
+  return note ? `Saved. ${note}` : "Saved.";
+}
