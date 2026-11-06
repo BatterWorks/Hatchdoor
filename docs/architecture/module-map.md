@@ -1618,7 +1618,7 @@ Markdown code-region scanner (`for_non_code_line`) the link reader uses to skip
 fenced code blocks and inline code spans.
 
 **Consumers:** cache population, handlers, MCP reads, write coordination,
-watching, and application startup.
+watching, application startup, and chunking (`NoteSections` for heading paths, #635).
 
 **Coordination paths:** `src/cache/**`, `src/vault_watcher.rs`,
 `src/api_types.rs`, and adapters when a public vault type changes.
@@ -2520,7 +2520,8 @@ fence delimiter. The Vault link reader and the asset-reference rewriter consume
 `for_non_code_line`; the backlink, section, and asset-reference rewriters
 consume `parse_fence_marker` for their own line-rebuilding loops, which must
 preserve line endings and so cannot use the visiting form, as does the Bundled
-manual's wikilink rewrite. It lives here
+manual's wikilink rewrite, and so do the Section rule and chunking's
+`fence_marker`, which also refuse a marker indented four spaces or by a tab (#635). It lives here
 because tag extraction, link extraction, and rewriting have to agree on what
 counts as code: an indexer that reads a hashtag inside a fenced block as a tag
 while a rewrite refuses to touch it makes a Vault-wide tag rename look
@@ -2681,7 +2682,7 @@ changes require search and application-state tests too.
 normalization behavior re-exported by `src/chunk/mod.rs`.
 A `Chunk` carries two texts (#532). `content` is what is embedded and hashed: fence marker lines removed, code kept. `stored_content` is what the cache stores and a search hit returns: `content` with a marker line back around each run of code: the block's own opening line, info string included, and a closing run of the same character and length, so a four-backtick block showing a three-backtick example stays one block. A block that a chunk boundary cuts is closed at the end of one chunk and reopened at the start of the next, so each `stored_content` holds whole blocks. Fences follow the Section rule (#635): `fence_marker` reads a run of three or more backticks or tildes after at most three spaces, and `closes_fence` ends a block only at a run of the same character at least as long. A chunk's `heading_path` is the path `NoteSections::heading_paths` gives the last heading of level one to three before the chunk's text, so it is always a path `get_note_outline` lists.
 
-**Consumed dependencies:** Markdown text and tokenizer-aware splitting.
+**Consumed dependencies:** Markdown text and tokenizer-aware splitting, the read model's crate-private `NoteSections` (heading paths) and `cache::parse::parse_fence_marker` (fence markers) (#635).
 
 **Consumers:** cache population, evaluation/index microbench tooling, and Runtime Search's compact snippet (`fence_marker` and `closes_fence` only).
 
@@ -2689,7 +2690,7 @@ A `Chunk` carries two texts (#532). `content` is what is embedded and hashed: fe
 baselines.
 
 **Invariants:** chunk boundaries and contextual text changes alter every
-embedding and therefore require deliberate evaluation, not only unit tests. `stored_content` is outside that rule only while `content` stays byte for byte what it was; a change to it needs a new `CHUNK_STORED_TEXT_SHAPE` value in `src/cache/populate.rs`, which re-chunks existing indexes once and reuses their vectors.
+embedding and therefore require deliberate evaluation, not only unit tests. A change to `stored_content`, or to how a note whose file did not change is chunked, needs a new `CHUNK_STORED_TEXT_SHAPE` value in `src/cache/populate.rs`, which re-chunks existing indexes once; a chunk whose embedding input (text and contextual header) is unchanged keeps its vector and the rest are embedded again. Only a change that leaves `content` and `heading_path` byte for byte what they were is outside the evaluation rule.
 
 **Validation:** `cargo test chunk`, cache population tests, and relevant eval
 commands when retrieval behavior may change.

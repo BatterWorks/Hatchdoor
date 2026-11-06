@@ -113,8 +113,9 @@ pub fn restore_fences(normalized: &Normalized, start: usize, end: usize) -> Stri
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        let run = opener.len() - opener.trim_start_matches(['`', '~']).len();
-        out.push_str(&opener[..run]);
+        // An opener always holds a marker: `strip_code_fences` recorded it.
+        let (marker, len) = fence_marker(opener).unwrap_or((b'`', 3));
+        out.extend(std::iter::repeat_n(char::from(marker), len));
         if to < end {
             out.push('\n');
         }
@@ -310,6 +311,15 @@ mod tests {
         assert_eq!(
             restore_fences(&result, 0, result.text.len()),
             "a\n````markdown\n```js\nx\n```\n````\nb\n~~~bash\n# c\n```\n~~~\nd\n"
+        );
+    }
+
+    #[test]
+    fn a_closing_marker_carries_no_part_of_the_info_string() {
+        let normalized = strip_code_fences("~~~`x\na\n~~~\n```~~~\nb\n```\n");
+        assert_eq!(
+            restore_fences(&normalized, 0, normalized.text.len()),
+            "~~~`x\na\n~~~\n```~~~\nb\n```"
         );
     }
 

@@ -405,16 +405,33 @@ body content that lands in a separate later chunk";
 
     #[test]
     fn heading_paths_match_the_note_sections_rule() {
-        // Every path a chunk carries is a path the outline lists.
-        let content = "---\ntags: [a]\n---\n# A\n\ntext\n\n#### Deep\n\nmore\n\n## B\n\n```sh\n# no\n```\n\n### C\n\nend\n";
+        // Every path a chunk carries is a path the outline lists, and it is the
+        // path of the section the chunk's text sits in, past frontmatter and
+        // removed fence lines.
+        let content = "---\ntags: [a]\n---\n# A\n\ntext\n\n#### Deep\n\nmore\n\n~~~\n# no\n~~~\n\n## B\n\n````sh\n```\n# nor\n```\n````\n\nmiddle\n\n### C\n\nend\n";
         let opts = ChunkOptions {
             max_tokens: 8,
             overlap_tokens: 0,
         };
         let listed = crate::vault::NoteSections::scan(content).heading_paths();
-        for path in heading_paths(content, opts).into_iter().flatten() {
-            assert!(listed.contains(&path), "{path:?} not in {listed:?}");
+        let chunks = chunk(content, opts).chunks;
+        for c in &chunks {
+            if let Some(path) = &c.heading_path {
+                assert!(listed.contains(path), "{path:?} not in {listed:?}");
+            }
         }
+        let path_of = |word: &str| {
+            chunks
+                .iter()
+                .find(|c| c.content.contains(word))
+                .unwrap_or_else(|| panic!("no chunk holds {word:?}: {chunks:?}"))
+                .heading_path
+                .clone()
+        };
+        assert_eq!(path_of("text").as_deref(), Some("A"));
+        assert_eq!(path_of("more").as_deref(), Some("A"));
+        assert_eq!(path_of("middle").as_deref(), Some("A > B"));
+        assert_eq!(path_of("end").as_deref(), Some("A > B > C"));
     }
 
     #[test]
