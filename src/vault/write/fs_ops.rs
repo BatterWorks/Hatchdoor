@@ -405,17 +405,37 @@ fn ensure_path_content_hash(path: &Path, label: &str, expected: &str) -> Result<
         ));
     }
     ensure_safe_destination(path)?;
-    let mut content = String::new();
-    open_existing_file_no_follow(path)
-        .and_then(|mut file| std::io::Read::read_to_string(&mut file, &mut content))
-        .map_err(|error| WriteError::Io(format!("failed to read note '{}': {error}", label)))?;
-    let actual = content_hash(&content);
+    let actual = content_hash(&read_existing_note(path, label)?);
     if actual != expected {
         return Err(WriteError::Conflict(format!(
             "note changed since it was read: expected {expected}, found {actual}"
         )));
     }
     Ok(())
+}
+
+/// The text of the note at `path`, opened without following a symbolic link
+/// in any component and read under `MAX_NOTE_BYTES` (#670). A note over the
+/// bound is refused unread: Hatchdoor reads no note that large, so it cannot
+/// edit one either.
+pub(super) fn read_existing_note(path: &Path, label: &str) -> Result<String, WriteError> {
+    use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, read_open_bounded};
+
+    let io_error = |error: &dyn std::fmt::Display| {
+        WriteError::Io(format!("failed to read note '{label}': {error}"))
+    };
+    let file = open_existing_file_no_follow(path).map_err(|error| io_error(&error))?;
+    let bytes = read_open_bounded(file, MAX_NOTE_BYTES).map_err(|error| match error {
+        BoundedReadError::TooLarge { limit } => WriteError::InvalidInput(format!(
+            "note '{label}' is larger than {} MiB, the most Hatchdoor reads or edits",
+            limit / (1024 * 1024)
+        )),
+        BoundedReadError::NotRegular => {
+            WriteError::InvalidInput(format!("note '{label}' is not a regular file"))
+        }
+        BoundedReadError::Io(error) => io_error(&error),
+    })?;
+    String::from_utf8(bytes).map_err(|error| io_error(&error))
 }
 
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<(), WriteError> {

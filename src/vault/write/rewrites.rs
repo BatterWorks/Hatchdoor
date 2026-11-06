@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::cache::parse::{content_hash, parse_fence_marker};
@@ -24,11 +23,15 @@ pub(super) struct NoteText {
 ///
 /// A Vault-wide planner skips a note it cannot open, such as a dangling `.md`
 /// symlink, because `build_link_graph` skips the same file: it holds no link
-/// the index knows about, so there is nothing to plan for it (#360). A note
-/// that is not valid UTF-8 is read lossily, so the planner can still tell
-/// whether it holds anything the operation would change.
-pub(super) fn read_note_text(path: &Path) -> Option<NoteText> {
-    let bytes = fs::read(path).ok()?;
+/// the index knows about, so there is nothing to plan for it (#360). The same
+/// goes for a note over `MAX_NOTE_BYTES` or one that became a FIFO, which the
+/// link graph's bounded read skips too, so a rename never reads a huge note
+/// whole or waits on a pipe (#670).
+///
+/// A note that is not valid UTF-8 is read lossily, so the planner can still
+/// tell whether it holds anything the operation would change.
+pub(super) fn read_note_for_rewrite(path: &Path) -> Option<NoteText> {
+    let bytes = crate::vault::read_bounded(path, crate::vault::MAX_NOTE_BYTES).ok()?;
     Some(match String::from_utf8(bytes) {
         Ok(content) => NoteText {
             content,
@@ -131,7 +134,7 @@ pub(super) fn backlink_rewrite_plan(
             Some(moved) => moved.destination.to_path_buf(),
             None => continue,
         };
-        let Some(note) = read_note_text(&entry.path) else {
+        let Some(note) = read_note_for_rewrite(&entry.path) else {
             continue;
         };
         let content = note.content;
@@ -537,13 +540,13 @@ pub(super) fn planned_base(path: &Path, rewrites: &[TextRewrite]) -> Option<Rewr
 }
 
 /// The base a later planner composes onto for `path`: the planned one when
-/// there is one, otherwise the note as [`read_note_text`] reads it, or `None`
+/// there is one, otherwise the note as [`read_note_for_rewrite`] reads it, or `None`
 /// when it cannot be read at all.
 pub(super) fn rewrite_base_or_read(path: &Path, rewrites: &[TextRewrite]) -> Option<RewriteBase> {
     if let Some(base) = planned_base(path, rewrites) {
         return Some(base);
     }
-    let note = read_note_text(path)?;
+    let note = read_note_for_rewrite(path)?;
     Some(RewriteBase {
         original_hash: content_hash(&note.content),
         content: note.content,

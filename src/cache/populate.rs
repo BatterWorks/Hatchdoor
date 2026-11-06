@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -171,6 +170,12 @@ pub enum UpsertOutcome {
         reason: String,
     },
 }
+
+/// Stands in for the content hash of a note over `MAX_NOTE_BYTES`, which is
+/// listed with no text (#670). No real hash takes this form, so the note
+/// reads as changed once it shrinks back under the bound, and as unchanged,
+/// without being read, on every turn it stays over it.
+const OVERSIZED_NOTE_HASH: &str = "oversized";
 
 /// Names the shape of the text a chunk row stores. Change it when that shape
 /// changes, or when chunking changes for notes whose content did not, so
@@ -475,11 +480,12 @@ impl SqliteCache {
                 UpsertOutcome::Unreadable { reason } => {
                     per_note_failures += 1;
                     unreadable_notes += 1;
-                    last_unreadable_reason = Some(reason);
                     tracing::warn!(
                         path = %entry.relative_path,
+                        reason = %reason,
                         "Skipping unreadable note; the rest of the Vault still indexes"
                     );
+                    last_unreadable_reason = Some(reason);
                 }
             }
         }
@@ -1400,15 +1406,29 @@ fn upsert_note_if_changed(
     };
     let cached = cached_note_state(tx, &entry.relative_path)?;
 
-    let content = match fs::read_to_string(&entry.path) {
-        Ok(content) => content,
+    // Bounded and non-blocking (#670). A note over `MAX_NOTE_BYTES` is listed
+    // unread: it keeps its row, so the explorer still shows it, with no text,
+    // so nothing of it is chunked, embedded or left over from before it grew.
+    // One that became a FIFO or device after the scan is skipped unread.
+    let (content, hash) = match crate::vault::read_note_text(&entry.path) {
+        Ok(content) => {
+            let hash = content_hash(&content);
+            (content, hash)
+        }
+        Err(error @ crate::vault::BoundedReadError::TooLarge { .. }) => {
+            tracing::warn!(
+                path = %entry.relative_path,
+                reason = %error,
+                "Note unreadable, too large to index; it stays listed without its text"
+            );
+            (String::new(), OVERSIZED_NOTE_HASH.to_string())
+        }
         Err(error) => {
             return Ok(UpsertOutcome::Unreadable {
                 reason: format!("failed reading note '{}': {error}", entry.path.display()),
             });
         }
     };
-    let hash = content_hash(&content);
 
     // When the marker set changed, the note's `layer` may differ even though its
     // content, mtime and slug are identical. `layer` is only written on the full
@@ -2629,6 +2649,131 @@ mod tests {
         );
     }
 
+    /// Indexes `dir` with `make_unreadable` run between the scan and the
+    /// populate, and returns the captured log lines.
+    fn index_with_one_unreadable_note(
+        dir: &std::path::Path,
+        make_unreadable: impl FnOnce(&std::path::Path),
+    ) -> (SqliteCache, Vec<String>) {
+        std::fs::write(dir.join("Home.md"), "# Home\n\nhome body").expect("note");
+        std::fs::write(dir.join("Other.md"), "# Other\n\nother body").expect("note");
+        std::fs::write(dir.join("Odd.md"), "# Odd\n\nplaceholder").expect("note");
+        let index = VaultIndex::build(dir).expect("index");
+        make_unreadable(&dir.join("Odd.md"));
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let logs = crate::config::log_capture::CapturedLogs::default();
+        tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::WARN), || {
+            cache
+                .replace_from_index_with_embedder(&index, &StubEmbedder::new(384))
+                .expect("one unreadable note must not fail the turn");
+        });
+        (cache, logs.lines())
+    }
+
+    fn assert_only_odd_skipped(cache: &SqliteCache, lines: &[String], reason: &str) {
+        assert_eq!(cached_slug_for_path(cache, "Odd"), None);
+        assert_eq!(cached_slug_for_path(cache, "Home").as_deref(), Some("home"));
+        assert_eq!(
+            cached_slug_for_path(cache, "Other").as_deref(),
+            Some("other")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Odd.md") && line.contains(reason)),
+            "the turn logs the note and why it skipped it: {lines:#?}"
+        );
+    }
+
+    /// A note over `MAX_NOTE_BYTES` is listed without being read, so one huge
+    /// file cannot drive the server out of memory and still shows in the
+    /// explorer (#670). The file is sparse,
+    /// so the test costs no disk.
+    #[test]
+    fn an_oversized_note_is_listed_unread_and_the_rest_index() {
+        let dir = tempdir().expect("temp dir");
+        let (cache, lines) = index_with_one_unreadable_note(dir.path(), |path| {
+            crate::vault::grow_past_note_bound(path);
+        });
+        assert_eq!(cached_slug_for_path(&cache, "Odd").as_deref(), Some("odd"));
+        assert_eq!(chunk_count(&cache, "odd"), 0);
+        assert_eq!(
+            cached_slug_for_path(&cache, "Home").as_deref(),
+            Some("home")
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("path=Odd")
+                && line.contains(&format!(
+                    "larger than {} bytes",
+                    crate::vault::MAX_NOTE_BYTES
+                ))),
+            "the turn logs the note and why it left its text out: {lines:#?}"
+        );
+    }
+
+    /// A note indexed before it grew past the bound loses its chunks, rather
+    /// than serving its old text in search while exact reads refuse it, and
+    /// gets them back once it shrinks (#670).
+    #[test]
+    fn a_note_that_grew_past_the_bound_drops_its_old_chunks() {
+        let dir = tempdir().expect("temp dir");
+        let note = dir.path().join("Odd.md");
+        std::fs::write(&note, "# Odd\n\nodd body").expect("note");
+        std::fs::write(dir.path().join("Home.md"), "# Home\n\nhome body").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let reindex = || {
+            cache
+                .replace_from_index_with_embedder(
+                    &VaultIndex::build(dir.path()).expect("index"),
+                    &embedder,
+                )
+                .expect("populate");
+        };
+        reindex();
+        assert!(chunk_count(&cache, "odd") > 0);
+
+        crate::vault::grow_past_note_bound(&note);
+        reindex();
+        assert_eq!(cached_slug_for_path(&cache, "Odd").as_deref(), Some("odd"));
+        assert_eq!(chunk_count(&cache, "odd"), 0);
+        reindex();
+        assert_eq!(
+            chunk_count(&cache, "odd"),
+            0,
+            "a second turn changes nothing"
+        );
+
+        std::fs::write(&note, "# Odd\n\nodd body").expect("shrink the note");
+        reindex();
+        assert!(chunk_count(&cache, "odd") > 0);
+    }
+
+    fn chunk_count(cache: &SqliteCache, slug: &str) -> i64 {
+        cache
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = ?1",
+                params![slug],
+                |row| row.get(0),
+            )
+            .expect("count chunks")
+    }
+
+    /// A note replaced by a FIFO after the scan is skipped without blocking
+    /// the turn on a writer that never comes (#670).
+    #[cfg(unix)]
+    #[test]
+    fn a_note_that_became_a_fifo_is_skipped_without_blocking() {
+        let dir = tempdir().expect("temp dir");
+        let (cache, lines) = index_with_one_unreadable_note(dir.path(), |path| {
+            std::fs::remove_file(path).expect("remove");
+            crate::vault::make_fifo(path);
+        });
+        assert_only_odd_skipped(&cache, &lines, "not a regular file");
+    }
+
     /// Reads the `layer` column for a note by slug directly from the notes table.
     #[cfg(test)]
     fn read_layer_for_slug(cache: &SqliteCache, slug: &str) -> Option<String> {
@@ -2818,7 +2963,7 @@ mod tests {
     fn refresh_updates_content_even_when_cached_file_snapshot_matches() {
         let dir = tempdir().expect("temp dir");
         let note_path = dir.path().join("Home.md");
-        fs::write(&note_path, "# Home\nalpha token").expect("write original note");
+        std::fs::write(&note_path, "# Home\nalpha token").expect("write original note");
 
         let cache = SqliteCache::in_memory(384).expect("sqlite cache");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
@@ -2827,7 +2972,7 @@ mod tests {
             .replace_from_index_with_embedder(&index, embedder.as_ref())
             .expect("initial populate");
 
-        fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
+        std::fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
         let snapshot = file_snapshot(&note_path).expect("file snapshot");
         {
             let conn = cache.connection().expect("connection");
