@@ -141,8 +141,8 @@ fn list_note_attachments_reports_the_containing_folders_layer() {
     let index = build(root);
 
     let clip = index.find_by_slug("clip").expect("clip entry").clone();
-    let clip_assets =
-        list_note_attachments(root, &index.layers, &clip).expect("list clip attachments");
+    let clip_assets = list_note_attachments(root, &index.layers, &clip, &note_text(&clip))
+        .expect("list clip attachments");
     assert_eq!(clip_assets.len(), 1);
     assert_eq!(
         clip_assets[0].layer.as_deref(),
@@ -151,8 +151,8 @@ fn list_note_attachments_reports_the_containing_folders_layer() {
     );
 
     let wiki = index.find_by_slug("wiki").expect("wiki entry").clone();
-    let wiki_assets =
-        list_note_attachments(root, &index.layers, &wiki).expect("list wiki attachments");
+    let wiki_assets = list_note_attachments(root, &index.layers, &wiki, &note_text(&wiki))
+        .expect("list wiki attachments");
     assert_eq!(wiki_assets.len(), 1);
     assert_eq!(
         wiki_assets[0].layer, None,
@@ -3286,7 +3286,8 @@ fn list_note_attachments_reports_every_non_markdown_reference() {
     let index = build(root);
     let entry = index.find_by_slug("analysis").expect("analysis");
 
-    let listed = list_note_attachments(root, &index.layers, entry).expect("list attachments");
+    let listed = list_note_attachments(root, &index.layers, entry, &note_text(entry))
+        .expect("list attachments");
 
     let mut paths: Vec<&str> = listed
         .iter()
@@ -3312,7 +3313,8 @@ fn an_attachment_larger_than_one_read_chunk_reports_its_whole_size_and_hash() {
     let index = build(root);
     let entry = index.find_by_slug("note").expect("note");
 
-    let listed = list_note_attachments(root, &index.layers, entry).expect("list attachments");
+    let listed = list_note_attachments(root, &index.layers, entry, &note_text(entry))
+        .expect("list attachments");
 
     let mut expected = 0xcbf29ce484222325u64;
     for byte in &bytes {
@@ -3339,7 +3341,7 @@ fn a_wikilink_to_a_note_whose_title_contains_a_dot_is_not_an_asset() {
 
     let entry = index.find_by_slug("b").expect("b");
     assert!(
-        list_note_attachments(root, &index.layers, entry)
+        list_note_attachments(root, &index.layers, entry, &note_text(entry))
             .expect("list attachments")
             .is_empty(),
         "a dotted note title is not an attachment"
@@ -5847,4 +5849,9 @@ fn relocated_breaks_ties_in_the_order_a_rebuild_does() {
         .resolve_wikilink_from(home.trim_start_matches("[[").trim_end_matches("]]"), "")
         .expect("reached");
     assert_eq!(reached.relative_path, "a b/Plan", "home was {home:?}");
+}
+
+/// A note's text, as the read core hands it to `list_note_attachments`.
+fn note_text(entry: &crate::vault::NoteEntry) -> String {
+    fs::read_to_string(&entry.path).expect("read note")
 }

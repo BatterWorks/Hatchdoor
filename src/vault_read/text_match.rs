@@ -17,7 +17,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::cache::vault_snapshots::{VaultSnapshotNote, VaultSnapshotRead};
 use crate::search::LayerSelection;
-use crate::vault::body_start;
+use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, body_start, read_bounded};
 use crate::vault_registry::VaultId;
 
 use super::VaultReadError;
@@ -123,7 +123,8 @@ pub struct TextMatchNote {
 pub enum TextMatchUnreadReason {
     /// The published Note list names a file that is no longer there.
     Missing,
-    /// The file is there and could not be read.
+    /// The file is there and could not be read: a read failed, it is no
+    /// longer a regular file, or it is over `MAX_NOTE_BYTES` (#636).
     Unreadable,
 }
 
@@ -469,7 +470,16 @@ fn read_note_file(root: Option<&Path>, file_path: &str) -> Result<String, TextMa
     if std::fs::canonicalize(&path).map_err(reason)? != path {
         return Err(TextMatchUnreadReason::Unreadable);
     }
-    let bytes = std::fs::read(&path).map_err(reason)?;
+    // Bounded and non-blocking: the list is the published one, so the file
+    // may have become a FIFO or grown since the index saw it (#636).
+    // No reason of its own for an oversized note: a client keeps the
+    // `outputSchema` it connected with and would refuse a new value.
+    let bytes = read_bounded(&path, MAX_NOTE_BYTES).map_err(|error| match error {
+        BoundedReadError::Io(error) => reason(error),
+        BoundedReadError::TooLarge { .. } | BoundedReadError::NotRegular => {
+            TextMatchUnreadReason::Unreadable
+        }
+    })?;
     Ok(match String::from_utf8(bytes) {
         Ok(content) => content,
         Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),

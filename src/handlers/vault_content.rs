@@ -104,6 +104,8 @@ pub(crate) fn vault_read_error_response(error: VaultReadError) -> Response {
     let status = match error.code.as_str() {
         "vault_not_found" | "note_not_found" => StatusCode::NOT_FOUND,
         "vault_disabled" => StatusCode::CONFLICT,
+        // The status the asset route gives a file over its own bound.
+        "note_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
         "vault_scan_config_invalid" => StatusCode::INTERNAL_SERVER_ERROR,
         "invalid_scope" | "invalid_query" | "invalid_search_query" | "invalid_layer_selection" => {
             StatusCode::BAD_REQUEST
@@ -503,6 +505,14 @@ mod tests {
             retryable: false,
         });
         assert_eq!(disabled.status(), StatusCode::CONFLICT);
+
+        let too_large = vault_read_error_response(VaultReadError {
+            code: "note_too_large".to_string(),
+            message: "too large".to_string(),
+            vault_id: None,
+            retryable: false,
+        });
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let unavailable = vault_read_error_response(VaultReadError {
             code: "vault_unavailable".to_string(),

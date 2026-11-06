@@ -141,6 +141,11 @@ function DraftRow({
         );
         return;
       }
+      if (res.status === 413) {
+        // A size bound, not a passing failure: a retry cannot help (#636).
+        setMessage("This note is too large for Hatchdoor to open.");
+        return;
+      }
       if (!res.ok) {
         setMessage("This Vault could not be checked. Try again.");
         return;

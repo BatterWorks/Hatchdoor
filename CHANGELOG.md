@@ -7,6 +7,7 @@
 - Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
 
 ### Fixed
+- A Vault's files can no longer hang or exhaust the server. A `.obsidian/app.json` that a sync or Git pull turned into a pipe made every Vault listing hang, and one pointing at `/dev/zero` filled memory until the process was killed; Hatchdoor now reads that file only when it is a regular file of at most 64 KB, and reads anything else as Obsidian's default link style. A note larger than 8 MiB is refused with `note_too_large` (HTTP `413`) by `get_note`, the note page, downloads, section, frontmatter and attachment reads and saved queries, where a 200 MB note used to produce a 1.2 GB reply. `find_text` lists such a note, or a note that has become a pipe since the last index, as `unreadable` instead of never answering. [#636]
 - A search hit's `heading_path` is now always a real heading of the note, so `get_note_section` finds it. A line of tags such as `#meeting #acme`, a `#` comment inside a `~~~` code block, or a `#` line inside a code block that shows another code block used to be taken for a heading, and a hit carried that text as its path; the search snippet also showed the code of a block with a shorter fence inside it as prose. Code in a full hit's `content` now keeps the fence the note used. The index re-chunks every note once at the first start after the upgrade, and embeds again only the chunks whose text or heading changed. [#635]
 - Keyword search now finds a Chinese, Japanese, Korean or Thai word inside a sentence. Those scripts have no spaces between words, so a search for `本文` or `中文` found nothing unless the word sat between punctuation. The index now stores each pair of neighbouring characters and searches a word as its pairs, a single character still finds every note holding it, and a Korean note saved in decomposed Unicode is found by a normally typed query. An existing index is converted at the first start after the upgrade from the text it already holds, in seconds, with no re-embedding. [#634]
 - Repeated-word keyword searches no longer stall other reads: queries are deduplicated and bounded, with a time limit on SQLite work. Oversized YAML frontmatter is rejected before parsing, BOM-prefixed notes expose their metadata and keep the marker through property edits, and damaged search caches are quarantined and rebuilt automatically at startup or during use. [#633]
@@ -37,6 +38,7 @@
 [#633]: https://github.com/BatterWorks/Hatchdoor/issues/633
 [#635]: https://github.com/BatterWorks/Hatchdoor/issues/635
 [#634]: https://github.com/BatterWorks/Hatchdoor/issues/634
+[#636]: https://github.com/BatterWorks/Hatchdoor/issues/636
 [#661]: https://github.com/BatterWorks/Hatchdoor/issues/661
 
 ## v2.9.0 - 2026-10-27

@@ -17,7 +17,13 @@ use std::time::{Duration, SystemTime};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::{BoundedReadError, read_bounded, read_note_text};
+
 const OBSIDIAN_APP_CONFIG: &str = ".obsidian/app.json";
+
+/// The most of `app.json` read. Obsidian's own is a few hundred bytes; a
+/// larger one is not Obsidian's and reads as its defaults (#636).
+const MAX_APP_CONFIG_BYTES: u64 = 64 * 1024;
 
 /// The syntax new links are written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -77,8 +83,9 @@ fn counted_notes() -> &'static Mutex<HashMap<PathBuf, CountedNote>> {
 }
 
 /// The link forms written by the notes of the Vault at `root`, `notes` being
-/// all of them. A note that cannot be read counts nothing. Counts kept for a
-/// note under `root` that is no longer in `notes` are dropped.
+/// all of them. A note that cannot be read, is not a regular file or is over
+/// [`super::MAX_NOTE_BYTES`] counts nothing. Counts kept for a note under `root`
+/// that is no longer in `notes` are dropped.
 pub fn count_link_forms<'a>(
     root: &Path,
     notes: impl IntoIterator<Item = &'a Path>,
@@ -103,7 +110,9 @@ pub fn count_link_forms<'a>(
         let counts = match fresh {
             Some(counts) => counts,
             None => {
-                let Ok(content) = fs::read_to_string(path) else {
+                // Bounded and non-blocking: this runs under the process-wide
+                // lock on every Vault listing (#636).
+                let Ok(content) = read_note_text(path) else {
                     continue;
                 };
                 let counts = super::links::note_link_forms(&content);
@@ -158,15 +167,16 @@ pub fn vault_link_style(
 /// still means Obsidian owns the choice, so it answers with Obsidian's
 /// defaults: wikilinks, shortest paths.
 fn obsidian_link_style(root: &Path) -> Option<VaultLinkStyle> {
-    let raw = match fs::read_to_string(root.join(OBSIDIAN_APP_CONFIG)) {
+    let raw = match read_bounded(&root.join(OBSIDIAN_APP_CONFIG), MAX_APP_CONFIG_BYTES) {
         Ok(raw) => raw,
-        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(BoundedReadError::Io(error)) if error.kind() == ErrorKind::NotFound => return None,
         // A Vault directory that cannot be listed is unreadable, not a
         // settings file Hatchdoor failed to parse.
         Err(_) if fs::read_dir(root).is_err() => return None,
-        Err(_) => String::new(),
+        // A FIFO, a link, a device or an oversized file (#636).
+        Err(_) => Vec::new(),
     };
-    let settings: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    let settings: serde_json::Value = serde_json::from_slice(&raw).unwrap_or_default();
     let style = if settings
         .get("useMarkdownLinks")
         .and_then(serde_json::Value::as_bool)
@@ -376,5 +386,41 @@ mod tests {
         let dir = vault_with_app_json("{}");
         let found = vault_link_style(dir.path(), || panic!("counted links needlessly"));
         assert!(found.is_some());
+    }
+
+    const OBSIDIAN_DEFAULTS: Option<VaultLinkStyle> = Some(VaultLinkStyle {
+        style: LinkStyle::Wikilink,
+        path_form: LinkPathForm::Shortest,
+    });
+
+    /// A FIFO would block the read for ever, and the Vault listing with it
+    /// (#636). It still means Obsidian owns the choice.
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_file_that_is_a_fifo_gives_obsidian_defaults_without_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join(".obsidian")).expect("obsidian dir");
+        crate::vault::make_fifo(&dir.path().join(OBSIDIAN_APP_CONFIG));
+        assert_eq!(style(dir.path(), mostly_markdown()), OBSIDIAN_DEFAULTS);
+    }
+
+    /// A link to `/dev/zero` would be read until memory ran out (#636).
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_file_that_is_a_symlink_gives_obsidian_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join(".obsidian")).expect("obsidian dir");
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join(OBSIDIAN_APP_CONFIG))
+            .expect("link");
+        assert_eq!(style(dir.path(), mostly_markdown()), OBSIDIAN_DEFAULTS);
+    }
+
+    #[test]
+    fn a_settings_file_over_the_size_limit_gives_obsidian_defaults() {
+        let padding = " ".repeat(128 * 1024);
+        let dir = vault_with_app_json(&format!(
+            r#"{{"useMarkdownLinks": true,{padding}"newLinkFormat": "absolute"}}"#
+        ));
+        assert_eq!(style(dir.path(), mostly_markdown()), OBSIDIAN_DEFAULTS);
     }
 }

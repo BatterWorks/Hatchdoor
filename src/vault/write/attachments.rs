@@ -19,21 +19,18 @@ use super::paths::{
 use super::rewrites::refuse_unrewritable;
 use super::types::{AttachmentInfo, AttachmentOutcome, MutationPhase, WriteError};
 
+/// The existing attachments `content`, the text of the note `entry` names,
+/// references. The caller reads the note, so it decides the bound (#636).
 pub fn list_note_attachments(
     vault_root: &Path,
     layers: &LayerMap,
     entry: &NoteEntry,
+    content: &str,
 ) -> Result<Vec<AttachmentInfo>, WriteError> {
-    let content = fs::read_to_string(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}' for attachments: {error}",
-            entry.relative_path
-        ))
-    })?;
     let note_dir = entry.path.parent().unwrap_or(vault_root);
     let mut attachments = Vec::new();
     let mut seen = HashSet::new();
-    for relative_asset in referenced_assets(&content) {
+    for relative_asset in referenced_assets(content) {
         let path = note_dir.join(relative_asset);
         if !path.exists() || !path.is_file() {
             continue;

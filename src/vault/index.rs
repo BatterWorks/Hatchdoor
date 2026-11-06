@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +16,7 @@ use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata, SearchHit,
     VaultIndex, VaultScanConfig,
 };
+use super::{BoundedReadError, read_note_text};
 use crate::cache::parse::{content_hash, parse_frontmatter_metadata};
 
 impl VaultIndex {
@@ -416,12 +416,14 @@ impl VaultIndex {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn read_note_by_slug(&self, slug: &str) -> io::Result<Option<Note>> {
+    /// The note `slug` names, read now. A file that is not a regular file or
+    /// is over [`super::MAX_NOTE_BYTES`] is refused before it is read (#636).
+    pub fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, BoundedReadError> {
         let Some(entry) = self.find_by_slug(slug) else {
             return Ok(None);
         };
 
-        let content = fs::read_to_string(&entry.path)?;
+        let content = read_note_text(&entry.path)?;
         // The parser the frontmatter read uses, so the two cannot drift. Bad
         // frontmatter leaves the note readable: that is how it gets repaired.
         let metadata = parse_frontmatter_metadata(&content)
@@ -525,7 +527,7 @@ impl VaultIndex {
                 continue;
             }
 
-            let Ok(content) = fs::read_to_string(&note.path) else {
+            let Ok(content) = read_note_text(&note.path) else {
                 continue;
             };
 

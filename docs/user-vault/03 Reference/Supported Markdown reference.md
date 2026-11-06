@@ -175,7 +175,7 @@ When a note is renamed or moved, Hatchdoor rewrites the Markdown links that poin
 
 A Vault has one link style, wikilinks or Markdown links, and every link Hatchdoor inserts follows it: a note picked from the editor's `[[` suggestions, and an attachment pasted, uploaded or dropped into a note. You don't set it in Hatchdoor. It is read from the Vault each time:
 
-- If the Vault has Obsidian's settings file, `.obsidian/app.json`, its **Use `[[Wikilinks]]`** switch decides. Obsidian stores the switch turned off as `"useMarkdownLinks": true`. With the switch on, the key missing, or a file Hatchdoor cannot read, the Vault uses wikilinks, as Obsidian does.
+- If the Vault has Obsidian's settings file, `.obsidian/app.json`, its **Use `[[Wikilinks]]`** switch decides. Obsidian stores the switch turned off as `"useMarkdownLinks": true`. With the switch on, the key missing, or a file Hatchdoor cannot read, the Vault uses wikilinks, as Obsidian does. Hatchdoor reads the file only when it is an ordinary file of at most 64 KB, so a settings file that is a symlink, such as one shared between Vaults, also means wikilinks.
 - Otherwise Hatchdoor counts the note links and attachment embeds already in the Vault, and the form most of them use wins. No links at all, or an exact tie, means wikilinks.
 
 In a wikilink Vault, Hatchdoor inserts `[[Note Title]]` and `![[path/to/file.png]]`. In a Markdown-link Vault it inserts `[Note Title](path/to/Note%20Title.md)` and `![](path/to/file.png)`. The link text is the note's title, with any `[`, `]`, `` ` `` or `\` escaped.
