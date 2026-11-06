@@ -8,6 +8,7 @@ use hatchdoor::server::run_server;
 enum RunMode {
     Serve,
     PrefetchEmbedder,
+    FetchModel,
     Healthcheck,
     Unknown(String),
 }
@@ -16,6 +17,7 @@ fn parse_run_mode(args: &[String]) -> RunMode {
     match args.get(1).map(String::as_str) {
         None => RunMode::Serve,
         Some("--prefetch-embedder") => RunMode::PrefetchEmbedder,
+        Some(hatchdoor::model_setup::FETCH_MODEL_FLAG) => RunMode::FetchModel,
         Some("--healthcheck") => RunMode::Healthcheck,
         Some(other) => RunMode::Unknown(other.to_string()),
     }
@@ -44,6 +46,12 @@ async fn main() {
             run_server().await
         }
         RunMode::PrefetchEmbedder => run_prefetch(),
+        // The model download the server runs and watches during setup
+        // (#642), never started by hand.
+        RunMode::FetchModel => std::process::exit(hatchdoor::model_setup::run_fetch_child(
+            &args[2..],
+            std::io::stdout(),
+        )),
         RunMode::Healthcheck => run_healthcheck(),
         RunMode::Unknown(flag) => {
             error!("Unknown flag: {flag}");
@@ -102,6 +110,16 @@ mod tests {
     fn cli_recognises_prefetch_embedder_flag() {
         let args = vec!["hatchdoor".to_string(), "--prefetch-embedder".to_string()];
         assert!(matches!(parse_run_mode(&args), RunMode::PrefetchEmbedder));
+    }
+
+    #[test]
+    fn cli_recognises_fetch_model_flag() {
+        let args = vec![
+            "hatchdoor".to_string(),
+            "--fetch-model".to_string(),
+            "nomic".to_string(),
+        ];
+        assert!(matches!(parse_run_mode(&args), RunMode::FetchModel));
     }
 
     #[test]

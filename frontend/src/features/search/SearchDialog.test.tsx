@@ -735,6 +735,21 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
     expect(props.onRetryModelSetup).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows why a retry did not start, as an alert under the retry action (#642)", () => {
+    renderDialog({
+      query: "",
+      startupStatus: { state: "failed", message: "The download stalled." },
+      modelSetupError:
+        "Could not reach Hatchdoor. Check the connection and try again.",
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Could not reach Hatchdoor. Check the connection and try again.",
+    );
+    expect(screen.getByRole("button", { name: "Retry setup" })).toBeVisible();
   });
 
   it("gives a demo visitor a neutral sentence and no retry for a failed model (#339)", () => {

@@ -319,13 +319,12 @@ impl Embedder for FastembedEmbedder {
     }
 }
 
-/// The repo handle FastEmbed's enum route would build for `cache_dir`: the same
-/// `HF_HOME` and `HF_ENDPOINT` overrides, and a download when a file is not in
-/// the cache yet.
+/// The repo handle for Gemma's load: `cache_dir` itself, where model setup's
+/// pinned download writes and its integrity record reads, so the load finds
+/// every file on disk and never downloads (#642). `HF_HOME` is deliberately
+/// not read here: it would send the load to a folder the download never
+/// filled. `HF_ENDPOINT` is kept for a direct call outside model setup.
 fn fastembed_repo(repo_id: &str, cache_dir: PathBuf) -> Result<ApiRepo, String> {
-    let cache_dir = std::env::var("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or(cache_dir);
     let endpoint =
         std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
     let api = ApiBuilder::new()

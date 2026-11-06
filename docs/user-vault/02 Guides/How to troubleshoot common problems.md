@@ -79,6 +79,10 @@ The model downloads from Hugging Face, so this is almost always a network proble
 
 An agent sees the same through `get_model_setup_status`, and `GET /api/startup-status` reports `"failed"` with the same message. `POST /api/model/retry` starts the download again.
 
+A download that stops receiving data, as behind a Wi-Fi login page, a dropped connection or a proxy that hangs, is stopped after 60 seconds, and one still running after two hours is stopped too. The reason then says the download stalled or did not finish in time. **Retry setup** continues from the files already fetched, so a slow connection gets there in a few tries. While a download is moving, `GET /api/startup-status` shows `"step": "download"` with the bytes so far, and `"step": "load"` once the files are in and the model is loading, which can take many minutes on a slow disk.
+
+If pressing **Accept terms and set up Gemma**, **Use Nomic instead** or **Retry setup** shows a red message instead of starting the download, the message says why. "Model setup could not be started." usually means the models folder is full or read-only, and the log has the exact error. "Could not reach Hatchdoor" means the request never arrived: check the connection, then press the button again.
+
 Two related, more specific errors:
 
 - **`409`, "Gemma terms must be accepted or declined first."**: you tried to retry before choosing a model at all. Accept or decline Gemma first.

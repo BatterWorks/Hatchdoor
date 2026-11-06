@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use schemars::JsonSchema;
@@ -197,6 +198,10 @@ const MODEL_SETUP_FAILED: &str = "model_setup_failed";
 pub struct StartupTracker {
     runtime: VaultRuntime,
     pass: Arc<Mutex<FirstRunPass>>,
+    /// While the phase is `Downloading`: whether the download has finished
+    /// and the model is loading, so a reader can tell a slow load from a
+    /// download that has stopped moving (#642).
+    model_loading: Arc<AtomicBool>,
 }
 
 impl StartupTracker {
@@ -204,6 +209,7 @@ impl StartupTracker {
         Self {
             runtime,
             pass: Arc::default(),
+            model_loading: Arc::default(),
         }
     }
 
@@ -258,8 +264,18 @@ impl StartupTracker {
         total_bytes: Option<u64>,
     ) {
         self.restart_pass();
+        self.model_loading.store(false, Ordering::Release);
         self.runtime
             .set_downloading(model, downloaded_bytes, total_bytes);
+    }
+
+    /// The model's files are on disk and it is loading. The phase stays
+    /// `Downloading`, which is what every setup gate reads; only the status
+    /// reading's `step` changes.
+    pub fn set_model_loading(&self, model: &'static str) {
+        self.restart_pass();
+        self.runtime.set_downloading(model, None, None);
+        self.model_loading.store(true, Ordering::Release);
     }
 
     /// Move the tracker to `Indexing` even when it has settled `Ready`, for
@@ -353,11 +369,17 @@ impl StartupTracker {
     }
 
     pub fn set_model_setup_failed(&self) {
-        self.restart_pass();
-        self.runtime.set_unavailable(
-            MODEL_SETUP_FAILED,
-            "The search model could not be downloaded or loaded. Check the Hatchdoor logs, then retry setup.",
+        self.set_model_setup_failed_with(
+            "The search model could not be downloaded or loaded. Check the Hatchdoor logs, then retry setup."
+                .to_string(),
         );
+    }
+
+    /// A failed setup with its own sentence, such as a download that
+    /// stalled (#642). Retryable like any other setup failure.
+    pub fn set_model_setup_failed_with(&self, message: String) {
+        self.restart_pass();
+        self.runtime.set_unavailable(MODEL_SETUP_FAILED, message);
     }
 
     /// Whether the model is set up and every active Vault's Index turn has
@@ -417,6 +439,11 @@ impl StartupTracker {
             VaultPhase::TermsRequired => StartupStatusResponse::simple("terms_required", None),
             VaultPhase::Downloading => StartupStatusResponse {
                 state: "downloading",
+                step: Some(if self.model_loading.load(Ordering::Acquire) {
+                    "load"
+                } else {
+                    "download"
+                }),
                 model: snapshot.model,
                 downloaded_bytes: snapshot.downloaded_bytes,
                 total_bytes: snapshot.total_bytes,
@@ -438,6 +465,7 @@ impl StartupTracker {
                 let (percent, eta_seconds) = self.pass().reading(progress);
                 StartupStatusResponse {
                     state: "indexing",
+                    step: None,
                     model: None,
                     downloaded_bytes: None,
                     total_bytes: None,
@@ -463,6 +491,12 @@ impl StartupTracker {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct StartupStatusResponse {
     pub state: &'static str,
+    /// While `downloading`: `download` while the model's files arrive, then
+    /// `load` once they are on disk and the model is loading. Bytes and
+    /// percent move only during `download`; a download that stops moving
+    /// fails within a minute (#642).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -500,6 +534,7 @@ impl StartupStatusResponse {
     fn simple(state: &'static str, message: Option<String>) -> Self {
         Self {
             state,
+            step: None,
             model: None,
             downloaded_bytes: None,
             total_bytes: None,
@@ -553,6 +588,41 @@ mod tests {
         let tracker = StartupTracker::terms_required();
         tracker.set_downloading("Nomic Embed Text v1.5", None, None);
         assert_eq!(tracker.status().percent, None);
+    }
+
+    /// A reader can tell a download from the load that follows it (#642):
+    /// the state stays `downloading`, which every gate reads, and `step`
+    /// moves from `download` to `load`.
+    #[test]
+    fn download_status_tells_the_download_from_the_load() {
+        let tracker = StartupTracker::terms_required();
+        tracker.set_downloading("Nomic Embed Text v1.5", Some(5), Some(10));
+        assert_eq!(tracker.status().step, Some("download"));
+
+        tracker.set_model_loading("Nomic Embed Text v1.5");
+        let status = tracker.status();
+        assert_eq!(status.state, "downloading");
+        assert_eq!(status.step, Some("load"));
+        assert_eq!(status.model, Some("Nomic Embed Text v1.5"));
+        assert_eq!(status.percent, None);
+        assert!(tracker.model_setup_pending());
+
+        // A retry starts with a download again.
+        tracker.set_downloading("Nomic Embed Text v1.5", None, None);
+        assert_eq!(tracker.status().step, Some("download"));
+    }
+
+    /// A stalled download fails with its own sentence and stays retryable.
+    #[test]
+    fn a_setup_failure_can_carry_its_own_message() {
+        let tracker = StartupTracker::terms_required();
+        tracker.set_downloading("Nomic Embed Text v1.5", None, None);
+        tracker.set_model_setup_failed_with("The download stalled.".to_string());
+        let status = tracker.status();
+        assert_eq!(status.state, "failed");
+        assert_eq!(status.step, None);
+        assert_eq!(status.message.as_deref(), Some("The download stalled."));
+        assert!(tracker.model_setup_pending());
     }
 
     /// Setup is pending only while the setup tools can still change something:

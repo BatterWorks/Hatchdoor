@@ -950,48 +950,38 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
         let sqlite = state.startup_sqlite.clone();
         let model_setup = state.model_setup.clone();
         let download_tracker = tracker.clone();
-        let load_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            model_setup.prepare_download(selected)?;
+        let load_result = tokio::task::spawn_blocking(move || -> Result<(), SetupFailure> {
+            model_setup
+                .prepare_download(selected)
+                .map_err(SetupFailure::Other)?;
             for attempt in 0..=1 {
-                let loaded = (|| -> Result<Arc<dyn Embedder>, String> {
-                    if selected == SelectedModel::Gemma {
-                        let progress = {
-                            let download_tracker = download_tracker.clone();
-                            Arc::new(move |downloaded, total| {
-                                download_tracker.set_downloading(
-                                    model_name,
-                                    Some(downloaded),
-                                    Some(total),
-                                );
-                            })
+                // A stopped download fails setup at once: the network, not
+                // the cache, is what went wrong, and its partial files are
+                // kept for the next attempt to resume (#642).
+                fetch_model_files(&model_setup, selected, &download_tracker)?;
+                download_tracker.set_model_loading(model_name);
+                // The load covers recording the files' digests, which
+                // reads every model file again and is as slow as the load
+                // itself on a slow share.
+                let loaded = log_model_load(
+                    selected,
+                    MODEL_STILL_LOADING_EVERY,
+                    || -> Result<Arc<dyn Embedder>, String> {
+                        let embedder: Arc<dyn Embedder> = match selected {
+                            SelectedModel::Gemma => Arc::new(
+                                FastembedEmbedder::embedding_gemma_300m_q4_in(model_dir.clone())?,
+                            ),
+                            SelectedModel::Nomic => {
+                                Arc::new(FastembedEmbedder::nomic_v1_5_in(model_dir.clone())?)
+                            }
+                            SelectedModel::TermsRequired => {
+                                return Err("model terms have not been accepted".to_string());
+                            }
                         };
-                        model_setup.fetch_gemma_at_pinned_revision(progress)?;
-                    }
-                    // The load covers recording the files' digests, which
-                    // reads every model file again and is as slow as the load
-                    // itself on a slow share.
-                    log_model_load(
-                        selected,
-                        MODEL_STILL_LOADING_EVERY,
-                        || -> Result<Arc<dyn Embedder>, String> {
-                            let embedder: Arc<dyn Embedder> = match selected {
-                                SelectedModel::Gemma => {
-                                    Arc::new(FastembedEmbedder::embedding_gemma_300m_q4_in(
-                                        model_dir.clone(),
-                                    )?)
-                                }
-                                SelectedModel::Nomic => {
-                                    Arc::new(FastembedEmbedder::nomic_v1_5_in(model_dir.clone())?)
-                                }
-                                SelectedModel::TermsRequired => {
-                                    return Err("model terms have not been accepted".to_string());
-                                }
-                            };
-                            model_setup.record_integrity(selected)?;
-                            Ok(embedder)
-                        },
-                    )
-                })();
+                        model_setup.record_integrity(selected)?;
+                        Ok(embedder)
+                    },
+                );
                 match loaded {
                     Ok(embedder) => {
                         // Before the model is installed, so no search reaches
@@ -1008,9 +998,12 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                             model = model_name,
                             "Model setup attempt failed; retrying once: {error}"
                         );
-                        model_setup.reset_download_cache(selected)?;
+                        model_setup
+                            .reset_download_cache(selected)
+                            .map_err(SetupFailure::Other)?;
+                        download_tracker.set_downloading(model_name, None, None);
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(SetupFailure::Other(error)),
                 }
             }
             unreachable!("the retry loop always returns")
@@ -1019,10 +1012,9 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
 
         match load_result {
             Ok(Ok(())) => finish_model_setup(&state),
-            Ok(Err(error)) => {
-                state.model_setup_started.store(false, Ordering::Release);
-                tracker.set_model_setup_failed();
-                error!(model = model_name, "Model download/load failed: {error}");
+            Ok(Err(failure)) => {
+                record_model_setup_failure(&state, &failure);
+                error!(model = model_name, "Model download/load failed: {failure}");
             }
             Err(error) => {
                 state.model_setup_started.store(false, Ordering::Release);
@@ -1031,6 +1023,75 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
             }
         }
     });
+}
+
+/// Publish a failed setup run and release the setup claim, so the next
+/// accept, decline or retry is taken without a restart. A stopped download
+/// says so in the status message (#642).
+fn record_model_setup_failure(state: &AppState, failure: &SetupFailure) {
+    state.model_setup_started.store(false, Ordering::Release);
+    match failure {
+        SetupFailure::Download(fetch) => match fetch.status_message() {
+            Some(message) => state.startup.set_model_setup_failed_with(message),
+            None => state.startup.set_model_setup_failed(),
+        },
+        SetupFailure::Other(_) => state.startup.set_model_setup_failed(),
+    }
+}
+
+/// Why one model setup run failed.
+enum SetupFailure {
+    /// The supervised download did not complete; the next run resumes it.
+    Download(crate::model_setup::FetchFailure),
+    Other(String),
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Download(failure) => write!(f, "{failure}"),
+            Self::Other(error) => f.write_str(error),
+        }
+    }
+}
+
+/// How often a running download logs how far it has got, so the log shows
+/// a download moving rather than nothing at all.
+const MODEL_DOWNLOAD_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Download the selected model's files in a child process that is stopped
+/// when the download stops moving (#642), reporting progress to the startup
+/// status as it arrives.
+fn fetch_model_files(
+    model_setup: &ModelSetup,
+    selected: SelectedModel,
+    tracker: &StartupTracker,
+) -> Result<(), SetupFailure> {
+    let model_name = startup_model_name(selected);
+    let command = model_setup
+        .fetch_command(selected)
+        .map_err(SetupFailure::Other)?;
+    let last_log = std::sync::Mutex::new(std::time::Instant::now());
+    crate::model_setup::run_supervised_fetch(
+        command,
+        crate::model_setup::FetchLimits::default(),
+        &|downloaded, total| {
+            tracker.set_downloading(model_name, Some(downloaded), Some(total));
+            let mut last = last_log
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.elapsed() >= MODEL_DOWNLOAD_LOG_EVERY {
+                *last = std::time::Instant::now();
+                info!(
+                    model = model_name,
+                    downloaded_mb = downloaded / (1024 * 1024),
+                    file_mb = total / (1024 * 1024),
+                    "Search model is still downloading"
+                );
+            }
+        },
+    )
+    .map_err(SetupFailure::Download)
 }
 
 /// How often a load that has not finished says so. A load takes seconds on a
@@ -1047,15 +1108,7 @@ fn log_model_load<T>(
     load: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let model_name = startup_model_name(selected);
-    if selected == SelectedModel::Gemma {
-        info!(model = model_name, "Search model downloaded, loading it");
-    } else {
-        // FastEmbed fetches Nomic inside the same call that loads it.
-        info!(
-            model = model_name,
-            "Loading search model, after downloading it if it is not on disk yet"
-        );
-    }
+    info!(model = model_name, "Search model downloaded, loading it");
     let started = std::time::Instant::now();
     let elapsed = || format!("{:.1}s", started.elapsed().as_secs_f64());
     // The reporting thread starts with no subscriber of its own when the
@@ -2365,7 +2418,10 @@ mod tests {
 
         let lines = logs.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("Loading search model"), "{lines:?}");
+        assert!(
+            lines[0].contains("Search model downloaded, loading it"),
+            "{lines:?}"
+        );
     }
 
     #[tokio::test]
@@ -5693,6 +5749,63 @@ mod tests {
             .expect("body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         payload["state"].as_str().expect("state").to_string()
+    }
+
+    /// A stalled download fails setup with a message naming the stall, and
+    /// releases the claim so `POST /api/model/retry` is taken with no
+    /// restart (#642).
+    #[tokio::test]
+    async fn a_stalled_download_fails_setup_and_retry_is_accepted() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        state.model_setup.decline_gemma().expect("select Nomic");
+        // A download in flight holds the setup claim.
+        state.model_setup_started.store(true, Ordering::Release);
+        state
+            .startup
+            .set_downloading(crate::model_setup::NOMIC_MODEL_ID, None, None);
+        // While the claim is held, a retry is refused: the #642 dead end.
+        let refused = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+        record_model_setup_failure(
+            &state,
+            &SetupFailure::Download(crate::model_setup::FetchFailure::Stalled(
+                crate::model_setup::DOWNLOAD_STALL_AFTER,
+            )),
+        );
+
+        let status = state.startup.status();
+        assert_eq!(status.state, "failed");
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("stalled")),
+            "{:?}",
+            status.message
+        );
+        assert!(!state.model_setup_started.load(Ordering::Acquire));
+        let retried = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(retried.status(), StatusCode::ACCEPTED);
     }
 
     /// A fresh install has no Vaults (ADR-40), so no Index turn follows model

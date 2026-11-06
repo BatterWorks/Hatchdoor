@@ -93,7 +93,10 @@ that production inventory are still checked for stale paths and duplicates.
 
 - `lib.rs` exposes the application modules to the main binary and auxiliary
   binaries.
-- `main.rs` selects serve, model-prefetch, and container-healthcheck modes.
+- `main.rs` selects serve, model-prefetch, model-fetch, and
+  container-healthcheck modes. Model-fetch (`--fetch-model <gemma|nomic>
+  <models dir>`, `model_setup::run_fetch_child`) is the child process model
+  setup starts and watches; it is never started by hand.
 - `server.rs` is the HTTP composition root: it validates startup posture,
   constructs `AppState`, builds routes, and starts background work. It starts
   and joins Vault work execution's signal-driven cache-recovery waiter (#633). Unsafe
@@ -316,7 +319,23 @@ that production inventory are still checked for stale paths and duplicates.
   guard across a reconcile can check, by pointer, that a freshly resolved
   block still serializes against what it holds.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
-  and persistent setup records. Once the embedder is installed, startup queues
+  and persistent setup records. It also owns the model download (#642):
+  `fetch_model` fetches every file the selected model's load reads, through
+  `HF_ENDPOINT`, into the folder the load reads (for Nomic, `HF_HOME` when
+  set, as FastEmbed's own lookup reads it; Gemma's loader,
+  `embed::fastembed_repo`, reads only the model's folder), so the load needs
+  no network. Setup runs it in a child copy of the
+  executable (`fetch_command`) under `run_supervised_fetch`, which reads the
+  child's `hatchdoor-model-fetch` progress lines and kills it when no data
+  arrives for `DOWNLOAD_STALL_AFTER` (60 s) or the attempt passes
+  `DOWNLOAD_DEADLINE` (2 h). `hf-hub` has no timeout or cancellation, and a
+  stuck request holds a blob lock, so only ending the process frees both. A
+  stopped download fails setup at once with `FetchFailure::status_message`
+  as the startup message, skips the in-run cache reset so the next attempt
+  resumes the partial files, and releases `model_setup_started` like any
+  failure, so a retry needs no restart. The startup status reads `step`
+  `download` during the fetch and `load` after it
+  (`StartupTracker::set_model_loading`), with the phase still `Downloading`. Once the embedder is installed, startup queues
   each active Vault through the collection Index coordinator; it does not run a
   second legacy single-Vault cache build. Startup becomes Ready once every
   active collection Vault's Index turn has settled (see
@@ -4680,7 +4699,13 @@ not verify Rust-to-TypeScript wire compatibility.
 **Public contract:** `StartupGate` (a pure, prop-driven presentational
 component — it no longer polls itself) and `useStartupStatus`, the shared
 hook that polls `/api/startup-status` and owns the model-setup actions
-(accept/decline Gemma, retry). The poll runs once a second while it succeeds;
+(accept/decline Gemma, retry). An action the server refuses, or a request
+that never arrives, leaves the status as it was and sets `actionError` to
+the server's `error` sentence or a connection sentence, without throwing
+(#642); `StartupGate` shows it as a `role="alert"` under the terms choice,
+and `SearchDialog` under its **Retry setup** block (`modelSetupError`,
+threaded through `App.tsx`'s `VaultWorkspace`). The gate reads the status's
+`step` to say "Loading" once the download has finished. The poll runs once a second while it succeeds;
 after a failed or unreachable poll it backs off (`startupPollDelay`: 2s, 4s,
 8s, capped at 30s) and returns to 1s on the first success (#333). Production `App.tsx` resolves Vault discovery
 before enabling this polling, so broken-registry and zero-Vault workspaces
@@ -4719,7 +4744,8 @@ reader's `ContextualHelpLink` and `CONTEXTUAL_HELP` (the model choice's
 types, and shell-wide styles.
 
 **Validation:** `StartupGate.test.tsx`, `useStartupStatus.test.ts`,
-`App.startup-auth.test.tsx`, and full frontend checks.
+`App.startup-auth.test.tsx`, `SearchDialog.test.tsx`, and full frontend
+checks.
 
 ### Vault explorer
 

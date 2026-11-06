@@ -2,7 +2,11 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearToken } from "../api/api";
-import { startupPollDelay, useStartupStatus } from "./useStartupStatus";
+import {
+  MODEL_SETUP_CONNECTION_ERROR,
+  startupPollDelay,
+  useStartupStatus,
+} from "./useStartupStatus";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -200,5 +204,130 @@ describe("useStartupStatus", () => {
     expect(startupPollDelay(4)).toBe(16_000);
     expect(startupPollDelay(5)).toBe(30_000);
     expect(startupPollDelay(50)).toBe(30_000);
+  });
+
+  describe("a model-setup request that does not start setup (#642)", () => {
+    function routeFetch(action: (url: string) => Promise<Response>) {
+      return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "/api/startup-status") {
+          return statusResponse({ state: "terms_required" });
+        }
+        return action(url);
+      });
+    }
+
+    it("keeps the server's sentence and the current state", async () => {
+      routeFetch(
+        async () =>
+          new Response(
+            JSON.stringify({ error: "Model setup could not be started." }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          ),
+      );
+      const { result } = renderHook(() => useStartupStatus());
+      await waitFor(() =>
+        expect(result.current.status).toEqual({ state: "terms_required" }),
+      );
+
+      await act(async () => {
+        await result.current.declineGemma();
+      });
+
+      expect(result.current.actionError).toBe(
+        "Model setup could not be started.",
+      );
+      expect(result.current.status).toEqual({ state: "terms_required" });
+    });
+
+    it("says the server could not be reached when the request fails, without throwing", async () => {
+      routeFetch(async () => {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      });
+      const { result } = renderHook(() => useStartupStatus());
+      await waitFor(() => expect(result.current.status).not.toBeNull());
+
+      await act(async () => {
+        await expect(result.current.acceptGemma()).resolves.toBeUndefined();
+      });
+
+      expect(result.current.actionError).toBe(MODEL_SETUP_CONNECTION_ERROR);
+    });
+
+    it("reports a refused retry, and clears the sentence when the next request starts setup", async () => {
+      let refuse = true;
+      routeFetch(async () =>
+        refuse
+          ? new Response(
+              JSON.stringify({
+                error:
+                  "The running search model cannot be changed until Hatchdoor restarts.",
+              }),
+              { status: 409 },
+            )
+          : new Response(null, { status: 202 }),
+      );
+      const { result } = renderHook(() => useStartupStatus());
+      await waitFor(() => expect(result.current.status).not.toBeNull());
+
+      await act(async () => {
+        await result.current.retryModelSetup();
+      });
+      expect(result.current.actionError).toBe(
+        "The running search model cannot be changed until Hatchdoor restarts.",
+      );
+
+      refuse = false;
+      await act(async () => {
+        await result.current.retryModelSetup();
+      });
+      expect(result.current.actionError).toBeNull();
+    });
+
+    it("drops a refusal once the server's state has moved on", async () => {
+      vi.useFakeTimers();
+      let state = "terms_required";
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        if (String(input) === "/api/startup-status") {
+          return statusResponse({ state });
+        }
+        return new Response(
+          JSON.stringify({
+            error:
+              "The running search model cannot be changed until Hatchdoor restarts.",
+          }),
+          { status: 409 },
+        );
+      });
+      const { result } = renderHook(() => useStartupStatus());
+      await act(async () => {});
+      expect(result.current.status).not.toBeNull();
+      await act(async () => {
+        await result.current.acceptGemma();
+      });
+      expect(result.current.actionError).not.toBeNull();
+
+      // Another client started setup; the next poll sees it.
+      state = "downloading";
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(result.current.status?.state).toBe("downloading");
+      expect(result.current.actionError).toBeNull();
+    });
+
+    it("falls back to the HTTP status when the refusal has no sentence", async () => {
+      routeFetch(async () => new Response("oops", { status: 503 }));
+      const { result } = renderHook(() => useStartupStatus());
+      await waitFor(() => expect(result.current.status).not.toBeNull());
+
+      await act(async () => {
+        await result.current.acceptGemma();
+      });
+
+      expect(result.current.actionError).toBe(
+        "Model setup could not be started (HTTP 503).",
+      );
+    });
   });
 });
