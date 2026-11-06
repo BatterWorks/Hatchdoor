@@ -4,40 +4,35 @@ import { safeGetItem, safeRemoveItem, safeSetItem } from "../lib/storage";
 
 export type Theme = "auto" | "light" | "dark";
 
-const THEME_COLORS: Record<Exclude<Theme, "auto">, string> = {
-  light: "#f4f1e8",
-  dark: "#0c0c0a",
-};
-
 function readStoredTheme(): Theme {
   const v = safeGetItem(THEME_KEY);
   return v === "light" || v === "dark" ? v : "auto";
 }
 
-function clearThemeColorMeta() {
-  document
-    .querySelectorAll('meta[name="theme-color"]')
-    .forEach((node) => node.remove());
-}
+const OVERRIDE_ATTR = "data-theme-override";
 
-function addThemeColorMeta(content: string, media?: string) {
+/** The browser bar takes the page background, `--bg`, read from the computed
+ * style so it follows base.css rather than restating its hexes (#648). The
+ * build's two tags, one per colour scheme, stay in place for auto. A chosen
+ * theme puts one tag of its own in front of them: the browser uses the first
+ * `theme-color` tag that matches, so it wins until auto takes it out. */
+function syncThemeColor(theme: Theme) {
+  document
+    .querySelectorAll(`meta[name="theme-color"][${OVERRIDE_ATTR}]`)
+    .forEach((node) => node.remove());
+  if (theme === "auto") return;
+  const bg = getComputedStyle(document.documentElement)
+    .getPropertyValue("--bg")
+    .trim();
+  // No stylesheet loaded yet: the build's tags are better than an empty one.
+  if (!bg) return;
   const meta = document.createElement("meta");
   meta.name = "theme-color";
-  meta.content = content;
-  if (media) {
-    meta.setAttribute("media", media);
-  }
-  document.head.append(meta);
-}
-
-function syncThemeColor(theme: Theme) {
-  clearThemeColorMeta();
-  if (theme === "auto") {
-    addThemeColorMeta(THEME_COLORS.light, "(prefers-color-scheme: light)");
-    addThemeColorMeta(THEME_COLORS.dark, "(prefers-color-scheme: dark)");
-  } else {
-    addThemeColorMeta(THEME_COLORS[theme]);
-  }
+  meta.content = bg;
+  meta.setAttribute(OVERRIDE_ATTR, "");
+  const first = document.querySelector('meta[name="theme-color"]');
+  if (first) first.before(meta);
+  else document.head.append(meta);
 }
 
 export function useTheme() {

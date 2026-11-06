@@ -166,6 +166,10 @@
      the documented exception, for the kbd pill and status badges. */
   --radius-none: 0;
   --radius-pill: 999px;
+  /* A rendered PDF page is printed paper: white in both themes, as the
+     document's own author drew it. Not a palette colour, so it sits here
+     rather than in a theme block. */
+  --pdf-page: #ffffff;
   --dur-fast: 120ms;
   --dur: 200ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);

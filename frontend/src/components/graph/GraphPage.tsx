@@ -214,6 +214,33 @@ function notePath(node: SimNode): string {
   return `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`;
 }
 
+/** What each key does to the keyboard selection (#648): a step through the
+ * notes in title order, or a jump to either end. */
+const KEY_STEPS: Record<string, 1 | -1 | "first" | "last"> = {
+  ArrowRight: 1,
+  ArrowDown: 1,
+  ArrowLeft: -1,
+  ArrowUp: -1,
+  Home: "first",
+  End: "last",
+};
+/** How far inside the canvas edges a note the keys land on must sit to count
+ * as in view, and the strip along the bottom the "Open note" bar covers
+ * (about 60px of bar and gap): a note there is brought to the centre. */
+const KEY_VIEW_EDGE_PX = 24;
+const KEY_VIEW_BOTTOM_PX = 80;
+const TITLE_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
+function compareNodesForKeyboard(a: SimNode, b: SimNode): number {
+  return (
+    TITLE_COLLATOR.compare(a.title, b.title) ||
+    TITLE_COLLATOR.compare(a.vault_id, b.vault_id) ||
+    TITLE_COLLATOR.compare(a.slug, b.slug)
+  );
+}
+
 interface RenderIsland extends GraphIsland {
   slot: VaultSlotState;
 }
@@ -1476,6 +1503,72 @@ export function GraphPage() {
     };
   }, [hitTest, navigate, requestRender, select]);
 
+  // ── keyboard ─────────────────────────────────────────────────────────────────
+
+  // The canvas takes focus, and the arrow keys step the selection through the
+  // notes in title order, so the "Open note" bar is reachable without a
+  // pointer (#648). A note the step lands on outside the view, or under the
+  // "Open note" bar, is brought to its centre at the current zoom. A key held
+  // with Alt, Ctrl or Cmd is the browser's (Alt+Left is Back), so it passes.
+  const onCanvasKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const current = selectedRef.current;
+      if (event.key === "Enter") {
+        if (!current) return;
+        event.preventDefault();
+        void navigate(notePath(current));
+        return;
+      }
+      if (event.key === "Escape") {
+        if (!current) return;
+        event.preventDefault();
+        select(null);
+        requestRender();
+        return;
+      }
+      const step = KEY_STEPS[event.key];
+      if (step === undefined) return;
+      const nodes = [...simNodesRef.current].sort(compareNodesForKeyboard);
+      if (nodes.length === 0) return;
+      event.preventDefault();
+      const at = current ? nodes.indexOf(current) : -1;
+      let next: number;
+      if (step === "first") next = 0;
+      else if (step === "last") next = nodes.length - 1;
+      else if (at < 0) next = step > 0 ? 0 : nodes.length - 1;
+      else next = (at + step + nodes.length) % nodes.length;
+      const node = nodes[next];
+      select(node);
+
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const t = transformRef.current;
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        const sx = node.x * t.k + t.x;
+        const sy = node.y * t.k + t.y;
+        const inView =
+          sx >= KEY_VIEW_EDGE_PX &&
+          sy >= KEY_VIEW_EDGE_PX &&
+          sx <= w - KEY_VIEW_EDGE_PX &&
+          sy <= h - KEY_VIEW_BOTTOM_PX;
+        if (w > 0 && h > 0 && !inView) {
+          pendingFitRef.current = false;
+          viewTouchedRef.current = true;
+          zoomAnimRef.current = null;
+          transformRef.current = {
+            k: t.k,
+            x: w / 2 - node.x * t.k,
+            y: h / 2 - node.y * t.k,
+          };
+        }
+      }
+      requestRender();
+    },
+    [navigate, requestRender, select],
+  );
+
   // ── tag filter toggle ────────────────────────────────────────────────────────
 
   const [filterOpen, setFilterOpen] = useState(false);
@@ -1584,7 +1677,7 @@ export function GraphPage() {
 
         <p className="graph-hint">
           Scroll to zoom · Drag background to pan · Click node to select ·
-          Double-click to open
+          Double-click to open · Arrow keys step through notes
         </p>
 
         {islandMode && notDrawnVaultNames.length > 0 && (
@@ -1607,7 +1700,22 @@ export function GraphPage() {
       </div>
 
       <div className="graph-canvas-wrap" ref={wrapRef}>
-        <canvas ref={canvasRef} className="graph-canvas" />
+        <canvas
+          ref={canvasRef}
+          className="graph-canvas"
+          role="application"
+          aria-label="Note graph"
+          aria-describedby="graph-keyboard-hint"
+          tabIndex={0}
+          onKeyDown={onCanvasKeyDown}
+        />
+        <p id="graph-keyboard-hint" className="visually-hidden">
+          Arrow keys step through the notes by title. Enter opens the selected
+          note, Escape clears the selection.
+        </p>
+        <p className="visually-hidden" role="status">
+          {selectedNote ? `Selected: ${selectedNote.title}` : ""}
+        </p>
 
         {selectedNote && (
           <div className="graph-selection">

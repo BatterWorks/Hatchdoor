@@ -896,3 +896,127 @@ describe("GraphPage — opening a note on touch (#337)", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("GraphPage — reaching notes from the keyboard (#648)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn(() => 1),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.mocked(graphSimulation.createGraphSimulation).mockClear();
+    vi.mocked(graphSimulation.createIslandSimulation).mockClear();
+  });
+
+  afterEach(() => {
+    for (const sim of builtSimulations()) sim.stop();
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+  });
+
+  // Stored out of title order, with a number that sorts wrongly as text, so
+  // the order the keys walk is the page's own sort and nothing else.
+  function unsortedGraph(): VaultGraph {
+    const graph = graphFor(ONE_VAULT[0], 3);
+    graph.nodes[0].title = "Note 10";
+    graph.nodes[1].title = "Note 2";
+    graph.nodes[2].title = "Apple";
+    return graph;
+  }
+
+  async function renderThreeNotes() {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    mockLiveCollection({
+      vaults: ONE_VAULT,
+      graphs: [unsortedGraph()],
+    });
+    render(
+      <MemoryRouter initialEntries={["/graph"]}>
+        <Routes>
+          <Route path="/graph" element={<GraphPage />} />
+          <Route path="/v/:vaultId/n/:slug" element={<p>Opened the note</p>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(builtSimulations()).toHaveLength(1));
+    return screen.getByRole("application", { name: "Note graph" });
+  }
+
+  function press(target: HTMLElement, key: string) {
+    act(() => {
+      fireEvent.keyDown(target, { key });
+    });
+  }
+
+  it("names the canvas and puts it in the Tab order", async () => {
+    const graph = await renderThreeNotes();
+
+    expect(graph).toBe(canvas());
+    expect(graph.tabIndex).toBe(0);
+  });
+
+  it("steps through notes in title order with the arrow keys", async () => {
+    const graph = await renderThreeNotes();
+
+    press(graph, "ArrowRight");
+    expect(screen.getByRole("status")).toHaveTextContent("Apple");
+    press(graph, "ArrowDown");
+    expect(screen.getByRole("status")).toHaveTextContent("Note 2");
+    press(graph, "ArrowRight");
+    expect(screen.getByRole("status")).toHaveTextContent("Note 10");
+    press(graph, "ArrowLeft");
+    expect(screen.getByRole("status")).toHaveTextContent("Note 2");
+    press(graph, "Home");
+    press(graph, "ArrowUp");
+    expect(screen.getByRole("status")).toHaveTextContent("Note 10");
+    press(graph, "Home");
+    expect(screen.getByRole("status")).toHaveTextContent("Apple");
+    press(graph, "End");
+    expect(screen.getByRole("status")).toHaveTextContent("Note 10");
+    expect(screen.getByRole("button", { name: "Open note" })).toBeVisible();
+  });
+
+  it("leaves a key held with Alt, Ctrl or Cmd to the browser", async () => {
+    const graph = await renderThreeNotes();
+
+    for (const modifier of ["altKey", "ctrlKey", "metaKey"] as const) {
+      const event = new KeyboardEvent("keydown", {
+        key: "ArrowLeft",
+        bubbles: true,
+        cancelable: true,
+        [modifier]: true,
+      });
+      act(() => {
+        graph.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(
+      screen.queryByRole("button", { name: "Open note" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the selected note with Enter", async () => {
+    const graph = await renderThreeNotes();
+    press(graph, "ArrowRight");
+
+    press(graph, "Enter");
+
+    expect(await screen.findByText("Opened the note")).toBeVisible();
+  });
+
+  it("clears the selection with Escape", async () => {
+    const graph = await renderThreeNotes();
+    press(graph, "ArrowRight");
+
+    press(graph, "Escape");
+
+    expect(
+      screen.queryByRole("button", { name: "Open note" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+});
