@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{BoundedReadError, MAX_NOTE_BYTES, read_bounded};
+use super::{BoundedReadError, read_bounded, read_note_text};
 
 const OBSIDIAN_APP_CONFIG: &str = ".obsidian/app.json";
 
@@ -84,7 +84,7 @@ fn counted_notes() -> &'static Mutex<HashMap<PathBuf, CountedNote>> {
 
 /// The link forms written by the notes of the Vault at `root`, `notes` being
 /// all of them. A note that cannot be read, is not a regular file or is over
-/// [`MAX_NOTE_BYTES`] counts nothing. Counts kept for a note under `root`
+/// [`super::MAX_NOTE_BYTES`] counts nothing. Counts kept for a note under `root`
 /// that is no longer in `notes` are dropped.
 pub fn count_link_forms<'a>(
     root: &Path,
@@ -112,10 +112,7 @@ pub fn count_link_forms<'a>(
             None => {
                 // Bounded and non-blocking: this runs under the process-wide
                 // lock on every Vault listing (#636).
-                let Some(content) = read_bounded(path, MAX_NOTE_BYTES)
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                else {
+                let Ok(content) = read_note_text(path) else {
                     continue;
                 };
                 let counts = super::links::note_link_forms(&content);

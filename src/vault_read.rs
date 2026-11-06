@@ -792,7 +792,7 @@ impl<'a> VaultReadCore<'a> {
                 note.filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(|note| VaultQualifiedNote::new(vault_id, note))
             })
-            .map_err(|error| note_read_error(vault_id, slug, error, "vault_read_unavailable"))
+            .map_err(|error| note_read_error(vault_id, slug, error, "vault_read_unavailable", true))
     }
 
     pub fn exact_note_links(
@@ -1417,13 +1417,8 @@ impl<'a> VaultReadCore<'a> {
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
-        let content = crate::vault::read_bounded(&entry.path, crate::vault::MAX_NOTE_BYTES)
-            .and_then(|bytes| {
-                String::from_utf8(bytes).map_err(|error| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, error).into()
-                })
-            })
-            .map_err(|error| note_read_error(vault_id, slug, error, "note_unreadable"))?;
+        let content = crate::vault::read_note_text(&entry.path)
+            .map_err(|error| note_read_error(vault_id, slug, error, "note_unreadable", false))?;
         Ok(Some((entry, content)))
     }
 
@@ -1438,7 +1433,9 @@ impl<'a> VaultReadCore<'a> {
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
-        crate::vault::list_note_attachments(control.vault_path(), &index.layers, &entry)
+        let content = crate::vault::read_note_text(&entry.path)
+            .map_err(|error| note_read_error(vault_id, slug, error, "note_unreadable", false))?;
+        crate::vault::list_note_attachments(control.vault_path(), &index.layers, &entry, &content)
             .map(Some)
             .map_err(|error| {
                 let error = crate::vault_mutation::write_operation_error(vault_id, error);
@@ -1544,7 +1541,9 @@ impl<'a> VaultReadCore<'a> {
         let (control, index) = self.control_and_catalog(vault_id)?;
         let note = index
             .read_note_by_slug(slug)
-            .map_err(|error| note_read_error(vault_id, slug, error, "vault_read_unavailable"))?
+            .map_err(|error| {
+                note_read_error(vault_id, slug, error, "vault_read_unavailable", true)
+            })?
             .filter(|note| !self.surface.hides(note.layer.as_deref()));
         Ok(note.map(|note| NoteDownload {
             note: VaultQualifiedNote::new(vault_id, note),
@@ -1858,12 +1857,13 @@ fn saved_query_error(vault_id: VaultId, code: &str, message: String) -> VaultRea
 
 /// A Note's file that could not be read (#636). A file over the size bound
 /// or not a regular file is refused for good; any other failure is reported
-/// under `io_code`, retryable when that is the transient `vault_read_unavailable`.
+/// under `io_code` and `io_retryable`.
 fn note_read_error(
     vault_id: VaultId,
     slug: &str,
     error: crate::vault::BoundedReadError,
     io_code: &str,
+    io_retryable: bool,
 ) -> VaultReadError {
     use crate::vault::BoundedReadError;
     match error {
@@ -1886,7 +1886,7 @@ fn note_read_error(
             vault_id,
             io_code,
             format!("failed to read note '{slug}': {error}"),
-            io_code == "vault_read_unavailable",
+            io_retryable,
         ),
     }
 }
@@ -3630,6 +3630,8 @@ mod tests {
         };
         assert_eq!(error.public_code(), "note_too_large");
         let error = reads.note_outline(vault, "big").expect_err("too large");
+        assert_eq!(error.public_code(), "note_too_large");
+        let error = reads.note_attachments(vault, "big").expect_err("too large");
         assert_eq!(error.public_code(), "note_too_large");
     }
 

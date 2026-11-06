@@ -17,7 +17,7 @@ pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME};
 pub use link_style::{LinkPathForm, LinkStyle, VaultLinkStyle, count_link_forms, vault_link_style};
 #[cfg(all(test, unix))]
 pub(crate) use note_file::make_fifo;
-pub(crate) use note_file::{BoundedReadError, MAX_NOTE_BYTES, read_bounded};
+pub(crate) use note_file::{BoundedReadError, MAX_NOTE_BYTES, read_bounded, read_note_text};
 #[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{

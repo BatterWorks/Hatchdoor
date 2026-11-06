@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 
 use crate::cache::parse::for_non_code_line;
 
@@ -25,7 +24,9 @@ pub fn build_link_graph(
             continue;
         };
 
-        let Ok(content) = fs::read_to_string(&note.path) else {
+        // Bounded and non-blocking (#636): the path may have become a FIFO
+        // since the walk, and a note over the bound adds no links.
+        let Ok(content) = super::read_note_text(&note.path) else {
             continue;
         };
 

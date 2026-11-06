@@ -69,6 +69,13 @@ pub fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, BoundedReadError
     Ok(bytes)
 }
 
+/// The note at `path` as text, bounded by [`MAX_NOTE_BYTES`]. A file that is
+/// not UTF-8 fails as `InvalidData`, as `fs::read_to_string` did.
+pub fn read_note_text(path: &Path) -> Result<String, BoundedReadError> {
+    String::from_utf8(read_bounded(path, MAX_NOTE_BYTES)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error).into())
+}
+
 /// Opens `path` for reading without following a final symbolic link and
 /// without waiting for a FIFO's writer.
 #[cfg(unix)]

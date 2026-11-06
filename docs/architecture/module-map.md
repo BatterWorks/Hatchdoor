@@ -1609,7 +1609,7 @@ process-wide memo keeps each note's counts until its size or modification
 time changes, so a listing re-reads only changed notes. The scanner records
 inline images as `MarkdownLink::Image` for that count only, and no rewriter
 touches them.
-`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_by_slug`, the read core's exact reads and `find_text`, and `count_link_forms` read notes through it under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap), and the `app.json` probe under 64 KiB.
+`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_text` is that read for a note's text under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap): `read_note_by_slug`, the read core's exact reads and attachment list, the link graph and `count_link_forms` read notes through it, `find_text` through `read_bounded` with the same bound, and the `app.json` probe under 64 KiB.
 `sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every body ATX heading outside fenced or indented code (at most three leading spaces, no leading tab, one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text. The write layer, the read core's outline and section reads, and the chunker's heading paths share this scan and cannot disagree about a span or a path (#635). The crate-private `body_start` re-export locates the end of the canonical frontmatter block for section scanning and the read core's text-match place classification. `scan` skips that block automatically; `scan_from` starts at a caller-supplied line boundary for a caller that already has the same offset (#625).
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
@@ -1718,7 +1718,8 @@ the link graph can never disagree about where a target ends (#252).
 which since #186 is the sole caller of every write primitive. The one
 exception is `list_note_attachments`, a read that lives here for its path
 handling and is called by the MCP `list_note_attachments` tool through the
-core's own `write_operation_error` translation. The other is
+core's own `write_operation_error` translation. It takes the note's text from
+the read core, which reads it under the read model's size bound (#636). The other is
 `repair_interrupted_writes` (#631, ADR-51), which Vault activation in
 `src/vault_runtime.rs` calls once per Vault per process, before the Vault
 admits a write. It moves and rewrites files outside the mutation core, so

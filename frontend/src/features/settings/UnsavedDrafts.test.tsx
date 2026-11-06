@@ -307,6 +307,24 @@ describe("UnsavedDrafts (#151)", () => {
     expect(await screen.findByText(/not answering right now/)).toBeVisible();
   });
 
+  it("says a note too large to open is too large, not worth a retry (#636)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "note_too_large" }, 413),
+    );
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[noteDraft]}
+          vaults={[vault("vault-1", "Alpha")]}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(await screen.findByText(/too large for Hatchdoor/)).toBeVisible();
+  });
+
   // #627: a draft held by path names a file. A root note's path can equal a
   // namesake's slug, so restore asks who is at the path, never the slug.
   it("looks a path-held draft up by its path, not as a slug", async () => {
