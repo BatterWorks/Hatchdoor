@@ -2,30 +2,27 @@
 //!
 //! The import itself is gone: a deployment with no registry starts with an
 //! empty one, whatever `VAULT_PATH` holds. Two startup steps outlive it. Every
-//! start on an existing registry purges the retired Git-lane keys from stored
-//! settings, so a plaintext Git token never survives there. And a start with
-//! no registry but stored single-Vault keys refuses, because that is an
-//! install from 2.4.x or earlier that never ran the import, and opening it on
-//! zero Vaults would look like lost notes.
+//! start purges the retired settings from stored settings, so a plaintext Git
+//! token never survives there and a value nothing reads cannot stop a later
+//! start (#644). And a start with no registry but stored single-Vault Git keys
+//! refuses, because that is an install from 2.4.x or earlier that never ran
+//! the import, and opening it on zero Vaults would look like lost notes.
 
 use std::fmt;
 use std::fs;
 
-use crate::runtime_config::{RuntimeConfig, SettingSource};
+use crate::runtime_config::{ConfigSnapshot, RETIRED_SETTINGS, RuntimeConfig, SettingSource};
 use crate::vault_registry::{VaultRegistryError, VaultRegistryState, VaultRegistryStore};
 
 /// Where an install too old to upgrade directly is sent.
 pub const LEGACY_MIGRATION_DOC_URL: &str =
     "https://github.com/BatterWorks/Hatchdoor/blob/main/docs/migrations/legacy-single-vault.md";
 
-/// The retired instance-wide Git lane's inputs, the token among them. Nothing
-/// reads them once a registry exists, so every start on one removes them
-/// again (#325). For the same reason, any of them stored on an install
-/// without a registry means a single-Vault release wrote them and the 2.5.0
-/// to 2.7.x import never ran. `HATCHDOOR_EXCLUDE` and the two author keys are
-/// neither purged nor evidence of an old install, because they are still live
-/// settings a current install may store (the commit-identity fallback among
-/// them).
+/// The retired instance-wide Git lane's inputs, the token among them. Any of
+/// them stored on an install without a registry means a single-Vault release
+/// wrote them and the 2.5.0 to 2.7.x import never ran. `HATCHDOOR_EXCLUDE` is
+/// retired too but is no such evidence: a 2.8 install could store it before
+/// #644 refused saving it.
 const RETIRED_GIT_LANE_STORED_KEYS: [&str; 6] = [
     "HATCHDOOR_GIT_SYNC_ENABLED",
     "HATCHDOOR_GIT_HTTPS_TOKEN",
@@ -79,12 +76,7 @@ pub fn prepare_registry(
 ) -> Result<VaultRegistryState, RegistryStartupError> {
     match fs::symlink_metadata(registry.path()) {
         Ok(_) => {
-            if let Err(error) = runtime_config.remove_stored(RETIRED_GIT_LANE_STORED_KEYS) {
-                tracing::warn!(
-                    %error,
-                    "could not remove retired Git settings; retrying on the next start"
-                );
-            }
+            purge_retired_settings(runtime_config);
             return Ok(registry.load()?);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -104,7 +96,43 @@ pub fn prepare_registry(
     }) {
         return Err(RegistryStartupError::UnconvertedLegacyInstall);
     }
+    purge_retired_settings(runtime_config);
     Ok(VaultRegistryState::Ready(registry.initialize_empty(0)?))
+}
+
+/// The warning naming each retired setting stored in `settings.json`, or
+/// `None` when there is none. Startup logs it right after the settings load,
+/// before any check that could stop the start, because [`prepare_registry`]
+/// removes them only once those checks pass (#644). A key the environment
+/// also pins resolves as `Environment`, so it is left to the `.env` warning.
+pub fn stored_retired_settings_warning(snapshot: &ConfigSnapshot) -> Option<String> {
+    let stored = RETIRED_SETTINGS
+        .into_iter()
+        .filter(|key| {
+            snapshot
+                .setting(key)
+                .is_some_and(|setting| setting.source == SettingSource::Stored)
+        })
+        .collect::<Vec<_>>();
+    (!stored.is_empty()).then(|| {
+        format!(
+            "settings.json holds retired settings that nothing reads: {}. Hatchdoor ignores \
+             them and removes them from settings.json during this start.",
+            stored.join(", ")
+        )
+    })
+}
+
+/// Remove every retired setting from stored settings. Nothing reads them,
+/// and before #644 a save could store a value the old startup checks
+/// refused, so an upgraded install may still hold one.
+fn purge_retired_settings(runtime_config: &RuntimeConfig) {
+    if let Err(error) = runtime_config.remove_stored(RETIRED_SETTINGS) {
+        tracing::warn!(
+            %error,
+            "could not remove retired settings; retrying on the next start"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -114,7 +142,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{RegistryStartupError, prepare_registry};
-    use crate::runtime_config::{Environment, RuntimeConfig, live_settings_defaults};
+    use crate::runtime_config::{
+        Environment, RuntimeConfig, SettingSource, live_settings_defaults,
+    };
     use crate::vault_registry::{
         NewVaultDefinition, VaultRegistryState, VaultRegistryStore, VaultSource,
     };
@@ -197,9 +227,11 @@ mod tests {
         assert_eq!(std::fs::read_dir(&vault_path).expect("read").count(), 0);
     }
 
-    /// Live settings a current install may store, the exclusions and commit
-    /// author among them, say nothing about the install's age, so they never
-    /// trigger the refusal (a 2.8 install that lost its registry is not old).
+    /// Live settings a current install may store, the commit author among
+    /// them, say nothing about the install's age, so they never trigger the
+    /// refusal (a 2.8 install that lost its registry is not old). Nor does a
+    /// stored `HATCHDOOR_EXCLUDE`, which a 2.8 install could save before #644
+    /// retired it; the start removes it.
     #[test]
     fn live_stored_settings_without_a_registry_still_start_empty() {
         let root = tempdir().expect("temporary deployment");
@@ -226,6 +258,20 @@ mod tests {
         let state = prepare_registry(&registry, &config).expect("fresh start");
 
         assert_eq!(ready_vault_count(&state), 0);
+        let snapshot = config.snapshot();
+        assert_eq!(
+            snapshot
+                .setting("HATCHDOOR_EXCLUDE")
+                .expect("listed")
+                .source,
+            SettingSource::Default
+        );
+        assert_eq!(
+            snapshot
+                .required("HATCHDOOR_GIT_AUTHOR_NAME")
+                .expect("author"),
+            "Current Author"
+        );
     }
 
     #[test]
@@ -257,6 +303,52 @@ mod tests {
         }
     }
 
+    /// The legacy-install evidence is the retired list without
+    /// `HATCHDOOR_EXCLUDE`; kept by hand, so this keeps the two in step.
+    #[test]
+    fn the_git_lane_evidence_is_every_retired_setting_but_the_exclusions() {
+        let mut evidence = super::RETIRED_GIT_LANE_STORED_KEYS.to_vec();
+        evidence.push("HATCHDOOR_EXCLUDE");
+        evidence.sort_unstable();
+        let mut retired = crate::runtime_config::RETIRED_SETTINGS.to_vec();
+        retired.sort_unstable();
+        assert_eq!(evidence, retired);
+    }
+
+    #[test]
+    fn the_stored_retired_settings_warning_names_each_stored_key_only() {
+        let root = tempdir().expect("temporary deployment");
+        let config = runtime_config(&root.path().join("settings.json"));
+        assert_eq!(
+            super::stored_retired_settings_warning(&config.snapshot()),
+            None
+        );
+        config
+            .save([
+                ("HATCHDOOR_EXCLUDE".to_string(), "notes/[z-a]".to_string()),
+                (
+                    "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                    "remote".to_string(),
+                ),
+                (
+                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                    "Kept Author".to_string(),
+                ),
+            ])
+            .expect("stored settings");
+
+        let message = super::stored_retired_settings_warning(&config.snapshot())
+            .expect("stored retired keys are named");
+
+        assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
+        assert!(message.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{message}");
+        assert!(!message.contains("HATCHDOOR_GIT_AUTHOR_NAME"), "{message}");
+        assert!(
+            !message.contains("notes/[z-a]"),
+            "values stay out: {message}"
+        );
+    }
+
     #[test]
     fn the_refusal_names_the_upgrade_path_and_the_migration_document() {
         let message = RegistryStartupError::UnconvertedLegacyInstall.to_string();
@@ -270,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_registry_purges_the_retired_git_lane_keys_and_keeps_the_rest() {
+    fn an_existing_registry_purges_the_retired_settings_and_keeps_the_rest() {
         let root = tempdir().expect("temporary deployment");
         let registry = VaultRegistryStore::new(root.path().join("state/vaults.json"));
         registry.initialize_empty(0).expect("existing registry");
@@ -283,6 +375,10 @@ mod tests {
                     "legacy-secret-token".to_string(),
                 ),
                 ("HATCHDOOR_GIT_SYNC_ENABLED".to_string(), "on".to_string()),
+                (
+                    "HATCHDOOR_EXCLUDE".to_string(),
+                    "drafts/, notes/[z-a]".to_string(),
+                ),
                 (
                     "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
                     "Kept Author".to_string(),
@@ -299,6 +395,7 @@ mod tests {
         let stored = std::fs::read_to_string(&settings_path).expect("settings file");
         assert!(!stored.contains("legacy-secret-token"), "{stored}");
         assert!(!stored.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{stored}");
+        assert!(!stored.contains("HATCHDOOR_EXCLUDE"), "{stored}");
         let snapshot = runtime_config(&settings_path).snapshot();
         assert_eq!(
             snapshot
@@ -356,8 +453,7 @@ mod tests {
     }
 
     /// An existing registry wins even when single-Vault keys are still stored:
-    /// that install already ran the import, and only the retired Git-lane keys
-    /// are purged.
+    /// that install already ran the import, and the retired keys are purged.
     #[test]
     fn an_existing_registry_is_never_refused_for_stored_single_vault_keys() {
         let root = tempdir().expect("temporary deployment");

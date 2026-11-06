@@ -127,9 +127,6 @@ pub struct AppConfig {
     pub demo_mode: bool,
     /// Folder prefix (with trailing slash) treated as archived in resolve results.
     pub archive_prefix: String,
-    /// Extra noise-exclusion patterns from `HATCHDOOR_EXCLUDE` (gitignore
-    /// syntax), appended to the built-in defaults. Empty when unset.
-    pub exclude_patterns: Vec<String>,
     /// Whether demoted-layer vectors are embedded (`HATCHDOOR_EMBED_LAYERS`,
     /// default true). Surfaced here only for the effective-config startup log;
     /// the cache reads the same env var when it persists the value.
@@ -170,7 +167,6 @@ impl AppConfig {
             web_bearer_token,
             demo_mode,
             archive_prefix: "90-archive/".to_string(),
-            exclude_patterns: Vec::new(),
             embed_layers: true,
         })
     }
@@ -186,7 +182,6 @@ impl AppConfig {
             .required("HATCHDOOR_ARCHIVE_PREFIX")?
             .trim()
             .to_string();
-        self.exclude_patterns = parse_exclude_patterns(snapshot.required("HATCHDOOR_EXCLUDE")?);
         self.embed_layers =
             crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_EMBED_LAYERS")?);
         Ok(())
@@ -232,17 +227,6 @@ pub fn parse_port(input: &str) -> Result<u16, String> {
     input
         .parse::<u16>()
         .map_err(|e| format!("invalid PORT '{input}': {e}"))
-}
-
-/// Split a comma-separated `HATCHDOOR_EXCLUDE` value into individual gitignore
-/// patterns, trimming surrounding whitespace and dropping empty entries so a
-/// trailing comma or accidental double comma does not produce a blank pattern.
-pub fn parse_exclude_patterns(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|pattern| pattern.trim())
-        .filter(|pattern| !pattern.is_empty())
-        .map(|pattern| pattern.to_string())
-        .collect()
 }
 
 pub fn init_logging() {
@@ -484,20 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_exclude_patterns_trims_and_drops_blanks() {
-        assert_eq!(
-            parse_exclude_patterns("build/, *.log ,, !.DS_Store"),
-            vec![
-                "build/".to_string(),
-                "*.log".to_string(),
-                "!.DS_Store".to_string(),
-            ]
-        );
-        assert!(parse_exclude_patterns("   ").is_empty());
-        assert!(parse_exclude_patterns("").is_empty());
-    }
-
-    #[test]
     fn socket_addr_normalizes_every_accepted_loopback_spelling() {
         for (host, expected) in [
             ("127.0.0.1", "127.0.0.1:42824"),
@@ -515,7 +485,6 @@ mod tests {
                 web_bearer_token: None,
                 demo_mode: true,
                 archive_prefix: "90-archive/".to_string(),
-                exclude_patterns: Vec::new(),
                 embed_layers: true,
             };
 

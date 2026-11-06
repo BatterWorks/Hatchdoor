@@ -105,8 +105,12 @@ that production inventory are still checked for stale paths and duplicates.
   `.env` line to `NEW_WEB_TOKEN_FILE` (`new-web-token.env`) beside the Vault
   registry, mode 0600, reuses a valid file an earlier refusal left, and names
   the file in the error. Per-Vault variables left in the environment
-  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*`) are named in one startup warning;
-  they no longer hold the instance in a restricted recovery mode (#427).
+  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*`) are named in one startup warning,
+  logged right after the settings load and before any startup refusal, followed
+  by `vault_migration::stored_retired_settings_warning` naming each retired
+  key `settings.json` still stores (#644);
+  they no longer hold the instance in a restricted recovery mode (#427), and
+  no startup check parses them, so no value of one can stop a start.
 - `AppState` carries shared runtime state. Every field has a production
   reader, and each is one of: collection runtime (`vault_registry`, `vaults`,
   `vault_work`, `managed_git`, `startup_sqlite`, `embedder`,
@@ -854,13 +858,17 @@ backend checks.
 
 **Public contract:** `RuntimeConfig`, `ConfigSnapshot`, `ResolvedSetting`,
 `SettingSource`, `Environment`, `SETTINGS_SCHEMA`, `live_settings_defaults`,
+`RETIRED_SETTINGS`,
 `settings_file_path`, `is_truthy`, and the versioned
 `settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
 lock-free configuration view to bind at the start of an operation;
 `RuntimeConfig::save` serializes writes, persists first, then publishes the
 new view. `RuntimeConfig::remove_stored` lets the registry's startup step
-purge the retired Git-lane keys, persisting before publishing and leaving
-environment pins and unrelated values untouched.
+purge the retired keys, persisting before publishing and leaving
+environment pins and unrelated values untouched. `RETIRED_SETTINGS` names
+them (`HATCHDOOR_EXCLUDE` and the Git-lane keys, not the two author keys):
+still listed by the defaults so the settings document keeps its shape, but
+refused by the settings save and purged at every start (#644).
 `RuntimeConfig::validate_and_save` runs a caller-supplied decision
 against the snapshot current at the moment the write lock is taken and only
 persists on success, so validation and persistence serialize behind the same
@@ -952,7 +960,7 @@ checks.
 
 **Public contract:** `DEFAULT_VAULT_REGISTRY_PATH`, the startup step
 `vault_migration::{prepare_registry, RegistryStartupError,
-LEGACY_MIGRATION_DOC_URL}`,
+LEGACY_MIGRATION_DOC_URL, stored_retired_settings_warning}`,
 `REGISTRY_SCHEMA_VERSION`, canonical `VaultId` generation and parsing,
 `VaultRegistryStore`, immutable `VaultRegistrySnapshot` values, explicit
 `VaultRegistryState::Ready` versus `Recovery`, structured recovery/error
@@ -1014,20 +1022,22 @@ username.
 
 `vault_migration::prepare_registry` is the registry's startup step, all that
 remains of the legacy single-Vault import #427 removed (ADR-40). A start that
-finds a registry purges the retired Git-lane keys from stored settings
-(`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
-`_BRANCH`, `_DEBOUNCE_SECONDS`), logging and retrying on the next start on
-failure, so a plaintext Git token never survives there (#325), then loads it.
+finds a registry purges every retired setting from stored settings
+(`runtime_config::RETIRED_SETTINGS`: `HATCHDOOR_EXCLUDE`,
+`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
+`_BRANCH`, `_DEBOUNCE_SECONDS`), logging and retrying on the next start on failure, so a plaintext Git token
+never survives there (#325) and a value nothing reads cannot stop a start
+(#644), then loads it.
 A start that finds none refuses with
 `RegistryStartupError::UnconvertedLegacyInstall` when stored settings still
 carry any of those retired Git-lane keys, which only a single-Vault release
 wrote: that install is from 2.4.x or earlier, and the
 message sends it through a 2.5.0 to 2.7.x release and names
 `docs/migrations/legacy-single-vault.md`. Otherwise it writes an empty
-registry, whatever `VAULT_PATH` holds. It never reads, registers, or writes
-the `VAULT_PATH` folder, and the refusal writes nothing at all.
-`HATCHDOOR_EXCLUDE` and the author keys never trigger it, because a current
-install stores them too.
+registry, after the same purge, whatever `VAULT_PATH` holds. It never reads,
+registers, or writes the `VAULT_PATH` folder, and the refusal writes nothing at
+all. `HATCHDOOR_EXCLUDE` and the author keys never trigger it, because a
+current install could store them too.
 
 **Consumers:** runtime composition calls `vault_migration::prepare_registry`
 after the security refusals and before recording the start or opening the
@@ -3637,12 +3647,11 @@ Every save takes one path: the legacy versioning-task lifecycle branch (stop
 the task, preflight the repository, respawn) went with the task itself in
 #185. `HATCHDOOR_GIT_SYNC_ENABLED`, `_REMOTE`, `_BRANCH`, `_HTTPS_USERNAME`,
 `_HTTPS_TOKEN`, `_DEBOUNCE_SECONDS`, and `HATCHDOOR_EXCLUDE` remain in the
-schema although #427 removed the import that consumed them; the registry's
-startup step purges the Git-lane ones from stored settings and refuses an
-install without a registry that still stores any of them. No per-operation
-code reads them; two `server.rs` startup checks
-still parse them — `check_demo_mode_posture` and `HATCHDOOR_EXCLUDE`'s pattern
-validation — and both only refuse a start.
+document although #427 removed the import that consumed them, so `GET` keeps
+its shape. Nothing reads them: a save of any of them is refused with `400` and a field error naming it as
+retired, checked before every other rule so no value is stored and no
+reindex queued (`runtime_config::RETIRED_SETTINGS`, #644), and the
+registry's startup step purges them from stored settings.
 `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` remain
 the commit-identity fallback the collection lane's Git turns read per turn, so
 a change to them still reaches the next turn without a restart.

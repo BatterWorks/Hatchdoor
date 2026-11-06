@@ -29,7 +29,6 @@ use crate::auth::{
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
-use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, app_docs_page_handler, create_folder_handler, create_vault_handler,
     demo_read_only_response, disable_vault_handler, disconnect_vault_handler, docs_router,
@@ -175,33 +174,17 @@ fn save_new_web_token(state_dir: &std::path::Path) -> Result<std::path::PathBuf,
     Ok(path)
 }
 
-/// Refuse a demo start whose operator still has legacy instance-wide Git
-/// versioning or MCP configured.
-///
-/// `legacy_git_configured` is `HATCHDOOR_GIT_SYNC_ENABLED` resolving to a
-/// mode. Since #185 that setting drives nothing at runtime, so this is no
-/// longer the refusal that keeps a demo read-only — the registry check in
-/// [`check_demo_mode_registry_posture`] is. It is kept because the setting is
-/// still in the settings schema and can still be set in the environment, and
-/// the operator's `.env` and Hatchdoor's behaviour disagreeing is worth
-/// stopping over.
-pub fn check_demo_mode_posture(
-    demo_mode: bool,
-    mcp_enabled: bool,
-    legacy_git_configured: bool,
-) -> Result<(), String> {
+/// Refuse a demo start whose operator has MCP configured. The registry check
+/// in [`check_demo_mode_registry_posture`] is the one that refuses Git
+/// writeback; the retired `HATCHDOOR_GIT_SYNC_ENABLED` is never read, so a
+/// value left in `.env` cannot stop a start (#644).
+pub fn check_demo_mode_posture(demo_mode: bool, mcp_enabled: bool) -> Result<(), String> {
     if !demo_mode {
         return Ok(());
     }
     if mcp_enabled {
         return Err(
             "HATCHDOOR_DEMO_MODE=true is incompatible with HATCHDOOR_MCP_ENABLED=true; disable MCP for public demos."
-                .to_string(),
-        );
-    }
-    if legacy_git_configured {
-        return Err(
-            "HATCHDOOR_DEMO_MODE=true is incompatible with Git writeback; disable HATCHDOOR_GIT_SYNC_ENABLED and managed bidirectional mode for public demos."
                 .to_string(),
         );
     }
@@ -1266,7 +1249,21 @@ pub async fn run_server() {
         error!("Settings configuration error: {e}");
         std::process::exit(1);
     });
+    // Named before any refusal below, so an operator whose start fails for
+    // another reason still sees which `.env` lines do nothing (#644).
+    let environment_keys = std::env::vars()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    if let Some(message) = legacy_environment_warning(&environment_keys) {
+        warn!("{message}");
+    }
     let startup_snapshot = runtime_config.snapshot();
+    if let Some(message) =
+        crate::vault_migration::stored_retired_settings_warning(&startup_snapshot)
+    {
+        warn!("{message}");
+    }
     // Stated only when it is true of this instance: on a boot with nothing
     // pinned the sentence describes nothing, and running pinned is a
     // legitimate posture rather than something to warn about every start.
@@ -1314,25 +1311,7 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    // The instance-wide Git lane is gone (issue #185), so this parses
-    // `HATCHDOOR_GIT_*` for exactly two remaining purposes: validating that a
-    // configured mode is fully configured, and the demo posture refusal
-    // below. No runtime behaviour reads the result.
-    let legacy_git_config = match &config.vault_source {
-        VaultSource::Local { vault_path } => {
-            GitConfig::from_snapshot(vault_path.clone(), &startup_snapshot)
-        }
-    }
-    .unwrap_or_else(|e| {
-        error!("Git sync configuration error: {e}");
-        std::process::exit(1);
-    });
-
-    if let Err(message) = check_demo_mode_posture(
-        config.demo_mode,
-        mcp_config.enabled,
-        legacy_git_config.is_some(),
-    ) {
+    if let Err(message) = check_demo_mode_posture(config.demo_mode, mcp_config.enabled) {
         error!("{message}");
         std::process::exit(1);
     }
@@ -1387,14 +1366,6 @@ pub async fn run_server() {
         config.demo_mode,
     ));
     usage_report.reconcile();
-    let environment_keys = std::env::vars()
-        .filter(|(_, value)| !value.trim().is_empty())
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    if let Some(message) = legacy_environment_warning(&environment_keys) {
-        warn!("{message}");
-    }
-
     if let VaultRegistryState::Ready(snapshot) = &registry_state
         && let Err(message) = check_demo_mode_registry_posture(config.demo_mode, snapshot)
     {
@@ -1418,13 +1389,6 @@ pub async fn run_server() {
     let runtime_embedder = Arc::new(RuntimeEmbedder::new());
     let embedder: Arc<dyn Embedder> = runtime_embedder.clone();
 
-    let scan_config = AppState::runtime_scan_config(&startup_snapshot).unwrap_or_else(|e| {
-        error!("Invalid HATCHDOOR_EXCLUDE configuration: {e}");
-        std::process::exit(1);
-    });
-    for (pattern, source) in scan_config.exclude.configured_patterns() {
-        info!(pattern = %pattern, source, "Noise-exclusion pattern active");
-    }
     info!(
         embed_layers = config.embed_layers,
         "Demoted-layer vector embedding (HATCHDOOR_EMBED_LAYERS)"
@@ -1826,10 +1790,12 @@ mod tests {
             "VAULT_PATH".to_string(),
             "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
             "HATCHDOOR_EXCLUDE".to_string(),
+            "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
         ])
         .expect("stale per-Vault variables are named");
         assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
         assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
+        assert!(message.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{message}");
         assert!(!message.contains("VAULT_PATH"), "{message}");
         assert!(message.contains("Settings"), "{message}");
     }
@@ -2190,14 +2156,11 @@ mod tests {
 
     #[test]
     fn demo_mode_posture_rejects_external_write_surfaces() {
-        assert!(check_demo_mode_posture(true, false, false).is_ok());
-        assert!(check_demo_mode_posture(false, true, true).is_ok());
+        assert!(check_demo_mode_posture(true, false).is_ok());
+        assert!(check_demo_mode_posture(false, true).is_ok());
 
-        let mcp_error = check_demo_mode_posture(true, true, false).expect_err("mcp rejected");
+        let mcp_error = check_demo_mode_posture(true, true).expect_err("mcp rejected");
         assert!(mcp_error.contains("HATCHDOOR_MCP_ENABLED"));
-
-        let git_error = check_demo_mode_posture(true, false, true).expect_err("git rejected");
-        assert!(git_error.contains("HATCHDOOR_GIT_SYNC_ENABLED"));
     }
 
     #[test]
@@ -6344,7 +6307,7 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"}}"#,
+                        r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"}}"#,
                     ))
                     .expect("request"),
             )
@@ -6370,42 +6333,13 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"},"confirm":["reindex"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_EXCLUDE")
-                .expect("setting")
-                .value,
-            "generated/**"
-        );
-        assert!(
-            state
-                .vault_work
-                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
-            "a confirmed indexing save must request an Index turn for the active Vault"
-        );
-
-        let second_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
                         r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"},"confirm":["reindex"]}"#,
                     ))
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(second_response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             state
                 .runtime_snapshot()
@@ -6414,45 +6348,79 @@ mod tests {
                 .value,
             "false"
         );
+        assert!(
+            state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a confirmed indexing save must request an Index turn for the active Vault"
+        );
     }
 
-    /// #185 deleted the instance-wide Git lane, so the legacy
-    /// `HATCHDOOR_GIT_SYNC_ENABLED` key has no runtime reader. Saving it still
-    /// persists (it stays in the settings schema) but must no longer ask for a consequence confirmation and must no
-    /// longer create a repository as a side effect of a settings save.
+    /// Nothing reads a retired setting, and before #644 a saved value the old
+    /// startup checks refused made the next start exit. A save of one is now
+    /// refused with a field error naming it as retired: nothing is stored, no
+    /// reindex is queued, and no repository is created.
     #[tokio::test]
-    async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
-        let (app, tmp, state) = app_for_tests_with_state();
-        let vault_root = tmp.path().join("legacy-git-mode");
-        std::fs::create_dir_all(&vault_root).expect("create vault directory");
-        assert!(!vault_root.join(".git").exists());
+    async fn saving_a_retired_setting_is_refused_and_stores_nothing() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        let vault_root = tmp.path().join("retired");
+        let vault_id =
+            create_vault_with_files(&app, "Retired", &vault_root, &[("Home.md", "# Home\n")], 0)
+                .await;
+        let vault_id: crate::vault_registry::VaultId = vault_id.parse().expect("Vault id");
+        drain_queued_turns(&mut worker).await;
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+        for (key, body) in [
+            (
+                "HATCHDOOR_GIT_SYNC_ENABLED",
+                r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"remote"}}"#,
+            ),
+            (
+                "HATCHDOOR_EXCLUDE",
+                r#"{"updates":{"HATCHDOOR_EXCLUDE":"drafts/, notes/[z-a]"},"confirm":["reindex"]}"#,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/settings")
+                        .method("PATCH")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["fields"][0]["key"], key);
+            assert!(
+                json["fields"][0]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("retired")),
+                "{json}"
+            );
+            assert_eq!(
+                state
+                    .runtime_snapshot()
+                    .setting(key)
+                    .expect("still listed")
+                    .source,
+                crate::runtime_config::SettingSource::Default,
+                "{key}: nothing is stored"
+            );
+        }
         assert!(
-            !vault_root.join(".git").exists(),
-            "a settings save must not initialize versioning on any directory"
+            !state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a refused save queues no reindex"
         );
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
-                .expect("setting")
-                .value,
-            "local"
-        );
+        assert!(!vault_root.join(".git").exists());
     }
 
     #[tokio::test]
