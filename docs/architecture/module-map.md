@@ -319,12 +319,26 @@ that production inventory are still checked for stale paths and duplicates.
   guard across a reconcile can check, by pointer, that a freshly resolved
   block still serializes against what it holds.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
-  and persistent setup records. It also owns the model download (#642):
-  `fetch_model` fetches every file the selected model's load reads, through
-  `HF_ENDPOINT`, into the folder the load reads (for Nomic, `HF_HOME` when
-  set, as FastEmbed's own lookup reads it; Gemma's loader,
-  `embed::fastembed_repo`, reads only the model's folder), so the load needs
-  no network. Setup runs it in a child copy of the
+  and persistent setup records. Both models are pinned to a commit
+  (`GEMMA_REVISION`, `NOMIC_REVISION`) and every file their loads read has a
+  SHA-256 shipped in `model_setup.rs` (#643). `prepare_download` checks the
+  cache through the snapshot paths the load opens, links followed, and
+  removes it whole when a file differs or an unlisted regular file sits in the
+  snapshot; only a cache that needs a download must find
+  `MIN_SETUP_FREE_BYTES` free. A cache that was valid there is loaded without
+  hashing it again; a downloaded one is checked by `verify_download` before
+  its load. `point_main_at_pinned_revision` points the cache's `main` at the
+  pinned commit, which is what FastEmbed's Nomic load reads; Gemma loads from
+  the snapshot folder by path (`FastembedEmbedder::embedding_gemma_300m_q4_from`).
+  The revision is part of each embedder identity, so a revision change
+  rebuilds the vectors. `main.rs` drops `HF_HOME` before the runtime starts,
+  because FastEmbed reads it ahead of the folder Hatchdoor passes. A
+  selection or terms record that cannot be parsed reads as "terms required"
+  instead of stopping the server, and records are written with `sync_all` on
+  the file and its folder. It also owns the model download (#642):
+  `fetch_model` fetches every file of the pinned revision that the snapshot
+  lacks, through `HF_ENDPOINT`, into the model's own folder under the models
+  directory, so the load needs no network. Setup runs it in a child copy of the
   executable (`fetch_command`) under `run_supervised_fetch`, which reads the
   child's `hatchdoor-model-fetch` progress lines and kills it when no data
   arrives for `DOWNLOAD_STALL_AFTER` (60 s) or the attempt passes

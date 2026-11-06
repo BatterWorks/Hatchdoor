@@ -51,7 +51,9 @@ use crate::handlers::{
     whats_new_handler,
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
-use crate::model_setup::{ModelSetup, SelectedModel};
+use crate::model_setup::{
+    CacheIntegrity, GEMMA_REVISION, ModelSetup, NOMIC_REVISION, SelectedModel,
+};
 use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
 use crate::vault_executor::VaultWorkExecutor;
@@ -844,19 +846,18 @@ async fn decline_gemma_handler(State(state): State<AppState>) -> Response {
 
 async fn retry_model_setup_handler(State(state): State<AppState>) -> Response {
     match state.model_setup.selected() {
-        Ok(selected @ (SelectedModel::Gemma | SelectedModel::Nomic)) => {
+        selected @ (SelectedModel::Gemma | SelectedModel::Nomic) => {
             if spawn_model_startup(state, selected) {
                 StatusCode::ACCEPTED.into_response()
             } else {
                 model_setup_conflict()
             }
         }
-        Ok(SelectedModel::TermsRequired) => (
+        SelectedModel::TermsRequired => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "Gemma terms must be accepted or declined first." })),
         )
             .into_response(),
-        Err(error) => model_setup_error(error),
     }
 }
 
@@ -951,34 +952,47 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
         let model_setup = state.model_setup.clone();
         let download_tracker = tracker.clone();
         let load_result = tokio::task::spawn_blocking(move || -> Result<(), SetupFailure> {
-            model_setup
+            // A cache that already matches the shipped digests needs no
+            // download, and was just checked, so it is not hashed twice
+            // before its load (#643).
+            let mut cache_checked = model_setup
                 .prepare_download(selected)
-                .map_err(SetupFailure::Other)?;
+                .map_err(SetupFailure::Other)?
+                == CacheIntegrity::Valid;
             for attempt in 0..=1 {
                 // A stopped download fails setup at once: the network, not
                 // the cache, is what went wrong, and its partial files are
                 // kept for the next attempt to resume (#642).
-                fetch_model_files(&model_setup, selected, &download_tracker)?;
+                if !cache_checked {
+                    fetch_model_files(&model_setup, selected, &download_tracker)?;
+                }
                 download_tracker.set_model_loading(model_name);
-                // The load covers recording the files' digests, which
-                // reads every model file again and is as slow as the load
+                // The load covers checking the downloaded files' digests,
+                // which reads every model file and is as slow as the load
                 // itself on a slow share.
                 let loaded = log_model_load(
                     selected,
                     MODEL_STILL_LOADING_EVERY,
                     || -> Result<Arc<dyn Embedder>, String> {
+                        if !cache_checked {
+                            model_setup.verify_download(selected)?;
+                        }
+                        model_setup.point_main_at_pinned_revision(selected)?;
                         let embedder: Arc<dyn Embedder> = match selected {
-                            SelectedModel::Gemma => Arc::new(
-                                FastembedEmbedder::embedding_gemma_300m_q4_in(model_dir.clone())?,
-                            ),
-                            SelectedModel::Nomic => {
-                                Arc::new(FastembedEmbedder::nomic_v1_5_in(model_dir.clone())?)
+                            SelectedModel::Gemma => {
+                                Arc::new(FastembedEmbedder::embedding_gemma_300m_q4_from(
+                                    &model_setup.snapshot_dir(selected)?,
+                                    GEMMA_REVISION,
+                                )?)
                             }
+                            SelectedModel::Nomic => Arc::new(FastembedEmbedder::nomic_v1_5_in(
+                                model_dir.clone(),
+                                NOMIC_REVISION,
+                            )?),
                             SelectedModel::TermsRequired => {
                                 return Err("model terms have not been accepted".to_string());
                             }
                         };
-                        model_setup.record_integrity(selected)?;
                         Ok(embedder)
                     },
                 );
@@ -1001,6 +1015,7 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                         model_setup
                             .reset_download_cache(selected)
                             .map_err(SetupFailure::Other)?;
+                        cache_checked = false;
                         download_tracker.set_downloading(model_name, None, None);
                     }
                     Err(error) => return Err(SetupFailure::Other(error)),
@@ -1398,10 +1413,7 @@ pub async fn run_server() {
     );
 
     let model_setup = Arc::new(ModelSetup::new(ModelSetup::default_models_dir()));
-    let selected_model = model_setup.selected().unwrap_or_else(|error| {
-        error!("Model setup state is invalid: {error}");
-        std::process::exit(1);
-    });
+    let selected_model = model_setup.selected();
     let selected_model = initial_model_for_startup(config.demo_mode, selected_model);
     let runtime_embedder = Arc::new(RuntimeEmbedder::new());
     let embedder: Arc<dyn Embedder> = runtime_embedder.clone();
@@ -6192,10 +6204,7 @@ mod tests {
     #[tokio::test]
     async fn post_start_model_choice_is_rejected_without_persisting_a_new_selection() {
         let (app, _tmp, state) = app_for_tests_with_state();
-        assert_eq!(
-            state.model_setup.selected().expect("initial selection"),
-            SelectedModel::TermsRequired
-        );
+        assert_eq!(state.model_setup.selected(), SelectedModel::TermsRequired);
 
         let response = app
             .oneshot(
@@ -6210,10 +6219,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
-            state
-                .model_setup
-                .selected()
-                .expect("selection after refusal"),
+            state.model_setup.selected(),
             SelectedModel::TermsRequired,
             "a rejected post-start request must not persist a model the runtime did not adopt"
         );

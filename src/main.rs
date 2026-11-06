@@ -1,5 +1,5 @@
 use dotenvy::dotenv;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use hatchdoor::config::{init_logging, version_string};
 use hatchdoor::embed::FastembedEmbedder;
@@ -34,11 +34,34 @@ fn run_prefetch() {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     dotenv().ok();
+    // FastEmbed reads its model cache from `HF_HOME` ahead of the folder
+    // Hatchdoor gives it, which split the download, the digest check and the
+    // load across two caches (#643). Hatchdoor keeps its models in its own
+    // models folder, so the variable is dropped here, while this is still the
+    // only thread and changing the environment is sound.
+    let ignored_hf_home = std::env::var_os("HF_HOME");
+    if ignored_hf_home.is_some() {
+        // SAFETY: no other thread exists yet: the Tokio runtime is built
+        // below, and neither `dotenv` nor anything before it starts one.
+        unsafe { std::env::remove_var("HF_HOME") };
+    }
     init_logging();
+    if let Some(path) = ignored_hf_home {
+        warn!(
+            hf_home = %path.to_string_lossy(),
+            "HF_HOME is set and ignored: Hatchdoor keeps its search models in its own models folder"
+        );
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("start the Tokio runtime")
+        .block_on(run())
+}
 
+async fn run() {
     let args: Vec<String> = std::env::args().collect();
     match parse_run_mode(&args) {
         RunMode::Serve => {
