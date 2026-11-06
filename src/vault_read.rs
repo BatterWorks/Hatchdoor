@@ -3608,7 +3608,7 @@ mod tests {
         let response = found(&reads, VaultScope::All, &text("zzz"));
         assert_eq!(found_paths(&response), ["Kept"]);
         assert_eq!(response.total_unread, 1);
-        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::TooLarge);
+        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
     }
 
     #[test]

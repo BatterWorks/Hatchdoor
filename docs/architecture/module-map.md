@@ -1915,7 +1915,7 @@ projections, plus `VaultReadCore::saved_queries` and its wire types
 (`SavedQueriesResponse`, `SavedQueryResult`, `SavedQueryOutcome`,
 `SavedQueryTable`, `SavedQueryColumn`, `SavedQueryRow`, `SavedQueryTruncation`,
 `SavedQueryTruncationReason`), and `VaultReadCore::saved_query` with its
-wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46; `too_large` since #636), and `VaultReadCore::note_outline` and `note_sections` with their wire types (`NoteOutline`, `OutlineHeading`, `NoteSectionsResponse`, `NoteSectionEntry`, `NoteSection`, `NoteSectionMiss`, `NoteSectionError`, `NoteSectionErrorCode`; #502). `VaultQualifiedNote`
+wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46), and `VaultReadCore::note_outline` and `note_sections` with their wire types (`NoteOutline`, `OutlineHeading`, `NoteSectionsResponse`, `NoteSectionEntry`, `NoteSection`, `NoteSectionMiss`, `NoteSectionError`, `NoteSectionErrorCode`; #502). `VaultQualifiedNote`
 carries `saved_queries: Vec<SavedQuerySummary>` (#277). `BrowseSurface` names which layer surface a caller may read.
 `Everything` is the established behavior and stays the default: a layer demotes
 a Note from the default *search* surface only, and an operator still reaches it
@@ -2168,7 +2168,7 @@ link graph, and the Index turn's retained `IndexedAssets`.
 
 - Exact reads inspect the requested Vault's Markdown directory; SQLite remains
   a disposable projection (ADR-01).
-- A Note over `MAX_NOTE_BYTES` is refused on every exact read with `note_too_large` (HTTP 413) before its bytes are read, and `find_text` lists it as unread with `too_large`; a Note path that is no longer a regular file is `note_unreadable` and `unreadable` (#636).
+- A Note over `MAX_NOTE_BYTES` is refused on every exact read with `note_too_large` (HTTP 413) before its bytes are read, and `find_text` lists it as `unreadable`; a Note path that is no longer a regular file is `note_unreadable` and `unreadable`. `find_text` adds no reason for size, since a client checks replies against the `outputSchema` it connected with (#636).
 - Note content and its hash are never older than disk. Links and backlinks
   are the one exception the maintainer accepted (#361): after an edit made
   outside Hatchdoor they may lag disk until the watcher reports the change,

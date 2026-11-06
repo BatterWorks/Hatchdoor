@@ -123,10 +123,9 @@ pub struct TextMatchNote {
 pub enum TextMatchUnreadReason {
     /// The published Note list names a file that is no longer there.
     Missing,
-    /// The file is there and could not be read, or is not a regular file.
+    /// The file is there and could not be read: a read failed, it is no
+    /// longer a regular file, or it is over `MAX_NOTE_BYTES` (#636).
     Unreadable,
-    /// The file is larger than the most Hatchdoor reads of one note (#636).
-    TooLarge,
 }
 
 /// One Note the match could not read, so it says nothing about that Note's
@@ -473,10 +472,13 @@ fn read_note_file(root: Option<&Path>, file_path: &str) -> Result<String, TextMa
     }
     // Bounded and non-blocking: the list is the published one, so the file
     // may have become a FIFO or grown since the index saw it (#636).
+    // No reason of its own for an oversized note: a client keeps the
+    // `outputSchema` it connected with and would refuse a new value.
     let bytes = read_bounded(&path, MAX_NOTE_BYTES).map_err(|error| match error {
-        BoundedReadError::TooLarge { .. } => TextMatchUnreadReason::TooLarge,
-        BoundedReadError::NotRegular => TextMatchUnreadReason::Unreadable,
         BoundedReadError::Io(error) => reason(error),
+        BoundedReadError::TooLarge { .. } | BoundedReadError::NotRegular => {
+            TextMatchUnreadReason::Unreadable
+        }
     })?;
     Ok(match String::from_utf8(bytes) {
         Ok(content) => content,
