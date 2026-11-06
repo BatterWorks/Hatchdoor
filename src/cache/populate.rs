@@ -173,9 +173,12 @@ pub enum UpsertOutcome {
 }
 
 /// Names the shape of the text a chunk row stores. Change it when that shape
-/// changes without the embedded text changing, so existing indexes are
-/// re-chunked once and keep their vectors.
-const CHUNK_STORED_TEXT_SHAPE: &str = "fence-markers";
+/// changes, or when chunking changes for notes whose content did not, so
+/// existing indexes are re-chunked once. A chunk whose embedding input is
+/// unchanged keeps its vector; the rest are embedded again. `native-fences`
+/// (#635): fences and headings follow the note's Section rule, and a stored
+/// fence keeps the note's own marker.
+const CHUNK_STORED_TEXT_SHAPE: &str = "native-fences";
 /// Reparse unchanged notes once after the BOM and bounded-YAML parser upgrade.
 /// Chunk hashes still reuse their vectors; this is not a model/schema change.
 const NOTE_METADATA_SHAPE: &str = "bounded-yaml-bom-v1";

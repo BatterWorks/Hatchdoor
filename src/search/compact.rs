@@ -11,7 +11,7 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use crate::cache::keyword::{is_bigram_char, is_trailing_jamo, run_tokens};
 use crate::cache::parse::fts_query_terms;
-use crate::chunk::is_fence_marker;
+use crate::chunk::{closes_fence, fence_marker};
 use crate::vault_registry::VaultId;
 
 use super::SearchResponseMode;
@@ -221,17 +221,27 @@ fn first_match(chars: &[(usize, char)], phrases: &[Phrase]) -> Option<(usize, us
 }
 
 /// `content` without its fenced blocks, marker lines included, so a chunk
-/// that is nothing but code leaves nothing. An opening marker with no closing
-/// one fences the rest of the chunk. The blank lines a dropped block leaves
-/// behind are closed up to one.
+/// that is nothing but code leaves nothing. A block ends only at a run of its
+/// opening character at least as long, so a block showing a shorter fence
+/// stays whole. An opening marker with no closing one fences the rest of the
+/// chunk. The blank lines a dropped block leaves behind are closed up to one.
 fn without_fenced_blocks(content: &str) -> String {
     let mut prose = String::with_capacity(content.len());
-    let mut fenced = false;
+    let mut open = None;
     for line in content.split_inclusive('\n') {
-        if is_fence_marker(line) {
-            fenced = !fenced;
-        } else if !fenced && !(line.trim().is_empty() && prose.ends_with("\n\n")) {
-            prose.push_str(line);
+        match open {
+            Some(opener) => {
+                if closes_fence(opener, line) {
+                    open = None;
+                }
+            }
+            None => {
+                if let Some(opener) = fence_marker(line) {
+                    open = Some(opener);
+                } else if !(line.trim().is_empty() && prose.ends_with("\n\n")) {
+                    prose.push_str(line);
+                }
+            }
         }
     }
     prose
@@ -398,6 +408,12 @@ mod tests {
     #[test]
     fn an_unclosed_fence_hides_the_rest_of_the_chunk() {
         assert_eq!(snippet("Intro.\n```sh\nls -la\n", &[]), "Intro.");
+    }
+
+    #[test]
+    fn a_block_showing_a_shorter_fence_or_using_tildes_stays_out_whole() {
+        let chunk = "Before.\n````markdown\n```js\n# not a heading either\nconsole.log(1)\n```\n````\n\nBetween.\n~~~bash\n# install the deps\n~~~\n\nAfter.";
+        assert_eq!(snippet(chunk, &[]), "Before.\n\nBetween.\n\nAfter.");
     }
 
     #[test]
