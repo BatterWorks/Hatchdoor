@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::http::{HeaderValue, StatusCode, header};
@@ -95,7 +95,12 @@ pub(crate) fn build_note_export(
         .map(|base| format!("{base}.zip"))
         .unwrap_or_else(|| format!("{markdown_filename}.zip"));
     let markdown = rewrite_export_asset_links(&markdown, &assets);
-    let bytes = build_zip_export(&markdown_filename, &markdown, &assets)?;
+    let bytes = build_zip_export(
+        &markdown_filename,
+        &markdown,
+        &assets,
+        MAX_NOTE_EXPORT_BYTES,
+    )?;
 
     Ok(NoteExport {
         filename: zip_filename,
@@ -104,18 +109,39 @@ pub(crate) fn build_note_export(
     })
 }
 
+/// A note or asset name made safe to hand a browser or an unzip tool, and to
+/// write unescaped into the archive's own Markdown links. The name keeps its
+/// own script (#647), up to 200 bytes; control and invisible characters are
+/// dropped, and any ASCII
+/// character other than letters, digits and ` -_.()` becomes `-`, as it always
+/// has: `#` or `%` would turn a link inside the zip into an anchor or an
+/// escape. Reducing to ASCII is [`build_download_content_disposition`]'s job,
+/// for its fallback alone.
+const MAX_DOWNLOAD_NAME_BYTES: usize = 200;
+
 fn sanitize_download_filename(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for ch in input.trim().chars() {
-        let allowed = ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.' | '(' | ')');
-        if allowed {
-            output.push(ch);
-        } else if !ch.is_ascii_control() {
-            output.push('-');
+        if ch.is_control() || is_invisible(ch) {
+            continue;
         }
+        let kept = !ch.is_ascii()
+            || ch.is_ascii_alphanumeric()
+            || matches!(ch, ' ' | '-' | '_' | '.' | '(' | ')');
+        output.push(if kept { ch } else { '-' });
     }
 
-    let collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Most filesystems cap a name at 255 bytes, and a name that keeps its own
+    // script takes up to 4 bytes a letter. Leave room for `-assets`, a `-2`
+    // suffix or an extension added after this.
+    if collapsed.len() > MAX_DOWNLOAD_NAME_BYTES {
+        let mut end = MAX_DOWNLOAD_NAME_BYTES;
+        while !collapsed.is_char_boundary(end) {
+            end -= 1;
+        }
+        collapsed.truncate(end);
+    }
     let trimmed = collapsed.trim_end_matches('.').trim();
     if trimmed.is_empty() {
         "note".to_string()
@@ -124,10 +150,32 @@ fn sanitize_download_filename(input: &str) -> String {
     }
 }
 
+/// Invisible characters: the ones that reorder how a name displays, so
+/// `gpj.exe` can read as `exe.jpg`, the Unicode line and paragraph separators,
+/// zero-width spaces and joiners, the soft hyphen and the byte-order mark. A
+/// downloaded file name never needs them.
+fn is_invisible(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2028}' | '\u{2029}' | '\u{2060}' | '\u{FEFF}' |
+        '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// RFC 6266 `Content-Disposition` for a download. `filename*` (RFC 5987)
+/// carries the real UTF-8 name; the quoted `filename=` is the ASCII fallback
+/// for clients that predate it. Whatever the caller passes, no control
+/// character, quote or backslash reaches the quoted value.
 pub(crate) fn build_download_content_disposition(filename: &str) -> String {
     let ascii_fallback = filename
         .chars()
-        .map(|ch| if ch.is_ascii() { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii() && !ch.is_ascii_control() && !matches!(ch, '"' | '\\') {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     format!(
         "attachment; filename=\"{}\"; filename*=UTF-8''{}",
@@ -521,41 +569,53 @@ fn build_zip_export(
     markdown_filename: &str,
     markdown: &str,
     assets: &[ExportAsset],
+    maximum: usize,
 ) -> Result<Vec<u8>, ExportError> {
-    let mut writer = zip::ZipWriter::new(LimitedExportWriter::new(MAX_NOTE_EXPORT_BYTES));
+    let mut writer = zip::ZipWriter::new(LimitedExportWriter::new(maximum));
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let failed = |context: &str, error: &dyn std::fmt::Display| {
+        ExportError::Failed(format!("{context}: {error}"))
+    };
 
     writer
         .start_file(markdown_filename, options)
-        .map_err(|error| {
-            ExportError::Failed(format!("failed to add markdown to export zip: {error}"))
-        })?;
-    writer.write_all(markdown.as_bytes()).map_err(|error| {
-        ExportError::Failed(format!("failed to write markdown to export zip: {error}"))
-    })?;
+        .map_err(|error| failed("failed to add markdown to export zip", &error))?;
+    writer
+        .write_all(markdown.as_bytes())
+        .map_err(|error| failed("failed to write markdown to export zip", &error))?;
 
     for asset in assets {
-        let bytes = read_export_asset(&asset.source_path)?;
+        // Stop at the first entry past the bound: what is already written
+        // cannot shrink, and reading the next asset would be wasted work.
+        // Bytes the compressor still buffers are caught by the final check.
+        if writer
+            .get_ref()
+            .is_some_and(LimitedExportWriter::overflowed)
+        {
+            return Err(ExportError::TooLarge);
+        }
+        let bytes = read_export_asset(&asset.source_path, maximum)?;
         writer
             .start_file(&asset.zip_path, options)
-            .map_err(|error| {
-                ExportError::Failed(format!("failed to add asset to export zip: {error}"))
-            })?;
+            .map_err(|error| failed("failed to add asset to export zip", &error))?;
         writer.write_all(&bytes).map_err(|error| {
-            ExportError::Failed(format!(
-                "failed to write asset '{}' to export zip: {error}",
-                asset.source_path.display()
-            ))
+            failed(
+                &format!(
+                    "failed to write asset '{}' to export zip",
+                    asset.source_path.display()
+                ),
+                &error,
+            )
         })?;
     }
 
     writer
         .finish()
-        .map(LimitedExportWriter::into_inner)
-        .map_err(|error| ExportError::Failed(format!("failed to finish export zip: {error}")))
+        .map_err(|error| failed("failed to finish export zip", &error))?
+        .into_inner()
 }
 
-fn read_export_asset(path: &FsPath) -> Result<Vec<u8>, ExportError> {
+fn read_export_asset(path: &FsPath, maximum: usize) -> Result<Vec<u8>, ExportError> {
     let file = std::fs::File::open(path).map_err(|error| {
         ExportError::Failed(format!(
             "failed opening asset '{}' for export: {error}",
@@ -563,7 +623,7 @@ fn read_export_asset(path: &FsPath) -> Result<Vec<u8>, ExportError> {
         ))
     })?;
     let mut bytes = Vec::new();
-    file.take((MAX_NOTE_EXPORT_BYTES as u64).saturating_add(1))
+    file.take((maximum as u64).saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| {
             ExportError::Failed(format!(
@@ -571,44 +631,66 @@ fn read_export_asset(path: &FsPath) -> Result<Vec<u8>, ExportError> {
                 path.display()
             ))
         })?;
-    if bytes.len() > MAX_NOTE_EXPORT_BYTES {
+    if bytes.len() > maximum {
         return Err(ExportError::TooLarge);
     }
     Ok(bytes)
 }
 
+/// The archive's bytes, held only up to `maximum`. The bound is the size of
+/// the compressed archive, so a note of well-compressing images still fits.
+///
+/// Past the bound the writer keeps answering as an ordinary seekable file
+/// whose bytes beyond `maximum` are dropped, and only records that it
+/// overflowed (#647). Refusing the write instead would leave `ZipWriter`
+/// unfinished, and its drop would report the failure on stderr; the caller
+/// turns the overflow into [`ExportError::TooLarge`] instead.
 struct LimitedExportWriter {
-    cursor: Cursor<Vec<u8>>,
+    bytes: Vec<u8>,
+    position: u64,
+    length: u64,
     maximum: usize,
 }
 
 impl LimitedExportWriter {
     fn new(maximum: usize) -> Self {
         Self {
-            cursor: Cursor::new(Vec::new()),
+            bytes: Vec::new(),
+            position: 0,
+            length: 0,
             maximum,
         }
     }
 
-    fn into_inner(self) -> Vec<u8> {
-        self.cursor.into_inner()
+    fn overflowed(&self) -> bool {
+        self.length > self.maximum as u64
+    }
+
+    fn into_inner(self) -> Result<Vec<u8>, ExportError> {
+        if self.overflowed() {
+            Err(ExportError::TooLarge)
+        } else {
+            Ok(self.bytes)
+        }
     }
 }
 
 impl Write for LimitedExportWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let next_len = usize::try_from(self.cursor.position())
-            .ok()
-            .and_then(|position| position.checked_add(buf.len()))
-            .ok_or_else(|| {
-                std::io::Error::other("note export exceeds the server download size limit")
-            })?;
-        if next_len > self.maximum {
-            return Err(std::io::Error::other(
-                "note export exceeds the server download size limit",
-            ));
+        let end = self.position.saturating_add(buf.len() as u64);
+        let kept_end = end.min(self.maximum as u64);
+        if self.position < kept_end {
+            // Both bounds are at most `maximum`, so they fit in `usize`.
+            let start = self.position as usize;
+            let stop = kept_end as usize;
+            if self.bytes.len() < stop {
+                self.bytes.resize(stop, 0);
+            }
+            self.bytes[start..stop].copy_from_slice(&buf[..stop - start]);
         }
-        self.cursor.write(buf)
+        self.position = end;
+        self.length = self.length.max(end);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -617,8 +699,19 @@ impl Write for LimitedExportWriter {
 }
 
 impl Seek for LimitedExportWriter {
-    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        self.cursor.seek(position)
+    fn seek(&mut self, target: SeekFrom) -> std::io::Result<u64> {
+        let next = match target {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+            SeekFrom::End(delta) => self.length.checked_add_signed(delta),
+        };
+        self.position = next.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid seek to a negative or overflowing position",
+            )
+        })?;
+        Ok(self.position)
     }
 }
 
@@ -707,7 +800,7 @@ pub(crate) fn percent_encode_filename(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Cursor, Read};
     use tempfile::tempdir;
 
     #[test]
@@ -717,6 +810,69 @@ mod tests {
             "Prox-mox-Note-.md"
         );
         assert_eq!(sanitize_download_filename(""), "note");
+    }
+
+    #[test]
+    fn sanitize_download_filename_keeps_non_latin_scripts() {
+        // #647: every non-ASCII character used to become `-`.
+        assert_eq!(
+            sanitize_download_filename("Ελληνική σημείωση.md"),
+            "Ελληνική σημείωση.md"
+        );
+        assert_eq!(sanitize_download_filename("中文笔记"), "中文笔记");
+        assert_eq!(
+            sanitize_download_filename("Straße Grüße ẞ"),
+            "Straße Grüße ẞ"
+        );
+        assert_eq!(sanitize_download_filename("notes 🦀"), "notes 🦀");
+    }
+
+    #[test]
+    fn sanitize_download_filename_drops_controls_quotes_and_direction_overrides() {
+        assert_eq!(
+            sanitize_download_filename("a\r\nb\"c\u{202E}gpj.md"),
+            "ab-cgpj.md"
+        );
+    }
+
+    #[test]
+    fn content_disposition_carries_the_unicode_name_with_an_ascii_fallback() {
+        let value = build_download_content_disposition("Ελληνική σημείωση.md");
+        let (fallback, encoded) = value
+            .strip_prefix("attachment; filename=\"")
+            .and_then(|rest| rest.split_once("\"; filename*=UTF-8''"))
+            .expect("both parameters");
+        assert!(fallback.is_ascii());
+        assert!(fallback.ends_with(".md"));
+        let decoded = percent_decode(encoded);
+        assert_eq!(decoded, "Ελληνική σημείωση.md");
+    }
+
+    #[test]
+    fn content_disposition_fallback_never_carries_a_quote_or_line_break() {
+        let value = build_download_content_disposition("a\"b\r\nc\\d.md");
+        assert_eq!(
+            value,
+            "attachment; filename=\"a-b--c-d.md\"; filename*=UTF-8''a%22b%0D%0Ac%5Cd.md"
+        );
+        assert!(HeaderValue::from_str(&value).is_ok());
+    }
+
+    fn percent_decode(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).expect("hex");
+                out.push(u8::from_str_radix(hex, 16).expect("byte"));
+                index += 3;
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(out).expect("utf-8 name")
     }
 
     #[test]
@@ -889,11 +1045,163 @@ mod tests {
         assert_eq!(asset, b"png-bytes");
     }
 
+    fn note_at(relative_path: &str, content: &str) -> Note {
+        Note {
+            title: relative_path.to_string(),
+            slug: "note".to_string(),
+            relative_path: relative_path.to_string(),
+            content: content.to_string(),
+            content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
+            metadata: Default::default(),
+        }
+    }
+
     #[test]
-    fn limited_export_writer_refuses_to_grow_past_its_bound() {
+    fn build_note_export_names_zip_entries_in_the_note_own_script() {
+        let dir = tempdir().expect("temp dir");
+        let vault = dir.path();
+        std::fs::write(vault.join("σχέδιο.png"), b"png-bytes").expect("asset");
+        let note = note_at("Ελληνική σημείωση.md", "![[σχέδιο.png]]");
+
+        let export = build_note_export(vault, &note, |_| true).expect("export");
+
+        assert_eq!(export.filename, "Ελληνική σημείωση.zip");
+        let mut archive = zip::ZipArchive::new(Cursor::new(export.bytes)).expect("zip archive");
+        let mut names = archive
+            .file_names()
+            .map(|name| name.expect("entry name").into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "Ελληνική σημείωση-assets/σχέδιο.png",
+                "Ελληνική σημείωση.md"
+            ]
+        );
+        assert!(
+            archive
+                .by_name("Ελληνική σημείωση-assets/σχέδιο.png")
+                .is_ok()
+        );
+    }
+
+    /// Bytes no compressor can shrink, from a fixed xorshift sequence.
+    fn incompressible(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    fn export_two_assets(
+        vault: &FsPath,
+        one: &[u8],
+        two: &[u8],
+        maximum: usize,
+    ) -> Result<Vec<u8>, ExportError> {
+        std::fs::write(vault.join("one.bmp"), one).expect("asset");
+        std::fs::write(vault.join("two.bmp"), two).expect("asset");
+        let markdown = "![](one.bmp) ![](two.bmp)";
+        let note = note_at("big.md", markdown);
+        let assets = export_assets(vault, &note, markdown, "big.md", &|_: &str| true);
+        assert_eq!(assets.len(), 2);
+        build_zip_export("big.md", markdown, &assets, maximum)
+    }
+
+    #[test]
+    fn an_archive_over_the_limit_is_too_large_not_a_failure() {
+        // #647: two assets each under the limit whose archive passes it
+        // surfaced as `Failed`, a 500 with an ERROR log.
+        let dir = tempdir().expect("temp dir");
+        let result = export_two_assets(
+            dir.path(),
+            &incompressible(40_000, 1),
+            &incompressible(40_000, 2),
+            60_000,
+        );
+        assert!(matches!(result, Err(ExportError::TooLarge)));
+    }
+
+    #[test]
+    fn the_limit_counts_the_compressed_archive_not_the_raw_files() {
+        // Two assets whose raw bytes pass the limit but which compress well
+        // still download, as they did before #647.
+        let dir = tempdir().expect("temp dir");
+        let flat = vec![7u8; 40_000];
+        let bytes = export_two_assets(dir.path(), &flat, &flat, 60_000).expect("fits compressed");
+        assert!(bytes.len() <= 60_000);
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("a whole archive");
+        let mut asset = Vec::new();
+        archive
+            .by_name("big-assets/two.bmp")
+            .expect("asset entry")
+            .read_to_end(&mut asset)
+            .expect("asset bytes");
+        assert_eq!(asset, flat);
+    }
+
+    #[test]
+    fn an_archive_that_fits_is_whole_and_readable() {
+        let dir = tempdir().expect("temp dir");
+        let one = incompressible(20_000, 3);
+        let bytes =
+            export_two_assets(dir.path(), &one, &incompressible(20_000, 4), 60_000).expect("fits");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("a whole archive");
+        let mut asset = Vec::new();
+        archive
+            .by_name("big-assets/one.bmp")
+            .expect("asset entry")
+            .read_to_end(&mut asset)
+            .expect("asset bytes");
+        assert_eq!(asset, one);
+    }
+
+    #[test]
+    fn limited_export_writer_keeps_only_its_bound_and_reports_the_overflow() {
         let mut writer = LimitedExportWriter::new(3);
         writer.write_all(b"abc").expect("fill limit");
-        assert!(writer.write_all(b"d").is_err());
-        assert_eq!(writer.into_inner(), b"abc");
+        assert!(!writer.overflowed());
+        writer
+            .write_all(b"de")
+            .expect("past the bound still answers");
+        assert!(writer.overflowed());
+        assert_eq!(writer.seek(SeekFrom::End(-1)).expect("seek"), 4);
+        assert_eq!(writer.bytes, b"abc");
+        assert!(matches!(writer.into_inner(), Err(ExportError::TooLarge)));
+    }
+
+    #[test]
+    fn limited_export_writer_rewrites_in_place_after_a_seek() {
+        let mut writer = LimitedExportWriter::new(8);
+        writer.write_all(b"abcdef").expect("write");
+        writer.seek(SeekFrom::Start(1)).expect("seek");
+        writer.write_all(b"XY").expect("rewrite");
+        writer.seek(SeekFrom::End(0)).expect("seek end");
+        writer.write_all(b"g").expect("append");
+        assert_eq!(writer.into_inner().ok().as_deref(), Some(&b"aXYdefg"[..]));
+    }
+
+    #[test]
+    fn sanitize_download_filename_stays_within_a_filesystem_name() {
+        let name = sanitize_download_filename(&"中".repeat(120));
+        assert!(name.len() <= MAX_DOWNLOAD_NAME_BYTES);
+        assert!(name.chars().all(|ch| ch == '中'));
+        assert_eq!(sanitize_download_filename("a\u{200B}b\u{FEFF}c"), "abc");
+    }
+
+    #[test]
+    fn sanitize_download_filename_keeps_link_safe_ascii() {
+        // `#` or `%` in a zip entry name would break the archive's own links.
+        assert_eq!(
+            sanitize_download_filename("fig#1 100%.png"),
+            "fig-1 100-.png"
+        );
     }
 }

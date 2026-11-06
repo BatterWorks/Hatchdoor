@@ -9778,6 +9778,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unresolvable_asset_paths_are_caller_errors_and_downloads_keep_unicode_names() {
+        // #647: these answered `500 internal_error`, and a note's download
+        // name lost every non-ASCII letter.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault = create_vault_with_files(
+            &app,
+            "Unicode",
+            &tmp.path().join("unicode"),
+            &[("Ελληνική σημείωση.md", "# Γεια")],
+            0,
+        )
+        .await;
+        let get = |uri: String| {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+        };
+
+        let nul = get(format!("/api/v1/vaults/{vault}/assets/x%00.png"))
+            .await
+            .expect("response");
+        assert_eq!(nul.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(nul).await["code"], "invalid_asset_path");
+
+        let through_a_file = get(format!(
+            "/api/v1/vaults/{vault}/assets/{}/x.png",
+            crate::vault_read::encode_relative_path("Ελληνική σημείωση.md")
+        ))
+        .await
+        .expect("response");
+        assert_eq!(through_a_file.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(through_a_file).await["code"], "asset_not_found");
+
+        let too_long = get(format!(
+            "/api/v1/vaults/{vault}/assets/{}.png",
+            "a".repeat(300)
+        ))
+        .await
+        .expect("response");
+        assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+
+        let download = get(format!(
+            "/api/v1/vaults/{vault}/notes/{}/download",
+            crate::vault_read::encode_relative_path("ελληνική-σημείωση")
+        ))
+        .await
+        .expect("response");
+        assert_eq!(download.status(), StatusCode::OK);
+        let disposition = download.headers()["content-disposition"]
+            .to_str()
+            .expect("ascii header")
+            .to_string();
+        assert!(
+            disposition.ends_with(&format!(
+                "filename*=UTF-8''{}",
+                crate::vault_read::encode_relative_path("Ελληνική σημείωση.md")
+            )),
+            "{disposition}"
+        );
+    }
+
+    #[tokio::test]
     async fn vault_scoped_asset_reports_a_retryable_unavailable_status_for_a_missing_directory() {
         // A managed-Git Vault can be enabled and accepting operations before
         // its checkout has materialized; simulate that by removing the
