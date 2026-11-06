@@ -91,7 +91,8 @@ pub(crate) struct BuildHandles<'a> {
 /// The error a build returns when it stopped early for [`IndexYield`]. The
 /// caller tells it from a failure by asking [`IndexYield::yielded`], never
 /// by this text.
-const YIELDED: &str = "the build stopped early so another Vault could index";
+const YIELDED: &str =
+    "the build stopped early so another Vault could index, or its Vault is stopping";
 
 /// How a long Index turn takes turns with other Vaults (ADR-35 decision 3).
 ///
@@ -105,22 +106,34 @@ const YIELDED: &str = "the build stopped early so another Vault could index";
 ///
 /// Asking before a chunk rather than after one means a build that has just
 /// embedded its last chunk finishes instead of pausing with nothing left to
-/// do. A build that has embedded nothing yet never stops either, so two
-/// Vaults can never hand the slot back and forth without either of them
-/// getting anywhere.
+/// do. A build that has embedded nothing yet never stops for another Vault
+/// either, so two Vaults can never hand the slot back and forth without
+/// either of them getting anywhere.
+///
+/// The build also stops, before any chunk and with no slice to wait out,
+/// once `must_stop` says its Vault is being drained or the instance is
+/// shutting down (#640). Pause, a settings edit, disconnect and SIGTERM all
+/// wait for the running turn, and the saved progress makes stopping cheap:
+/// the next turn resumes from it.
 pub(crate) struct IndexYield {
     every: Duration,
     another_vault_waits: Box<dyn Fn() -> bool + Send>,
+    must_stop: Box<dyn Fn() -> bool + Send>,
     next_check: Cell<Duration>,
     embedded_any: Cell<bool>,
     yielded: Cell<bool>,
 }
 
 impl IndexYield {
-    pub(crate) fn new(every: Duration, another_vault_waits: Box<dyn Fn() -> bool + Send>) -> Self {
+    pub(crate) fn new(
+        every: Duration,
+        another_vault_waits: Box<dyn Fn() -> bool + Send>,
+        must_stop: Box<dyn Fn() -> bool + Send>,
+    ) -> Self {
         Self {
             every,
             another_vault_waits,
+            must_stop,
             next_check: Cell::new(every),
             embedded_any: Cell::new(false),
             yielded: Cell::new(false),
@@ -131,7 +144,8 @@ impl IndexYield {
         self.embedded_any.set(true);
     }
 
-    /// Whether the build stopped early for another Vault.
+    /// Whether the build stopped early, for another Vault or because its
+    /// own Vault is being drained or the instance is shutting down.
     pub(crate) fn yielded(&self) -> bool {
         self.yielded.get()
     }
@@ -139,6 +153,10 @@ impl IndexYield {
     /// Asked before each chunk with the time this build has spent embedding
     /// so far.
     fn should_stop(&self, embedding: Duration) -> bool {
+        if (self.must_stop)() {
+            self.yielded.set(true);
+            return true;
+        }
         if !self.embedded_any.get() || embedding < self.next_check.get() {
             return false;
         }
@@ -616,9 +634,7 @@ impl SqliteCache {
                     // Not this note's failure: the whole build is stopping,
                     // and the candidate it was filling is never published.
                     Err(error) if index_yield.is_some_and(IndexYield::yielded) => {
-                        tracing::info!(
-                            "Pausing embedding so another Vault can index; progress is saved"
-                        );
+                        tracing::info!("Pausing embedding; progress is saved");
                         return Err(error);
                     }
                     Err(error) => {
@@ -4172,8 +4188,21 @@ mod index_yield_tests {
     use super::IndexYield;
 
     fn yield_point(every: Duration) -> (IndexYield, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let (index_yield, waiting, asked, _) = yield_point_with_stop(every);
+        (index_yield, waiting, asked)
+    }
+
+    fn yield_point_with_stop(
+        every: Duration,
+    ) -> (
+        IndexYield,
+        Arc<AtomicBool>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+    ) {
         let waiting = Arc::new(AtomicBool::new(false));
         let asked = Arc::new(AtomicUsize::new(0));
+        let stopping = Arc::new(AtomicBool::new(false));
         let index_yield = IndexYield::new(
             every,
             Box::new({
@@ -4184,8 +4213,29 @@ mod index_yield_tests {
                     waiting.load(Ordering::SeqCst)
                 }
             }),
+            Box::new({
+                let stopping = stopping.clone();
+                move || stopping.load(Ordering::SeqCst)
+            }),
         );
-        (index_yield, waiting, asked)
+        (index_yield, waiting, asked, stopping)
+    }
+
+    /// A drained Vault or a shutting-down instance stops the build at the
+    /// next chunk, with no slice to wait out and whether or not it has
+    /// embedded anything yet (#640).
+    #[test]
+    fn a_stopping_vault_stops_at_the_next_chunk_without_waiting_for_the_slice() {
+        let (index_yield, _, asked, stopping) = yield_point_with_stop(Duration::from_secs(300));
+        assert!(!index_yield.should_stop(Duration::from_secs(1)));
+        stopping.store(true, Ordering::SeqCst);
+        assert!(index_yield.should_stop(Duration::from_secs(1)));
+        assert!(index_yield.yielded());
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "stopping does not depend on another Vault waiting"
+        );
     }
 
     /// The queue is asked once per slice of embedding time, not at every

@@ -2748,3 +2748,76 @@ fn an_unreadable_registry_is_an_error_never_an_empty_registry() {
         "the unreadable registry was replaced"
     );
 }
+
+/// #640: a crash between writing the temporary registry copy and renaming it
+/// over the registry leaves a full copy, credentials included. Startup
+/// removes it, logs that it did, and leaves every other file alone.
+#[test]
+fn startup_removes_temporary_registry_copies_an_interrupted_write_left() {
+    let directory = tempdir().expect("temporary directory");
+    let state = directory.path().join("state");
+    std::fs::create_dir_all(&state).expect("state directory");
+    let store = VaultRegistryStore::new(state.join("vaults.json"));
+    let empty = match store.load().expect("load") {
+        VaultRegistryState::Ready(snapshot) => snapshot,
+        VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    store
+        .initialize_empty(empty.revision())
+        .expect("write a registry");
+    for stray in [".vaults.json.1.0.tmp", ".vaults.json.4242.17.tmp"] {
+        std::fs::write(state.join(stray), "{\"secret\":true}").expect("stray copy");
+    }
+    let kept = [
+        "vaults.json",
+        ".vaults.json.tmp",
+        ".vaults.json.1.tmp",
+        ".vaults.json.a.0.tmp",
+        ".other.json.1.0.tmp",
+        "instance.json",
+    ];
+    for name in &kept[1..] {
+        std::fs::write(state.join(name), "{}").expect("unrelated file");
+    }
+
+    let logs = crate::config::log_capture::CapturedLogs::default();
+    let removed = tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::WARN), || {
+        store.remove_stale_temporary_files()
+    });
+
+    assert_eq!(removed, 2);
+    let mut left: Vec<String> = std::fs::read_dir(&state)
+        .expect("list state directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .into_string()
+                .expect("name")
+        })
+        .collect();
+    left.sort();
+    let mut expected: Vec<String> = kept.iter().map(|name| name.to_string()).collect();
+    expected.sort();
+    assert_eq!(left, expected);
+    assert_eq!(
+        logs.lines()
+            .iter()
+            .filter(|line| line.contains("removed a temporary Vault registry file"))
+            .count(),
+        2,
+        "each removal is logged: {:?}",
+        logs.lines()
+    );
+    assert!(matches!(
+        store.load().expect("load"),
+        VaultRegistryState::Ready(_)
+    ));
+}
+
+#[test]
+fn sweeping_a_missing_state_directory_removes_nothing() {
+    let directory = tempdir().expect("temporary directory");
+    let store = VaultRegistryStore::new(directory.path().join("absent/vaults.json"));
+    assert_eq!(store.remove_stale_temporary_files(), 0);
+}

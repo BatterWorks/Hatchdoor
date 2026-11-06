@@ -301,8 +301,18 @@ that production inventory are still checked for stale paths and duplicates.
   `VaultWriteExclusion` — the mutation lock, its generation counter, and the
   refresh lock — so the exclusion's lifetime is the Vault's, not the block's,
   and an edit can never put two live mutexes on one Vault directory (issue
-  #321, [ADR-25](../adr/README.md)). Only a genuinely new or re-enabled Vault
-  gets a fresh exclusion. `write_exclusion()` exposes it so a caller holding a
+  #321, [ADR-25](../adr/README.md)). Only a genuinely new Vault, or one
+  re-enabled after its disable has passed its safe boundary, gets a fresh
+  exclusion. A disable keeps the retiring block in `retiring` until that
+  boundary, and a Resume arriving before it inherits that block's exclusion
+  and write ledger, so the old Git turn and the writes after the Resume share
+  one lock and one commit record (#640). An edit hands the Git-lane work
+  (sync, commit, recovery) its drain discarded back to the coordinator once
+  the replacement block is active; a Vault left disabled or removed drops it.
+  A lifecycle a newer one supersedes while it waits still starts the
+  replacement blocks it installed that are still live, since the newer one
+  took them as already running.
+  `write_exclusion()` exposes it so a caller holding a
   guard across a reconcile can check, by pointer, that a freshly resolved
   block still serializes against what it holds.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
@@ -432,6 +442,13 @@ another Vault and rejoin that lane (ADR-35): `another_vault_waits_to_index`
 is the question it asks, and `requeue_paused_index_turn` moves its Vault's
 one indexing position to the back, folding in any rerun requested while it
 ran, and refuses a drained Vault so lifecycle still discards paused work.
+`vault_is_stopping` answers whether a Vault is drained or the queue is shut
+down, so a running Index turn stops at its next chunk instead of embedding
+to the end while Pause, an edit, disconnect or SIGTERM waits for it (#640).
+`drain_vault` returns the kinds it discarded, and
+`wait_for_vault_safe_boundary` also returns once a newer lifecycle has
+reopened the Vault, so a Pause superseded by a Resume does not wait for the
+resumed Vault's work.
 `index_lane_state` (`IndexLaneState::Running` or `Waiting`) says where a
 Vault's indexing stands, and the one observer set with `observe_index_lane`
 is called, outside the queue lock, with each Vault whose indexing may have
@@ -492,8 +509,9 @@ composition (`src/server.rs`) runs every admitted turn on its own task through
 `vault_executor` and joins them all before it exits; Repair remains separately
 owned. `git::ManagedGitScheduler`'s
 `tick` is the one production caller of `request_if_idle`. `vault_executor`
-is the one caller of `requeue_paused_index_turn` and
-`another_vault_waits_to_index`, and sets the index-lane observer.
+is the one caller of `requeue_paused_index_turn`,
+`another_vault_waits_to_index` and `vault_is_stopping`, and sets the
+index-lane observer.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
@@ -590,7 +608,11 @@ whichever lane the turn ran in.
   generation supports with no error (`retained_search_status`, shared with
   the failure path), and returns `Ok`: a pause is not a failure, and the
   next turn resumes from the saved progress. A turn that has embedded
-  nothing yet, or has nothing left to embed, never pauses. It acquires that
+  nothing yet, or has nothing left to embed, never pauses for another Vault.
+  Whatever it has embedded, it stops before its next chunk once its Vault is
+  drained or the coordinator shuts down, and is not requeued: the lifecycle
+  that drained it, or the next start, requests a fresh turn that resumes from
+  the saved progress (#640). It acquires that
   Vault's foreground mutation and refresh
   boundaries, builds an authoritative Markdown index and isolated candidate
   cache off the async runtime, hands that scan's asset catalog and layer map
@@ -1014,7 +1036,10 @@ identity-bearing changes require a disabled definition plus explicit
 same-Vault confirmation; readable
 non-writable directories remain valid; disconnect deletes no files or Git
 state; HTTPS credentials persist only in the private registry record and never
-appear in projections, debug output, errors, status, or repository URLs;
+appear in projections, debug output, errors, status, or repository URLs, and
+`remove_stale_temporary_files`, run once at startup before the registry
+loads, deletes and logs any `.<registry>.<pid>.<nonce>.tmp` copy a crash
+between write and rename left beside it (#640);
 recovery retains the original bytes; Vault contents remain authoritative
 Markdown and SQLite remains disposable (ADR-01); the store adds no service,
 framework, or speculative trait (ADR-02/13); filesystem behavior assumes no
@@ -2710,7 +2735,8 @@ and embedder identity/dimensions.
   disabling keeps them, and `snapshot_vault_ids` enumerates them so
   reconciliation can clean up a Vault removed before its first publication.
   A build given an `IndexYield` stops before its next chunk once it has
-  embedded for its slice and another Vault waits; it publishes nothing,
+  embedded for its slice and another Vault waits, or at once when the
+  yield's stop question says its Vault is stopping; it publishes nothing,
   flushes its saved progress, and reports `SnapshotPublication::Paused`
   without marking the retained generation stale again.
   The table has no foreign key to `vault_snapshots`, whose row each

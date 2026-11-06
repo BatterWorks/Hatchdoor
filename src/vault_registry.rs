@@ -791,6 +791,63 @@ impl VaultRegistryStore {
         self.load_unlocked()
     }
 
+    /// Remove the temporary registry copies an interrupted [`Self::persist`]
+    /// left beside the registry, returning how many it removed. Each one is a
+    /// full copy of the registry, HTTPS Git credentials included, that would
+    /// otherwise outlive a credential rotation or a disconnect (#640). Called
+    /// once at startup, before the registry is loaded, when no write of this
+    /// process can be in flight. Only names [`temporary_path`] produces are
+    /// touched.
+    pub fn remove_stale_temporary_files(&self) -> usize {
+        let Some(file_name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return 0;
+        };
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let entries = match fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => {
+                tracing::warn!(
+                    directory = %parent.display(),
+                    %error,
+                    "could not look for stale temporary Vault registry files"
+                );
+                return 0;
+            }
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_temporary_registry_name(name, file_name) {
+                continue;
+            }
+            let path = entry.path();
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::warn!(
+                        path = %path.display(),
+                        "removed a temporary Vault registry file an interrupted write left behind"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove a stale temporary Vault registry file"
+                ),
+            }
+        }
+        removed
+    }
+
     /// Persist an intentionally empty registry: what a start with no registry
     /// writes (ADR-40).
     pub fn initialize_empty(
@@ -2130,6 +2187,24 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
         };
         existing_ancestor = parent;
     }
+}
+
+/// Whether `name` is one [`temporary_path`] produces for a registry file
+/// called `registry_file_name`: `.<file name>.<pid>.<nonce>.tmp`.
+fn is_temporary_registry_name(name: &str, registry_file_name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_prefix(registry_file_name))
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let mut parts = rest.split('.');
+    let numeric = |part: Option<&str>| {
+        part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()
 }
 
 fn temporary_path(path: &Path) -> Result<PathBuf, VaultRegistryError> {

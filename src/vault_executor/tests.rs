@@ -4860,6 +4860,75 @@ async fn an_index_turn_with_nothing_waiting_never_pauses() {
     assert_eq!(executor.work.index_lane_state(large), None, "not requeued");
 }
 
+/// #640: a running Index turn stops at the next chunk once its Vault is
+/// drained (Pause, a settings edit, disconnect) or the instance shuts down
+/// (SIGTERM), rather than embedding to the last chunk. What it embedded is
+/// saved, and it is not put back in the queue.
+async fn an_index_turn_stops_mid_embedding_when(stop: impl FnOnce(&VaultWorkCoordinator, VaultId)) {
+    let directory = tempdir().expect("temporary state directory");
+    let (executor, mut worker, embedder, large, _small) = large_and_small_executor(
+        directory.path(),
+        Duration::from_secs(300),
+        "# Small\n\nsmall note",
+    )
+    .await;
+    const SLOW_NOTES: usize = 4;
+    for index in 0..SLOW_NOTES {
+        std::fs::write(
+            directory.path().join(format!("large/Slow {index}.md")),
+            format!("# Slow {index}\n\n{SLOW_MARKER} number {index}."),
+        )
+        .expect("write slow note");
+    }
+    executor.work.request(large, VaultWorkKind::Index);
+    let turn = worker.next_turn().await.expect("the queued Index turn");
+    let running = tokio::spawn({
+        let executor = executor.clone();
+        async move {
+            let outcome = turn.run(|request| executor.run(request)).await;
+            executor.publish_outcome(&outcome);
+            outcome
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while embedder.embedded.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the turn starts embedding");
+    stop(&executor.work, large);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(30), running)
+        .await
+        .expect("the turn returns")
+        .expect("the turn's task");
+    outcome.result.expect("stopping is not a failure");
+    let embedded = embedder.embedded.load(Ordering::SeqCst);
+    assert!(
+        embedded < LARGE_NOTES + SLOW_NOTES,
+        "the turn stopped before its last chunk; it embedded {embedded}"
+    );
+    assert!(
+        saved_vectors(&executor.cache, large) >= 1,
+        "what it embedded is saved for the next turn"
+    );
+    assert_eq!(executor.work.index_lane_state(large), None, "not requeued");
+}
+
+#[tokio::test]
+async fn draining_a_vault_stops_its_index_turn_at_the_next_chunk() {
+    an_index_turn_stops_mid_embedding_when(|work, vault_id| {
+        work.drain_vault(vault_id);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn shutdown_stops_a_running_index_turn_at_the_next_chunk() {
+    an_index_turn_stops_mid_embedding_when(|work, _| work.shutdown()).await;
+}
+
 /// Disabling a paused Vault discards its place in the queue like any other
 /// queued work, and keeps the progress it saved for when it is re-enabled.
 #[tokio::test]

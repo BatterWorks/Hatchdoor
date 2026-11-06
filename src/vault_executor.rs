@@ -795,9 +795,11 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         let indexing_cache = cache.clone();
         let publication_stale = published_stale.clone();
         let index_yield = slicing.map(|IndexTurnSlicing { work, slice }| {
+            let stopping = work.clone();
             IndexYield::new(
                 slice,
                 Box::new(move || work.another_vault_waits_to_index(vault_id)),
+                Box::new(move || stopping.vault_is_stopping(vault_id)),
             )
         });
         match tokio::task::spawn_blocking(move || {
@@ -924,11 +926,13 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         Ok(IndexTurnEnd::Paused) => {
             // Behind every Vault already waiting, so the one this turn paused
             // for goes first. A drained Vault is not put back: disabling or
-            // removing it discards its paused work with the rest.
+            // removing it discards its paused work with the rest, and an edit
+            // or a restart requests a fresh Index turn when it activates the
+            // Vault again, which resumes from the saved progress (#640).
             if let Some(work) = requeue_on {
                 work.requeue_paused_index_turn(vault_id);
             }
-            info!(%vault_id, "Vault indexing paused so another Vault can index; it resumes when its turn comes round");
+            info!(%vault_id, "Vault indexing paused with its progress saved; it resumes when its turn comes round");
             // Nothing failed, so no error rides along: the Vault shows what
             // its retained generation supports, as an unfinished rebuild does.
             let _ = control_block.set_search_status(retained_search_status(&cache, vault_id), None);
