@@ -4638,6 +4638,16 @@ revision the moment it connects rather than a delta, so against a `0` start
 that first event always read as an invalidation and every consumer keyed on it
 reloaded.
 
+The stream must not die quietly (#646). A browser closes an `EventSource`
+for good when a reconnect answers anything but 200, as a reverse proxy's 502
+during a restart or a 401 after a token change does; the store then reopens it
+with a fresh `withAccessToken` URL after a backoff of 1 s doubling to 30 s,
+and reads the collection again through `apiFetch`, so a 401 reaches the app's
+token prompt. Every reopen after the first, a `visibilitychange` back to
+visible and an `online` event also read it again; the last two reopen a
+closed stream at once. Collection and count reads are numbered when sent, and
+an answer is dropped once a later-sent read of the same kind has published.
+
 A refresh that finds nothing new keeps the previous value's identity, and a
 patch that changes nothing publishes nothing. Without that, a note write — which
 bumps the collection revision — would hand every consumer a fresh-but-identical
