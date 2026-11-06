@@ -189,13 +189,19 @@ impl<'a> VaultSearchCore<'a> {
         let mut participants = Vec::with_capacity(selected.len());
         for vault in selected {
             // Search never returns a note's frontmatter properties, so it
-            // does not pay to parse them for every note in every Vault.
-            match SqliteCache::read_vault_snapshot_on(
-                &cache_snapshot,
-                vault.vault_id,
-                NoteBodies::Omit,
-                NoteProperties::Omit,
-            ) {
+            // does not pay to parse them for every note in every Vault. A
+            // Vault that is not active answers nothing, retained index
+            // included (#641).
+            let read = match &vault.inactive {
+                Some(message) => Err(message.clone()),
+                None => SqliteCache::read_vault_snapshot_on(
+                    &cache_snapshot,
+                    vault.vault_id,
+                    NoteBodies::Omit,
+                    NoteProperties::Omit,
+                ),
+            };
+            match read {
                 Ok(Some(snapshot)) => {
                     let read = self.surface.restrict(snapshot.read);
                     let state = match snapshot.status.freshness {

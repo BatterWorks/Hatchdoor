@@ -750,6 +750,18 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         return Ok(());
     };
 
+    // Index only what the Vault reports it can read (#641). A Local Vault's
+    // folder is looked at again first, so the watcher's or re-scan's report
+    // of a change, a retry and every other Index request also moves its
+    // status to where the folder stands now. A Vault that is still not
+    // Active has nothing to index; its status already says why, and the
+    // probe or Git turn that makes it readable asks for a turn of its own.
+    let probe = control_block.clone();
+    let _ = tokio::task::spawn_blocking(move || probe.reprobe_local_content()).await;
+    if control_block.snapshot().activation != VaultActivationStatus::Active {
+        return Ok(());
+    }
+
     // HTTP and MCP Markdown mutations hold this exact per-Vault guard across
     // their filesystem transaction. Hold it through the authoritative scan and
     // every per-note content read, so an Index turn cannot observe a mixed

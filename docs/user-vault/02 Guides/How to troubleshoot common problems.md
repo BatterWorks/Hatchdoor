@@ -125,11 +125,11 @@ If the error names a damaged SQLite cache, Hatchdoor quarantines it and rebuilds
 
 Hatchdoor runs as its own restricted user, number `65532`, not as you. Your notes folder has to be readable by that user, and writable too if you want to edit notes in the browser or let an agent change them. A folder only your own account can open shows up as this error.
 
-In detail: `local_content` reports `unavailable` with an error code of `vault_path_unreadable` or `vault_path_unavailable`, and the message includes the system's own error, such as `Permission denied (os error 13)`. Give user `65532` access to the folder, for example with `chown` or `chmod` on Linux, as in step 3 of [[Install Hatchdoor with Docker Compose]], then press **Try again** on the Vault's page.
+In detail: `local_content` reports `unavailable` with an error code of `vault_path_unreadable` or `vault_path_unavailable`, and the message includes the system's own error, such as `Permission denied (os error 13)`. Give user `65532` access to the folder, for example with `chown` or `chmod` on Linux, as in step 3 of [[Install Hatchdoor with Docker Compose]], then press **Try again** on the Vault's page. If you don't, Hatchdoor looks at the folder again by itself within a minute.
 
-If the message says `No such file or directory (os error 2)` instead, the folder is not there at all, as seen from inside the container: it was moved or renamed, or the mount in `compose.yaml` no longer points at it. Put the folder back, or fix the mount, then run `docker compose up -d` so Hatchdoor starts again with the folder in place.
+If the message says `No such file or directory (os error 2)` instead, the folder is not there at all, as seen from inside the container: it was moved or renamed, or the mount in `compose.yaml` no longer points at it. If the folder was moved, put it back and press **Try again**, or wait a minute for Hatchdoor to find it. If the mount is wrong, fix it in `compose.yaml` and run `docker compose up -d`, because a running container cannot see a new mount. While the folder is missing, the Vault shows nothing, not even notes Hatchdoor read before it went away.
 
-If you can read and search notes but the edit controls are missing, `local_content` reports `read_only`: user `65532` can read the folder but not write to it. That is a read-only Vault and not an error. Give that user write access the same way if you want to edit.
+If you can read and search notes but the edit controls are missing, `local_content` reports `read_only`: user `65532` can read the folder but not write to it. That is a read-only Vault and not an error. Give that user write access the same way if you want to edit. The edit controls come back within a minute, and a folder made read-only while Hatchdoor runs turns read-only on screen just as quickly.
 
 ## Editing a note fails but creating one works
 

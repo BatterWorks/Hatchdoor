@@ -382,7 +382,26 @@ that production inventory are still checked for stale paths and duplicates.
   only stats `vault_path` once, at `reconcile()` time, before a managed
   checkout exists. When that makes the Vault Active it also starts (or
   replaces) the Vault's watcher, which activation skipped for want of a
-  directory (#324). `activation_snapshot`'s Git status defaults to `Pending`
+  directory (#324). When it makes the Vault not Active it stops that watcher
+  and reports it `disabled`, and reports `search` `unavailable`; becoming
+  Active again restores `search` from the retained snapshot (#641). A
+  folder the operator owns (Local, and ExistingGit, whose Git turn may keep
+  failing) has nothing else to re-derive this, so
+  `VaultControlBlock::reprobe_local_content` stats it again through
+  `stat_local_content` and publishes the result; it is a no-op for
+  ManagedGit, whose Git turns create the folder.
+  `VaultCollectionRuntime::reprobe_local_vault` runs it for one Vault and
+  requests an Index turn if it has just become readable. `server.rs`'s
+  `spawn_local_content_probe` calls it on a `LOCAL_CONTENT_PROBE_INTERVAL`
+  tick (60 seconds, `RESCAN_INTERVAL`), one blocking task per Vault and
+  skipping a Vault whose previous probe has not returned. The Index turn
+  calls it before it scans, so a watcher or re-scan report re-probes too,
+  and the management core's now-async `retry` and `refresh` call it off the
+  request workers (`retry_local_content` also restarts a watcher that failed
+  to start). `repair_once` holds its record locked across the repair, since
+  these callers can race to activate one Vault.
+  `collection_capabilities` grants `search` only to an Active Vault.
+  `activation_snapshot`'s Git status defaults to `Pending`
   (an immediate first sync) for a genuinely new Vault or a
   disabled-to-enabled transition only; `reconcile()`'s non-retained-
   definition branch (an in-place edit to an already-active Vault) instead
@@ -597,7 +616,12 @@ task, so the Index retry backoff and the commit cooldown behave the same
 whichever lane the turn ran in.
 
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one
-  active Vault. Through `dispatch_vault_index_turn_with_progress`, `run`
+  active Vault. It first re-probes a Local Vault's folder
+  (`reprobe_local_content`, on the blocking pool) and returns `Ok` without
+  scanning for any Vault whose activation is not `Active` (#641): every
+  producer, model setup and collection reindex included, goes through this
+  one gate, and the probe or Git turn that makes the Vault readable requests
+  its turn. Through `dispatch_vault_index_turn_with_progress`, `run`
   hands it an `IndexTurnSlicing` (the coordinator and `INDEX_TURN_SLICE`,
   five minutes of embedding, a constant per ADR-14; tests shorten the
   executor's `index_slice`). Once the build has embedded for a slice, it asks
@@ -2180,7 +2204,13 @@ and one index build. That is required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control
 block rather than mutating the current one in place, so two independent
 `exact_note`/`vault_directory` calls could otherwise observe different Vault
-generations. The private `control_and_catalog` seam shares the
+generations. Every content read (`control_and_catalog`, `exact_note_links`,
+`vault_directory`, the demo asset check) goes through the private
+`readable_control_block`, which refuses a Vault whose activation is not
+`Active` with retryable `vault_read_unavailable`, and `selected_vaults` marks
+such a Vault `inactive`, so `try_collection` and `search::vault_scoped` report
+it as an unavailable participant without reading its retained snapshot
+(#641). The private `control_and_catalog` seam shares the
 control-block-then-catalog-build sequence between `catalog` and
 `exact_note_for_download` so the two cannot diverge on identical failure
 conditions.
@@ -2421,7 +2451,13 @@ remote, and a `VaultWorkKind::Commit` request (plus a clear of that Vault's
 `git::CommitCooldown`, because an operator asking explicitly is exactly the
 case suppression must not swallow) for one that keeps history but has no
 remote. `capability_unavailable` narrowed with it: it now names only a Vault
-with no Git at all, not every Vault with no remote.
+with no Git at all, not every Vault with no remote. Since #641 `retry` on a
+`Local` Vault is no longer refused: it calls
+`VaultControlBlock::retry_local_content`, requests an Index turn once the
+folder reads, and answers retryable `vault_unavailable` carrying the
+activation error's message when it still does not. `refresh` re-probes a
+Local Vault's folder before its `browse` check. `sync` still refuses a
+`Local` Vault.
 `publish_recovery` (ADR-30) admits a `VaultWorkKind::Recovery` request only
 while the Vault's runtime reports the `publish_recovery` capability, refusing
 with `capability_unavailable` otherwise, and `VaultSummary` carries the

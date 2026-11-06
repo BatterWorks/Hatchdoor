@@ -385,6 +385,12 @@ impl VaultRuntime {
     }
 }
 
+/// How often every Local Vault's folder is looked at again, so its status
+/// follows a folder that appears, disappears or changes permissions after
+/// activation (#641). The same minute as the folder re-scan (ADR-43), so an
+/// outside change of any kind shows within about a minute.
+pub const LOCAL_CONTENT_PROBE_INTERVAL: std::time::Duration = crate::vault_watcher::RESCAN_INTERVAL;
+
 /// Activation state for one definition in the live Vault collection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -798,12 +804,16 @@ static REPAIRED_VAULTS: Mutex<BTreeSet<VaultId>> = Mutex::new(BTreeSet::new());
 /// activation (an edit, a disable and quick re-enable, a lost checkout cloned
 /// again) can overlap a write this process is still running on the retiring
 /// block, whose record and temporary files are not leftovers (#631).
+///
+/// The record is held locked across the repair itself: the periodic probe,
+/// a retry, a refresh and an Index turn can all make a Vault Active at once
+/// (#641), and the one that finds the Vault already recorded must not
+/// publish it writable while another is still repairing it.
 fn repair_once(vault_id: VaultId, vault_path: &Path, intent_log: &crate::vault::IntentLog) {
-    let first = REPAIRED_VAULTS
+    let mut repaired = REPAIRED_VAULTS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(vault_id);
-    if first {
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if repaired.insert(vault_id) {
         crate::vault::repair_interrupted_writes(vault_path, intent_log);
     }
 }
@@ -1436,6 +1446,24 @@ impl VaultControlBlock {
             && previous.activation != VaultActivationStatus::Active;
         if became_active {
             self.rearm_watcher(&mut snapshot);
+            // Search answers again from whatever index survived, until the
+            // Index turn this asks for publishes a fresh one.
+            snapshot.search = retained_snapshot_search_status(
+                self.snapshot_cache.as_deref(),
+                self.definition.vault_id(),
+            );
+            snapshot.search_error = None;
+        }
+        // A folder that went away takes its watcher with it: there is nothing
+        // left to watch, and a watcher still reported running would claim
+        // outside edits are being noticed. Search goes too, since nothing of
+        // an unavailable Vault is served, its retained index included (#641).
+        if snapshot.activation != VaultActivationStatus::Active
+            && previous.activation == VaultActivationStatus::Active
+        {
+            self.stop_watcher(&mut snapshot);
+            snapshot.search = VaultSearchStatus::Unavailable;
+            snapshot.search_error = None;
         }
         snapshot.capabilities = collection_capabilities(&self.definition, &snapshot);
         let changed = *snapshot != previous;
@@ -1448,6 +1476,74 @@ impl VaultControlBlock {
                 .bump(self.definition.vault_id(), VaultChangeCategory::Status);
         }
         Ok(())
+    }
+
+    /// Look at a Local Vault's folder again and publish what it finds, so its
+    /// status follows the folder instead of what activation saw (#641): a
+    /// folder created after startup makes the Vault Active, one removed makes
+    /// it Unavailable, and a permission change moves it between
+    /// `read_write` and `read_only`. A folder the operator owns is probed
+    /// whether or not it keeps Git history: an existing checkout can be a
+    /// mount that comes up late too, and a sync that keeps failing would
+    /// otherwise leave it dark. A managed checkout is left to its Git turns,
+    /// which create the folder and re-derive this after every sync; a probe
+    /// could catch one half-cloned.
+    ///
+    /// Returns whether the Vault has just become readable, which is when its
+    /// caller must ask for an Index turn: nothing was indexed while it could
+    /// not be read.
+    ///
+    /// Blocking (it stats the folder): call it from the blocking pool.
+    pub(crate) fn reprobe_local_content(&self) -> bool {
+        if matches!(
+            self.definition.source(),
+            RegistryVaultSource::ManagedGit { .. }
+        ) || !self.is_accepting_operations()
+        {
+            return false;
+        }
+        let was_active = self.snapshot().activation == VaultActivationStatus::Active;
+        let (status, error) = stat_local_content(&self.vault_path);
+        if self.set_local_content_status(status, error).is_err() {
+            return false;
+        }
+        !was_active && self.snapshot().activation == VaultActivationStatus::Active
+    }
+
+    /// What a person's Try again does for a Local Vault: re-probe its folder
+    /// now, and start its watcher again if an earlier start failed, since
+    /// that failure is also offered as retryable. Returns whether the Vault
+    /// is readable afterwards. Blocking, like `reprobe_local_content`.
+    pub(crate) fn retry_local_content(&self) -> bool {
+        self.reprobe_local_content();
+        let mut snapshot = self.write_snapshot();
+        if snapshot.activation != VaultActivationStatus::Active {
+            return false;
+        }
+        if snapshot.watcher == VaultWatcherStatus::Unavailable {
+            let previous = snapshot.clone();
+            self.rearm_watcher(&mut snapshot);
+            snapshot.capabilities = collection_capabilities(&self.definition, &snapshot);
+            let changed = *snapshot != previous;
+            drop(snapshot);
+            if changed {
+                self.revisions
+                    .bump(self.definition.vault_id(), VaultChangeCategory::Status);
+            }
+        }
+        true
+    }
+
+    /// Stop this Vault's watcher and report it disabled, for a Vault whose
+    /// folder is gone.
+    fn stop_watcher(&self, snapshot: &mut CollectionVaultSnapshot) {
+        let mut slot = self.watcher.write().expect("Vault watcher handle poisoned");
+        if let Some(previous) = slot.take() {
+            previous.cancel();
+            self.watcher_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        snapshot.watcher = VaultWatcherStatus::Disabled;
+        snapshot.watcher_error = None;
     }
 
     /// Replace this Vault's watcher with a fresh one over its current
@@ -2470,6 +2566,21 @@ impl VaultCollectionRuntime {
         }
     }
 
+    /// Re-probe one Vault's folder (`reprobe_local_content`) and ask for an
+    /// Index turn if it has just become readable. Runtime composition runs
+    /// it for every enabled Vault on a `LOCAL_CONTENT_PROBE_INTERVAL` tick,
+    /// so a folder that appears, disappears or changes permissions is
+    /// reflected within one tick (#641). A Vault no longer active is a no-op.
+    ///
+    /// Blocking: call it from the blocking pool.
+    pub fn reprobe_local_vault(&self, vault_id: VaultId, coordinator: &VaultWorkCoordinator) {
+        if let Some(runtime) = self.runtime(vault_id)
+            && runtime.reprobe_local_content()
+        {
+            coordinator.request(vault_id, VaultWorkKind::Index);
+        }
+    }
+
     pub fn active_vault_ids(&self) -> Vec<VaultId> {
         self.state
             .read()
@@ -2839,10 +2950,13 @@ fn collection_capabilities(
     let source = definition.source();
     VaultCapabilities {
         browse,
-        search: matches!(
-            snapshot.search,
-            VaultSearchStatus::Ready | VaultSearchStatus::Stale
-        ),
+        // A Vault that cannot be read serves nothing, retained index
+        // included (#641).
+        search: snapshot.activation == VaultActivationStatus::Active
+            && matches!(
+                snapshot.search,
+                VaultSearchStatus::Ready | VaultSearchStatus::Stale
+            ),
         mutate: snapshot.local_content == LocalContentStatus::ReadWrite && !pull_only,
         pull: snapshot.git == VaultGitStatus::Ready
             && matches!(

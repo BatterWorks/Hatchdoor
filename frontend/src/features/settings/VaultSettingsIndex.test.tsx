@@ -898,6 +898,99 @@ describe("VaultSettingsDetail — schedule", () => {
   });
 });
 
+describe("VaultSettingsDetail — folder Try again (#641)", () => {
+  function missingFolderVault() {
+    const vault = baseVault(
+      { type: "local", path: "/notes" },
+      {
+        activation: "unavailable",
+        local_content: "unavailable",
+        search: "unavailable",
+        watcher: "disabled",
+        activation_error: {
+          code: "vault_path_unavailable",
+          message: "Vault path '/notes' is unavailable",
+          retryable: true,
+        },
+      },
+    );
+    vault.capabilities = {
+      ...vault.capabilities,
+      browse: false,
+      search: false,
+      mutate: false,
+      retry: true,
+    };
+    return vault;
+  }
+
+  it("offers Try again on a Local Vault whose folder cannot be read, and asks the server to look again", async () => {
+    let retried = 0;
+    mockDetail(missingFolderVault(), {
+      extraRoutes: {
+        [`/api/v1/vaults/${VAULT_ID}/retry POST`]: () => {
+          retried += 1;
+          return json({ vault_id: VAULT_ID, schedule: "queued" });
+        },
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByText("Hatchdoor checked this Vault's folder again."),
+    ).toBeVisible();
+    expect(retried).toBe(1);
+  });
+
+  it("shows the server's reason when the folder still cannot be read", async () => {
+    mockDetail(missingFolderVault(), {
+      extraRoutes: {
+        [`/api/v1/vaults/${VAULT_ID}/retry POST`]: () =>
+          new Response(
+            JSON.stringify({
+              code: "vault_unavailable",
+              message: "Vault path '/notes' is unavailable: No such file",
+              retryable: true,
+            }),
+            { status: 503, headers: { "content-type": "application/json" } },
+          ),
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Vault path '/notes' is unavailable: No such file",
+    );
+  });
+
+  it("offers no Try again on a healthy Local Vault", async () => {
+    mockDetail(baseVault({ type: "local", path: "/notes" }));
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+});
+
 describe("VaultSettingsDetail — sync console", () => {
   it("shows a healthy console with a Sync now button for a working remote Vault", async () => {
     mockDetail(
