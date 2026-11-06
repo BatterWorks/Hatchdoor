@@ -1,8 +1,8 @@
 use super::normalize::{
-    extract_frontmatter_metadata, in_fenced, restore_fences, strip_code_fences, strip_frontmatter,
+    Normalized, extract_frontmatter_metadata, restore_fences, strip_code_fences, strip_frontmatter,
 };
 use crate::embed::Embedder;
-use std::ops::Range;
+use crate::vault::NoteSections;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +61,7 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
     let metadata = extract_frontmatter_metadata(raw_content);
     let body = strip_frontmatter(raw_content);
     let normalized = strip_code_fences(body);
+    let headings = ChunkHeadings::of(raw_content, body, &normalized);
 
     if normalized.text.trim().is_empty() {
         return NoteChunking {
@@ -81,9 +82,8 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
         let byte_end = byte_start + piece.len();
         // Scan up to the start of the first non-heading content within this chunk
         // so that headings at the very beginning of a chunk are captured.
-        let heading_scan_end = heading_content_start(piece, byte_start, &normalized.fenced);
-        let heading_path =
-            derive_heading_path(&normalized.text, heading_scan_end, &normalized.fenced);
+        let heading_scan_end = headings.content_start(piece, byte_start);
+        let heading_path = headings.path_before(heading_scan_end);
         let content = piece.to_string();
         let stored_content = restore_fences(&normalized, byte_start, byte_end);
         let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
@@ -105,67 +105,60 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
     }
 }
 
-#[allow(dead_code)]
-/// Returns the byte offset (relative to `content` start) of the first non-heading
-/// line in `piece`, offset by `piece_start`. This allows headings that open a chunk
-/// to be included in the heading path scan.
-fn heading_content_start(piece: &str, piece_start: usize, fenced: &[Range<usize>]) -> usize {
-    let mut offset = piece_start;
-    for line in piece.split_inclusive('\n') {
-        let text = line.strip_suffix('\n').unwrap_or(line);
-        let text = text.strip_suffix('\r').unwrap_or(text);
-        let trimmed = text.trim_start();
-        let level = trimmed.chars().take_while(|c| *c == '#').count();
-        let is_heading = level > 0 && level <= 3 && !trimmed[level..].trim().is_empty();
-        // A `#`-prefixed line inside a fenced code block is not a heading.
-        if is_heading && !in_fenced(fenced, offset) {
-            // This is a heading line; advance past it (the '\n' is included).
-            offset += line.len();
-        } else {
-            // First non-heading content; stop here
-            break;
-        }
-    }
-    offset
+/// The headings a chunk's `heading_path` may name: the note's Sections as
+/// `vault::sections` reads them, which is what `get_note_outline` lists and
+/// `get_note_section` resolves, placed in the normalized text. Only levels one
+/// to three shape a chunk's path (ADR-16).
+struct ChunkHeadings {
+    /// Offset of the heading's line in `Normalized::text`, and its path.
+    /// Ascending by offset.
+    headings: Vec<(usize, String)>,
 }
 
-#[allow(dead_code)]
-fn derive_heading_path(
-    content: &str,
-    byte_offset: usize,
-    fenced: &[Range<usize>],
-) -> Option<String> {
-    let prefix = &content[..byte_offset.min(content.len())];
-    let mut stack: [Option<String>; 3] = [None, None, None];
-    let mut pos = 0usize;
-    for line in prefix.split_inclusive('\n') {
-        let line_start = pos;
-        pos += line.len();
-        // A `#`-prefixed line inside a fenced code block is not a heading.
-        if in_fenced(fenced, line_start) {
-            continue;
-        }
-        let text = line.strip_suffix('\n').unwrap_or(line);
-        let text = text.strip_suffix('\r').unwrap_or(text);
-        let trimmed = text.trim_start();
-        let level = trimmed.chars().take_while(|c| *c == '#').count();
-        if level == 0 || level > 3 {
-            continue;
-        }
-        let text = trimmed[level..].trim();
-        if text.is_empty() {
-            continue;
-        }
-        stack[level - 1] = Some(text.to_string());
-        for deeper in &mut stack[level..] {
-            *deeper = None;
-        }
+impl ChunkHeadings {
+    fn of(raw_content: &str, body: &str, normalized: &Normalized) -> Self {
+        // `body` is a suffix of `raw_content`, so a heading's offset in the
+        // body is its offset in the note less the frontmatter's length.
+        let body_offset = raw_content.len() - body.len();
+        let sections = NoteSections::scan(raw_content);
+        let headings = sections
+            .headings()
+            .iter()
+            .zip(sections.heading_paths())
+            .filter(|(heading, _)| {
+                heading.offset >= body_offset && heading.level <= 3 && !heading.text().is_empty()
+            })
+            .map(|(heading, path)| (normalized.text_offset(heading.offset - body_offset), path))
+            .collect();
+        Self { headings }
     }
-    let parts: Vec<String> = stack.iter().filter_map(Clone::clone).collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" > "))
+
+    fn is_heading_at(&self, offset: usize) -> bool {
+        self.headings
+            .binary_search_by_key(&offset, |(start, _)| *start)
+            .is_ok()
+    }
+
+    /// The offset of the first line in `piece` that is not a heading, where
+    /// `piece` starts at `piece_start` in the normalized text, so a heading
+    /// that opens a chunk counts towards its path.
+    fn content_start(&self, piece: &str, piece_start: usize) -> usize {
+        let mut offset = piece_start;
+        for line in piece.split_inclusive('\n') {
+            if !self.is_heading_at(offset) {
+                break;
+            }
+            offset += line.len();
+        }
+        offset
+    }
+
+    /// The path of the last heading whose line starts before `offset`.
+    fn path_before(&self, offset: usize) -> Option<String> {
+        let count = self.headings.partition_point(|(start, _)| *start < offset);
+        count
+            .checked_sub(1)
+            .map(|last| self.headings[last].1.clone())
     }
 }
 
@@ -340,6 +333,88 @@ body content that lands in a separate later chunk";
             path.contains("Ownership handling"),
             "real heading lost after fence: {path:?}"
         );
+    }
+
+    /// Every heading path the note's chunks carry.
+    fn heading_paths(content: &str, opts: ChunkOptions) -> Vec<Option<String>> {
+        chunk(content, opts)
+            .chunks
+            .into_iter()
+            .map(|c| c.heading_path)
+            .collect()
+    }
+
+    #[test]
+    fn a_tag_line_is_no_heading() {
+        let paths = heading_paths(
+            "#meeting #acme\n\nWe agreed on the plan.\n",
+            ChunkOptions::default(),
+        );
+        assert_eq!(paths, vec![None]);
+    }
+
+    #[test]
+    fn a_hash_line_in_a_tilde_fence_is_no_heading() {
+        let filler = "Setup notes keep going here with more words. ".repeat(120);
+        let content = format!("# Setup\n\n~~~bash\n# install the deps\nnpm ci\n~~~\n\n{filler}\n");
+        let opts = ChunkOptions {
+            max_tokens: 200,
+            overlap_tokens: 0,
+        };
+        let paths = heading_paths(&content, opts);
+        assert!(paths.len() > 1, "expected several chunks");
+        assert!(
+            paths.iter().all(|p| p.as_deref() == Some("Setup")),
+            "{paths:?}"
+        );
+        let chunks = chunk(&content, opts).chunks;
+        assert!(
+            chunks.iter().any(|c| c
+                .stored_content
+                .contains("~~~bash\n# install the deps\nnpm ci\n~~~")),
+            "{chunks:?}"
+        );
+        assert!(chunks.iter().all(|c| !c.content.contains("~~~")));
+    }
+
+    #[test]
+    fn a_hash_line_in_a_nested_fence_is_no_heading() {
+        let content = "# Showcase\n\n````markdown\n```js\n# not a heading either\nconsole.log(1)\n```\n````\n\nAfter.\n";
+        let result = chunk(content, ChunkOptions::default());
+        for c in &result.chunks {
+            assert_eq!(c.heading_path.as_deref(), Some("Showcase"));
+        }
+        let stored: String = result
+            .chunks
+            .iter()
+            .map(|c| c.stored_content.as_str())
+            .collect();
+        assert!(
+            stored
+                .contains("````markdown\n```js\n# not a heading either\nconsole.log(1)\n```\n````"),
+            "{stored}"
+        );
+    }
+
+    #[test]
+    fn an_indented_code_line_is_no_heading() {
+        let content = "# Real\n\nText.\n\n    # indented code\n\nMore.\n";
+        let paths = heading_paths(content, ChunkOptions::default());
+        assert_eq!(paths, vec![Some("Real".to_string())]);
+    }
+
+    #[test]
+    fn heading_paths_match_the_note_sections_rule() {
+        // Every path a chunk carries is a path the outline lists.
+        let content = "---\ntags: [a]\n---\n# A\n\ntext\n\n#### Deep\n\nmore\n\n## B\n\n```sh\n# no\n```\n\n### C\n\nend\n";
+        let opts = ChunkOptions {
+            max_tokens: 8,
+            overlap_tokens: 0,
+        };
+        let listed = crate::vault::NoteSections::scan(content).heading_paths();
+        for path in heading_paths(content, opts).into_iter().flatten() {
+            assert!(listed.contains(&path), "{path:?} not in {listed:?}");
+        }
     }
 
     #[test]

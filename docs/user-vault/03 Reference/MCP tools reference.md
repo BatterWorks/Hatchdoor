@@ -235,7 +235,7 @@ The `snippet` is at most 200 characters, and its length cannot be changed. Excep
 - `…` marks each side where text was left out. A chunk of 200 characters or fewer comes back whole, with no `…`.
 - A cut falls between words. Text with no spaces near the cut, such as Chinese or Japanese or a very long URL, is cut between characters instead, never inside one.
 
-Pass `detail: "full"` to get the earlier shape: every hit carries the whole chunk in `content`, the note's `outbound_links`, its `metadata` (tags and aliases) and the `chunk_id`, and no `snippet`. Code in `content` sits between ` ``` ` lines of three backticks, the opening one with the block's language, even when the chunk starts or ends part-way through a block. For a `#tag` query, `content` holds the line `Matched tag: #<tag>` instead of note text. Any other `detail` value is refused as invalid input.
+Pass `detail: "full"` to get the earlier shape: every hit carries the whole chunk in `content`, the note's `outbound_links`, its `metadata` (tags and aliases) and the `chunk_id`, and no `snippet`. Code in `content` sits between the fence lines the note used, backticks or tildes, the opening one with the block's language, even when the chunk starts or ends part-way through a block. For a `#tag` query, `content` holds the line `Matched tag: #<tag>` instead of note text. Any other `detail` value is refused as invalid input.
 
 Both shapes return the same hits, with the same scores, in the same order. `detail` changes only what each hit carries. A `search_notes` item inside `batch` follows the same default.
 
