@@ -35,7 +35,7 @@ A save made through Hatchdoor, from the browser or an agent, does not wait for t
 > [!note]
 > Reindexing covers only what changed. Each note carries a content hash, and Hatchdoor reuses unchanged notes and unchanged chunks without embedding them again. A full rebuild happens only when something makes the whole cache invalid at once, such as switching embedding models or changing `HATCHDOOR_EMBED_LAYERS`. Every vector in the cache has to come from the same model, and a partial rebuild would leave vectors that cannot be compared with each other.
 >
-> An index pass cut short by a restart, a crash or a shutdown does not start over either. Hatchdoor saves the chunks it has embedded as it goes, and the next pass embeds only what is left, so the progress percentage picks up where the last one stopped. Saved chunks never answer a search. A Vault becomes searchable only once every chunk has its vector, and until then a Vault that was searchable before keeps answering from its previous index, marked `stale`.
+> An index pass cut short by a restart, a crash or a shutdown does not start over either. Hatchdoor saves the chunks it has embedded as it goes, and the next pass embeds only what is left, so the progress percentage picks up where the last one stopped. That is also why pausing a Vault, changing its settings or stopping Hatchdoor in the middle of a pass takes seconds: the pass stops at the next chunk instead of running to the end. Saved chunks never answer a search. A Vault becomes searchable only once every chunk has its vector, and until then a Vault that was searchable before keeps answering from its previous index, marked `stale`.
 
 ## Vaults take turns indexing
 

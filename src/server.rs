@@ -1292,6 +1292,9 @@ pub async fn run_server() {
     // below can write a registry, so a registry or settings file on disk still
     // means an install that existed before this start.
     let existing_install = is_existing_install(vault_registry.path(), &settings_path);
+    // A crash mid-write can leave a full registry copy, credentials included,
+    // beside the registry. Nothing of this process writes it yet (#640).
+    vault_registry.remove_stale_temporary_files();
     // ADR-40: a start with no registry writes an empty one, whatever
     // `VAULT_PATH` holds; an install from 2.4.x or earlier refuses instead,
     // before this start is recorded, so a refusal writes nothing.

@@ -591,8 +591,10 @@ impl VaultWriteExclusion {
 }
 
 /// What a replacement control block inherits from the block it replaces. All
-/// three are `None` for a genuinely new or re-enabled Vault, which has no
-/// predecessor to inherit from.
+/// are `None` for a genuinely new Vault, which has no predecessor to inherit
+/// from, and for one re-enabled after its disable finished. One re-enabled
+/// while that disable still waits for its safe boundary inherits the
+/// retiring block's writes and exclusion only (#640).
 #[derive(Default)]
 struct CarriedOverState {
     /// The retiring block's Git status, so an in-place edit does not force a
@@ -1635,6 +1637,18 @@ struct VaultCollectionState {
     /// what a collection read's `participants[].state` answers (#259).
     collection_revision: u64,
     vaults: BTreeMap<VaultId, VaultCollectionEntry>,
+    /// The control block of each Vault disabled while a turn or write may
+    /// still hold its write exclusion, kept until that disable's safe
+    /// boundary has passed. A Vault re-enabled before then inherits the
+    /// block's exclusion and write ledger, so a Resume during a pending Pause
+    /// never puts a second mutation lock on the directory the old Git turn
+    /// still holds (#640, ADR-25).
+    retiring: BTreeMap<VaultId, VaultControlBlock>,
+    /// Git-lane work (sync, commit, recovery) a lifecycle drained from a
+    /// Vault's queue, re-requested when the Vault's replacement block is
+    /// activated and dropped when the Vault ends up disabled or removed. A
+    /// sync already answered "queued" survives a rename (#640).
+    discarded_work: BTreeMap<VaultId, Vec<VaultWorkKind>>,
 }
 
 impl VaultCollectionRuntime {
@@ -1667,6 +1681,8 @@ impl VaultCollectionRuntime {
                 registry_revision: 0,
                 collection_revision: 0,
                 vaults: BTreeMap::new(),
+                retiring: BTreeMap::new(),
+                discarded_work: BTreeMap::new(),
             })),
             revisions,
             watching: None,
@@ -1687,6 +1703,8 @@ impl VaultCollectionRuntime {
                 registry_revision: 0,
                 collection_revision: 0,
                 vaults: BTreeMap::new(),
+                retiring: BTreeMap::new(),
+                discarded_work: BTreeMap::new(),
             })),
             revisions,
             watching: Some(WatcherContext {
@@ -1716,6 +1734,8 @@ impl VaultCollectionRuntime {
                 registry_revision: 0,
                 collection_revision: 0,
                 vaults: BTreeMap::new(),
+                retiring: BTreeMap::new(),
+                discarded_work: BTreeMap::new(),
             })),
             revisions,
             watching: Some(WatcherContext {
@@ -1755,7 +1775,7 @@ impl VaultCollectionRuntime {
             revisions: self.revisions.clone(),
         };
         let (mut state, previous, next) = loop {
-            let (observed_revision, observed) = {
+            let (observed_revision, observed, retiring) = {
                 let state = self
                     .state
                     .read()
@@ -1763,9 +1783,19 @@ impl VaultCollectionRuntime {
                 if snapshot.revision() <= state.registry_revision {
                     return false;
                 }
-                (state.registry_revision, state.vaults.clone())
+                (
+                    state.registry_revision,
+                    state.vaults.clone(),
+                    state.retiring.clone(),
+                )
             };
-            let next = self.next_entries(registry, snapshot, &observed, &revision_publisher);
+            let next = self.next_entries(
+                registry,
+                snapshot,
+                &observed,
+                &retiring,
+                &revision_publisher,
+            );
             let mut state = self
                 .state
                 .write()
@@ -1791,6 +1821,24 @@ impl VaultCollectionRuntime {
             );
             if !retained {
                 previous_runtime.revoke();
+            }
+        }
+
+        // A Vault disabled here keeps its retiring block reachable until the
+        // disable's safe boundary has passed; one enabled here has taken
+        // whatever its retiring block carried.
+        for (vault_id, entry) in &previous {
+            match (entry, next.get(vault_id)) {
+                (
+                    VaultCollectionEntry::Active(previous_runtime),
+                    Some(VaultCollectionEntry::Disabled(_)),
+                ) => {
+                    state.retiring.insert(*vault_id, previous_runtime.clone());
+                }
+                (_, Some(VaultCollectionEntry::Active(_)) | None) => {
+                    state.retiring.remove(vault_id);
+                }
+                _ => {}
             }
         }
 
@@ -1837,6 +1885,7 @@ impl VaultCollectionRuntime {
         registry: &VaultRegistryStore,
         snapshot: &VaultRegistrySnapshot,
         previous: &BTreeMap<VaultId, VaultCollectionEntry>,
+        retiring: &BTreeMap<VaultId, VaultControlBlock>,
         revision_publisher: &CollectionRevisionPublisher,
     ) -> BTreeMap<VaultId, VaultCollectionEntry> {
         let mut next = BTreeMap::new();
@@ -1884,18 +1933,38 @@ impl VaultCollectionRuntime {
                         // patterns, credentials). Carrying the exclusion
                         // across makes an edit rotate the definition and
                         // nothing else (#321, ADR-25).
-                        let carried_over = if let Some(VaultCollectionEntry::Active(runtime)) =
-                            previous_entry
-                        {
-                            let prior_snapshot = runtime.snapshot();
-                            CarriedOverState {
-                                git: Some((prior_snapshot.git, prior_snapshot.git_error.clone())),
-                                recovery: prior_snapshot.recovery_branch.clone(),
-                                writes: Some(runtime.write_ledger()),
-                                exclusion: Some(runtime.write_exclusion()),
+                        //
+                        // A Vault re-enabled while its disable still waits
+                        // for the old turn is in the same position: that
+                        // turn holds the retiring block's lock, so the new
+                        // block takes that exclusion and ledger rather than
+                        // fresh ones (#640), unless its folder changed while
+                        // it was paused: the old turn's lock and commit belong
+                        // to the old folder. Its Git status starts over, as
+                        // any re-enabled Vault's does.
+                        let carried_over = match previous_entry {
+                            Some(VaultCollectionEntry::Active(runtime)) => {
+                                let prior_snapshot = runtime.snapshot();
+                                CarriedOverState {
+                                    git: Some((
+                                        prior_snapshot.git,
+                                        prior_snapshot.git_error.clone(),
+                                    )),
+                                    recovery: prior_snapshot.recovery_branch.clone(),
+                                    writes: Some(runtime.write_ledger()),
+                                    exclusion: Some(runtime.write_exclusion()),
+                                }
                             }
-                        } else {
-                            CarriedOverState::default()
+                            Some(VaultCollectionEntry::Disabled(_)) => retiring
+                                .get(&vault_id)
+                                .filter(|runtime| runtime.vault_path() == vault_path.as_path())
+                                .map(|runtime| CarriedOverState {
+                                    writes: Some(runtime.write_ledger()),
+                                    exclusion: Some(runtime.write_exclusion()),
+                                    ..CarriedOverState::default()
+                                })
+                                .unwrap_or_default(),
+                            None => CarriedOverState::default(),
                         };
                         #[cfg(test)]
                         observe_activation();
@@ -2010,7 +2079,8 @@ impl VaultCollectionRuntime {
 
         let mut retirement_error = None;
         for (vault_id, _) in &retired {
-            coordinator.drain_vault(*vault_id);
+            let discarded = coordinator.drain_vault(*vault_id);
+            self.keep_discarded_work(*vault_id, discarded);
             // A Vault edited while it stays enabled is "retired" here only
             // because any definition change constructs a fresh
             // `VaultControlBlock` (a new `Arc`, so `reconcile()`'s ptr_eq
@@ -2049,6 +2119,25 @@ impl VaultCollectionRuntime {
         for (vault_id, _) in &retired {
             coordinator.wait_for_vault_safe_boundary(*vault_id).await;
         }
+        // Past the boundary, nothing holds a disabled block's lock any more,
+        // so a later re-enable may start a fresh one. Only this lifecycle's
+        // own block is forgotten: a newer disable of the same Vault has
+        // installed its own.
+        {
+            let mut state = self
+                .state
+                .write()
+                .expect("Vault collection runtime poisoned");
+            for (vault_id, runtime) in &retired {
+                if state
+                    .retiring
+                    .get(vault_id)
+                    .is_some_and(|retiring| Arc::ptr_eq(&retiring.snapshot, &runtime.snapshot))
+                {
+                    state.retiring.remove(vault_id);
+                }
+            }
+        }
         // Reacquire only after every await. This makes the post-wait revision
         // fence, cache retirement/convergence, and new-work admission one
         // short phase: a newer lifecycle cannot slip between the fence and
@@ -2061,6 +2150,7 @@ impl VaultCollectionRuntime {
             if let Some(mutation_boundary) = mutation_boundary {
                 let _ = mutation_boundary.send(Ok(()));
             }
+            self.start_superseded_replacements(&active, &retired, coordinator, managed_git);
             return;
         }
         #[cfg(test)]
@@ -2173,8 +2263,16 @@ impl VaultCollectionRuntime {
             let _ = mutation_boundary.send(retirement_error.map_or(Ok(()), Err));
         }
         if !self.has_registry_revision(snapshot.revision()) {
+            self.start_superseded_replacements(&active, &retired, coordinator, managed_git);
             return;
         }
+        // A Vault this revision leaves disabled or removed drops what its
+        // drain discarded, as disabling always has.
+        self.state
+            .write()
+            .expect("Vault collection runtime poisoned")
+            .discarded_work
+            .retain(|vault_id, _| active.contains_key(vault_id));
         for (vault_id, runtime) in &active {
             coordinator.activate_vault(*vault_id);
             if previously_active
@@ -2185,72 +2283,147 @@ impl VaultCollectionRuntime {
             {
                 continue;
             }
-            let snapshot = runtime.snapshot();
-            if snapshot.activation == VaultActivationStatus::Active
-                && matches!(
-                    snapshot.local_content,
-                    LocalContentStatus::ReadWrite | LocalContentStatus::ReadOnly
-                )
-            {
-                coordinator.request(*vault_id, VaultWorkKind::Index);
-            }
-            // Register/refresh the scheduler's per-Vault interval for every
-            // newly (re)activated managed-Git definition, independent of
-            // Git status: an edit that only changes `poll_interval_secs`
-            // still produces a non-retained control block here (its
-            // `VaultDefinition` compares unequal). Such an edit does not
-            // request a turn *of its own* — the due-check below is still the
-            // only thing that starts one — but it can leave the Vault due,
-            // and then that check starts a turn: `activate` brings an armed
-            // attempt forward when the new interval is shorter, and an
-            // interval shortened past the time already elapsed is due at
-            // once. That is the point of shortening it, not a reset.
-            let scheduled = runtime.definition().source().managed_git_poll_interval();
-            if let Some(poll_interval) = scheduled {
-                managed_git.activate(*vault_id, poll_interval);
-                // A fresh process publishes `Pending` for every Vault, which
-                // is only true of one that has never completed a turn. Now
-                // that a restart no longer forces an immediate turn, leaving
-                // it at `Pending` would report nothing wrong about a Vault
-                // that is in fact failing, for up to a whole poll interval.
-                // Republishing the remembered outcome carries the previous
-                // process's conclusion across the restart that erased it.
-                //
-                // Guarded on `Pending` so an in-process definition edit keeps
-                // whatever status it was carrying (`reconcile` preserves it
-                // through `prior_git`) — a Vault mid-backoff from a transient
-                // failure must not be reset to the last *interval-arming*
-                // outcome, which is older.
-                if snapshot.git == VaultGitStatus::Pending
-                    && let Some(remembered) = managed_git.remembered_turn(*vault_id)
-                {
-                    let (status, error) = remembered_git_status(&remembered);
-                    let _ = runtime.set_git_status(status, error);
-                }
-                // Due now — a Vault that has never synced, or one already
-                // past its interval — starts its turn here rather than
-                // waiting out a tick. One still inside its interval is left
-                // to the schedule its last turn armed.
-                managed_git.request_if_due(*vault_id);
-            }
-            // A scheduler-tracked Vault has already had its due-check above,
-            // which is the only thing that should start one of its turns.
-            // Requesting here on `Pending` as well would undo it: activation
-            // publishes `Pending` on every fresh process, so every restart
-            // would re-sync and then re-arm the interval from the restart —
-            // exactly how a deployment redeployed more often than its poll
-            // interval never reached a scheduled turn.
+            self.start_replacement_block(*vault_id, runtime, coordinator, managed_git);
+        }
+    }
+
+    /// Queue what a freshly installed control block needs to start: its
+    /// Index turn when its files can be read, the Git-lane work a drain
+    /// discarded for it, and its Git schedule.
+    fn start_replacement_block(
+        &self,
+        vault_id: VaultId,
+        runtime: &VaultControlBlock,
+        coordinator: &VaultWorkCoordinator,
+        managed_git: &ManagedGitScheduler,
+    ) {
+        let snapshot = runtime.snapshot();
+        if snapshot.activation == VaultActivationStatus::Active
+            && matches!(
+                snapshot.local_content,
+                LocalContentStatus::ReadWrite | LocalContentStatus::ReadOnly
+            )
+        {
+            coordinator.request(vault_id, VaultWorkKind::Index);
+        }
+        // What draining the retired block discarded and nothing above
+        // re-requests on its own: a sync already answered "queued", a
+        // pending commit, a recovery request (#640).
+        for kind in self.take_discarded_work(vault_id) {
+            coordinator.request(vault_id, kind);
+        }
+        // Register/refresh the scheduler's per-Vault interval for every
+        // newly (re)activated managed-Git definition, independent of
+        // Git status: an edit that only changes `poll_interval_secs`
+        // still produces a non-retained control block here (its
+        // `VaultDefinition` compares unequal). Such an edit does not
+        // request a turn *of its own* — the due-check below is still the
+        // only thing that starts one — but it can leave the Vault due,
+        // and then that check starts a turn: `activate` brings an armed
+        // attempt forward when the new interval is shorter, and an
+        // interval shortened past the time already elapsed is due at
+        // once. That is the point of shortening it, not a reset.
+        let scheduled = runtime.definition().source().managed_git_poll_interval();
+        if let Some(poll_interval) = scheduled {
+            managed_git.activate(vault_id, poll_interval);
+            // A fresh process publishes `Pending` for every Vault, which
+            // is only true of one that has never completed a turn. Now
+            // that a restart no longer forces an immediate turn, leaving
+            // it at `Pending` would report nothing wrong about a Vault
+            // that is in fact failing, for up to a whole poll interval.
+            // Republishing the remembered outcome carries the previous
+            // process's conclusion across the restart that erased it.
             //
-            // A Git-capable source the scheduler does *not* track — an
-            // `ExistingGit` Vault in `LocalHistory` mode, which has no remote
-            // to poll, needs its activation turn from here: nothing else
-            // publishes a first Git status for it. A commit turn, because a
-            // commit is the whole of what such a Vault's Git does; the
-            // watcher and a manual control ask for the same kind (#267).
-            if snapshot.git == VaultGitStatus::Pending && scheduled.is_none() {
-                coordinator.request(*vault_id, VaultWorkKind::Commit);
+            // Guarded on `Pending` so an in-process definition edit keeps
+            // whatever status it was carrying (`reconcile` preserves it
+            // through `prior_git`) — a Vault mid-backoff from a transient
+            // failure must not be reset to the last *interval-arming*
+            // outcome, which is older.
+            if snapshot.git == VaultGitStatus::Pending
+                && let Some(remembered) = managed_git.remembered_turn(vault_id)
+            {
+                let (status, error) = remembered_git_status(&remembered);
+                let _ = runtime.set_git_status(status, error);
+            }
+            // Due now — a Vault that has never synced, or one already
+            // past its interval — starts its turn here rather than
+            // waiting out a tick. One still inside its interval is left
+            // to the schedule its last turn armed.
+            managed_git.request_if_due(vault_id);
+        }
+        // A scheduler-tracked Vault has already had its due-check above,
+        // which is the only thing that should start one of its turns.
+        // Requesting here on `Pending` as well would undo it: activation
+        // publishes `Pending` on every fresh process, so every restart
+        // would re-sync and then re-arm the interval from the restart —
+        // exactly how a deployment redeployed more often than its poll
+        // interval never reached a scheduled turn.
+        //
+        // A Git-capable source the scheduler does *not* track — an
+        // `ExistingGit` Vault in `LocalHistory` mode, which has no remote
+        // to poll, needs its activation turn from here: nothing else
+        // publishes a first Git status for it. A commit turn, because a
+        // commit is the whole of what such a Vault's Git does; the
+        // watcher and a manual control ask for the same kind (#267).
+        if snapshot.git == VaultGitStatus::Pending && scheduled.is_none() {
+            coordinator.request(vault_id, VaultWorkKind::Commit);
+        }
+    }
+
+    /// Start the blocks a superseded lifecycle installed for Vaults it
+    /// retired and that are still live. The newer lifecycle took them as
+    /// already running, so without this an edit overtaken by another
+    /// Vault's edit would leave its Vault drained of its Index turn, which
+    /// now stops at the drain, and of its queued sync (#640).
+    fn start_superseded_replacements(
+        &self,
+        installed: &BTreeMap<VaultId, VaultControlBlock>,
+        retired: &[(VaultId, VaultControlBlock)],
+        coordinator: &VaultWorkCoordinator,
+        managed_git: &ManagedGitScheduler,
+    ) {
+        for (vault_id, _) in retired {
+            let (Some(installed), Some(live)) = (installed.get(vault_id), self.runtime(*vault_id))
+            else {
+                continue;
+            };
+            if Arc::ptr_eq(&installed.snapshot, &live.snapshot) {
+                coordinator.activate_vault(*vault_id);
+                self.start_replacement_block(*vault_id, &live, coordinator, managed_git);
             }
         }
+    }
+
+    /// Remember the Git-lane kinds a drain discarded for `vault_id`, in
+    /// request order and without duplicates. Index work is not kept:
+    /// activation requests it whenever the Vault's files can be read.
+    fn keep_discarded_work(&self, vault_id: VaultId, discarded: Vec<VaultWorkKind>) {
+        let mut state = self
+            .state
+            .write()
+            .expect("Vault collection runtime poisoned");
+        let kept = state.discarded_work.entry(vault_id).or_default();
+        for kind in discarded {
+            if matches!(
+                kind,
+                VaultWorkKind::Git | VaultWorkKind::Commit | VaultWorkKind::Recovery
+            ) && !kept.contains(&kind)
+            {
+                kept.push(kind);
+            }
+        }
+        if kept.is_empty() {
+            state.discarded_work.remove(&vault_id);
+        }
+    }
+
+    fn take_discarded_work(&self, vault_id: VaultId) -> Vec<VaultWorkKind> {
+        self.state
+            .write()
+            .expect("Vault collection runtime poisoned")
+            .discarded_work
+            .remove(&vault_id)
+            .unwrap_or_default()
     }
 
     /// Revoke every Vault runtime, discard queued background work, and wait

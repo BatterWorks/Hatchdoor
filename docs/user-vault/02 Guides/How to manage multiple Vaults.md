@@ -32,7 +32,7 @@ Open the Vault from the list in Settings and use **Pause Vault** or **Resume Vau
 - Leaves every file, the search index and any Git history as they were. Nothing is deleted or rebuilt.
 - Stops all changes to that Vault, from agents too, until you resume it.
 
-Pausing asks for no confirmation, because one click undoes it.
+Pausing asks for no confirmation, because one click undoes it. A Vault paused while it indexes keeps the work done so far and carries on from there when you resume it.
 
 ## Disconnect a Vault
 

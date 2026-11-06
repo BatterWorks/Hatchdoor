@@ -4042,3 +4042,386 @@ fn editing_a_running_vault_does_not_sweep_its_in_flight_files() {
 
     assert!(vault_path.join(in_flight).exists());
 }
+
+/// #640: a Resume that arrives while the Pause still waits for an old turn
+/// holding the Vault's lock must not put a second lock on the directory. The
+/// re-enabled block takes the retiring block's exclusion and write ledger,
+/// so a write after the Resume waits for the old turn and its commit names
+/// the write. Once the Pause has passed its boundary, a later re-enable
+/// starts fresh again.
+#[tokio::test]
+async fn resuming_during_a_pending_pause_keeps_one_write_lock() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path);
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    let original = collection.runtime(vault_id).expect("enabled runtime");
+    let old_turn = original
+        .acquire_mutation_for_git_turn()
+        .await
+        .expect("the old Git turn holds the Vault's lock");
+
+    let paused = registry
+        .disable(enabled.revision(), vault_id)
+        .expect("pause the Vault");
+    let pause = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &paused, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while collection.runtime(vault_id).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the pause is installed while it waits for the old turn");
+
+    let current = match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let resumed = registry
+        .enable(current.revision(), vault_id)
+        .expect("resume the Vault");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collection.reconcile_and_reconstruct(&registry, &resumed, &coordinator, &managed_git),
+    )
+    .await
+    .expect("the resume does not wait for the old turn");
+    let replacement = collection.runtime(vault_id).expect("resumed runtime");
+    assert!(
+        replacement
+            .write_exclusion()
+            .is_same(&original.write_exclusion()),
+        "the resumed block shares the lock the old turn holds"
+    );
+    assert!(
+        Arc::ptr_eq(&replacement.write_ledger(), &original.write_ledger()),
+        "a write after the resume is recorded where the old turn's commit reads"
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            replacement.acquire_mutation()
+        )
+        .await
+        .is_err(),
+        "a write after the resume waits for the old turn"
+    );
+
+    drop(old_turn);
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause)
+        .await
+        .expect("the pause finishes once the old turn is done")
+        .expect("pause task");
+
+    // Past that boundary nothing holds the old lock, and a later pause and
+    // resume starts a fresh one, as re-enabling always has.
+    let current = match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let paused_again = registry
+        .disable(current.revision(), vault_id)
+        .expect("pause again");
+    collection
+        .reconcile_and_reconstruct(&registry, &paused_again, &coordinator, &managed_git)
+        .await;
+    let resumed_again = registry
+        .enable(paused_again.revision(), vault_id)
+        .expect("resume again");
+    collection
+        .reconcile_and_reconstruct(&registry, &resumed_again, &coordinator, &managed_git)
+        .await;
+    assert!(
+        !collection
+            .runtime(vault_id)
+            .expect("resumed again")
+            .write_exclusion()
+            .is_same(&original.write_exclusion()),
+        "a re-enable after the pause finished starts a fresh lock"
+    );
+}
+
+/// #640: an edit retires the Vault's control block, and draining it used to
+/// throw away work already acknowledged as queued. A Vault that stays
+/// enabled gets its sync rerun and its recovery request back once the
+/// replacement block is active.
+#[tokio::test]
+async fn an_edit_keeps_the_sync_and_recovery_work_already_queued() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path.clone());
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    while coordinator.has_work(vault_id, VaultWorkKind::Index) {
+        worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("activation turn");
+    }
+
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Git),
+        crate::vault_work::ScheduleResult::Queued
+    );
+    let sync = worker.next_turn().await.expect("the first sync runs");
+    assert_eq!(sync.request().kind(), VaultWorkKind::Git);
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Git),
+        crate::vault_work::ScheduleResult::Queued,
+        "the second sync is acknowledged as queued"
+    );
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Recovery),
+        crate::vault_work::ScheduleResult::Queued
+    );
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Commit),
+        crate::vault_work::ScheduleResult::Queued
+    );
+
+    let renamed = registry
+        .edit(
+            enabled.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Renamed".to_string(),
+                source: RegistryVaultSource::Local { path: vault_path },
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("rename the Vault");
+    let rename = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &renamed, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while collection
+            .runtime(vault_id)
+            .is_some_and(|runtime| runtime.definition().name() == "Vault")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the rename is installed while the first sync runs");
+    drop(sync);
+    tokio::time::timeout(std::time::Duration::from_secs(5), rename)
+        .await
+        .expect("the rename finishes once the first sync is done")
+        .expect("rename task");
+
+    assert!(
+        coordinator.has_work(vault_id, VaultWorkKind::Git),
+        "the second sync survives the rename"
+    );
+    assert!(
+        coordinator.has_work(vault_id, VaultWorkKind::Recovery),
+        "the recovery request survives the rename"
+    );
+    assert!(
+        coordinator.has_work(vault_id, VaultWorkKind::Commit),
+        "the queued commit survives the rename"
+    );
+}
+
+/// #640: disabling a Vault still drops its queued work, and nothing of it
+/// comes back when the Vault is re-enabled later.
+#[tokio::test]
+async fn disabling_drops_queued_sync_work_for_good() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path);
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    coordinator.request(vault_id, VaultWorkKind::Recovery);
+
+    let disabled = registry
+        .disable(enabled.revision(), vault_id)
+        .expect("disable");
+    collection
+        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+        .await;
+    let reenabled = registry
+        .enable(disabled.revision(), vault_id)
+        .expect("enable");
+    collection
+        .reconcile_and_reconstruct(&registry, &reenabled, &coordinator, &managed_git)
+        .await;
+    assert!(!coordinator.has_work(vault_id, VaultWorkKind::Recovery));
+}
+
+/// #640: an edit that waits for its Vault's old turn can be overtaken by an
+/// edit to another Vault. The newer lifecycle sees the first Vault's new
+/// block as already running, and the older one returns as superseded, so
+/// unless the older one still starts the block it installed, that Vault is
+/// left with no Index turn, which now stops at the drain, and loses the
+/// recovery request it had queued.
+#[tokio::test]
+async fn an_edit_overtaken_by_another_vaults_edit_still_starts_its_vault() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    std::fs::create_dir_all(&second_path).expect("second Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let two = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first = vault_id_named(&two, "First");
+    let second = vault_id_named(&two, "Second");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
+    collection
+        .reconcile_and_reconstruct(&registry, &two, &coordinator, &managed_git)
+        .await;
+    while coordinator.has_work(first, VaultWorkKind::Index)
+        || coordinator.has_work(second, VaultWorkKind::Index)
+    {
+        worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("activation turn");
+    }
+    coordinator.request(first, VaultWorkKind::Recovery);
+    let old_turn = collection
+        .runtime(first)
+        .expect("first runtime")
+        .acquire_mutation_for_git_turn()
+        .await
+        .expect("an old turn holds the first Vault's lock");
+
+    let rename = |snapshot: &VaultRegistrySnapshot, vault_id, name: &str, path: PathBuf| {
+        registry
+            .edit(
+                snapshot.revision(),
+                vault_id,
+                VaultDefinitionEdit {
+                    name: name.to_string(),
+                    source: RegistryVaultSource::Local { path },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: HttpsCredentialUpdate::Keep,
+                    confirm_identity_change: false,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("rename")
+    };
+    let first_renamed = rename(&two, first, "First renamed", first_path);
+    let older = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        let first_renamed = first_renamed.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &first_renamed, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while collection
+            .runtime(first)
+            .is_some_and(|runtime| runtime.definition().name() == "First")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first rename is installed while it waits");
+
+    let second_renamed = rename(&first_renamed, second, "Second renamed", second_path);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collection.reconcile_and_reconstruct(
+            &registry,
+            &second_renamed,
+            &coordinator,
+            &managed_git,
+        ),
+    )
+    .await
+    .expect("the second rename runs to the end");
+    drop(old_turn);
+    tokio::time::timeout(std::time::Duration::from_secs(5), older)
+        .await
+        .expect("the overtaken rename returns")
+        .expect("rename task");
+
+    assert!(
+        coordinator.has_work(first, VaultWorkKind::Index),
+        "the first Vault's new block gets its Index turn"
+    );
+    assert!(
+        coordinator.has_work(first, VaultWorkKind::Recovery),
+        "and the recovery request its drain discarded"
+    );
+}
