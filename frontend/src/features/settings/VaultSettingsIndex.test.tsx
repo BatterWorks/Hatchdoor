@@ -1498,6 +1498,111 @@ describe("VaultSettingsIndex — the management entry's recovery state", () => {
     );
     expect(isRecoveryPending(VAULT_ID)).toBe(false);
   });
+
+  it("shows the server's reason in an alert on the row when Try again fails (#645)", async () => {
+    markRecoveryPending(VAULT_ID);
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [
+            baseVault({ type: "local", path: "/notes" }, { enabled: false }),
+          ],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+      [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
+        new Response(
+          JSON.stringify({
+            code: "vault_unavailable",
+            message: "The folder /notes could not be read: permission denied.",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+
+    await screen.findByText("needs attention");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    await vi.waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "The folder /notes could not be read: permission denied.",
+      ),
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
+  it("keeps the reason through a refresh that changed another Vault, and drops it once this one runs again", async () => {
+    markRecoveryPending(VAULT_ID);
+    const OTHER_ID = "00000000-0000-4000-8000-000000000009";
+    const state = { otherSearch: "ready", enabled: false, reads: 0 };
+    mockRoutes({
+      "/api/v1/vaults": () => {
+        state.reads += 1;
+        return json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [
+            baseVault(
+              { type: "local", path: "/notes" },
+              { enabled: state.enabled },
+            ),
+            baseVault(
+              { type: "local", path: "/other" },
+              { vault_id: OTHER_ID, name: "Other", search: state.otherSearch },
+            ),
+          ],
+          demo_mode: false,
+        });
+      },
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+      [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
+        new Response(JSON.stringify({ message: "Folder unreadable." }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    let revision = 10;
+    const emit = () => {
+      revision += 1;
+      for (const source of window.__hatchdoorEventSources)
+        source.emit(
+          "vault-collection-revision",
+          JSON.stringify({ collection_revision: revision }),
+        );
+    };
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+    await screen.findByText("needs attention");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText(/Folder unreadable\./);
+
+    state.otherSearch = "indexing";
+    const before = state.reads;
+    emit();
+    await vi.waitFor(() => expect(state.reads).toBeGreaterThan(before));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByRole("alert")).toHaveTextContent("Folder unreadable.");
+
+    // Brought back elsewhere, then stuck again: the old reason is gone.
+    state.enabled = true;
+    emit();
+    await vi.waitFor(() =>
+      expect(screen.queryByText("needs attention")).not.toBeInTheDocument(),
+    );
+    state.enabled = false;
+    markRecoveryPending(VAULT_ID);
+    emit();
+    await screen.findByText("needs attention");
+    expect(screen.queryByText(/Folder unreadable/)).not.toBeInTheDocument();
+  });
 });
 
 describe("VaultSettingsIndex — an unreadable registry (#150)", () => {
@@ -1759,6 +1864,7 @@ describe("VaultSettingsDetail — a registry that moved elsewhere (#338)", () =>
    * `src/vault_management.rs` does. */
   function mockMovingRegistry(
     onPatch?: (body: Record<string, unknown>) => void,
+    { refuseIdentityEdit = false }: { refuseIdentityEdit?: boolean } = {},
   ) {
     const registry = { revision: 3 };
     const vault = baseVault({ type: "local", path: "/notes" });
@@ -1790,6 +1896,16 @@ describe("VaultSettingsDetail — a registry that moved elsewhere (#338)", () =>
         const expected = expectedFrom(init, url);
         if (expected !== registry.revision)
           return conflict(expected, registry.revision);
+        if (
+          method === "PATCH" &&
+          refuseIdentityEdit &&
+          (JSON.parse(String(init?.body)) as Record<string, unknown>)
+            .confirm_identity_change
+        )
+          return new Response(
+            JSON.stringify({ message: "That repository could not be read." }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          );
         if (method === "PATCH")
           onPatch?.(JSON.parse(String(init?.body)) as Record<string, unknown>);
         registry.revision += 1;
@@ -1825,7 +1941,7 @@ describe("VaultSettingsDetail — a registry that moved elsewhere (#338)", () =>
     registry.revision = 7; // another tab edited a different Vault
     fireEvent.click(screen.getByRole("button", { name: "Pause Vault" }));
 
-    await screen.findByText("Saved.");
+    await screen.findByText("This Vault is paused.");
     expect(calls).toContain(
       `POST /api/v1/vaults/${VAULT_ID}/disable?expected_registry_revision=7`,
     );
@@ -1855,6 +1971,224 @@ describe("VaultSettingsDetail — a registry that moved elsewhere (#338)", () =>
     await screen.findByText("Saved.");
     expect(patched?.expected_registry_revision).toBe(7);
     expect(patched?.name).toBe("Renamed");
+  });
+
+  async function changeIdentityThenRename() {
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Go ahead" }));
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save Vault" })).toBeEnabled(),
+    );
+    await screen.findByText(/saved|nothing changed/i);
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Renamed after" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+  }
+
+  it("saves the next edit after an identity change with no false conflict (#645)", async () => {
+    const patches: Record<string, unknown>[] = [];
+    const { registry } = mockMovingRegistry((body) => patches.push(body));
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    await changeIdentityThenRename();
+
+    await vi.waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1].name).toBe("Renamed after");
+    expect(patches[1].expected_registry_revision).toBe(registry.revision - 1);
+    expect(screen.queryByText(/changed elsewhere/)).not.toBeInTheDocument();
+  });
+
+  it("saves the next edit after a rolled-back identity change with no false conflict (#645)", async () => {
+    const patches: Record<string, unknown>[] = [];
+    mockMovingRegistry((body) => patches.push(body), {
+      refuseIdentityEdit: true,
+    });
+    renderDetail();
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    await changeIdentityThenRename();
+
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0].name).toBe("Renamed after");
+    await screen.findByText("Saved.");
+    expect(screen.queryByText(/changed elsewhere/)).not.toBeInTheDocument();
+  });
+});
+
+describe("VaultSettingsDetail: a Vault disconnected elsewhere (#645)", () => {
+  function mockDisappearingVault() {
+    const state = { listed: true, revision: 3 };
+    mockRoutes({
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+      [`/api/v1/vaults/${VAULT_ID}/recent?limit=1`]: () => json({ data: [] }),
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: state.revision,
+          collection_revision: state.revision,
+          vaults: state.listed
+            ? [baseVault({ type: "local", path: "/notes" })]
+            : [],
+          demo_mode: false,
+        }),
+      [`/api/v1/vaults/${VAULT_ID} PATCH`]: () =>
+        new Response(
+          JSON.stringify({
+            code: "registry_revision_conflict",
+            message: "expected registry revision 3, current revision is 4",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+    });
+    return state;
+  }
+
+  function disconnectElsewhere(state: { listed: boolean; revision: number }) {
+    state.listed = false;
+    state.revision = 4;
+  }
+
+  it("shows the disconnected state, with no Save, once the collection drops the Vault", async () => {
+    const state = mockDisappearingVault();
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    disconnectElsewhere(state);
+    for (const source of window.__hatchdoorEventSources) {
+      source.emit(
+        "vault-collection-revision",
+        JSON.stringify({ collection_revision: 4 }),
+      );
+    }
+
+    expect(
+      await screen.findByRole("heading", { name: "Vault Disconnected" }),
+    ).toBeVisible();
+    expect(screen.getByText(/Field notes was disconnected/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Save Vault" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says the Vault was disconnected, not 'save again', when a Save finds it gone", async () => {
+    const state = mockDisappearingVault();
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    disconnectElsewhere(state);
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Vault Disconnected" }),
+    ).toBeVisible();
+    expect(screen.queryByText(/save them over/)).not.toBeInTheDocument();
+  });
+});
+
+describe("VaultSettingsDetail: a registry that cannot be read is not a disconnect (#645)", () => {
+  it("keeps the form when discovery reports an unreadable registry", async () => {
+    let broken = false;
+    let brokenServed = false;
+    mockRoutes({
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+      [`/api/v1/vaults/${VAULT_ID}/recent?limit=1`]: () => json({ data: [] }),
+      "/api/v1/vaults": () => {
+        if (broken) brokenServed = true;
+        return json(
+          broken
+            ? {
+                registry_revision: 4,
+                collection_revision: 4,
+                vaults: [],
+                demo_mode: false,
+                recovery: {
+                  code: "vault_registry_recovery_required",
+                  kind: "corrupt",
+                  message: "The Vault registry could not be read.",
+                },
+              }
+            : {
+                registry_revision: 3,
+                collection_revision: 3,
+                vaults: [baseVault({ type: "local", path: "/notes" })],
+                demo_mode: false,
+              },
+        );
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    broken = true;
+    for (const source of window.__hatchdoorEventSources) {
+      source.emit(
+        "vault-collection-revision",
+        JSON.stringify({ collection_revision: 4 }),
+      );
+    }
+    await vi.waitFor(() => expect(brokenServed).toBe(true));
+    // Let the store publish what that read answered.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(
+      screen.queryByRole("heading", { name: "Vault Disconnected" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Field notes" })).toBeVisible();
+  });
+});
+
+describe("VaultSettingsDetail: Rebuild search index (#645)", () => {
+  it("keeps the form and says the index is rebuilding, not Saved", async () => {
+    mockDetail(baseVault({ type: "local", path: "/notes" }), {
+      extraRoutes: {
+        [`/api/v1/vaults/${VAULT_ID}/refresh POST`]: () =>
+          new Response(JSON.stringify({ admitted: true }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Typed" },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Rebuild search index" }),
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Rebuilding this Vault's search index.",
+    );
+    expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Vault name")).toHaveValue("Typed");
   });
 });
 

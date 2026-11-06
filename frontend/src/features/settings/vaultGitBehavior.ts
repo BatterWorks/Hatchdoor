@@ -505,9 +505,14 @@ export { fetchRegistryRevision };
 /** The single recovery action: re-enable with whatever revision is current
  * right now, since the marker may be read on a visit long after the failure.
  * Shared by the index's management entry and a Vault's own page. */
-export async function recoverPausedVault(
-  vaultId: VaultId,
-): Promise<{ ok: boolean; message: string; vault?: VaultSummary }> {
+export async function recoverPausedVault(vaultId: VaultId): Promise<{
+  ok: boolean;
+  message: string;
+  vault?: VaultSummary;
+  /** The registry revision the enable produced, for a page that sequences
+   * its next mutation on it (#645). */
+  registryRevision?: number;
+}> {
   const registryRevision = await fetchRegistryRevision();
   if (registryRevision === null)
     return {
@@ -518,14 +523,23 @@ export async function recoverPausedVault(
     `/api/v1/vaults/${vaultId}/enable?expected_registry_revision=${registryRevision}`,
     { method: "POST" },
   );
-  const payload = result.payload as { vault?: VaultSummary; message?: string };
+  const payload = result.payload as {
+    vault?: VaultSummary;
+    message?: string;
+    registry_revision?: number;
+  };
   if (!result.ok)
     return {
       ok: false,
       message: payload.message ?? "This Vault is still paused. Try again.",
     };
   clearRecoveryPending(vaultId);
-  return { ok: true, message: "This Vault is back.", vault: payload.vault };
+  return {
+    ok: true,
+    message: "This Vault is back.",
+    vault: payload.vault,
+    registryRevision: payload.registry_revision,
+  };
 }
 
 /** What an identity change of a managed checkout set aside (#639): the old

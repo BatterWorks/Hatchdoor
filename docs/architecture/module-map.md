@@ -5931,7 +5931,13 @@ red-line recovery state (a `hatchdoor:vault-recovery:{vaultId}`
 `localStorage` marker, since the registry has no "wanted enabled but
 couldn't" flag of its own) shown on both the Vault's own page and its
 management entry in the index, each carrying one recovery button that
-re-enables with a freshly fetched revision. Sign-in is one no-sign-in/access-
+re-enables with a freshly fetched revision. Every step of that round trip,
+the rollback and the recovery adopts the revision its response carries, so
+the next Save does not conflict with the page's own change (#645). Pause,
+resume and rebuild change the Vault's state only: they keep unsaved field
+edits and each says what it did. The detail is keyed per Vault, and once the
+collection no longer lists the open Vault it shows a disconnected state with
+no Save. Sign-in is one no-sign-in/access-
 token control with no separate Remove; the token field is always empty and
 its state reads `saved`, `none`, or (the instant an identity field changes)
 `will be cleared`. The sync schedule is a 1–1440-minute field (client-side

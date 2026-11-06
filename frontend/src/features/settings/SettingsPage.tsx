@@ -542,10 +542,9 @@ export function SettingsPage({
       const response = await generateMcpTokenCandidate();
       const payload = (await response.json()) as { value?: string };
       if (!response.ok || !payload.value) throw new Error();
-      setRevealed((old) => ({
-        ...old,
-        HATCHDOOR_MCP_BEARER_TOKEN: payload.value!,
-      }));
+      // A candidate lives in the drafts alone, never among the revealed
+      // values: revealed means "this is the saved password", and a candidate
+      // shown that way survived Discard as if it were in use (#645).
       edit("HATCHDOOR_MCP_BEARER_TOKEN", payload.value);
       setSaved("A new password is ready. It is not in use until you save.");
     } catch {
@@ -655,7 +654,10 @@ export function SettingsPage({
             readOnly={masked && !replacing[setting.key]}
             onChange={(event) => edit(setting.key, event.target.value)}
           />
-          {isMcp && setting.configured && shown === undefined ? (
+          {isMcp &&
+          setting.configured &&
+          shown === undefined &&
+          draft === undefined ? (
             <button
               type="button"
               className="settings-mini"
@@ -664,7 +666,7 @@ export function SettingsPage({
               Show
             </button>
           ) : null}
-          {shown !== undefined ? (
+          {shown !== undefined && draft === undefined ? (
             <button
               type="button"
               className="settings-mini"
@@ -811,6 +813,9 @@ export function SettingsPage({
 
         {selectedVaultId ? (
           <VaultSettingsDetail
+            // One component per Vault, so nothing typed or announced on one
+            // Vault's page carries over to the next (#645).
+            key={selectedVaultId}
             vaultId={selectedVaultId}
             serverIdentity={{
               name:
