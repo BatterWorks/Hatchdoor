@@ -25,12 +25,13 @@ describe("client audit launch contracts", () => {
     );
   });
 
+  // The colours themselves come from base.css at build time (#648).
   it("ships separate light and dark theme-color metadata", () => {
     expect(indexHtml).toMatch(
-      /<meta\s+name="theme-color"\s+content="#f4f1e8"\s+media="\(\s*prefers-color-scheme:\s*light\s*\)"/,
+      /<meta\s+name="theme-color"\s+content="%THEME_BG_LIGHT%"\s+media="\(\s*prefers-color-scheme:\s*light\s*\)"/,
     );
     expect(indexHtml).toMatch(
-      /<meta\s+name="theme-color"\s+content="#0c0c0a"\s+media="\(\s*prefers-color-scheme:\s*dark\s*\)"/,
+      /<meta\s+name="theme-color"\s+content="%THEME_BG_DARK%"\s+media="\(\s*prefers-color-scheme:\s*dark\s*\)"/,
     );
     expect(indexHtml).toMatch(
       /<meta\s+name="apple-mobile-web-app-status-bar-style"\s+content="black-translucent"/,
@@ -73,8 +74,8 @@ describe("client audit launch contracts", () => {
   // from the manifest, which has no media-query form (#332). A dark splash
   // under a light UI is the milder flash of the two.
   it("gives the installed PWA a dark splash rather than a light one", () => {
-    expect(viteConfig).toMatch(/background_color:\s*"#0c0c0a"/);
-    expect(viteConfig).toMatch(/theme_color:\s*"#0c0c0a"/);
+    expect(viteConfig).toMatch(/background_color:\s*THEME_BG\.dark/);
+    expect(viteConfig).toMatch(/theme_color:\s*THEME_BG\.dark/);
   });
 
   // `autoUpdate` activates a new worker the moment it installs and reloads the

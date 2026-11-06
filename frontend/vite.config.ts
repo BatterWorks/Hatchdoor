@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import type { Plugin, Rolldown } from "vite";
@@ -85,10 +86,64 @@ function trackLazyChunks(): Plugin {
   };
 }
 
+/** The page background of each theme, `--bg` in base.css. */
+export type ThemeBackgrounds = { light: string; dark: string };
+
+/**
+ * `--bg` from the light and the dark token blocks of base.css, read the way
+ * `docs/design/palette.py` finds them. The browser bar colour and the
+ * installed app's splash are filled from these at build time, so a palette
+ * change reaches them (#648). A block without the token fails the build
+ * rather than shipping a stale colour.
+ */
+export function readThemeBackgrounds(css: string): ThemeBackgrounds {
+  const read = (name: keyof ThemeBackgrounds) => {
+    const marker = `:root[data-theme="${name}"]`;
+    const start = css.indexOf(marker);
+    const end = start < 0 ? -1 : css.indexOf("}", start);
+    const block = end < 0 ? "" : css.slice(start + marker.length, end);
+    const value = /--bg:\s*([^;]+);/.exec(block)?.[1].trim();
+    if (!value) {
+      throw new Error(`base.css: no --bg in the ${name} token block`);
+    }
+    return value;
+  };
+  return { light: read("light"), dark: read("dark") };
+}
+
+/** index.html with its `%THEME_BG_LIGHT%` and `%THEME_BG_DARK%` placeholders
+ * filled. A missing placeholder is an error: the page would ship a colour no
+ * build step owns. */
+export function fillThemeColors(html: string, bg: ThemeBackgrounds): string {
+  let out = html;
+  for (const [placeholder, value] of [
+    ["%THEME_BG_LIGHT%", bg.light],
+    ["%THEME_BG_DARK%", bg.dark],
+  ] as const) {
+    if (!out.includes(placeholder)) {
+      throw new Error(`index.html: no ${placeholder} placeholder`);
+    }
+    out = out.replaceAll(placeholder, value);
+  }
+  return out;
+}
+
+const THEME_BG = readThemeBackgrounds(
+  readFileSync(`${import.meta.dirname}/src/styles/base.css`, "utf8"),
+);
+
+function themeColorsFromTokens(): Plugin {
+  return {
+    name: "hatchdoor:theme-colors-from-tokens",
+    transformIndexHtml: (html) => fillThemeColors(html, THEME_BG),
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
     trackLazyChunks(),
+    themeColorsFromTokens(),
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
@@ -102,8 +157,8 @@ export default defineConfig({
         // form (index.html carries both for the in-browser bar). Dark is the
         // milder mismatch: a brief dark splash before a light UI, instead of
         // a cream flash on every cold start in dark mode (#332).
-        background_color: "#0c0c0a",
-        theme_color: "#0c0c0a",
+        background_color: THEME_BG.dark,
+        theme_color: THEME_BG.dark,
         icons: [
           {
             src: "/android-chrome-192x192.png",

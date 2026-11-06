@@ -198,6 +198,14 @@ export function AppTopbar({
   }, [showTocChip]);
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const actionsTriggerRef = useRef<HTMLButtonElement>(null);
+  // A chosen item closes the menu and hands focus back to its trigger (#648).
+  // The item stays mounted but hidden, so a dialog it opens would otherwise
+  // remember a control that can no longer take focus, and focus would fall
+  // to the page when that dialog closes.
+  const closeActionsMenuFromItem = () => {
+    onCloseActionsMenu();
+    actionsTriggerRef.current?.focus();
+  };
   const scopeHostRef = useRef<HTMLDivElement>(null);
   const scopeTriggerRef = useRef<HTMLButtonElement>(null);
   const scopeSheetRef = useRef<HTMLDivElement>(null);
@@ -542,7 +550,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onRenameNote();
                   }}
                 >
@@ -554,7 +562,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onMoveNote();
                   }}
                 >
@@ -569,7 +577,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onCopyPageContent();
                   }}
                 >
@@ -581,7 +589,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onDownloadMarkdown();
                   }}
                 >
@@ -593,7 +601,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onCopyNoteLink();
                   }}
                 >
@@ -608,7 +616,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onArchiveNote();
                   }}
                 >
@@ -620,7 +628,7 @@ export function AppTopbar({
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
-                    onCloseActionsMenu();
+                    closeActionsMenuFromItem();
                     onDeleteNote();
                   }}
                 >

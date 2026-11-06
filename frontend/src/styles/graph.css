@@ -175,6 +175,13 @@
   cursor: grabbing;
 }
 
+/* The canvas is the keyboard's way into the graph (#648); the ring sits inside
+   it because the wrap clips anything drawn past its edge. */
+.graph-canvas:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
 /* ── SELECTION BAR (#337) ────────────────────────────────────── */
 /* The selected note's title and a way to open it, pinned to the foot of the
    canvas. The graph's only other route to a note is a double-click or a

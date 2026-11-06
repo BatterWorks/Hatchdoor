@@ -287,7 +287,7 @@
   max-width: 100%;
   margin: 1rem auto;
   border: 1px solid var(--rule);
-  background: white;
+  background: var(--pdf-page);
 }
 
 .pdf-preview-controls {

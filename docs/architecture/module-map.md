@@ -4365,7 +4365,11 @@ only: New note and Edit left it for their own buttons, Copy note text and
 Download .md file are the utilities' names, and `Escape` closes it. The theme
 button opens a three-option menu (System, Light, Dark) through `useTheme`'s
 `setTheme`, focusing the current choice and moving with the arrows;
-`cycleTheme` stays for callers without a menu. `e` opens the editor on the
+`cycleTheme` stays for callers without a menu. A chosen theme sets the
+browser bar from `--bg` in the computed style, in one `theme-color` tag put
+in front of the build's two; auto removes it (#648). An item of the "…" menu
+hands focus back to the menu's button before it acts, so a dialog it opens
+returns focus there on close (#648). `e` opens the editor on the
 open note, the key the Edit button shows, unless focus sits in a dialog or
 menu, Help is open, or an inline block is open. The Scope zone starts
 folded (`SCOPE_ZONE_COLLAPSED_KEY` unset reads folded) and its folded head
@@ -4424,6 +4428,9 @@ everything only a Mermaid or PDF.js dynamic import reaches out of the
 install-time precache, found from the bundle graph by `findLazyChunks`, and
 caches those chunks CacheFirst on first use instead; the manifest's splash
 colours are the dark theme's, since the manifest has no light/dark form.
+Both those and `index.html`'s two `theme-color` tags come from `--bg` in
+`base.css` at build time (`readThemeBackgrounds`, `fillThemeColors`, #648),
+and a missing token or placeholder fails the build.
 `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137) and the Vault-less-action
 default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
@@ -5625,7 +5632,8 @@ editor-toolbar syntax check, #572), Markdown/heading/search/state tests,
 - `frontend/src/components/note-page/linkStyle.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
-components, note-action/write-mode hooks, local draft behavior, client path
+components (`NoteActionsDialog` hands focus back on close to whatever held it
+when it opened, #648), note-action/write-mode hooks, local draft behavior, client path
 validation, upload normalization, frontmatter editing, conflict display,
 note-link autocomplete and attachment inserts written in the Vault's link
 style (`linkStyle.ts`, ADR-33: `[[Title]]`/`![[path]]` in a wikilink Vault,
@@ -5837,6 +5845,10 @@ component is laid out on its own and placed as a labelled, dash-enclosed
 island on one shared canvas (one zoom, one pan); at zero or one participating
 component — including a single-enabled-Vault instance under `all` — the page
 is byte-identical to the narrowed single-Vault graph (#118's resolution).
+The canvas is named "Note graph" and takes focus; the arrow keys, Home and
+End step the selection through the notes in title order, bringing an
+off-screen note to the centre, Enter opens it and Escape clears it, with the
+selection announced in a status line (#648).
 
 **Consumed dependencies:** shared API/error/types/UI, router navigation,
 `d3-force`, `useVaultDiscovery` (Vault-management order, `demoMode`, and

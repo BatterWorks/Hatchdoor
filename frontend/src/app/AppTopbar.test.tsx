@@ -5,7 +5,10 @@ import {
   screen,
   within,
 } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { NoteActionsDialog } from "../components/NoteActionsDialog";
 
 import { AppTopbar } from "./AppTopbar";
 import {
@@ -573,4 +576,120 @@ describe("AppTopbar On this page chip (#530)", () => {
       screen.queryByRole("button", { name: /On this page/ }),
     ).not.toBeInTheDocument();
   });
+});
+
+describe("AppTopbar More actions focus (#648)", () => {
+  afterEach(cleanup);
+
+  const activeNote: ActiveNoteMeta = {
+    vaultId: THREE_VAULTS[0].vault_id,
+    title: "A note",
+    slug: "a-note",
+    relativePath: "a-note",
+  };
+
+  it.each(["Rename note", "Move note", "Archive note", "Delete note"])(
+    "hands focus back to More actions when %s is chosen",
+    (item) => {
+      renderTopbar({
+        activeNote,
+        vaults: THREE_VAULTS,
+        writeEnabled: true,
+        actionsMenuOpen: true,
+      });
+      const menuItem = screen.getByRole("menuitem", { name: item });
+      menuItem.focus();
+
+      fireEvent.click(menuItem);
+
+      expect(
+        screen.getByRole("button", { name: "More actions" }),
+      ).toHaveFocus();
+    },
+  );
+});
+
+describe("More actions to a note dialog and back (#648)", () => {
+  afterEach(cleanup);
+
+  /** The topbar and the dialog wired as the shell wires them: the menu opens
+   * and closes on its own state, and each item opens its dialog. */
+  function Shell() {
+    const [menuOpen, setMenuOpen] = useState(false);
+    const [dialog, setDialog] = useState<
+      "rename" | "move" | "archive" | "delete" | null
+    >(null);
+    return (
+      <>
+        <AppTopbar
+          activeNote={{
+            vaultId: THREE_VAULTS[0].vault_id,
+            title: "A note",
+            slug: "a-note",
+            relativePath: "a-note",
+          }}
+          vaults={THREE_VAULTS}
+          scope="all"
+          writeEnabled
+          isMobile={false}
+          isOnline
+          actionsMenuOpen={menuOpen}
+          theme="auto"
+          onToggleDrawer={() => {}}
+          onOpenSearch={() => {}}
+          onToggleActionsMenu={() => setMenuOpen((open) => !open)}
+          onCloseActionsMenu={() => setMenuOpen(false)}
+          onCopyPageContent={() => {}}
+          onCopyNoteLink={() => {}}
+          onDownloadMarkdown={() => {}}
+          onRenameNote={() => setDialog("rename")}
+          onMoveNote={() => setDialog("move")}
+          onArchiveNote={() => setDialog("archive")}
+          onDeleteNote={() => setDialog("delete")}
+          onSetTheme={() => {}}
+          onScopeChange={() => {}}
+          viewingVaultId={undefined}
+          vaultNoteCounts={{}}
+          scopeSheetOpen={false}
+          onToggleScopeSheet={() => {}}
+          onCloseScopeSheet={() => {}}
+          scopeFocusRequestId={0}
+          onRestoreScopeFocus={() => {}}
+        />
+        {dialog ? (
+          <NoteActionsDialog
+            kind={dialog}
+            error={null}
+            onClose={() => setDialog(null)}
+            onCreate={() => {}}
+            onRename={() => {}}
+            onMove={() => {}}
+            onArchive={() => {}}
+            onDelete={() => {}}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  it.each(["Rename note", "Move note", "Archive note", "Delete note"])(
+    "returns focus to More actions after %s is closed with Escape",
+    (item) => {
+      render(<Shell />);
+      const trigger = screen.getByRole("button", { name: "More actions" });
+      trigger.focus();
+      fireEvent.click(trigger);
+      const menuItem = screen.getByRole("menuitem", { name: item });
+      menuItem.focus();
+      fireEvent.click(menuItem);
+      expect(screen.getByRole("dialog")).toContainElement(
+        document.activeElement as HTMLElement,
+      );
+
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    },
+  );
 });
