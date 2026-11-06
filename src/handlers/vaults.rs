@@ -311,9 +311,11 @@ pub async fn retry_vault_handler(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
 ) -> Response {
-    match parse_vault_id(&raw_id)
-        .and_then(|vault_id| VaultCollectionManagement::new(&state).retry(vault_id))
-    {
+    let result = match parse_vault_id(&raw_id) {
+        Ok(vault_id) => VaultCollectionManagement::new(&state).retry(vault_id).await,
+        Err(error) => Err(error),
+    };
+    match result {
         Ok(response) => schedule_response(response),
         Err(error) => management_error_response(error),
     }
@@ -342,9 +344,15 @@ pub async fn refresh_vault_handler(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
 ) -> Response {
-    match parse_vault_id(&raw_id)
-        .and_then(|vault_id| VaultCollectionManagement::new(&state).refresh(vault_id))
-    {
+    let result = match parse_vault_id(&raw_id) {
+        Ok(vault_id) => {
+            VaultCollectionManagement::new(&state)
+                .refresh(vault_id)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    match result {
         Ok(response) => schedule_response(response),
         Err(error) => management_error_response(error),
     }

@@ -282,10 +282,13 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
         })
     );
 
+    // A Vault whose folder went away is not indexed at all: its turn looks
+    // at the folder first, reports the Vault unavailable, and leaves the
+    // index it built earlier untouched and unserved (#641).
     std::fs::remove_dir_all(&first_path).expect("make first Vault unavailable");
     coordinator.request(first, VaultWorkKind::Index);
     coordinator.request(second, VaultWorkKind::Index);
-    let failed = worker
+    let skipped = worker
         .run_next({
             let collection = collection.clone();
             let cache = cache.clone();
@@ -295,12 +298,11 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
             }
         })
         .await
-        .expect("failing Index turn");
-    assert_eq!(failed.request.vault_id(), first);
-    assert_eq!(
-        failed.result.expect_err("scan failure is returned").code(),
-        "vault_index_failed"
-    );
+        .expect("Index turn of the unavailable Vault");
+    assert_eq!(skipped.request.vault_id(), first);
+    skipped
+        .result
+        .expect("an unreadable Vault is skipped, not failed");
     assert_eq!(
         cache
             .snapshot_note_content(first, "home")
@@ -308,14 +310,42 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
             .as_deref(),
         Some("# Home\n\nfirst version")
     );
+    let first_status = collection.runtime(first).expect("first runtime").snapshot();
+    assert_eq!(first_status.activation, VaultActivationStatus::Unavailable);
+    assert_eq!(first_status.local_content, LocalContentStatus::Unavailable);
+    assert!(!first_status.capabilities.browse);
+    assert!(!first_status.capabilities.search);
+    assert_eq!(first_status.search, VaultSearchStatus::Unavailable);
     assert_eq!(
-        collection
-            .runtime(first)
-            .expect("first runtime")
-            .snapshot()
-            .search,
-        VaultSearchStatus::Stale
+        first_status
+            .activation_error
+            .expect("activation error")
+            .code,
+        "vault_path_unavailable"
     );
+    // Nor is that retained index served: an exact read is refused, and a
+    // collection read names the Vault unavailable and carries none of it.
+    let reads = crate::vault_read::VaultReadCore::new(&cache, &collection);
+    assert_eq!(
+        reads
+            .exact_note(first, "home")
+            .expect_err("an unavailable Vault serves no note")
+            .code,
+        "vault_read_unavailable"
+    );
+    let recent = reads
+        .recently_modified(VaultScope::All, 10)
+        .expect("collection read");
+    let participant = recent
+        .participants
+        .iter()
+        .find(|participant| participant.vault_id == first)
+        .expect("first participant");
+    assert_eq!(
+        participant.state,
+        crate::vault_read::VaultParticipantState::Unavailable
+    );
+    assert!(recent.data.iter().all(|note| note.vault_id != first));
 
     let healthy = worker
         .run_next({
@@ -3777,8 +3807,8 @@ async fn one_vaults_failed_index_turn_leaves_the_collection_ready() {
     let directory = tempdir().expect("temporary state directory");
     let (executor, mut worker, first, second, second_path) =
         two_vault_executor(directory.path()).await;
-    // The second Vault's directory goes away after activation, so its scan
-    // fails for real.
+    // The second Vault's directory goes away after activation, so its turn
+    // finds it unreadable and reports it unavailable (#641).
     std::fs::remove_dir_all(&second_path).expect("remove second Vault directory");
 
     for _ in 0..2 {
@@ -3791,10 +3821,9 @@ async fn one_vaults_failed_index_turn_leaves_the_collection_ready() {
             vault_id if vault_id == first => outcome.result.expect("the healthy Vault indexes"),
             vault_id => {
                 assert_eq!(vault_id, second);
-                assert_eq!(
-                    outcome.result.expect_err("the broken Vault fails").code(),
-                    "vault_index_failed"
-                );
+                outcome
+                    .result
+                    .expect("the broken Vault is skipped, not indexed");
             }
         }
     }
@@ -3811,12 +3840,13 @@ async fn one_vaults_failed_index_turn_leaves_the_collection_ready() {
         .expect("second Vault")
         .snapshot();
     assert_eq!(failed.search, VaultSearchStatus::Unavailable);
+    assert_eq!(failed.activation, VaultActivationStatus::Unavailable);
     assert_eq!(
         failed
-            .search_error
+            .activation_error
             .expect("the failure is on the Vault")
             .code,
-        "vault_index_failed",
+        "vault_path_unavailable",
         "the failure stays visible on the Vault that had it"
     );
     assert_eq!(
@@ -5093,4 +5123,76 @@ async fn vaults_queued_before_the_executor_starts_report_waiting() {
             Some(VaultIndexTurn::Waiting)
         );
     }
+}
+
+/// A Vault whose folder was missing at activation is indexed by the first
+/// Index turn after the folder appears, whoever asked for it: the turn looks
+/// at the folder before it scans, makes the Vault active and publishes its
+/// notes (#641). Model setup and a collection reindex ask through the same
+/// turn, so they go through the same gate.
+#[tokio::test]
+async fn an_index_turn_activates_and_indexes_a_vault_whose_folder_appeared() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("later");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let snapshot = add_local_vault(&registry, &empty, "Later", vault_path.clone());
+    let vault_id = vault_id_named(&snapshot, "Later");
+    std::fs::remove_dir_all(&vault_path).expect("missing when the process starts");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+        .await;
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+    // Unavailable at activation, so nothing was queued; ask as model setup
+    // would, while the folder is still missing.
+    coordinator.request(vault_id, VaultWorkKind::Index);
+    worker
+        .run_next({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            let embedder = embedder.clone();
+            move |request| async move {
+                dispatch_vault_index_turn(&collection, cache, embedder, request).await
+            }
+        })
+        .await
+        .expect("turn")
+        .result
+        .expect("skipped, not failed");
+    assert_eq!(cache.snapshot_status(vault_id).expect("status"), None);
+
+    std::fs::create_dir_all(&vault_path).expect("the folder appears");
+    std::fs::write(vault_path.join("Found.md"), "# Found\n\nhere").expect("note");
+    coordinator.request(vault_id, VaultWorkKind::Index);
+    worker
+        .run_next({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            let embedder = embedder.clone();
+            move |request| async move {
+                dispatch_vault_index_turn(&collection, cache, embedder, request).await
+            }
+        })
+        .await
+        .expect("turn")
+        .result
+        .expect("indexed");
+    let status = collection.runtime(vault_id).expect("runtime").snapshot();
+    assert_eq!(status.activation, VaultActivationStatus::Active);
+    assert_eq!(status.search, VaultSearchStatus::Ready);
+    assert_eq!(
+        cache
+            .snapshot_note_content(vault_id, "found")
+            .expect("read snapshot")
+            .as_deref(),
+        Some("# Found\n\nhere")
+    );
 }

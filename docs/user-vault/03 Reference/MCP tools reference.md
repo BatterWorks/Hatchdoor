@@ -69,7 +69,7 @@ Each listed Vault also carries its link style: `link_style` (`wikilink` or `mark
 | `disable_vault` | Write mode | Disable a Vault without deleting its files. |
 | `disconnect_vault` | Write mode | Remove a Vault from the registry without deleting local files, checkouts, Git history, or credentials outside the registry record. |
 | `sync_vault` | Write mode | Request one Vault's Git work now: a remote sync if it has a remote, a local commit if it only keeps history. |
-| `retry_vault` | Write mode | Retry that same operation for one eligible Vault. |
+| `retry_vault` | Write mode | Retry that same operation for one eligible Vault, or look at a plain folder Vault's folder again. |
 | `publish_recovery_branch` | Write mode | Publish a Two-way Vault's side of a sync conflict to its recovery branch, so the conflict can be resolved on the Git host. |
 | `refresh_vault` | Write mode | Request one Vault's next index turn, so the snapshot the collection reads project from is rebuilt from its Markdown. |
 
@@ -109,7 +109,7 @@ All three take `vault_id` and `expected_registry_revision`, nothing else.
 
 Both take only `vault_id`. On a Vault with a remote, `sync_vault` asks for a check of the remote now, without waiting for `poll_interval_secs`. `retry_vault` retries an operation that failed, such as one cut short by a network error, without waiting for its backoff.
 
-On a Vault with no remote but with Git history (an `existing_git` Vault in `local_history` mode), both ask for a local commit now. No remote is contacted, and the request also lifts the five-minute pause that follows a failed commit. Only a Vault with no Git at all (a plain `local` source) is refused, with `capability_unavailable`. For rebuilding the search index of any Vault, Git-backed or not, use `refresh_vault`.
+On a Vault with no remote but with Git history (an `existing_git` Vault in `local_history` mode), both ask for a local commit now. No remote is contacted, and the request also lifts the five-minute pause that follows a failed commit. On a Vault with no Git at all (a plain `local` source), `sync_vault` is refused with `capability_unavailable`, and `retry_vault` looks at the Vault's folder again at once: a folder that came back or had its permissions fixed makes the Vault `active` and asks for an index turn, and one that still cannot be read is refused with retryable `vault_unavailable` and the reason. Hatchdoor also does this by itself every minute. For rebuilding the search index of any Vault, Git-backed or not, use `refresh_vault`.
 
 ### `publish_recovery_branch`
 

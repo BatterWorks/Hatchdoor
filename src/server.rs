@@ -1508,6 +1508,11 @@ pub async fn run_server() {
     });
     let scheduler_tick_task =
         crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
+    let local_probe_task = spawn_local_content_probe(
+        state.vaults.clone(),
+        vault_work.clone(),
+        crate::vault_runtime::LOCAL_CONTENT_PROBE_INTERVAL,
+    );
     // ADR-39: the opt-in daily check for a newer release. The task reads the
     // setting on every tick, so it runs whenever the setting is on; a demo
     // instance never starts it.
@@ -1578,6 +1583,7 @@ pub async fn run_server() {
     // coordinator has stopped accepting work; the dispatch loop drains and
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
+    local_probe_task.abort();
     commit_cooldown_tick_task.abort();
     startup_settle_task.abort();
     if let Some(task) = update_check_task {
@@ -1620,6 +1626,68 @@ async fn serve_until_shutdown(
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.wait().await })
         .await
+}
+
+/// Look at every Vault's folder again each `interval`, so a folder that
+/// appears, disappears or changes permissions after activation moves the
+/// Vault's status within one tick (#641). The first tick is skipped:
+/// activation has just looked.
+///
+/// Each Vault is probed on its own blocking task, and a Vault whose last
+/// probe has not returned is skipped, so one stalled network share neither
+/// holds up the others nor piles up threads waiting on it.
+fn spawn_local_content_probe(
+    vaults: VaultCollectionRuntime,
+    coordinator: VaultWorkCoordinator,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let in_flight = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::<
+            crate::vault_registry::VaultId,
+        >::new()));
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            for vault_id in vaults.active_vault_ids() {
+                let started = in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(vault_id);
+                if !started {
+                    continue;
+                }
+                let vaults = vaults.clone();
+                let coordinator = coordinator.clone();
+                let in_flight = Arc::clone(&in_flight);
+                tokio::task::spawn_blocking(move || {
+                    // Cleared on drop, so a probe that panics does not
+                    // leave its Vault skipped for good.
+                    let _done = ProbeInFlight {
+                        in_flight,
+                        vault_id,
+                    };
+                    vaults.reprobe_local_vault(vault_id, &coordinator);
+                });
+            }
+        }
+    })
+}
+
+/// One Vault's place in `spawn_local_content_probe`'s in-flight set, given
+/// up when its probe returns or panics.
+struct ProbeInFlight {
+    in_flight: Arc<std::sync::Mutex<std::collections::BTreeSet<crate::vault_registry::VaultId>>>,
+    vault_id: crate::vault_registry::VaultId,
+}
+
+impl Drop for ProbeInFlight {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.vault_id);
+    }
 }
 
 /// Forward a per-Vault watcher invalidation to the one shared work queue: a
@@ -8750,7 +8818,7 @@ mod tests {
                     name: "Unavailable".to_string(),
                     enabled: true,
                     source: crate::vault_registry::VaultSource::Local {
-                        path: unavailable_path,
+                        path: unavailable_path.clone(),
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
@@ -8769,20 +8837,8 @@ mod tests {
             )
             .await;
         let unavailable_id = unavailable_snapshot.vault_ids().next().expect("vault id");
-        state
-            .vaults
-            .runtime(unavailable_id)
-            .expect("active runtime")
-            .set_local_content_status(
-                crate::vault_runtime::LocalContentStatus::Unavailable,
-                Some(crate::vault_runtime::VaultRuntimeError {
-                    code: "vault_read_unavailable".to_string(),
-                    message: "Vault directory became unavailable".to_string(),
-                    retryable: true,
-                    detail: None,
-                }),
-            )
-            .expect("publish unavailable local content");
+        // The folder goes away after activation; refresh looks again (#641).
+        std::fs::remove_dir_all(&unavailable_path).expect("remove the Vault directory");
 
         let unavailable = app
             .clone()

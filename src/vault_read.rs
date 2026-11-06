@@ -801,7 +801,7 @@ impl<'a> VaultReadCore<'a> {
         slug: &str,
     ) -> Result<Option<VaultQualifiedLinks>, VaultReadError> {
         let index = self
-            .control_block(vault_id)?
+            .readable_control_block(vault_id)?
             .linked_index()
             .map_err(|error| runtime_error(vault_id, error))?;
         if self.hidden_slug(&index, slug) {
@@ -1310,7 +1310,7 @@ impl<'a> VaultReadCore<'a> {
     /// rather than callers discovering a raw filesystem error later and
     /// reporting an unrelated, non-retryable status.
     pub fn vault_directory(&self, vault_id: VaultId) -> Result<std::path::PathBuf, VaultReadError> {
-        let control = self.control_block(vault_id)?;
+        let control = self.readable_control_block(vault_id)?;
         control
             .ensure_accepting_operations()
             .map_err(|error| runtime_error(vault_id, error))?;
@@ -1509,7 +1509,7 @@ impl<'a> VaultReadCore<'a> {
         if self.surface == BrowseSurface::Everything {
             return Ok(true);
         }
-        let control = self.control_block(vault_id)?;
+        let control = self.readable_control_block(vault_id)?;
         let surface = match control.indexed_assets() {
             Some(assets) => {
                 control
@@ -1593,6 +1593,27 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
+    /// [`Self::control_block`] for a read of the Vault's content: refused
+    /// while the Vault reports itself unavailable, even when its folder has
+    /// since come back and could be read (#641). The status is what callers
+    /// were told, so content is served only once it says `active`.
+    fn readable_control_block(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<crate::vault_runtime::VaultControlBlock, VaultReadError> {
+        let control = self.control_block(vault_id)?;
+        let snapshot = control.snapshot();
+        if snapshot.activation != crate::vault_runtime::VaultActivationStatus::Active {
+            return Err(unavailable(
+                vault_id,
+                "vault_read_unavailable",
+                inactive_vault_message(snapshot.activation_error.as_ref()),
+                true,
+            ));
+        }
+        Ok(control)
+    }
+
     /// The gated control block together with a freshly built catalog of its
     /// Vault, shared by every exact-read method that needs one (`catalog`
     /// discards the control block; `exact_note_for_download` keeps it for
@@ -1612,7 +1633,7 @@ impl<'a> VaultReadCore<'a> {
         ),
         VaultReadError,
     > {
-        let control = self.control_block(vault_id)?;
+        let control = self.readable_control_block(vault_id)?;
         let index = control
             .authoritative_catalog()
             .map_err(|error| runtime_error(vault_id, error))?;
@@ -1693,7 +1714,10 @@ impl<'a> VaultReadCore<'a> {
         let mut data = Vec::new();
         let mut participants = Vec::with_capacity(selected.len());
         for selected in selected {
-            let published = self.cache.read_vault_snapshot(selected.vault_id, bodies);
+            let published = match &selected.inactive {
+                Some(message) => Err(message.clone()),
+                None => self.cache.read_vault_snapshot(selected.vault_id, bodies),
+            };
             let participant = match published {
                 Ok(Some(published)) => {
                     let state = match published.status.freshness {
@@ -1756,6 +1780,20 @@ impl<'a> VaultReadCore<'a> {
 pub(crate) struct SelectedVault {
     pub(crate) vault_id: VaultId,
     pub(crate) vault_name: String,
+    /// Why this enabled Vault serves nothing right now: it is not `active`,
+    /// so even an index it built earlier is withheld (#641).
+    pub(crate) inactive: Option<String>,
+}
+
+/// What a read of a Vault that is not `active` reports, carrying the
+/// activation error's own words when there is one.
+pub(crate) fn inactive_vault_message(
+    error: Option<&crate::vault_runtime::VaultRuntimeError>,
+) -> String {
+    match error {
+        Some(error) => format!("Vault is unavailable: {}", error.message),
+        None => "Vault is unavailable and cannot serve reads".to_string(),
+    }
 }
 
 pub(crate) fn selected_vaults(
@@ -1794,6 +1832,8 @@ pub(crate) fn selected_vaults(
         .map(|vault| SelectedVault {
             vault_id: vault.vault_id,
             vault_name: vault.name.clone(),
+            inactive: (vault.activation != crate::vault_runtime::VaultActivationStatus::Active)
+                .then(|| inactive_vault_message(vault.activation_error.as_ref())),
         })
         .collect())
 }

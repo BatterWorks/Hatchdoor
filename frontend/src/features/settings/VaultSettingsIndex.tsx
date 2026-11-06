@@ -793,6 +793,23 @@ export function VaultSettingsDetail({
     setSyncing(false);
   };
 
+  // A Vault with no Git console still has a Try again when its status
+  // offers one, such as a Local Vault whose folder was missing or could not
+  // be read: the server looks at the folder again on the spot (#641).
+  const retryFolder = async () => {
+    setSyncing(true);
+    setMessage(null);
+    const { ok, payload } = await requestJson(
+      `/api/v1/vaults/${vaultId}/retry`,
+      { method: "POST" },
+    );
+    if (ok) setMessage("Hatchdoor checked this Vault's folder again.");
+    else
+      setFailure(failureText(payload, "Could not check this Vault's folder."));
+    await refreshCollection();
+    setSyncing(false);
+  };
+
   const publishRecovery = async () => {
     setPublishing(true);
     setMessage(null);
@@ -828,6 +845,7 @@ export function VaultSettingsDetail({
       ? "Sync now"
       : "Commit now";
   const conditionHelp = vaultConditionHelp(vault, paused);
+  const folderRetry = !paused && !consoleVisible && vault.capabilities.retry;
   const healthySentence = remoteBacked
     ? "This Vault's Git sync is healthy."
     : "This Vault's Git history is up to date.";
@@ -929,6 +947,19 @@ export function VaultSettingsDetail({
           <>
             {" "}
             <ContextualHelpLink to={conditionHelp} />
+          </>
+        ) : null}
+        {folderRetry ? (
+          <>
+            {" "}
+            <button
+              type="button"
+              className="settings-mini"
+              disabled={syncing}
+              onClick={() => void retryFolder()}
+            >
+              Try again
+            </button>
           </>
         ) : null}
       </p>

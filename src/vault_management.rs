@@ -926,10 +926,52 @@ impl<'a> VaultCollectionManagement<'a> {
         self.managed_git_control(vault_id, false)
     }
 
-    /// The same admitted operation as [`Self::sync`], kept as a distinctly
-    /// named entry point (mirrors `ManagedGitScheduler::retry_now`).
-    pub fn retry(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
-        self.managed_git_control(vault_id, true)
+    /// For a Vault with Git, the same admitted operation as [`Self::sync`],
+    /// kept as a distinctly named entry point (mirrors
+    /// `ManagedGitScheduler::retry_now`).
+    ///
+    /// A Local Vault has no Git turn to retry. Its retry looks at the folder
+    /// again now, restarts a watcher that failed to start, and asks for an
+    /// Index turn once the folder can be read (#641). A folder that still
+    /// cannot be read answers `vault_unavailable` with the reason the probe
+    /// found.
+    pub async fn retry(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultScheduleResponse, VaultOperationError> {
+        let definition = self.enabled_definition(vault_id)?;
+        if !matches!(definition.source(), VaultSource::Local { .. }) {
+            return self.managed_git_control(vault_id, true);
+        }
+        let runtime = self
+            .state
+            .vaults
+            .runtime(vault_id)
+            .ok_or_else(|| vault_unavailable(vault_id))?;
+        // The probe stats the folder, which a stalled network share can hold
+        // up, so it runs off the workers that serve requests.
+        let probe = runtime.clone();
+        let readable = tokio::task::spawn_blocking(move || probe.retry_local_content())
+            .await
+            .map_err(|error| internal_error(error.to_string(), Some(vault_id)))?;
+        if !readable {
+            let message = runtime.snapshot().activation_error.map_or_else(
+                || "The Vault's folder cannot be read".to_string(),
+                |error| error.message,
+            );
+            return Err(VaultOperationError::new(
+                "vault_unavailable",
+                message,
+                Some(vault_id),
+                true,
+            ));
+        }
+        schedule_response(
+            vault_id,
+            self.state
+                .vault_work
+                .request(vault_id, VaultWorkKind::Index),
+        )
     }
 
     /// Admit a request to publish this Vault's side of a sync conflict to its
@@ -1014,14 +1056,22 @@ impl<'a> VaultCollectionManagement<'a> {
     /// Request one Vault's next Index turn. This only admits work to the
     /// shared FIFO; the runtime worker performs the authoritative Markdown
     /// scan and atomic snapshot publication.
-    pub fn refresh(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
+    pub async fn refresh(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultScheduleResponse, VaultOperationError> {
         self.enabled_definition(vault_id)?;
-        if self
-            .state
-            .vaults
-            .runtime(vault_id)
-            .is_none_or(|runtime| !runtime.snapshot().capabilities.browse)
-        {
+        let runtime = self.state.vaults.runtime(vault_id);
+        // A Local Vault's folder is looked at again first, off the request
+        // workers, so a refresh answers for the folder as it stands, not as
+        // activation found it (#641).
+        if let Some(runtime) = &runtime {
+            let probe = runtime.clone();
+            tokio::task::spawn_blocking(move || probe.reprobe_local_content())
+                .await
+                .map_err(|error| internal_error(error.to_string(), Some(vault_id)))?;
+        }
+        if runtime.is_none_or(|runtime| !runtime.snapshot().capabilities.browse) {
             return Err(VaultOperationError::new(
                 "capability_unavailable",
                 "Vault refresh requires currently usable local Markdown content",
@@ -2232,6 +2282,7 @@ mod tests {
         core.sync(vault_id)
             .expect("manual sync must no longer be refused for an ExistingGit PullOnly Vault");
         core.retry(vault_id)
+            .await
             .expect("manual retry must no longer be refused for an ExistingGit PullOnly Vault");
     }
 
@@ -2293,14 +2344,15 @@ mod tests {
         );
 
         core.retry(vault_id)
+            .await
             .expect("manual retry admits the same commit turn");
     }
 
-    /// A `Local` Vault has no Git at all, so both manual controls still
-    /// refuse it outright. This is what is left of the blanket refusal #267
-    /// narrowed: "no remote" no longer means "nothing to do".
+    /// A `Local` Vault has no Git at all, so manual sync still refuses it
+    /// outright. Retry does not: it looks at the folder again and asks for an
+    /// Index turn (#641), and still never a Git or commit turn.
     #[tokio::test]
-    async fn sync_and_retry_still_refuse_a_local_vault() {
+    async fn sync_refuses_a_local_vault_and_retry_reprobes_it() {
         let (state, _worker, directory) = test_state();
         let path = directory.path().join("plain-notes");
         std::fs::create_dir_all(&path).expect("vault dir");
@@ -2319,14 +2371,65 @@ mod tests {
             core.sync(vault_id).expect_err("sync refused").code,
             "capability_unavailable"
         );
-        assert_eq!(
-            core.retry(vault_id).expect_err("retry refused").code,
-            "capability_unavailable"
-        );
         assert!(
             !state.vault_work.has_work(vault_id, VaultWorkKind::Commit),
             "a refused control queues nothing"
         );
+        core.retry(vault_id)
+            .await
+            .expect("retry re-probes a readable Local Vault");
+        assert!(state.vault_work.has_work(vault_id, VaultWorkKind::Index));
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Commit));
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Git));
+    }
+
+    /// A Local Vault whose folder was missing at activation: Try again says
+    /// why while the folder is still missing, and once it exists, makes the
+    /// Vault active with its watcher running and asks for its first Index
+    /// turn, with no wait for the next tick (#641).
+    #[tokio::test]
+    async fn retry_activates_a_local_vault_whose_folder_appeared() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("later-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Later notes",
+                VaultSource::Local { path: path.clone() },
+            ))
+            .await
+            .expect("create the Vault");
+        let vault_id = ready_snapshot(&state)
+            .vault_ids()
+            .next()
+            .expect("one Vault");
+        std::fs::remove_dir_all(&path).expect("the folder goes away");
+
+        let core = VaultCollectionManagement::new(&state);
+        let refused = core
+            .retry(vault_id)
+            .await
+            .expect_err("folder still missing");
+        assert_eq!(refused.code, "vault_unavailable");
+        assert!(refused.retryable);
+        assert!(
+            refused.message.contains("later-notes"),
+            "{}",
+            refused.message
+        );
+        let status = state.vaults.runtime(vault_id).expect("runtime").snapshot();
+        assert_eq!(status.activation, VaultActivationStatus::Unavailable);
+        assert!(status.capabilities.retry);
+        assert_eq!(status.watcher, VaultWatcherStatus::Disabled);
+
+        std::fs::create_dir_all(&path).expect("the folder comes back");
+        std::fs::write(path.join("Found.md"), "# Found").expect("write note");
+        core.retry(vault_id).await.expect("retry finds the folder");
+        let status = state.vaults.runtime(vault_id).expect("runtime").snapshot();
+        assert_eq!(status.activation, VaultActivationStatus::Active);
+        assert_eq!(status.local_content, LocalContentStatus::ReadWrite);
+        assert!(status.capabilities.browse);
+        assert!(state.vault_work.has_work(vault_id, VaultWorkKind::Index));
     }
 
     /// Hatchdoor never writes into the operator's folder on its own: a brand

@@ -4425,3 +4425,114 @@ async fn an_edit_overtaken_by_another_vaults_edit_still_starts_its_vault() {
         "and the recovery request its drain discarded"
     );
 }
+
+/// A Local Vault whose folder was missing at activation follows it once it
+/// appears: the next probe makes it Active, readable and watched, and asks for
+/// its first Index turn. Removing the folder again takes the Vault and its
+/// watcher back down (#641).
+#[tokio::test]
+async fn reprobe_follows_a_local_folder_that_appears_and_disappears() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let path = directory.path().join("later");
+    std::fs::create_dir_all(&path).expect("the folder exists when the Vault is added");
+    let snapshot = add_local_vault(&registry, &empty, "Later", path.clone());
+    let vault_id = vault_id_named(&snapshot, "Later");
+    // Then goes away before this process activates the Vault.
+    std::fs::remove_dir_all(&path).expect("the folder goes away");
+    let collection = VaultCollectionRuntime::with_watching(directory.path().join("cache.sqlite3"));
+    collection.reconcile(&registry, &snapshot);
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let runtime = collection.runtime(vault_id).expect("enabled runtime");
+
+    let missing = runtime.snapshot();
+    assert_eq!(missing.activation, VaultActivationStatus::Unavailable);
+    assert_eq!(missing.watcher, VaultWatcherStatus::Disabled);
+    assert!(!missing.capabilities.browse);
+    assert!(missing.capabilities.retry);
+
+    // Nothing changed on disk: the probe publishes nothing and queues nothing.
+    let revision = collection.snapshot().collection_revision;
+    collection.reprobe_local_vault(vault_id, &coordinator);
+    assert_eq!(collection.snapshot().collection_revision, revision);
+    assert!(!coordinator.has_work(vault_id, VaultWorkKind::Index));
+
+    std::fs::create_dir_all(&path).expect("the folder appears");
+    collection.reprobe_local_vault(vault_id, &coordinator);
+    let found = runtime.snapshot();
+    assert_eq!(found.activation, VaultActivationStatus::Active);
+    assert_eq!(found.local_content, LocalContentStatus::ReadWrite);
+    assert_eq!(found.activation_error, None);
+    assert_eq!(found.watcher, VaultWatcherStatus::Running);
+    assert!(found.capabilities.browse && found.capabilities.mutate);
+    assert!(!found.capabilities.retry);
+    assert!(coordinator.has_work(vault_id, VaultWorkKind::Index));
+    assert!(collection.snapshot().collection_revision > revision);
+
+    std::fs::remove_dir_all(&path).expect("the folder goes away");
+    collection.reprobe_local_vault(vault_id, &coordinator);
+    let gone = runtime.snapshot();
+    assert_eq!(gone.activation, VaultActivationStatus::Unavailable);
+    assert_eq!(gone.local_content, LocalContentStatus::Unavailable);
+    assert_eq!(gone.watcher, VaultWatcherStatus::Disabled);
+    assert!(!gone.capabilities.browse && !gone.capabilities.mutate);
+    assert!(!gone.capabilities.search);
+    assert_eq!(gone.search, VaultSearchStatus::Unavailable);
+    assert!(!runtime.watcher_running());
+}
+
+/// A permission change on a Local Vault's folder moves it between
+/// `read_write` and `read_only` on the next probe, and `mutate` with it, so a
+/// write is refused as unavailable rather than failing on disk (#641).
+#[cfg(unix)]
+#[tokio::test]
+async fn reprobe_follows_a_local_folders_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Root's permission bypass would make every folder writable.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let path = directory.path().join("notes");
+    std::fs::create_dir_all(&path).expect("Vault directory");
+    let snapshot = add_local_vault(&registry, &empty, "Notes", path.clone());
+    let vault_id = vault_id_named(&snapshot, "Notes");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &snapshot);
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let runtime = collection.runtime(vault_id).expect("enabled runtime");
+    assert_eq!(
+        runtime.snapshot().local_content,
+        LocalContentStatus::ReadWrite
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555))
+        .expect("make the folder read-only");
+    collection.reprobe_local_vault(vault_id, &coordinator);
+    let read_only = runtime.snapshot();
+    assert_eq!(read_only.activation, VaultActivationStatus::Active);
+    assert_eq!(read_only.local_content, LocalContentStatus::ReadOnly);
+    assert!(read_only.capabilities.browse);
+    assert!(!read_only.capabilities.mutate);
+    assert!(
+        !coordinator.has_work(vault_id, VaultWorkKind::Index),
+        "a Vault that stayed readable needs no fresh index"
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("make the folder writable again");
+    collection.reprobe_local_vault(vault_id, &coordinator);
+    let writable = runtime.snapshot();
+    assert_eq!(writable.local_content, LocalContentStatus::ReadWrite);
+    assert!(writable.capabilities.mutate);
+}
