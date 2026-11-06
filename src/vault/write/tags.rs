@@ -37,7 +37,7 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::MutationJournal;
 use super::intent::IntentLog;
-use super::rewrites::read_note_text;
+use super::rewrites::read_note_for_rewrite;
 use super::types::{TextRewrite, WriteError};
 
 /// A rename that was planned, or planned and applied.
@@ -229,7 +229,7 @@ fn plan(index: &VaultIndex, old: &str, new: &str) -> Result<Plan, TagRenameError
     let mut already_tagged_notes = 0usize;
     for entry in index.ordered_entries() {
         // A note that cannot be opened carries no tag the index knows of.
-        let Some(note) = read_note_text(&entry.path) else {
+        let Some(note) = read_note_for_rewrite(&entry.path) else {
             continue;
         };
         let tags = extract_tags(&note.content);
@@ -772,7 +772,7 @@ fn plan_delete(
     let mut notes = Vec::new();
     let mut rewrites = Vec::new();
     for entry in index.ordered_entries() {
-        let Some(note) = read_note_text(&entry.path) else {
+        let Some(note) = read_note_for_rewrite(&entry.path) else {
             continue;
         };
         let tags = extract_tags(&note.content);

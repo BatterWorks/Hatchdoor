@@ -10,6 +10,7 @@ use super::assets::asset_move_plan;
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::{
     MutationJournal, atomic_create, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
+    read_existing_note,
 };
 use super::intent::IntentLog;
 use super::paths::{
@@ -588,12 +589,7 @@ pub fn replace_section(
 }
 
 fn read_note(entry: &NoteEntry) -> Result<String, WriteError> {
-    fs::read_to_string(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}': {error}",
-            entry.relative_path
-        ))
-    })
+    read_existing_note(&entry.path, &entry.relative_path)
 }
 
 /// Byte range `[start, end)` covering the requested section, by the shared

@@ -387,6 +387,84 @@ fn update_note_requires_matching_hash() {
     assert_eq!(fs::read_to_string(path).expect("read"), "new\n");
 }
 
+/// Every edit, move or delete of a note over `MAX_NOTE_BYTES` is refused
+/// before the note is read whole, as invalid input a retry cannot fix, and
+/// the file is left as it was (#670).
+#[test]
+fn edits_to_an_oversized_note_are_refused_unread() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "# Home\nbody\n").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+    let oversized = crate::vault::MAX_NOTE_BYTES + 1;
+    crate::vault::grow_past_note_bound(&path);
+    let hash = content_hash("# Home\nbody\n");
+    let frontmatter = || serde_json::from_value(serde_json::json!({"status": "new"})).unwrap();
+
+    let attempts: [(&str, Result<WriteOutcome, WriteError>); 7] = [
+        ("update_note", update_note(entry, "new", &hash)),
+        ("append_note", append_note(entry, "more", &hash)),
+        ("edit_note", edit_note(entry, "body", "text", &hash, false)),
+        (
+            "replace_section",
+            replace_section(entry, "# Home", SectionMode::Replace, "# Home\n", &hash),
+        ),
+        (
+            "update_note_frontmatter",
+            update_note_frontmatter(entry, frontmatter(), &hash),
+        ),
+        (
+            "move_or_rename_note",
+            move_or_rename_note(tmp.path(), &index, entry, "Moved.md", &hash),
+        ),
+        ("delete_note", delete_note(tmp.path(), &index, entry, &hash)),
+    ];
+    for (name, attempt) in attempts {
+        assert!(
+            matches!(&attempt, Err(WriteError::InvalidInput(message)) if message.contains("8 MiB")),
+            "{name}: {attempt:?}"
+        );
+        assert_eq!(
+            fs::metadata(&path).expect("stat").len(),
+            oversized,
+            "{name}"
+        );
+    }
+}
+
+/// A Vault-wide rewrite skips a note over `MAX_NOTE_BYTES` the way the link
+/// graph does, instead of reading it whole to plan a rewrite of it (#670).
+#[test]
+fn a_rename_skips_an_oversized_note_that_links_to_it() {
+    let tmp = TempDir::new().expect("tempdir");
+    fs::write(tmp.path().join("Plan.md"), "# Plan\n").expect("write");
+    let big = tmp.path().join("Big.md");
+    fs::write(&big, "[[Plan]]\n").expect("write");
+    let index = build(tmp.path());
+    let oversized = crate::vault::MAX_NOTE_BYTES + 1;
+    crate::vault::grow_past_note_bound(&big);
+    let entry = index.find_by_slug("plan").expect("plan");
+
+    move_or_rename_note(
+        tmp.path(),
+        &index,
+        entry,
+        "Roadmap.md",
+        &content_hash("# Plan\n"),
+    )
+    .expect("the rename goes ahead");
+
+    assert!(tmp.path().join("Roadmap.md").exists());
+    assert_eq!(fs::metadata(&big).expect("stat").len(), oversized);
+    let mut start = [0u8; 9];
+    std::io::Read::read_exact(&mut fs::File::open(&big).expect("open"), &mut start).expect("read");
+    assert_eq!(
+        &start, b"[[Plan]]\n",
+        "the oversized note is left as it was"
+    );
+}
+
 fn frontmatter_entry(
     root: &Path,
     content: &str,

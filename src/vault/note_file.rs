@@ -51,8 +51,14 @@ pub fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, BoundedReadError
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(BoundedReadError::NotRegular);
     }
-    let file = open_without_blocking(path)?;
     // Checked again on the open handle: the path may have changed between.
+    read_open_bounded(open_without_blocking(path)?, limit)
+}
+
+/// The bytes of a file the caller already opened, at most `limit` of them.
+/// For a caller that opens through its own path checks, such as the write
+/// layer's walk that follows no symbolic link in any component.
+pub fn read_open_bounded(file: File, limit: u64) -> Result<Vec<u8>, BoundedReadError> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(BoundedReadError::NotRegular);
@@ -95,6 +101,18 @@ fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
 #[cfg(not(unix))]
 fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
     Ok(File::open(path)?)
+}
+
+/// Grows the file at `path` one byte past [`MAX_NOTE_BYTES`] without writing
+/// it: the file is sparse, so a test of the bound costs no disk.
+#[cfg(test)]
+pub(crate) fn grow_past_note_bound(path: &Path) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open")
+        .set_len(MAX_NOTE_BYTES + 1)
+        .expect("grow the note past the bound");
 }
 
 /// Makes a FIFO at `path`, for tests of the readers that must not block on one.

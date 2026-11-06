@@ -1609,7 +1609,7 @@ process-wide memo keeps each note's counts until its size or modification
 time changes, so a listing re-reads only changed notes. The scanner records
 inline images as `MarkdownLink::Image` for that count only, and no rewriter
 touches them.
-`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_text` is that read for a note's text under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap): `read_note_by_slug`, the read core's exact reads and attachment list, the link graph and `count_link_forms` read notes through it, `find_text` through `read_bounded` with the same bound, and the `app.json` probe under 64 KiB.
+`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_text` is that read for a note's text under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap): `read_note_by_slug`, the read core's exact reads and attachment list, the link graph and `count_link_forms` read notes through it, `find_text` through `read_bounded` with the same bound, and the `app.json` probe under 64 KiB. The Index turn's note upsert reads through `read_note_text` too, so a note over the bound is listed without being read, under the `oversized` content-hash marker, with no text, chunks, links or tags, and one that became a FIFO or device after the scan is skipped as unreadable for that turn (#670). `read_open_bounded` is the same bounded read of a handle the caller opened itself: the write layer opens a note through its no-follow walk and reads it with it before an edit, so an edit of a note over `MAX_NOTE_BYTES` is refused as `invalid_write_input` without reading it whole (#670).
 `sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every body ATX heading outside fenced or indented code (at most three leading spaces, no leading tab, one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text. The write layer, the read core's outline and section reads, and the chunker's heading paths share this scan and cannot disagree about a span or a path (#635). The crate-private `body_start` re-export locates the end of the canonical frontmatter block for section scanning and the read core's text-match place classification. `scan` skips that block automatically; `scan_from` starts at a caller-supplied line boundary for a caller that already has the same offset (#625).
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
@@ -1702,7 +1702,10 @@ when it creates, edits or removes the frontmatter block (#633).
 for the intent record, the `write-intents/` folder beside the Vault registry,
 written with `serde_json`), the
 filesystem rename-flag capability (`src/rename_flags.rs`) that decides whether
-a commit can use `renameat2`'s flags here, and
+a commit can use `renameat2`'s flags here, the read model's bounded reader
+(`read_open_bounded`, `MAX_NOTE_BYTES`, `BoundedReadError`) for the read of a
+note before an edit, and `read_bounded` for the Vault-wide rewrite planners,
+which skip a note over the bound as the link graph does (#670), and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
 Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
 keeps every rewriter's idea of a code block identical to the indexer's. The
@@ -2574,7 +2577,8 @@ run into a prefix. `is_bigram_char` and `run_units` are consumed by
 offline evaluation's legacy `note_fts` is not rewritten, so a CJK query there
 finds only text whose pairs happen to be separate tokens.
 
-**Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
+**Consumed dependencies:** Vault IDs and index/types, the Vault read model's bounded
+`read_note_text` for every note an Index turn reads (#670), chunking, embeddings, SQLite,
 FTS5, and sqlite-vec. Its tests capture log lines with runtime composition's
 test-only `config::log_capture` (#535).
 
@@ -2591,6 +2595,11 @@ and embedder identity/dimensions.
 **Invariants:**
 
 - A chunk row's `content` holds `Chunk::stored_content`, the text with fence marker lines, and the keyword index is built from that column, read through `keyword_text` where the chunk has one (the `vault_chunk_keyword_source` view, with the tokenizer `unicode61 remove_diacritics 2` plus Thai vowel and tone marks as token characters); vectors and `content_hash` come from `Chunk::content`, the text without them (#532). The `chunk_stored_text` metadata key names the shape of the stored text. A build that finds a different value, or none, sends every note through the write path once, which re-chunks it and reuses its vectors by hash, so a change to the stored shape costs no embedding and no schema bump.
+- An Index turn reads no note over `MAX_NOTE_BYTES`. Such a note keeps a row,
+  so the explorer lists it, with empty content, no chunks, links or tags, and
+  the content-hash marker `oversized`, which no real hash equals: the note
+  reads as unchanged, unread, while it stays over the bound, and is chunked
+  again once it shrinks (#670).
 - SQLite is rebuildable and never authoritative (ADR-01).
 - Keep embedded SQLite, FTS5, sqlite-vec, WAL, one writer, and pooled
   query-only reads (ADR-06).
