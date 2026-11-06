@@ -99,7 +99,7 @@ Same fields as `create_vault`, plus `vault_id` (the Vault to edit) in place of `
 | `replace` | Set a new `{ "username"?, "token" }`. |
 
 > [!warning]
-> Changing a Vault's `source` path, repository URL, branch, or subdirectory is an **identity change**: it points the Vault at different content. It is refused unless you pass `confirm_identity_change: true` **and** the Vault is already disabled, so call `disable_vault` first. On an enabled Vault it is refused whatever the flag says. Changing `mode`, `poll_interval_secs`, `name`, credentials, exclusions, archive folder, or commit identity is not an identity change and needs neither.
+> Changing a Vault's `source` path, repository URL, branch, or subdirectory is an **identity change**: it points the Vault at different content. It is refused unless you pass `confirm_identity_change: true` **and** the Vault is already disabled, so call `disable_vault` first. On an enabled Vault it is refused whatever the flag says. Changing `mode`, `poll_interval_secs`, `name`, credentials, exclusions, archive folder, or commit identity is not an identity change and needs neither. On a `managed_git` Vault, an identity change first commits the old checkout's pending notes and moves the checkout into `vaults/<Vault ID>/retired-checkouts/` in Hatchdoor's state folder; the Vault clones the new source when it is enabled again. The reply's `retired_checkout` says where the copy went (`archive`), whether notes were committed there (`committed`) and how many commits the old remote never received (`unpushed_commits`). If the old notes cannot be committed, the edit is refused with `checkout_set_aside_failed` and nothing changes.
 
 ### `enable_vault` / `disable_vault` / `disconnect_vault`
 
@@ -151,7 +151,7 @@ A Vault that cannot be browsed right now is refused with `capability_unavailable
 { "type": "local", "path": "/data/vault" }
 ```
 
-**`existing_git`** is a Git working copy that already exists on this machine. Hatchdoor uses it in place and never clones it.
+**`existing_git`** is a Git working copy that already exists on this machine. Hatchdoor uses it in place and never clones it. With `local_history`, `repository_path` may also be a plain folder: Hatchdoor creates the repository there when the Vault is added or switched to Local history, with no commit of its own. Enabling a Local history Vault whose repository has gone missing is refused instead.
 
 ```json
 {

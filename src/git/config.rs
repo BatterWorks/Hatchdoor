@@ -96,10 +96,7 @@ impl GitConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
-        let author_name = non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string());
-        let author_email = non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string());
+        let (author_name, author_email) = author_defaults(snapshot);
 
         Ok(Some(Self {
             vault_path,
@@ -129,6 +126,20 @@ pub fn resolve_commit_identity(
         Some(identity) => (identity.name.clone(), identity.email.clone()),
         None => (default_name.to_string(), default_email.to_string()),
     }
+}
+
+/// The instance-wide default commit identity, read from one settings
+/// snapshot. A Vault's own configured identity still overrides it (see
+/// [`resolve_commit_identity`]).
+pub(crate) fn author_defaults(
+    snapshot: &crate::runtime_config::ConfigSnapshot,
+) -> (String, String) {
+    (
+        non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
+            .unwrap_or_else(|| "Hatchdoor".to_string()),
+        non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
+            .unwrap_or_else(|| "hatchdoor@localhost".to_string()),
+    )
 }
 
 pub(crate) fn non_empty_setting(

@@ -63,6 +63,8 @@ Hatchdoor-Origin: web
 
 The agent name is a label the client chooses for itself, not proof of who wrote. Every agent connects with the same MCP token, so nothing stops one from giving another's name. The lines say which origins a commit holds, not which file each one changed. Merge commits made during a sync carry none. A Vault without Git keeps no record of where a change came from.
 
+Choosing Local history for a folder that is not a Git repository yet creates the repository there when you save, with no commit of its own. A folder inside another Git repository gets a repository of its own, nested in that one. Turning a Local history Vault back on never creates a repository: if its `.git` folder is gone, for example because the drive it lives on is not mounted, the Vault stays off and says so. The next change Hatchdoor commits starts the history. A folder that is already a Git checkout keeps its repository and history.
+
 > [!warning]
 > Local history creates a hidden `.git` folder inside the Vault's notes folder to hold its history, and that folder only grows: every image and PDF ever attached stays in it, even after you delete the file from the Vault. On a Vault with large attachments, choose Local history only if you accept that growth.
 
@@ -93,6 +95,8 @@ Two kinds of edit behave differently:
 
 > [!note]
 > "This runs as one step: the Vault pauses, the change saves, and the Vault starts back up. It stays out of the sidebar and All Vaults for that moment." Confirming also clears any stored sign-in token, even if you didn't touch it, so sign in again afterward if the Vault still needs one. If you're moving into Local history, the disk-growth warning above appears again in the same confirmation.
+
+On a managed checkout, a new repository URL, branch or folder means a new clone. Before saving, Hatchdoor commits the notes the old checkout has not committed yet and moves that checkout, whole, into `vaults/<Vault ID>/retired-checkouts/<date and time>` in its state folder. When the Vault starts back up it clones the new repository, and syncing carries on from there. Nothing is deleted. Commits the old remote never received exist only in that archived copy. In Settings, the message after saving says how many there are and where the copy is; an agent's `edit_vault` reports the same in its `retired_checkout` field. If the old notes cannot be committed, the change is refused, nothing moves, and the message says why. This applies even when the new URL names the same repository spelled differently.
 
 If the last step, starting the Vault again, fails, the Vault stays paused and hidden. A banner appears with a **Try to bring this Vault back** button that retries that step alone.
 

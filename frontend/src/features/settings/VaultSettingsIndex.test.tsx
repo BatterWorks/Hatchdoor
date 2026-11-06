@@ -23,6 +23,7 @@ import {
   recoveryBranchName,
   recoveryBranchUrl,
   sameSourceIdentity,
+  savedMessage,
   withIdentityFields,
 } from "./vaultGitBehavior";
 
@@ -145,6 +146,24 @@ afterEach(() => {
 });
 
 describe("pure helpers", () => {
+  it("says where an identity change kept the old checkout and what only it holds", () => {
+    expect(savedMessage(undefined)).toBe("Saved.");
+    const archive = "vaults/v/retired-checkouts/20261106T120000Z";
+    expect(
+      savedMessage({ archive, committed: true, unpushed_commits: 1 }),
+    ).toBe(
+      `Saved. The previous checkout was kept in Hatchdoor's state folder at ${archive}. Notes not yet committed were committed there first. It holds 1 commit the old remote never received.`,
+    );
+    expect(
+      savedMessage({ archive, committed: false, unpushed_commits: 0 }),
+    ).toBe(
+      `Saved. The previous checkout was kept in Hatchdoor's state folder at ${archive}.`,
+    );
+    expect(
+      savedMessage({ archive, committed: false, unpushed_commits: 3 }),
+    ).toContain("It holds 3 commits the old remote never received.");
+  });
+
   it("offers four behaviours on an owned folder, two on a cloned one", () => {
     expect(
       behaviorOptions({ type: "local", path: "/notes" }).map((item) => item.id),

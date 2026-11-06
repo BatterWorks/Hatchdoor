@@ -35,7 +35,7 @@ use crate::git::{
     run_existing_git_recovery_turn, run_existing_git_remote_turn, run_managed_git_commit_turn,
     run_managed_git_turn, run_managed_recovery_turn,
 };
-use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
+use crate::runtime_config::RuntimeConfig;
 use crate::startup::{IndexingParticipant, IndexingProgressSnapshot, StartupTracker};
 use crate::vault_registry::{
     VaultGitMode, VaultId, VaultRegistryState, VaultRegistryStore,
@@ -215,7 +215,7 @@ impl VaultWorkExecutor {
                 // Read per turn, not once at startup, so saving a new author
                 // name or email applies to the next Git turn of every Vault
                 // without its own commit identity — no restart.
-                let (author_name, author_email) = git_author_defaults(&snapshot);
+                let (author_name, author_email) = crate::git::config::author_defaults(&snapshot);
                 dispatch_git_turn(
                     &self.vaults,
                     &self.registry,
@@ -229,7 +229,7 @@ impl VaultWorkExecutor {
             }
             VaultWorkKind::Commit => {
                 // Read per turn for the same reason the Git arm above does.
-                let (author_name, author_email) = git_author_defaults(&snapshot);
+                let (author_name, author_email) = crate::git::config::author_defaults(&snapshot);
                 dispatch_commit_turn(
                     &self.vaults,
                     &self.registry,
@@ -244,7 +244,7 @@ impl VaultWorkExecutor {
             VaultWorkKind::Recovery => {
                 // Read per turn for the same reason the Git arm above does:
                 // a publish commits pending saves before it pushes.
-                let (author_name, author_email) = git_author_defaults(&snapshot);
+                let (author_name, author_email) = crate::git::config::author_defaults(&snapshot);
                 dispatch_recovery_turn(
                     &self.vaults,
                     &self.registry,
@@ -640,18 +640,6 @@ fn index_settled(snapshot: &CollectionVaultSnapshot) -> bool {
         VaultSearchStatus::Ready | VaultSearchStatus::Stale
     ) || snapshot.search_error.is_some()
         || snapshot.activation != VaultActivationStatus::Active
-}
-
-/// The instance-wide default commit identity for a Git turn, read from the
-/// settings snapshot bound to that turn. A Vault's own configured identity
-/// still overrides this (see `crate::git::config::resolve_commit_identity`).
-fn git_author_defaults(snapshot: &ConfigSnapshot) -> (String, String) {
-    (
-        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string()),
-        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string()),
-    )
 }
 
 /// Publish each Vault's place in the indexing lane on its own status, so the
