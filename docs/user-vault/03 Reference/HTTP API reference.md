@@ -138,7 +138,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_GIT_BRANCH` | instant | text |
 
 > [!note]
-> The `HATCHDOOR_GIT_*` keys and `HATCHDOOR_EXCLUDE` are legacy: they configured a single-Vault deployment before the Vault registry existed, and releases 2.5.0 to 2.7.x imported them once. This version no longer imports them. Two of them still do something: `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` sign the commits of a Vault that has no `commit_identity` of its own. `HATCHDOOR_ARCHIVE_PREFIX` is not legacy: it is the archive folder of every Vault that sets no `archive_folder`. For every other legacy key, the Vault's own fields are the only place the setting lives, and nothing here overrides them: `source` (branch, mode, poll interval), `https_credentials` and `exclude_patterns`.
+> The `HATCHDOOR_GIT_*` keys and `HATCHDOOR_EXCLUDE` are legacy: they configured a single-Vault deployment before the Vault registry existed, and releases 2.5.0 to 2.7.x imported them once. This version no longer imports them, and a `PATCH` that sets any of them except the two author keys is refused with `400` and a field error naming the key as retired. They stay in the `GET` response so its shape does not change. Two of them still do something: `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` sign the commits of a Vault that has no `commit_identity` of its own. `HATCHDOOR_ARCHIVE_PREFIX` is not legacy: it is the archive folder of every Vault that sets no `archive_folder`. For every other legacy key, the Vault's own fields are the only place the setting lives, and nothing here overrides them: `source` (branch, mode, poll interval), `https_credentials` and `exclude_patterns`.
 
 ## MCP transport
 

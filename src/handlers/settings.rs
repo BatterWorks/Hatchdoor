@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
 use crate::app_state::{AppState, request_collection_reindex};
-use crate::runtime_config::{ConfigSnapshot, SettingSource};
+use crate::runtime_config::{ConfigSnapshot, RETIRED_SETTINGS, SettingSource};
 
 /// A deliberately generous ceiling: multipart files are buffered while they
 /// are written, so accepting arbitrarily large limits would let one upload
@@ -157,16 +157,15 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
     ("HATCHDOOR_UPDATE_CHECK_ENABLED", "instant", "switch"),
     ("HATCHDOOR_USAGE_REPORT_ENABLED", "instant", "switch"),
-    // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
-    // the schema although #185 deleted the instance-wide lane whose behaviour
-    // they drove and #427 removed the import that consumed them; startup
-    // still purges the retired Git-lane keys from stored settings and refuses
-    // an install that stores any of them without a registry
-    // (`vault_migration.rs`). Two startup checks still parse them — the demo-mode
-    // posture refusal and `HATCHDOOR_EXCLUDE`'s pattern validation, both in
-    // `server.rs` — but nothing reads them per operation. The two author keys
-    // are the exception: the collection lane's Git turns read them per turn as
-    // the commit-identity fallback for a Vault without its own (#181).
+    // `HATCHDOOR_EXCLUDE` above and the `HATCHDOOR_GIT_*` keys below stay in
+    // the document although nothing reads them: #185 deleted the
+    // instance-wide lane they drove, #427 the import that consumed them, and
+    // each Vault keeps its own exclusions. They are listed so the response
+    // shape does not change, but a save refuses them and every start purges
+    // them from stored settings (`runtime_config::RETIRED_SETTINGS`, #644).
+    // The two author keys are the exception: the collection lane's Git turns
+    // read them per turn as the commit-identity fallback for a Vault without
+    // its own (#181).
     ("HATCHDOOR_GIT_SYNC_ENABLED", "instant", "mode"),
     ("HATCHDOOR_GIT_HTTPS_USERNAME", "instant", "text"),
     ("HATCHDOOR_GIT_HTTPS_TOKEN", "instant", "secret"),
@@ -477,23 +476,31 @@ fn settings_response(
     }
 }
 
+/// Why a save of a retired key is refused, naming it as retired.
+fn retired_setting_message(key: &str) -> &'static str {
+    if key == "HATCHDOOR_EXCLUDE" {
+        "This setting is retired and has no effect: each Vault keeps its own exclusion patterns."
+    } else {
+        "This setting is retired and has no effect: each Vault keeps its own Git settings."
+    }
+}
+
 fn validate_updates(
     snapshot: &ConfigSnapshot,
     updates: &BTreeMap<String, String>,
 ) -> Vec<FieldError> {
     let mut errors = Vec::new();
     for (key, value) in updates {
+        // Refused before any other check, so no value of a retired key is
+        // ever stored or queues a reindex (#644).
+        if RETIRED_SETTINGS.contains(&key.as_str()) {
+            errors.push(FieldError::on(key, retired_setting_message(key)));
+            continue;
+        }
         let Some((_, _, kind)) = SETTINGS.iter().find(|(known, ..)| known == key) else {
             errors.push(FieldError::on(key, "This setting is not available."));
             continue;
         };
-        if key == "HATCHDOOR_GIT_BRANCH" {
-            errors.push(FieldError::on(
-                key,
-                "This value is managed by the vault's checked-out branch.",
-            ));
-            continue;
-        }
         if snapshot.setting(key).is_some_and(|setting| setting.pinned) {
             errors.push(FieldError::on(
                 key,
@@ -526,14 +533,6 @@ fn validate_updates(
         }
         if *kind == "switch" && !matches!(value.trim(), "true" | "false") {
             errors.push(FieldError::on(key, "Choose on or off."));
-        }
-        if key == "HATCHDOOR_GIT_SYNC_ENABLED"
-            && !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "off" | "local" | "remote" | "false" | "true" | "0" | "1" | "no" | "yes" | "on"
-            )
-        {
-            errors.push(FieldError::on(key, "Choose off, local, or remote."));
         }
     }
     if updates.keys().any(|key| {
@@ -1245,6 +1244,32 @@ mod tests {
             .len(),
             1,
             "a pinned setting cannot be saved over"
+        );
+    }
+
+    /// #644: a value nothing reads must never be stored, so every retired
+    /// key is refused whatever its value, naming the key as retired.
+    #[test]
+    fn every_retired_setting_is_refused_whatever_its_value() {
+        let config = RuntimeConfig::for_tests();
+        for key in RETIRED_SETTINGS {
+            for value in ["", "off", "local", "remote", "true", "drafts/, notes/[z-a]"] {
+                let errors = validate_updates(
+                    &config.snapshot(),
+                    &BTreeMap::from([(key.to_string(), value.to_string())]),
+                );
+                assert_eq!(errors.len(), 1, "{key}={value}");
+                assert_eq!(errors[0].key.as_deref(), Some(key));
+                assert!(errors[0].message.contains("retired"), "{key}");
+            }
+        }
+        assert!(
+            validate_updates(
+                &config.snapshot(),
+                &BTreeMap::from([("HATCHDOOR_GIT_AUTHOR_NAME".into(), "Me".into())]),
+            )
+            .is_empty(),
+            "the commit-identity fallback is still a live setting"
         );
     }
 

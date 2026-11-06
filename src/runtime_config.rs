@@ -55,6 +55,24 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Keys still in the defaults, so the settings document keeps listing them,
+/// that nothing reads any more: the instance-wide Git lane's inputs (#185,
+/// #427) and `HATCHDOOR_EXCLUDE`, which each Vault's own exclusion patterns
+/// replaced. A save refuses them and every start removes them from stored
+/// settings, because a value nothing reads must never be able to stop the
+/// next start (#644). The two `HATCHDOOR_GIT_AUTHOR_*` keys are absent: the
+/// collection lane's Git turns still read them as the commit-identity
+/// fallback.
+pub const RETIRED_SETTINGS: [&str; 7] = [
+    "HATCHDOOR_EXCLUDE",
+    "HATCHDOOR_GIT_SYNC_ENABLED",
+    "HATCHDOOR_GIT_HTTPS_TOKEN",
+    "HATCHDOOR_GIT_REMOTE",
+    "HATCHDOOR_GIT_BRANCH",
+    "HATCHDOOR_GIT_HTTPS_USERNAME",
+    "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
+];
+
 /// Parse one of the truthy string conventions accepted across live-applicable
 /// boolean settings (`1`, `true`, `yes`, `on`, case-insensitive, surrounding
 /// whitespace ignored). Anything else, including an empty string, is falsy.

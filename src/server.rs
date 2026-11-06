@@ -1259,6 +1259,11 @@ pub async fn run_server() {
         warn!("{message}");
     }
     let startup_snapshot = runtime_config.snapshot();
+    if let Some(message) =
+        crate::vault_migration::stored_retired_settings_warning(&startup_snapshot)
+    {
+        warn!("{message}");
+    }
     // Stated only when it is true of this instance: on a boot with nothing
     // pinned the sentence describes nothing, and running pinned is a
     // legitimate posture rather than something to warn about every start.
@@ -1785,10 +1790,12 @@ mod tests {
             "VAULT_PATH".to_string(),
             "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
             "HATCHDOOR_EXCLUDE".to_string(),
+            "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
         ])
         .expect("stale per-Vault variables are named");
         assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
         assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
+        assert!(message.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{message}");
         assert!(!message.contains("VAULT_PATH"), "{message}");
         assert!(message.contains("Settings"), "{message}");
     }
@@ -6300,7 +6307,7 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"}}"#,
+                        r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"}}"#,
                     ))
                     .expect("request"),
             )
@@ -6326,42 +6333,13 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"},"confirm":["reindex"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_EXCLUDE")
-                .expect("setting")
-                .value,
-            "generated/**"
-        );
-        assert!(
-            state
-                .vault_work
-                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
-            "a confirmed indexing save must request an Index turn for the active Vault"
-        );
-
-        let second_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
                         r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"},"confirm":["reindex"]}"#,
                     ))
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(second_response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             state
                 .runtime_snapshot()
@@ -6370,45 +6348,79 @@ mod tests {
                 .value,
             "false"
         );
+        assert!(
+            state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a confirmed indexing save must request an Index turn for the active Vault"
+        );
     }
 
-    /// #185 deleted the instance-wide Git lane, so the legacy
-    /// `HATCHDOOR_GIT_SYNC_ENABLED` key has no runtime reader. Saving it still
-    /// persists (it stays in the settings schema) but must no longer ask for a consequence confirmation and must no
-    /// longer create a repository as a side effect of a settings save.
+    /// Nothing reads a retired setting, and before #644 a saved value the old
+    /// startup checks refused made the next start exit. A save of one is now
+    /// refused with a field error naming it as retired: nothing is stored, no
+    /// reindex is queued, and no repository is created.
     #[tokio::test]
-    async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
-        let (app, tmp, state) = app_for_tests_with_state();
-        let vault_root = tmp.path().join("legacy-git-mode");
-        std::fs::create_dir_all(&vault_root).expect("create vault directory");
-        assert!(!vault_root.join(".git").exists());
+    async fn saving_a_retired_setting_is_refused_and_stores_nothing() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        let vault_root = tmp.path().join("retired");
+        let vault_id =
+            create_vault_with_files(&app, "Retired", &vault_root, &[("Home.md", "# Home\n")], 0)
+                .await;
+        let vault_id: crate::vault_registry::VaultId = vault_id.parse().expect("Vault id");
+        drain_queued_turns(&mut worker).await;
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+        for (key, body) in [
+            (
+                "HATCHDOOR_GIT_SYNC_ENABLED",
+                r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"remote"}}"#,
+            ),
+            (
+                "HATCHDOOR_EXCLUDE",
+                r#"{"updates":{"HATCHDOOR_EXCLUDE":"drafts/, notes/[z-a]"},"confirm":["reindex"]}"#,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/settings")
+                        .method("PATCH")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["fields"][0]["key"], key);
+            assert!(
+                json["fields"][0]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("retired")),
+                "{json}"
+            );
+            assert_eq!(
+                state
+                    .runtime_snapshot()
+                    .setting(key)
+                    .expect("still listed")
+                    .source,
+                crate::runtime_config::SettingSource::Default,
+                "{key}: nothing is stored"
+            );
+        }
         assert!(
-            !vault_root.join(".git").exists(),
-            "a settings save must not initialize versioning on any directory"
+            !state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a refused save queues no reindex"
         );
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
-                .expect("setting")
-                .value,
-            "local"
-        );
+        assert!(!vault_root.join(".git").exists());
     }
 
     #[tokio::test]

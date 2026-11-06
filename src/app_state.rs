@@ -9,7 +9,6 @@ use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::StartupTracker;
-use crate::vault::VaultScanConfig;
 use crate::vault_registry::{VaultDefinition, VaultRegistryStore};
 use crate::vault_runtime::VaultCollectionRuntime;
 
@@ -149,7 +148,6 @@ impl AppState {
         }
         Self::runtime_archive_prefix(snapshot)
     }
-
 }
 
 /// Build a generic `500` response, logging the real detail rather than leaking

@@ -229,17 +229,6 @@ pub fn parse_port(input: &str) -> Result<u16, String> {
         .map_err(|e| format!("invalid PORT '{input}': {e}"))
 }
 
-/// Split a comma-separated `HATCHDOOR_EXCLUDE` value into individual gitignore
-/// patterns, trimming surrounding whitespace and dropping empty entries so a
-/// trailing comma or accidental double comma does not produce a blank pattern.
-pub fn parse_exclude_patterns(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|pattern| pattern.trim())
-        .filter(|pattern| !pattern.is_empty())
-        .map(|pattern| pattern.to_string())
-        .collect()
-}
-
 pub fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn"));
@@ -479,20 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_exclude_patterns_trims_and_drops_blanks() {
-        assert_eq!(
-            parse_exclude_patterns("build/, *.log ,, !.DS_Store"),
-            vec![
-                "build/".to_string(),
-                "*.log".to_string(),
-                "!.DS_Store".to_string(),
-            ]
-        );
-        assert!(parse_exclude_patterns("   ").is_empty());
-        assert!(parse_exclude_patterns("").is_empty());
-    }
-
-    #[test]
     fn socket_addr_normalizes_every_accepted_loopback_spelling() {
         for (host, expected) in [
             ("127.0.0.1", "127.0.0.1:42824"),
@@ -510,7 +485,6 @@ mod tests {
                 web_bearer_token: None,
                 demo_mode: true,
                 archive_prefix: "90-archive/".to_string(),
-                exclude_patterns: Vec::new(),
                 embed_layers: true,
             };
 
