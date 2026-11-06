@@ -514,10 +514,7 @@ mod tests {
 
         assert_eq!(outcome["isError"], true);
         assert_eq!(
-            state
-                .model_setup
-                .selected()
-                .expect("selection after refusal"),
+            state.model_setup.selected(),
             crate::model_setup::SelectedModel::TermsRequired,
             "a lost MCP lifecycle claim must not persist a choice the runtime did not adopt"
         );

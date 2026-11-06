@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use fastembed::{
@@ -27,6 +27,10 @@ pub struct FastembedEmbedder {
     query_prefix: &'static str,
     document_format: DocumentFormat,
     identity_suffix: &'static str,
+    /// The model repository's commit, when the load pins one. Part of the
+    /// identity, so vectors from another revision are rebuilt, not mixed in
+    /// (#643).
+    revision: Option<&'static str>,
 }
 
 impl FastembedEmbedder {
@@ -74,6 +78,7 @@ impl FastembedEmbedder {
             query_prefix,
             document_format: DocumentFormat::HatchdoorContextual,
             identity_suffix: "",
+            revision: None,
         })
     }
 
@@ -105,8 +110,12 @@ impl FastembedEmbedder {
         )
     }
 
-    pub fn nomic_v1_5_in(cache_dir: PathBuf) -> Result<Self, String> {
-        Self::load_in(
+    /// Nomic v1.5 from `cache_dir`, whose `main` must name `revision`:
+    /// FastEmbed takes no revision and reads `main`. FastEmbed reads `HF_HOME`
+    /// ahead of `cache_dir`, which is why Hatchdoor drops `HF_HOME` at start
+    /// (#643).
+    pub fn nomic_v1_5_in(cache_dir: PathBuf, revision: &'static str) -> Result<Self, String> {
+        let mut embedder = Self::load_in(
             EmbeddingModel::NomicEmbedTextV15,
             768,
             1024,
@@ -114,7 +123,9 @@ impl FastembedEmbedder {
             "search_document: ",
             "search_query: ",
             cache_dir,
-        )
+        )?;
+        embedder.revision = Some(revision);
+        Ok(embedder)
     }
 
     pub fn mxbai_large() -> Result<Self, String> {
@@ -147,7 +158,29 @@ impl FastembedEmbedder {
     /// 2,048-token input limit and supports Matryoshka truncation for the
     /// storage-efficient 256-dimensional evaluation variant.
     pub fn embedding_gemma_300m_q4() -> Result<Self, String> {
-        Self::embedding_gemma_300m_q4_in(fastembed::get_cache_dir().into())
+        const REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
+        let repo = fastembed_repo(REPO, fastembed::get_cache_dir().into())?;
+        Self::load_gemma(|file| {
+            let path = repo
+                .get(file)
+                .map_err(|e| format!("failed to retrieve {REPO}/{file}: {e}"))?;
+            std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))
+        })
+    }
+
+    /// Gemma from the files of one revision's snapshot folder, read by path
+    /// with no network and no lookup through a ref, so what loads is what
+    /// model setup checked (#643).
+    pub fn embedding_gemma_300m_q4_from(
+        snapshot: &Path,
+        revision: &'static str,
+    ) -> Result<Self, String> {
+        let mut embedder = Self::load_gemma(|file| {
+            let path = snapshot.join(file);
+            std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))
+        })?;
+        embedder.revision = Some(revision);
+        Ok(embedder)
     }
 
     /// Loads Gemma from bytes rather than by path. Its weights sit in a second
@@ -156,17 +189,9 @@ impl FastembedEmbedder {
     /// round trip to the host when the models folder is a Docker Desktop
     /// share (#469). Everything FastEmbed's enum route would set for this
     /// model is set here by hand, so the vectors are the same.
-    pub fn embedding_gemma_300m_q4_in(cache_dir: PathBuf) -> Result<Self, String> {
-        const REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
+    fn load_gemma(read: impl Fn(&str) -> Result<Vec<u8>, String>) -> Result<Self, String> {
         const MAX_LENGTH: usize = 2048;
 
-        let repo = fastembed_repo(REPO, cache_dir)?;
-        let read = |file: &str| -> Result<Vec<u8>, String> {
-            let path = repo
-                .get(file)
-                .map_err(|e| format!("failed to retrieve {REPO}/{file}: {e}"))?;
-            std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))
-        };
         let tokenizer_files = TokenizerFiles {
             tokenizer_file: read("tokenizer.json")?,
             config_file: read("config.json")?,
@@ -226,6 +251,7 @@ impl FastembedEmbedder {
             query_prefix,
             document_format: DocumentFormat::HatchdoorContextual,
             identity_suffix: "",
+            revision: None,
         }
     }
 
@@ -283,9 +309,10 @@ impl Embedder for FastembedEmbedder {
 
     fn identity(&self) -> String {
         format!(
-            "{}{}",
+            "{}{}{}",
             embedder_identity(self.id, self.dim, self.max_length),
-            self.identity_suffix
+            self.identity_suffix,
+            revision_marker(self.revision)
         )
     }
 
@@ -319,11 +346,10 @@ impl Embedder for FastembedEmbedder {
     }
 }
 
-/// The repo handle for Gemma's load: `cache_dir` itself, where model setup's
-/// pinned download writes and its integrity record reads, so the load finds
-/// every file on disk and never downloads (#642). `HF_HOME` is deliberately
-/// not read here: it would send the load to a folder the download never
-/// filled. `HF_ENDPOINT` is kept for a direct call outside model setup.
+/// The repo handle for a Gemma load outside model setup (evaluation and the
+/// embedder tests): `cache_dir` itself, never `HF_HOME`, downloading through
+/// `HF_ENDPOINT` what is not cached. Model setup loads Gemma from its checked
+/// snapshot instead (`embedding_gemma_300m_q4_from`, #643).
 fn fastembed_repo(repo_id: &str, cache_dir: PathBuf) -> Result<ApiRepo, String> {
     let endpoint =
         std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
@@ -361,9 +387,17 @@ fn embedder_identity(id: &str, dim: usize, max_length: usize) -> String {
     format!("{id}-{dim}-max{max_length}-fastembed-v5-ctx1")
 }
 
+/// The pinned commit's first 12 characters, last in the identity, so a model
+/// that moves to another revision rebuilds its vectors (#643).
+fn revision_marker(revision: Option<&str>) -> String {
+    revision
+        .map(|revision| format!("-rev-{}", &revision[..revision.len().min(12)]))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod identity_tests {
-    use super::{embedder_identity, gemma_retrieval_document};
+    use super::{embedder_identity, gemma_retrieval_document, revision_marker};
 
     #[test]
     fn identity_marks_the_contextual_embedding_contract() {
@@ -374,6 +408,19 @@ mod identity_tests {
             embedder_identity("NomicEmbedTextV15", 768, 2048),
             "NomicEmbedTextV15-768-max2048-fastembed-v5-ctx1"
         );
+    }
+
+    #[test]
+    fn identity_ends_with_the_pinned_revision() {
+        assert_eq!(
+            format!(
+                "{}{}",
+                embedder_identity("NomicEmbedTextV15", 768, 1024),
+                revision_marker(Some("e9b6763023c676ca8431644204f50c2b100d9aab"))
+            ),
+            "NomicEmbedTextV15-768-max1024-fastembed-v5-ctx1-rev-e9b6763023c6"
+        );
+        assert_eq!(revision_marker(None), "");
     }
 
     #[test]

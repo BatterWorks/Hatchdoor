@@ -21,24 +21,90 @@ pub const GEMMA_TERMS_VERSION: &str = "2026-04-01";
 pub const GEMMA_REPOSITORY: &str = "onnx-community/embeddinggemma-300m-ONNX";
 pub const GEMMA_REVISION: &str = "5090578d9565bb06545b4552f76e6bc2c93e4a66";
 pub const NOMIC_REPOSITORY: &str = "nomic-ai/nomic-embed-text-v1.5";
+/// The Nomic commit every install loads (#643). It was `main` from April
+/// 2026, so a cache FastEmbed filled from `main` since then already holds it.
+pub const NOMIC_REVISION: &str = "e9b6763023c676ca8431644204f50c2b100d9aab";
+
+/// One file a model's load reads, with the SHA-256 of its bytes at the pinned
+/// revision. The large files' digests are Hugging Face's own LFS SHA-256.
+/// For the small files Hugging Face publishes only a Git blob ID, so their
+/// SHA-256 was computed from copies whose Git blob ID matched it.
+#[derive(Clone, Copy, Debug)]
+struct ModelFile {
+    path: &'static str,
+    sha256: &'static str,
+}
+
+/// A model as Hatchdoor loads it: a repository at one commit, and the files
+/// of that commit its load reads.
+#[derive(Clone, Copy, Debug)]
+struct PinnedModel {
+    repository: &'static str,
+    revision: &'static str,
+    files: &'static [ModelFile],
+}
+
 /// What FastEmbed reads for Nomic v1.5 (`EmbeddingModel::NomicEmbedTextV15`
-/// in fastembed 5.17): the ONNX graph and the four tokenizer files. Fetched
-/// up front so the load that follows finds them all on disk.
-const NOMIC_FILES: [&str; 5] = [
-    "onnx/model.onnx",
-    "config.json",
-    "special_tokens_map.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-];
-const GEMMA_FILES: [&str; 6] = [
-    "onnx/model_q4.onnx",
-    "onnx/model_q4.onnx_data",
-    "config.json",
-    "special_tokens_map.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-];
+/// in fastembed 5.17): the ONNX graph and the four tokenizer files.
+const NOMIC: PinnedModel = PinnedModel {
+    repository: NOMIC_REPOSITORY,
+    revision: NOMIC_REVISION,
+    files: &[
+        ModelFile {
+            path: "onnx/model.onnx",
+            sha256: "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965",
+        },
+        ModelFile {
+            path: "config.json",
+            sha256: "9ab00bd92cee80a569f708140b7b6c1661a65891ff3765b1519e181ba2f2c92b",
+        },
+        ModelFile {
+            path: "special_tokens_map.json",
+            sha256: "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
+        },
+        ModelFile {
+            path: "tokenizer.json",
+            sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        },
+        ModelFile {
+            path: "tokenizer_config.json",
+            sha256: "d7e0000bcc80134debd2222220427e6bf5fa20a669f40a0d0d1409cc18e0a9bc",
+        },
+    ],
+};
+
+/// What `FastembedEmbedder::embedding_gemma_300m_q4_from` reads.
+const GEMMA: PinnedModel = PinnedModel {
+    repository: GEMMA_REPOSITORY,
+    revision: GEMMA_REVISION,
+    files: &[
+        ModelFile {
+            path: "onnx/model_q4.onnx",
+            sha256: "ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043",
+        },
+        ModelFile {
+            path: "onnx/model_q4.onnx_data",
+            sha256: "599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02",
+        },
+        ModelFile {
+            path: "config.json",
+            sha256: "6e1f06404b7163e0325ed2ea3e6781cde50f4a50b31780a95ad0d30e8404d77b",
+        },
+        ModelFile {
+            path: "special_tokens_map.json",
+            sha256: "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
+        },
+        ModelFile {
+            path: "tokenizer.json",
+            sha256: "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+        },
+        ModelFile {
+            path: "tokenizer_config.json",
+            sha256: "3ca953eea6c3c9fcda9cf3df22949ff18b216f7c74bd6459230f3f1013953f3a",
+        },
+    ],
+};
+
 /// Enough room for either model plus temporary download files and a fresh
 /// index. The cache is persistent, so setup must fail early rather than leave
 /// a half-written model on a full volume.
@@ -75,17 +141,6 @@ struct AcceptanceRecord {
     model_repository: String,
     model_revision: String,
     hatchdoor_version: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct IntegrityRecord {
-    artifacts: Vec<IntegrityArtifact>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct IntegrityArtifact {
-    path: String,
-    blake3: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,17 +183,20 @@ impl ModelSetup {
         }
     }
 
-    pub fn selected(&self) -> Result<SelectedModel, String> {
-        let selection_path = self.models_dir.join("selection.json");
-        let Ok(bytes) = std::fs::read(selection_path) else {
-            return Ok(SelectedModel::TermsRequired);
+    /// The model this install chose. A missing or unreadable choice, or a
+    /// Gemma choice without a current terms receipt, asks for the choice
+    /// again rather than stopping Hatchdoor (#643).
+    pub fn selected(&self) -> SelectedModel {
+        let Some(selection) = read_record::<SelectionRecord>(
+            &self.models_dir.join("selection.json"),
+            "model selection",
+        ) else {
+            return SelectedModel::TermsRequired;
         };
-        let selection: SelectionRecord = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("invalid local model selection: {error}"))?;
         match selection.selected.as_str() {
-            "gemma" if self.acceptance_is_current()? => Ok(SelectedModel::Gemma),
-            "nomic" => Ok(SelectedModel::Nomic),
-            _ => Ok(SelectedModel::TermsRequired),
+            "gemma" if self.acceptance_is_current() => SelectedModel::Gemma,
+            "nomic" => SelectedModel::Nomic,
+            _ => SelectedModel::TermsRequired,
         }
     }
 
@@ -168,26 +226,72 @@ impl ModelSetup {
         self.write_selection("nomic")
     }
 
-    /// Prepare a persistent model directory for an interrupted download to
-    /// resume safely. A changed cached artifact is removed before FastEmbed is
-    /// allowed to use it; a missing manifest simply means this is the first
-    /// download.
-    pub fn prepare_download(&self, selected: SelectedModel) -> Result<(), String> {
-        let dir = self.model_cache_dir(selected);
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| format!("create model directory: {error}"))?;
-        let available = available_bytes(&dir)?;
-        if available < MIN_SETUP_FREE_BYTES {
-            return Err(format!(
-                "not enough free space for model setup: {} MB available, at least {} MB required",
-                available / (1024 * 1024),
-                MIN_SETUP_FREE_BYTES / (1024 * 1024)
-            ));
+    /// Check the cached model before setup uses it. A cache whose files all
+    /// match their known digests is returned `Valid` and needs no download. A
+    /// changed file is removed with the rest of the cache, so it is fetched
+    /// again before FastEmbed can use it, and the answer is then `Missing`.
+    /// Only a cache that needs a download must find
+    /// [`MIN_SETUP_FREE_BYTES`] free (#643).
+    pub fn prepare_download(&self, selected: SelectedModel) -> Result<CacheIntegrity, String> {
+        prepare_cache(
+            &self.model_cache_dir(selected),
+            pinned(selected)?,
+            MIN_SETUP_FREE_BYTES,
+        )
+    }
+
+    /// The folder holding the selected model's files at its pinned revision,
+    /// the paths its load opens.
+    pub fn snapshot_dir(&self, selected: SelectedModel) -> Result<PathBuf, String> {
+        Ok(snapshot_dir(
+            &self.model_cache_dir(selected),
+            pinned(selected)?,
+        ))
+    }
+
+    /// Check every file the selected model's load reads against the digest
+    /// Hatchdoor ships for it, through the paths the load opens.
+    fn verify_cache(&self, selected: SelectedModel) -> Result<CacheIntegrity, String> {
+        let model = pinned(selected)?;
+        verify_snapshot(&snapshot_dir(&self.model_cache_dir(selected), model), model)
+    }
+
+    /// Refuse a download that did not leave exactly the pinned files, before
+    /// anything loads them (#643).
+    pub fn verify_download(&self, selected: SelectedModel) -> Result<(), String> {
+        let model = pinned(selected)?;
+        match self.verify_cache(selected)? {
+            CacheIntegrity::Valid => Ok(()),
+            CacheIntegrity::Missing => Err(format!(
+                "model files for {} are missing after the download",
+                model.repository
+            )),
+            CacheIntegrity::Invalid => Err(format!(
+                "model files for {} do not match their known digests",
+                model.repository
+            )),
         }
-        if self.verify_integrity(selected)? == CacheIntegrity::Invalid {
-            self.remove_downloaded_artifacts(selected)?;
+    }
+
+    /// Point the cache's `main` at the pinned commit. FastEmbed's Nomic load
+    /// takes no revision and reads `main`, so this is what keeps it on the
+    /// files [`Self::verify_cache`] checked. A ref already right is left
+    /// alone, so a valid cache on a full volume is not written to, and a
+    /// failed write cannot send setup into resetting a good cache.
+    pub fn point_main_at_pinned_revision(&self, selected: SelectedModel) -> Result<(), String> {
+        let model = pinned(selected)?;
+        let main = self
+            .model_cache_dir(selected)
+            .join(Repo::model(model.repository.to_string()).folder_name())
+            .join("refs")
+            .join("main");
+        if std::fs::read_to_string(&main).is_ok_and(|current| current.trim() == model.revision) {
+            return Ok(());
         }
-        Ok(())
+        Cache::new(self.model_cache_dir(selected))
+            .repo(Repo::model(model.repository.to_string()))
+            .create_ref(model.revision)
+            .map_err(|error| format!("point the model cache at the pinned revision: {error}"))
     }
 
     /// Download every file the selected model's load reads, so the load
@@ -202,7 +306,6 @@ impl ModelSetup {
         let source = DownloadSource {
             endpoint: std::env::var("HF_ENDPOINT")
                 .unwrap_or_else(|_| "https://huggingface.co".to_string()),
-            hf_home: std::env::var("HF_HOME").ok().map(PathBuf::from),
         };
         self.fetch_model_from(selected, &source, report)
     }
@@ -213,70 +316,12 @@ impl ModelSetup {
         source: &DownloadSource,
         report: Arc<dyn Fn(u64, u64) + Send + Sync>,
     ) -> Result<(), String> {
-        match selected {
-            SelectedModel::Gemma => self.fetch_gemma_at_pinned_revision(source, report),
-            SelectedModel::Nomic => self.fetch_nomic(source, report),
-            SelectedModel::TermsRequired => Err("model terms have not been accepted".to_string()),
-        }
-    }
-
-    /// Download every artifact FastEmbed needs through a fixed Gemma revision,
-    /// then point FastEmbed's normal `main` cache lookup at that immutable
-    /// snapshot. FastEmbed itself does not expose a revision option.
-    fn fetch_gemma_at_pinned_revision(
-        &self,
-        source: &DownloadSource,
-        report: Arc<dyn Fn(u64, u64) + Send + Sync>,
-    ) -> Result<(), String> {
-        let cache_dir = self.model_cache_dir(SelectedModel::Gemma);
-        let api = source.client(cache_dir.clone())?;
-        let pinned_repo = Repo::with_revision(
-            GEMMA_REPOSITORY.to_string(),
-            RepoType::Model,
-            GEMMA_REVISION.to_string(),
-        );
-        let cached = Cache::new(cache_dir.clone()).repo(pinned_repo.clone());
-        let pinned = api.repo(pinned_repo);
-        for file in GEMMA_FILES {
-            if cached.get(file).is_none() {
-                pinned
-                    .download_with_progress(file, ModelDownloadProgress::new(report.clone()))
-                    .map_err(|error| format!("download Gemma artifact {file}: {error}"))?;
-            }
-        }
-        // FastEmbed uses Repo::model (revision "main"). Its cache supports a
-        // local ref, so write `main -> <pinned commit>` only after every needed
-        // artifact landed in the snapshot.
-        Cache::new(cache_dir)
-            .repo(Repo::model(GEMMA_REPOSITORY.to_string()))
-            .create_ref(GEMMA_REVISION)
-            .map_err(|error| format!("activate pinned Gemma snapshot: {error}"))
-    }
-
-    /// Download Nomic's files into the cache FastEmbed's own lookup reads:
-    /// `HF_HOME` when set, as FastEmbed resolves it, else the model's
-    /// directory, at revision `main`.
-    fn fetch_nomic(
-        &self,
-        source: &DownloadSource,
-        report: Arc<dyn Fn(u64, u64) + Send + Sync>,
-    ) -> Result<(), String> {
-        let cache_dir = source
-            .hf_home
-            .clone()
-            .unwrap_or_else(|| self.model_cache_dir(SelectedModel::Nomic));
-        let api = source.client(cache_dir.clone())?;
-        let repo = Repo::model(NOMIC_REPOSITORY.to_string());
-        let cached = Cache::new(cache_dir).repo(repo.clone());
-        let remote = api.repo(repo);
-        for file in NOMIC_FILES {
-            if cached.get(file).is_none() {
-                remote
-                    .download_with_progress(file, ModelDownloadProgress::new(report.clone()))
-                    .map_err(|error| format!("download Nomic artifact {file}: {error}"))?;
-            }
-        }
-        Ok(())
+        fetch_pinned(
+            &self.model_cache_dir(selected),
+            pinned(selected)?,
+            source,
+            report,
+        )
     }
 
     /// The command that runs [`Self::fetch_model`] in a child copy of this
@@ -320,94 +365,21 @@ impl ModelSetup {
         Ok(command)
     }
 
-    /// Record all downloaded regular files after a successful load. The next
-    /// startup verifies these BLAKE3 digests before reusing the local cache.
-    pub fn record_integrity(&self, selected: SelectedModel) -> Result<(), String> {
-        let dir = self.model_cache_dir(selected);
-        let mut artifacts = Vec::new();
-        for entry in walkdir::WalkDir::new(&dir) {
-            let entry = entry.map_err(|error| format!("walk model cache: {error}"))?;
-            if !entry.file_type().is_file() || is_local_metadata(entry.path()) {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(&dir)
-                .map_err(|error| format!("model cache relative path: {error}"))?
-                .to_string_lossy()
-                .into_owned();
-            artifacts.push(IntegrityArtifact {
-                path: relative,
-                blake3: file_blake3(entry.path())?,
-            });
-        }
-        artifacts.sort_by(|left, right| left.path.cmp(&right.path));
-        if artifacts.is_empty() {
-            return Err("model download completed without cache artifacts".to_string());
-        }
-        write_json_atomic(&dir.join("integrity.json"), &IntegrityRecord { artifacts })
-    }
-
-    pub fn verify_integrity(&self, selected: SelectedModel) -> Result<CacheIntegrity, String> {
-        let dir = self.model_cache_dir(selected);
-        let path = dir.join("integrity.json");
-        let Ok(bytes) = std::fs::read(path) else {
-            return Ok(CacheIntegrity::Missing);
-        };
-        let record: IntegrityRecord = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("invalid model integrity record: {error}"))?;
-        if record.artifacts.is_empty() {
-            return Ok(CacheIntegrity::Invalid);
-        }
-        for artifact in record.artifacts {
-            let path = dir.join(&artifact.path);
-            if !path.is_file() || file_blake3(&path)? != artifact.blake3 {
-                return Ok(CacheIntegrity::Invalid);
-            }
-        }
-        Ok(CacheIntegrity::Valid)
-    }
-
     /// Discard downloaded artifacts while retaining a Gemma acceptance receipt.
     /// Used after an unrecoverable first attempt before one clean retry.
     pub fn reset_download_cache(&self, selected: SelectedModel) -> Result<(), String> {
-        self.remove_downloaded_artifacts(selected)
+        remove_downloaded_artifacts(&self.model_cache_dir(selected))
     }
 
-    fn remove_downloaded_artifacts(&self, selected: SelectedModel) -> Result<(), String> {
-        let dir = self.model_cache_dir(selected);
-        for entry in
-            std::fs::read_dir(&dir).map_err(|error| format!("read corrupt model cache: {error}"))?
-        {
-            let entry =
-                entry.map_err(|error| format!("read corrupt model cache entry: {error}"))?;
-            let path = entry.path();
-            if is_local_metadata(&path) {
-                continue;
-            }
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-                    .map_err(|error| format!("remove corrupt model cache: {error}"))?;
-            } else {
-                std::fs::remove_file(&path)
-                    .map_err(|error| format!("remove corrupt model artifact: {error}"))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn acceptance_is_current(&self) -> Result<bool, String> {
+    fn acceptance_is_current(&self) -> bool {
         let path = self
             .model_cache_dir(SelectedModel::Gemma)
             .join("acceptance.json");
-        let Ok(bytes) = std::fs::read(path) else {
-            return Ok(false);
-        };
-        let receipt: AcceptanceRecord = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("invalid Gemma acceptance receipt: {error}"))?;
-        Ok(receipt.terms_version == GEMMA_TERMS_VERSION
-            && receipt.model_repository == GEMMA_REPOSITORY
-            && receipt.model_revision == GEMMA_REVISION)
+        read_record::<AcceptanceRecord>(&path, "Gemma terms receipt").is_some_and(|receipt| {
+            receipt.terms_version == GEMMA_TERMS_VERSION
+                && receipt.model_repository == GEMMA_REPOSITORY
+                && receipt.model_revision == GEMMA_REVISION
+        })
     }
 
     fn write_selection(&self, selected: &str) -> Result<(), String> {
@@ -422,11 +394,11 @@ impl ModelSetup {
     }
 }
 
-/// Where model files come from: `HF_ENDPOINT` and `HF_HOME` as FastEmbed's
-/// own lookup reads them, so the load finds what the download wrote.
+/// Where model files come from: `HF_ENDPOINT`. They always land in the
+/// model's own folder under the models directory, whatever `HF_HOME` says
+/// (#643).
 struct DownloadSource {
     endpoint: String,
-    hf_home: Option<PathBuf>,
 }
 
 impl DownloadSource {
@@ -437,6 +409,185 @@ impl DownloadSource {
             .with_progress(false)
             .build()
             .map_err(|error| format!("create Hugging Face download client: {error}"))
+    }
+}
+
+fn pinned(selected: SelectedModel) -> Result<&'static PinnedModel, String> {
+    match selected {
+        SelectedModel::Gemma => Ok(&GEMMA),
+        SelectedModel::Nomic => Ok(&NOMIC),
+        SelectedModel::TermsRequired => Err("model terms have not been accepted".to_string()),
+    }
+}
+
+/// `<cache>/models--<owner>--<name>/snapshots/<revision>`, as `hf-hub` lays
+/// a revision out.
+fn snapshot_dir(cache_dir: &Path, model: &PinnedModel) -> PathBuf {
+    Cache::new(cache_dir.to_path_buf())
+        .repo(Repo::with_revision(
+            model.repository.to_string(),
+            RepoType::Model,
+            model.revision.to_string(),
+        ))
+        .pointer_path(model.revision)
+}
+
+/// Download every file of `model` that its snapshot does not hold yet. The
+/// presence check reads the snapshot itself rather than a ref, so a cache
+/// FastEmbed filled under `main` is reused as it is.
+fn fetch_pinned(
+    cache_dir: &Path,
+    model: &PinnedModel,
+    source: &DownloadSource,
+    report: Arc<dyn Fn(u64, u64) + Send + Sync>,
+) -> Result<(), String> {
+    let snapshot = snapshot_dir(cache_dir, model);
+    let api = source.client(cache_dir.to_path_buf())?;
+    let remote = api.repo(Repo::with_revision(
+        model.repository.to_string(),
+        RepoType::Model,
+        model.revision.to_string(),
+    ));
+    for file in model.files {
+        if !snapshot.join(file.path).exists() {
+            remote
+                .download_with_progress(file.path, ModelDownloadProgress::new(report.clone()))
+                .map_err(|error| {
+                    format!(
+                        "download {} artifact {}: {error}",
+                        model.repository, file.path
+                    )
+                })?;
+        }
+    }
+    Ok(())
+}
+
+/// Hash every file of `model` through `snapshot`, the paths its load opens,
+/// following the links `hf-hub` leaves there. A file whose bytes differ, a
+/// link that leads nowhere, or a regular file the model does not list makes
+/// the cache `Invalid`; a file not downloaded yet makes it `Missing`.
+fn verify_snapshot(snapshot: &Path, model: &PinnedModel) -> Result<CacheIntegrity, String> {
+    if !snapshot.is_dir() {
+        return Ok(CacheIntegrity::Missing);
+    }
+    let mut missing = false;
+    for file in model.files {
+        let path = snapshot.join(file.path);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                if file_sha256(&path)? != file.sha256 {
+                    return Ok(CacheIntegrity::Invalid);
+                }
+            }
+            Ok(_) => return Ok(CacheIntegrity::Invalid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(&path).is_ok() {
+                    // A link whose target is gone: `hf-hub` cannot replace it.
+                    return Ok(CacheIntegrity::Invalid);
+                }
+                missing = true;
+            }
+            Err(error) => {
+                return Err(format!("read model artifact {}: {error}", path.display()));
+            }
+        }
+    }
+    for entry in walkdir::WalkDir::new(snapshot).min_depth(1) {
+        let entry = entry.map_err(|error| format!("walk model cache: {error}"))?;
+        // Hidden files, such as the `.DS_Store` and `._name` files macOS
+        // leaves on a shared folder, are nothing a load opens.
+        if !entry.file_type().is_file() || entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let listed = entry.path().strip_prefix(snapshot).is_ok_and(|relative| {
+            model
+                .files
+                .iter()
+                .any(|file| Path::new(file.path) == relative)
+        });
+        if !listed {
+            return Ok(CacheIntegrity::Invalid);
+        }
+    }
+    Ok(if missing {
+        CacheIntegrity::Missing
+    } else {
+        CacheIntegrity::Valid
+    })
+}
+
+/// Make `dir` ready for setup: drop the record older versions kept, check
+/// the cache against `model`, and remove it whole when a file does not match,
+/// so it is fetched again before anything loads it. Free space is checked
+/// only when a download will follow (#643).
+fn prepare_cache(
+    dir: &Path,
+    model: &PinnedModel,
+    min_free_bytes: u64,
+) -> Result<CacheIntegrity, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("create model directory: {error}"))?;
+    // The digests a first load recorded, before Hatchdoor shipped its own
+    // (#643). Nothing reads it any more.
+    let _ = std::fs::remove_file(dir.join(LEGACY_INTEGRITY_RECORD));
+    let mut integrity = verify_snapshot(&snapshot_dir(dir, model), model)?;
+    if integrity == CacheIntegrity::Invalid {
+        remove_downloaded_artifacts(dir)?;
+        integrity = CacheIntegrity::Missing;
+    }
+    if integrity == CacheIntegrity::Valid {
+        return Ok(integrity);
+    }
+    let available = available_bytes(dir)?;
+    if available < min_free_bytes {
+        return Err(format!(
+            "not enough free space for model setup: {} MB available, at least {} MB required",
+            available / (1024 * 1024),
+            min_free_bytes / (1024 * 1024)
+        ));
+    }
+    Ok(integrity)
+}
+
+/// Remove everything downloaded into `dir`, keeping a Gemma terms receipt.
+fn remove_downloaded_artifacts(dir: &Path) -> Result<(), String> {
+    for entry in
+        std::fs::read_dir(dir).map_err(|error| format!("read corrupt model cache: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("read corrupt model cache entry: {error}"))?;
+        let path = entry.path();
+        if is_local_metadata(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|error| format!("remove corrupt model cache: {error}"))?;
+        } else {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("remove corrupt model artifact: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Read one of the small JSON records setup keeps. A record that is missing
+/// reads as absent; one that cannot be read or parsed, as after a power cut
+/// mid-write, is logged and also reads as absent (#643).
+fn read_record<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Option<T> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!("Could not read the {what} at {}: {error}", path.display());
+            return None;
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(record) => Some(record),
+        Err(error) => {
+            tracing::warn!("Ignoring the damaged {what} at {}: {error}", path.display());
+            None
+        }
     }
 }
 
@@ -669,18 +820,18 @@ pub fn run_fetch_child(args: &[String], out: impl Write + Send + 'static) -> i32
     }
 }
 
+/// The record a first load wrote before #643, removed when found.
+const LEGACY_INTEGRITY_RECORD: &str = "integrity.json";
+
 fn is_local_metadata(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("acceptance.json" | "integrity.json")
-    )
+    path.file_name().and_then(|name| name.to_str()) == Some("acceptance.json")
 }
 
-fn file_blake3(path: &Path) -> Result<String, String> {
+fn file_sha256(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("open model artifact {}: {error}", path.display()))?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -688,9 +839,14 @@ fn file_blake3(path: &Path) -> Result<String, String> {
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        context.update(&buffer[..read]);
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(context
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn available_bytes(path: &Path) -> Result<u64, String> {
@@ -751,14 +907,33 @@ impl Progress for ModelDownloadProgress {
     }
 }
 
+/// Replace a setup record so a power cut leaves the old record or the new
+/// one, never an empty file: the bytes reach the disk before the rename, and
+/// the rename reaches it before this returns (#643).
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| format!("encode json: {error}"))?;
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, bytes)
-        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        file.write_all(&bytes)?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("write {}: {error}", temporary.display()));
+    }
     std::fs::rename(&temporary, path)
-        .map_err(|error| format!("replace {}: {error}", path.display()))
+        .map_err(|error| format!("replace {}: {error}", path.display()))?;
+    // The new record is in place either way; a filesystem that cannot
+    // flush a folder, as some network shares cannot, only loses that
+    // guarantee, so the save still counts as done.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all())
+    {
+        tracing::warn!("Could not flush {}: {error}", parent.display());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -769,9 +944,7 @@ mod tests {
     fn fresh_model_directory_requires_gemma_terms() {
         let temp = tempfile::tempdir().expect("tempdir");
         assert_eq!(
-            ModelSetup::new(temp.path().join("models"))
-                .selected()
-                .unwrap(),
+            ModelSetup::new(temp.path().join("models")).selected(),
             SelectedModel::TermsRequired
         );
     }
@@ -781,7 +954,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let setup = ModelSetup::new(temp.path().join("models"));
         setup.accept_gemma().expect("accept");
-        assert_eq!(setup.selected().unwrap(), SelectedModel::Gemma);
+        assert_eq!(setup.selected(), SelectedModel::Gemma);
         let receipt = setup
             .model_cache_dir(SelectedModel::Gemma)
             .join("acceptance.json");
@@ -800,35 +973,13 @@ mod tests {
         std::fs::write(gemma_root.join("partial.onnx"), "partial").expect("partial file");
         setup.decline_gemma().expect("decline");
         assert!(!gemma_root.exists());
-        assert_eq!(setup.selected().unwrap(), SelectedModel::Nomic);
-    }
-
-    #[test]
-    fn integrity_manifest_detects_a_changed_cached_artifact() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let setup = ModelSetup::new(temp.path().join("models"));
-        let dir = setup.model_cache_dir(SelectedModel::Nomic);
-        std::fs::create_dir_all(&dir).expect("model dir");
-        let artifact = dir.join("model.onnx");
-        std::fs::write(&artifact, "original model bytes").expect("artifact");
-        setup
-            .record_integrity(SelectedModel::Nomic)
-            .expect("integrity record");
-        assert_eq!(
-            setup.verify_integrity(SelectedModel::Nomic).unwrap(),
-            CacheIntegrity::Valid
-        );
-
-        std::fs::write(artifact, "corrupt bytes").expect("corrupt artifact");
-        assert_eq!(
-            setup.verify_integrity(SelectedModel::Nomic).unwrap(),
-            CacheIntegrity::Invalid
-        );
+        assert_eq!(setup.selected(), SelectedModel::Nomic);
     }
 
     /// A stand-in for the Hugging Face file server: every `resolve` request
     /// gets `body` (a per-path ETag, Range honoured), with the headers hf-hub
-    /// reads. Returns its address and how many requests it has answered.
+    /// reads, the commit being the revision the request named. Returns its
+    /// address and how many requests it has answered.
     fn serve_model_files(body: &'static [u8]) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::Write as _;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -845,6 +996,8 @@ mod tests {
                     continue;
                 }
                 let path = request_line.split(' ').nth(1).unwrap_or("").to_string();
+                // `/<owner>/<name>/resolve/<revision>/<file>`
+                let commit = path.split('/').nth(4).unwrap_or("main").to_string();
                 let mut start = 0usize;
                 let mut end = body.len() - 1;
                 loop {
@@ -865,7 +1018,7 @@ mod tests {
                 let slice = &body[start..=end];
                 let etag = format!("{:x}", path.bytes().map(u64::from).sum::<u64>());
                 let head = format!(
-                    "HTTP/1.1 206 Partial Content\r\netag: \"{etag}\"\r\nx-repo-commit: 0123456789abcdef\r\ncontent-range: bytes {start}-{end}/{}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    "HTTP/1.1 206 Partial Content\r\netag: \"{etag}\"\r\nx-repo-commit: {commit}\r\ncontent-range: bytes {start}-{end}/{}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len(),
                     slice.len()
                 );
@@ -876,19 +1029,244 @@ mod tests {
         (address, requests)
     }
 
-    /// Nomic's files land where FastEmbed's own lookup (`Repo::model`,
-    /// revision `main`) finds them, so its load needs no network, and a
-    /// second setup fetches nothing (#642).
+    fn sha256_hex(bytes: &[u8]) -> String {
+        ring::digest::digest(&ring::digest::SHA256, bytes)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// A two-file model whose known digests are those of `body`, the bytes
+    /// [`serve_model_files`] serves, so tests can download and verify it with
+    /// no request leaving the machine.
+    fn test_model(body: &[u8]) -> PinnedModel {
+        let digest: &'static str = Box::leak(sha256_hex(body).into_boxed_str());
+        let files: &'static [ModelFile] = Box::leak(Box::new([
+            ModelFile {
+                path: "onnx/model.onnx",
+                sha256: digest,
+            },
+            ModelFile {
+                path: "tokenizer.json",
+                sha256: digest,
+            },
+        ]));
+        PinnedModel {
+            repository: "test-owner/test-model",
+            revision: "1111111111111111111111111111111111111111",
+            files,
+        }
+    }
+
+    const BODY: &[u8] = b"model bytes";
+
+    /// A cache downloaded through `hf-hub`'s own layout: blobs, and links to
+    /// them under `snapshots/<revision>`.
+    fn downloaded_cache(dir: &Path, model: &PinnedModel) -> PathBuf {
+        let (endpoint, _) = serve_model_files(BODY);
+        fetch_pinned(
+            dir,
+            model,
+            &DownloadSource { endpoint },
+            Arc::new(|_, _| {}),
+        )
+        .expect("fetch");
+        let snapshot = snapshot_dir(dir, model);
+        assert_eq!(
+            verify_snapshot(&snapshot, model).unwrap(),
+            CacheIntegrity::Valid
+        );
+        snapshot
+    }
+
+    /// Every file both models load has a SHA-256 shipped with Hatchdoor.
     #[test]
-    fn nomic_fetch_fills_the_cache_fastembed_reads() {
+    fn both_models_ship_a_digest_for_every_file() {
+        for model in [&NOMIC, &GEMMA] {
+            assert_eq!(model.revision.len(), 40, "{}", model.repository);
+            for file in model.files {
+                assert_eq!(file.sha256.len(), 64, "{}", file.path);
+                assert!(
+                    file.sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                    "{}",
+                    file.path
+                );
+            }
+        }
+    }
+
+    /// With no record of earlier loads at all, a file with one byte changed
+    /// is refused against the shipped digest, and removed so it is fetched
+    /// again (#643, SB-06).
+    #[test]
+    fn a_changed_byte_is_refused_without_any_earlier_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let model = test_model(BODY);
+        let snapshot = downloaded_cache(temp.path(), &model);
+        let tokenizer = snapshot.join("tokenizer.json");
+        std::fs::write(&tokenizer, b"model bytez").expect("change a byte");
+
+        assert_eq!(
+            verify_snapshot(&snapshot, &model).unwrap(),
+            CacheIntegrity::Invalid
+        );
+        assert_eq!(
+            prepare_cache(temp.path(), &model, 0).unwrap(),
+            CacheIntegrity::Missing
+        );
+        assert!(!snapshot.exists(), "the changed cache was removed");
+    }
+
+    /// A snapshot link replaced by a regular file is checked like the link:
+    /// by its bytes. A file the model does not list makes the cache invalid
+    /// too, and so does a link to nothing (#643, SB-07).
+    #[test]
+    fn snapshot_entries_are_checked_through_the_paths_the_load_opens() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let model = test_model(BODY);
+        let snapshot = downloaded_cache(temp.path(), &model);
+        let tokenizer = snapshot.join("tokenizer.json");
+        assert!(
+            tokenizer
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        std::fs::remove_file(&tokenizer).expect("remove link");
+        std::fs::write(&tokenizer, b"lowercase: false").expect("regular file");
+        assert_eq!(
+            verify_snapshot(&snapshot, &model).unwrap(),
+            CacheIntegrity::Invalid
+        );
+
+        std::fs::write(&tokenizer, BODY).expect("same bytes");
+        assert_eq!(
+            verify_snapshot(&snapshot, &model).unwrap(),
+            CacheIntegrity::Valid
+        );
+
+        std::fs::write(snapshot.join("added.json"), b"{}").expect("unlisted file");
+        assert_eq!(
+            verify_snapshot(&snapshot, &model).unwrap(),
+            CacheIntegrity::Invalid
+        );
+        std::fs::remove_file(snapshot.join("added.json")).expect("remove unlisted");
+        std::fs::write(snapshot.join(".DS_Store"), b"finder").expect("hidden file");
+        assert_eq!(
+            verify_snapshot(&snapshot, &model).unwrap(),
+            CacheIntegrity::Valid
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&tokenizer).expect("remove file");
+            std::os::unix::fs::symlink("../../blobs/gone", &tokenizer).expect("dangling link");
+            assert_eq!(
+                verify_snapshot(&snapshot, &model).unwrap(),
+                CacheIntegrity::Invalid
+            );
+        }
+    }
+
+    /// A partial download is missing, not invalid, so it resumes.
+    #[test]
+    fn a_partial_download_is_missing_and_resumes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let model = test_model(BODY);
+        assert_eq!(
+            verify_snapshot(&snapshot_dir(temp.path(), &model), &model).unwrap(),
+            CacheIntegrity::Missing
+        );
+        let snapshot = downloaded_cache(temp.path(), &model);
+        std::fs::remove_file(snapshot.join("tokenizer.json")).expect("remove");
+        assert_eq!(
+            verify_snapshot(&snapshot, &model).unwrap(),
+            CacheIntegrity::Missing
+        );
+        assert!(snapshot.join("onnx/model.onnx").exists());
+    }
+
+    /// The record older versions kept is removed, empty or not, and never
+    /// stops setup: a damaged file is fetched again through the test double
+    /// and the cache ends valid (#643, SB-04).
+    #[test]
+    fn an_empty_legacy_record_does_not_stop_a_refetch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let model = test_model(BODY);
+        let snapshot = downloaded_cache(temp.path(), &model);
+        std::fs::write(temp.path().join(LEGACY_INTEGRITY_RECORD), b"").expect("empty record");
+        std::fs::write(snapshot.join("onnx/model.onnx"), b"truncated").expect("damage");
+
+        assert_eq!(
+            prepare_cache(temp.path(), &model, 0).unwrap(),
+            CacheIntegrity::Missing
+        );
+        assert!(!temp.path().join(LEGACY_INTEGRITY_RECORD).exists());
+        let (endpoint, _) = serve_model_files(BODY);
+        fetch_pinned(
+            temp.path(),
+            &model,
+            &DownloadSource { endpoint },
+            Arc::new(|_, _| {}),
+        )
+        .expect("refetch");
+        assert_eq!(
+            prepare_cache(temp.path(), &model, 0).unwrap(),
+            CacheIntegrity::Valid
+        );
+    }
+
+    /// An empty selection or terms receipt, as a power cut mid-write left
+    /// before records were flushed, asks for the choice again (#643, SB-04).
+    #[test]
+    fn damaged_choice_records_ask_for_the_choice_again() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let setup = ModelSetup::new(temp.path().join("models"));
+        std::fs::create_dir_all(setup.models_dir()).expect("models dir");
+        std::fs::write(setup.models_dir().join("selection.json"), b"").expect("empty");
+        assert_eq!(setup.selected(), SelectedModel::TermsRequired);
+
+        setup.accept_gemma().expect("accept");
+        assert_eq!(setup.selected(), SelectedModel::Gemma);
+        let receipt = setup
+            .model_cache_dir(SelectedModel::Gemma)
+            .join("acceptance.json");
+        std::fs::write(&receipt, b"").expect("empty receipt");
+        assert_eq!(setup.selected(), SelectedModel::TermsRequired);
+    }
+
+    /// The free-space floor guards downloads only: a valid cache is used
+    /// whatever the free space, and a cache that needs a download is still
+    /// refused below the floor (#643, SB-05).
+    #[test]
+    fn the_free_space_floor_applies_only_to_a_download() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let model = test_model(BODY);
+        downloaded_cache(temp.path(), &model);
+        assert_eq!(
+            prepare_cache(temp.path(), &model, u64::MAX).unwrap(),
+            CacheIntegrity::Valid
+        );
+
+        let empty = tempfile::tempdir().expect("tempdir");
+        let refused = prepare_cache(empty.path(), &model, u64::MAX).expect_err("no room");
+        assert!(refused.contains("not enough free space"), "{refused}");
+    }
+
+    /// Nomic downloads at its pinned revision into the snapshot setup checks,
+    /// and a second setup fetches nothing (#642, #643).
+    #[test]
+    fn nomic_fetch_fills_the_pinned_snapshot() {
         use std::sync::atomic::Ordering;
         let temp = tempfile::tempdir().expect("tempdir");
         let setup = ModelSetup::new(temp.path().join("models"));
-        let (endpoint, requests) = serve_model_files(b"model bytes");
-        let source = DownloadSource {
-            endpoint,
-            hf_home: None,
-        };
+        let (endpoint, requests) = serve_model_files(BODY);
+        let source = DownloadSource { endpoint };
         let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
         let report = {
             let reported = reported.clone();
@@ -899,19 +1277,112 @@ mod tests {
             .fetch_model_from(SelectedModel::Nomic, &source, report.clone())
             .expect("fetch");
 
-        let cached = Cache::new(setup.model_cache_dir(SelectedModel::Nomic))
-            .repo(Repo::model(NOMIC_REPOSITORY.to_string()));
-        for file in NOMIC_FILES {
-            let path = cached.get(file).unwrap_or_else(|| panic!("{file} cached"));
-            assert_eq!(std::fs::read(path).expect("read"), b"model bytes");
+        let snapshot = setup.snapshot_dir(SelectedModel::Nomic).expect("snapshot");
+        assert!(snapshot.ends_with(format!("snapshots/{NOMIC_REVISION}")));
+        for file in NOMIC.files {
+            assert_eq!(
+                std::fs::read(snapshot.join(file.path)).expect("read"),
+                BODY,
+                "{}",
+                file.path
+            );
         }
         assert!(reported.lock().unwrap().contains(&(11, 11)));
+        // The test double's bytes are not Nomic's.
+        assert_eq!(
+            setup.verify_cache(SelectedModel::Nomic).unwrap(),
+            CacheIntegrity::Invalid
+        );
+        assert!(setup.verify_download(SelectedModel::Nomic).is_err());
 
         let answered = requests.load(Ordering::SeqCst);
         setup
             .fetch_model_from(SelectedModel::Nomic, &source, report)
             .expect("second fetch");
         assert_eq!(requests.load(Ordering::SeqCst), answered);
+
+        setup
+            .point_main_at_pinned_revision(SelectedModel::Nomic)
+            .expect("ref");
+        let cached = Cache::new(setup.model_cache_dir(SelectedModel::Nomic))
+            .repo(Repo::model(NOMIC_REPOSITORY.to_string()));
+        assert_eq!(
+            cached.get("tokenizer.json"),
+            Some(snapshot.join("tokenizer.json")),
+            "FastEmbed's `main` lookup finds the pinned snapshot"
+        );
+    }
+
+    /// A `main` already naming the pinned commit is not written again, so a
+    /// valid cache on a volume that takes no writes still loads.
+    #[cfg(unix)]
+    #[test]
+    fn a_correct_main_ref_is_not_rewritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let setup = ModelSetup::new(temp.path().join("models"));
+        setup
+            .point_main_at_pinned_revision(SelectedModel::Nomic)
+            .expect("first write");
+        let refs = setup
+            .model_cache_dir(SelectedModel::Nomic)
+            .join(Repo::model(NOMIC_REPOSITORY.to_string()).folder_name())
+            .join("refs");
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        std::fs::set_permissions(refs.join("main"), std::fs::Permissions::from_mode(0o444))
+            .expect("chmod");
+        let result = setup.point_main_at_pinned_revision(SelectedModel::Nomic);
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        result.expect("nothing to write");
+    }
+
+    /// A Nomic snapshot FastEmbed filled from `main` before #643, at the
+    /// commit now pinned, has no `refs/<commit>`; the fetch still finds its
+    /// files and sends no request. (Their bytes are checked separately.)
+    #[test]
+    fn a_cache_fastembed_filled_from_main_needs_no_download() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let setup = ModelSetup::new(temp.path().join("models"));
+        let snapshot = setup.snapshot_dir(SelectedModel::Nomic).expect("snapshot");
+        for file in NOMIC.files {
+            let path = snapshot.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+            std::fs::write(path, b"present").expect("file");
+        }
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}", closed.local_addr().expect("address"));
+        drop(closed);
+        setup
+            .fetch_model_from(
+                SelectedModel::Nomic,
+                &DownloadSource { endpoint },
+                Arc::new(|_, _| {}),
+            )
+            .expect("nothing to fetch");
+    }
+
+    #[test]
+    fn records_are_replaced_whole() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("selection.json");
+        write_json_atomic(
+            &path,
+            &SelectionRecord {
+                selected: "nomic".into(),
+            },
+        )
+        .expect("write");
+        write_json_atomic(
+            &path,
+            &SelectionRecord {
+                selected: "gemma".into(),
+            },
+        )
+        .expect("rewrite");
+        let record: SelectionRecord =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record.selected, "gemma");
+        assert!(!path.with_extension("tmp").exists());
     }
 
     #[test]
@@ -1077,6 +1548,36 @@ mod tests {
             !held.lock().unwrap().is_empty(),
             "the child reached the server before it was stopped"
         );
+    }
+
+    /// The download child ignores `HF_HOME`: the files land in the models
+    /// folder, where setup checks and loads them (#643, SB-03).
+    #[test]
+    fn a_download_with_hf_home_set_still_fills_the_models_folder() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hf_home = temp.path().join("hf-home");
+        std::fs::create_dir_all(&hf_home).expect("hf home");
+        let (endpoint, _) = serve_model_files(BODY);
+        let mut command = Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args([
+                "--exact",
+                "model_setup::tests::fetch_child_for_supervisor_test",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FETCH_CHILD_DIR, temp.path().join("models"))
+            .env("HF_ENDPOINT", &endpoint)
+            .env("HF_HOME", &hf_home);
+
+        run_supervised_fetch(command, limits_for_real_child(), &|_, _| {}).expect("fetch");
+
+        let setup = ModelSetup::new(temp.path().join("models"));
+        let snapshot = setup.snapshot_dir(SelectedModel::Nomic).expect("snapshot");
+        for file in NOMIC.files {
+            assert!(snapshot.join(file.path).is_file(), "{}", file.path);
+        }
+        assert_eq!(std::fs::read_dir(&hf_home).unwrap().count(), 0);
     }
 
     fn limits_for_real_child() -> FetchLimits {

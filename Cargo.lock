@@ -1499,6 +1499,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "notify",
+ "ring",
  "rmcp",
  "rusqlite",
  "schemars",

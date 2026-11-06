@@ -30,6 +30,9 @@ getrandom = "0.4"
 ignore = "0.4"
 libc = "0.2"
 notify = "8"
+# SHA-256 for checking model files against the digests `model_setup.rs`
+# ships (#643). Already compiled through ureq's rustls; this only makes the edge direct.
+ring = "0.17"
 rmcp = { version = "=3.8.0", features = ["server", "transport-streamable-http-server"] }
 rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
 schemars = "1"

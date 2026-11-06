@@ -621,7 +621,7 @@ impl InstallFacts {
                 _ => Vec::new(),
             };
             Self {
-                search_model: model_setup.selected().ok(),
+                search_model: Some(model_setup.selected()),
                 enabled_vaults: enabled.len(),
                 // A Vault with nothing indexed yet counts no notes.
                 notes: enabled

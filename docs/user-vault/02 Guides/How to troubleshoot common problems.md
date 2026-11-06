@@ -83,6 +83,8 @@ A download that stops receiving data, as behind a Wi-Fi login page, a dropped co
 
 If pressing **Accept terms and set up Gemma**, **Use Nomic instead** or **Retry setup** shows a red message instead of starting the download, the message says why. "Model setup could not be started." usually means the models folder is full or read-only, and the log has the exact error. "Could not reach Hatchdoor" means the request never arrived: check the connection, then press the button again.
 
+Before every load, Hatchdoor checks each model file against a fingerprint it ships with. A file that does not match, because a sync tool, a restore or a hand edit changed it, is deleted and downloaded again. A models folder that was damaged therefore shows up as a download, and as a failed setup if Hugging Face cannot be reached.
+
 Two related, more specific errors:
 
 - **`409`, "Gemma terms must be accepted or declined first."**: you tried to retry before choosing a model at all. Accept or decline Gemma first.
