@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { clearToken } from "../api/api";
+import { clearToken, onUnauthorized, setToken } from "../api/api";
 import {
   collectionEnvelope,
   discoveryResponse,
@@ -20,8 +20,10 @@ import {
 afterEach(() => {
   cleanup();
   resetVaultCollection();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   clearToken();
+  onUnauthorized(null);
 });
 
 function jsonResponse(body: object, status = 200) {
@@ -561,6 +563,401 @@ describe("the Vault collection client's revision stream", () => {
 
     await waitFor(() => expect(result.current.revision).toBe(1));
     await waitFor(() => expect(result.current.vaults[0].search).toBe("stale"));
+  });
+});
+
+function streams() {
+  return window.__hatchdoorEventSources.filter((source) =>
+    source.url.includes("/api/v1/vaults/events"),
+  );
+}
+
+function latestStream() {
+  const all = streams();
+  return all[all.length - 1];
+}
+
+/** What the browser does when a reconnect is answered with anything but 200:
+ * the stream is closed for good and `error` fires once. */
+function giveUp(source = latestStream()) {
+  source.readyState = EventSource.CLOSED;
+  source.emit("error", "");
+}
+
+/** A server whose Vault list the test can change, counting its list reads. */
+function mutableServer(initial: VaultSummary[]) {
+  const server = {
+    vaults: initial,
+    discoveryStatus: 200,
+    discoveryReads: 0,
+  };
+  vi.spyOn(globalThis, "fetch").mockImplementation(
+    (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/vaults")) {
+        server.discoveryReads += 1;
+        if (server.discoveryStatus !== 200) {
+          return Promise.resolve(
+            jsonResponse(
+              { code: "unauthorized", message: "no", retryable: false },
+              server.discoveryStatus,
+            ),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(discoveryResponse(server.vaults, false)),
+        );
+      }
+      return Promise.resolve(
+        jsonResponse(
+          statsFor(
+            server.vaults,
+            server.vaults.map(() => 0),
+          ),
+        ),
+      );
+    },
+  );
+  return server;
+}
+
+describe("the Vault collection client's stream recovery (#646)", () => {
+  it("reopens a stream the browser gave up on, after a backoff, with the current token", async () => {
+    setToken("before-restart");
+    const vault = healthyVault("Alpha");
+    const server = mutableServer([vault]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    // A reverse proxy answered 502 while the server restarted; meanwhile the
+    // Vault was renamed and the token rotated.
+    setToken("after-restart");
+    server.vaults = [{ ...vault, name: "Beta" }];
+    act(() => giveUp());
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(streams()).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(streams()).toHaveLength(2);
+    expect(latestStream().url).toContain("access_token=after-restart");
+    expect(result.current.vaults[0].name).toBe("Beta");
+  });
+
+  it("waits longer after each failed reopen, and starts over once one opens", async () => {
+    mutableServer([healthyVault("Alpha")]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    act(() => giveUp());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    act(() => giveUp());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(streams()).toHaveLength(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(streams()).toHaveLength(3);
+
+    act(() => latestStream().emit("open", ""));
+    act(() => giveUp());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(streams()).toHaveLength(4);
+  });
+
+  it("leaves a stream the browser is still retrying to the browser", async () => {
+    mutableServer([healthyVault("Alpha")]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    act(() => latestStream().emit("error", ""));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(streams()).toHaveLength(1);
+  });
+
+  it("reads the collection again when the browser's own reconnect opens", async () => {
+    const server = mutableServer([healthyVault("Alpha")]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const source = latestStream();
+    act(() => source.emit("open", ""));
+    const before = server.discoveryReads;
+
+    await act(async () => {
+      source.emit("open", "");
+    });
+
+    expect(server.discoveryReads).toBe(before + 1);
+  });
+
+  it("raises the app's token prompt when the server refuses the token on reconnect", async () => {
+    const unauthorized = vi.fn();
+    onUnauthorized(unauthorized);
+    setToken("rotated-away");
+    const server = mutableServer([healthyVault("Alpha")]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    server.discoveryStatus = 401;
+    act(() => giveUp());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(unauthorized).toHaveBeenCalled();
+    // And it keeps trying, so a token fixed in place is picked up.
+    setToken("fixed-in-place");
+    act(() => giveUp());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(streams()).toHaveLength(3);
+    expect(latestStream().url).toContain("access_token=fixed-in-place");
+  });
+
+  it("reads again when a stream it reopened connects, in case the read sent with the reopen failed", async () => {
+    const vault = healthyVault("Alpha");
+    const server = mutableServer([vault]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    // The read sent with the reopen meets the proxy's 502...
+    server.discoveryStatus = 502;
+    act(() => giveUp());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current.vaults[0].name).toBe("Alpha");
+
+    // ...then the server is back with the renamed Vault, and the stream connects.
+    server.discoveryStatus = 200;
+    server.vaults = [{ ...vault, name: "Beta" }];
+    await act(async () => {
+      latestStream().emit("open", "");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(result.current.vaults[0].name).toBe("Beta");
+  });
+
+  it("does not read twice when the first stream opens", async () => {
+    const server = mutableServer([healthyVault("Alpha")]);
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const before = server.discoveryReads;
+
+    await act(async () => {
+      latestStream().emit("open", "");
+    });
+
+    expect(server.discoveryReads).toBe(before);
+  });
+
+  it.each([
+    [
+      "the tab is shown again",
+      () => document.dispatchEvent(new Event("visibilitychange")),
+    ],
+    [
+      "the browser is back online",
+      () => window.dispatchEvent(new Event("online")),
+    ],
+  ])(
+    "reopens a closed stream at once and reads again when %s",
+    async (_, resume) => {
+      const vault = healthyVault("Alpha");
+      const server = mutableServer([vault]);
+      const { result } = renderHook(() => useVaultCollection());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      act(() => giveUp());
+      server.vaults = [{ ...vault, name: "Beta" }];
+
+      await act(async () => {
+        resume();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(streams()).toHaveLength(2);
+      expect(result.current.vaults[0].name).toBe("Beta");
+      // The backoff timer it replaced does not open a third.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(streams()).toHaveLength(2);
+    },
+  );
+
+  it("stops retrying once the last subscriber leaves", async () => {
+    mutableServer([healthyVault("Alpha")]);
+    const { result, unmount } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    act(() => giveUp());
+
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(streams()).toHaveLength(1);
+  });
+});
+
+describe("the Vault collection client's read sequencing (#646)", () => {
+  it("drops a list answer that arrives after a newer read failed", async () => {
+    const vault = healthyVault("Alpha");
+    let reads = 0;
+    let releaseHeld: () => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          reads += 1;
+          if (reads === 2) {
+            return new Promise((resolve) => {
+              releaseHeld = () =>
+                resolve(jsonResponse(discoveryResponse([vault], false)));
+            });
+          }
+          if (reads > 2) {
+            return Promise.reject(new TypeError("Failed to fetch"));
+          }
+          return Promise.resolve(
+            jsonResponse(discoveryResponse([vault], false)),
+          );
+        }
+        return Promise.resolve(jsonResponse(statsFor([vault], [0])));
+      },
+    );
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      emitRevision(5);
+    });
+    await act(async () => {
+      emitRevision(6);
+    });
+    await waitFor(() =>
+      expect(result.current.error).toBe(
+        "Could not reach the Hatchdoor server.",
+      ),
+    );
+
+    await act(async () => {
+      releaseHeld();
+    });
+
+    // The older answer does not clear what the newer read reported.
+    expect(result.current.error).toBe("Could not reach the Hatchdoor server.");
+  });
+
+  it("drops a list answer that arrives after a newer one", async () => {
+    const vault = healthyVault("Alpha");
+    const renamed = { ...vault, name: "Beta" };
+    let reads = 0;
+    let releaseHeld: () => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          reads += 1;
+          if (reads === 2) {
+            // Sent before the rename, delivered after it.
+            return new Promise((resolve) => {
+              releaseHeld = () =>
+                resolve(jsonResponse(discoveryResponse([vault], false)));
+            });
+          }
+          return Promise.resolve(
+            jsonResponse(
+              discoveryResponse(reads > 2 ? [renamed] : [vault], false),
+            ),
+          );
+        }
+        return Promise.resolve(jsonResponse(statsFor([vault], [0])));
+      },
+    );
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      emitRevision(5);
+    });
+    await act(async () => {
+      emitRevision(6);
+    });
+    await waitFor(() => expect(result.current.vaults[0].name).toBe("Beta"));
+
+    await act(async () => {
+      releaseHeld();
+    });
+
+    expect(result.current.vaults[0].name).toBe("Beta");
+  });
+
+  it("drops a counts answer that arrives after a newer one", async () => {
+    const vault = healthyVault("Alpha");
+    let reads = 0;
+    let releaseHeld: () => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return Promise.resolve(
+            jsonResponse(discoveryResponse([vault], false)),
+          );
+        }
+        reads += 1;
+        if (reads === 2) {
+          return new Promise((resolve) => {
+            releaseHeld = () => resolve(jsonResponse(statsFor([vault], [3])));
+          });
+        }
+        return Promise.resolve(
+          jsonResponse(statsFor([vault], [reads > 2 ? 7 : 1])),
+        );
+      },
+    );
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() =>
+      expect(result.current.noteCounts).toEqual({ [vault.vault_id]: 1 }),
+    );
+
+    await act(async () => {
+      emitRevision(5);
+    });
+    await act(async () => {
+      emitRevision(6);
+    });
+    await waitFor(() =>
+      expect(result.current.noteCounts).toEqual({ [vault.vault_id]: 7 }),
+    );
+
+    await act(async () => {
+      releaseHeld();
+    });
+
+    expect(result.current.noteCounts).toEqual({ [vault.vault_id]: 7 });
   });
 });
 

@@ -86,6 +86,19 @@ let state: VaultCollectionState = EMPTY_STATE;
 const listeners = new Set<Listener>();
 let started = false;
 let stream: EventSource | null = null;
+/** The pending reopen of a stream that closed for good, and how many reopens
+ * in a row have failed, which sets the wait before the next. */
+let reconnectTimer: number | null = null;
+let reconnectAttempts = 0;
+/** Every collection read takes the next number when it is sent, and an answer
+ * is published only when no later-sent read has already been. Each stream
+ * event starts a read, so a burst of them can answer out of order: the older
+ * answer arriving last would otherwise put back a name or a Vault the newer
+ * one had already replaced (#646). Counts are sequenced the same way. */
+let discoveryRequests = 0;
+let newestDiscoveryPublished = 0;
+let countRequests = 0;
+let newestCountsPublished = 0;
 /** Bumped by every reset so a fetch still in flight over the old collection
  * cannot write its answer into the new one. */
 let generation = 0;
@@ -135,21 +148,28 @@ export function getVaultCollectionSnapshot(): VaultCollectionState {
 }
 
 async function loadNoteCounts(forGeneration: number): Promise<void> {
+  const request = (countRequests += 1);
+  // Superseded: another generation, or a later-sent counts read already
+  // published. Checked after every await.
+  const stale = () =>
+    forGeneration !== generation || request < newestCountsPublished;
   try {
     const res = await apiFetch("/api/v1/vaults/all/stats");
-    if (forGeneration !== generation) {
+    if (stale()) {
       return;
     }
     if (!res.ok) {
+      newestCountsPublished = request;
       publish({ noteCountsPartial: true });
       return;
     }
     const projection = (await res.json()) as VaultReadProjection<
       VaultStatistics[]
     >;
-    if (forGeneration !== generation) {
+    if (stale()) {
       return;
     }
+    newestCountsPublished = request;
     // Merge rather than rebuild: under `all` the server leaves a Vault whose
     // snapshot could not be read out of `data` and lists it only as a
     // participant. Rebuilding from `data` alone dropped its last known count,
@@ -167,9 +187,10 @@ async function loadNoteCounts(forGeneration: number): Promise<void> {
       noteCountsPartial: Boolean(projection.partial) || missing,
     });
   } catch {
-    if (forGeneration !== generation) {
+    if (stale()) {
       return;
     }
+    newestCountsPublished = request;
     // Leave prior counts in place; the slot treats a missing entry as unknown.
     publish({ noteCountsPartial: true });
   }
@@ -193,11 +214,15 @@ async function readDiscovery(): Promise<VaultDiscoveryResponse> {
 }
 
 async function loadCollection(forGeneration: number): Promise<void> {
+  const request = (discoveryRequests += 1);
+  const stale = () =>
+    forGeneration !== generation || request < newestDiscoveryPublished;
   try {
     const discovery = await readDiscovery();
-    if (forGeneration !== generation) {
+    if (stale()) {
       return;
     }
+    newestDiscoveryPublished = request;
     const allVaults = reuseIfUnchanged(
       state.allVaults,
       Array.isArray(discovery.vaults) ? discovery.vaults : [],
@@ -242,9 +267,13 @@ async function loadCollection(forGeneration: number): Promise<void> {
     }
     await loadNoteCounts(forGeneration);
   } catch (err) {
-    if (forGeneration !== generation) {
+    // A failure older than a published answer says nothing about it. A newer
+    // failure does: an older answer arriving after it would put back what
+    // the failed read was sent to replace, so it counts as published too.
+    if (stale()) {
       return;
     }
+    newestDiscoveryPublished = request;
     publish({
       error:
         err instanceof Error ? err.message : "Unknown Vault discovery error",
@@ -281,12 +310,85 @@ export async function fetchRegistryRevision(): Promise<number | null> {
   }
 }
 
-function openRevisionStream(): void {
+/** The wait before reopening a stream that closed for good: 1 s, doubling
+ * with each failed reopen, capped at 30 s. */
+const STREAM_RETRY_BASE_MS = 1_000;
+const STREAM_RETRY_MAX_MS = 30_000;
+
+function cancelReconnect(): void {
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+function closeStream(): void {
+  cancelReconnect();
+  stream?.close();
+  stream = null;
+}
+
+/** Reopen the stream after `delay`. The read that comes first goes through
+ * `apiFetch`, so a server that now refuses the token raises the app's own
+ * token prompt (an EventSource cannot see the status it was refused with). */
+function scheduleReconnect(delay: number): void {
+  if (reconnectTimer !== null) {
+    return;
+  }
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    reconnectAttempts += 1;
+    openRevisionStream({ reopened: true });
+    void loadCollection(generation);
+  }, delay);
+}
+
+function openRevisionStream({ reopened = false } = {}): void {
   if (!("EventSource" in window)) {
     return;
   }
+  // A fresh URL each time: the token may have changed since the last one.
   const events = new EventSource(withAccessToken("/api/v1/vaults/events"));
   stream = events;
+  // The first stream's first open needs no read: `start` has just made one.
+  // A reopened stream's does. The read sent with the reopen may have met the
+  // proxy's 502 a moment before the server came back, and the stream's first
+  // event may repeat the revision held before.
+  let opened = reopened;
+  events.addEventListener("open", () => {
+    if (stream !== events) {
+      return;
+    }
+    reconnectAttempts = 0;
+    // The browser reconnects by itself after a dropped connection, and the
+    // first event after it may repeat the revision held before, even though
+    // a restarted server counted back up to it through different changes.
+    if (opened) {
+      void loadCollection(generation);
+    }
+    opened = true;
+  });
+  events.addEventListener("error", () => {
+    if (stream !== events) {
+      return;
+    }
+    // While `CONNECTING` the browser is retrying on its own. `CLOSED` means it
+    // gave up for good: a reconnect answered with anything but 200, as a
+    // reverse proxy's 502 during a restart or a 401 after a token change is.
+    // Nothing else would ever reopen it, and the collection would stay as it
+    // was until a reload (#646).
+    if (events.readyState !== EventSource.CLOSED) {
+      return;
+    }
+    events.close();
+    stream = null;
+    scheduleReconnect(
+      Math.min(
+        STREAM_RETRY_BASE_MS * 2 ** reconnectAttempts,
+        STREAM_RETRY_MAX_MS,
+      ),
+    );
+  });
   events.addEventListener(
     "vault-collection-revision",
     (event: MessageEvent<string>) => {
@@ -318,9 +420,26 @@ function openRevisionStream(): void {
   );
 }
 
+/** Back on the tab, or back online: whatever happened meanwhile may have gone
+ * unheard, so read the collection again, and reopen a closed stream now
+ * rather than at the end of its backoff. */
+function resume(): void {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
+  if (stream === null) {
+    cancelReconnect();
+    reconnectAttempts = 0;
+    openRevisionStream();
+  }
+  void loadCollection(generation);
+}
+
 function start(): void {
   started = true;
   openRevisionStream();
+  document.addEventListener("visibilitychange", resume);
+  window.addEventListener("online", resume);
   void refreshVaultCollection();
 }
 
@@ -354,8 +473,10 @@ export function resetVaultCollection(): void {
   generation += 1;
   discovered = false;
   started = false;
-  stream?.close();
-  stream = null;
+  closeStream();
+  reconnectAttempts = 0;
+  document.removeEventListener("visibilitychange", resume);
+  window.removeEventListener("online", resume);
   state = EMPTY_STATE;
   for (const listener of [...listeners]) {
     listener();
