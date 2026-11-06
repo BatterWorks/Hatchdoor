@@ -7,6 +7,9 @@ export type StartupStatus =
   | { state: "terms_required" }
   | {
       state: "downloading";
+      /** `download` while the files arrive, `load` once they are on disk
+       * and the model is loading (#642). */
+      step?: "download" | "load";
       model?: string;
       downloaded_bytes?: number;
       total_bytes?: number;
@@ -41,6 +44,24 @@ export function startupPollDelay(failures: number): number {
   }
   return Math.min(POLL_INTERVAL_MS * 2 ** failures, MAX_FAILURE_BACKOFF_MS);
 }
+/** Shown when a model-setup request never reached the server. */
+export const MODEL_SETUP_CONNECTION_ERROR =
+  "Could not reach Hatchdoor. Check the connection and try again.";
+
+/** The server's own sentence from a refused model-setup request
+ * (`{ "error": "..." }`), or a status-based one when the body has none. */
+async function modelSetupErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    if (typeof body.error === "string" && body.error.trim().length > 0) {
+      return body.error;
+    }
+  } catch {
+    // Not JSON: fall through to the status-based sentence.
+  }
+  return `Model setup could not be started (HTTP ${response.status}).`;
+}
+
 const HAS_STEPPED_PAST_GATE_KEY = "hatchdoor:startup-gate-stepped-past";
 
 /**
@@ -58,11 +79,14 @@ const HAS_STEPPED_PAST_GATE_KEY = "hatchdoor:startup-gate-stepped-past";
  * (accept/decline/retry) optimistically moves local state to `downloading`
  * and explicitly resumes polling, since the loop would otherwise stay parked
  * at its last terminal state forever — required for a real retry after a
- * failed model download to ever reach `ready` again.
+ * failed model download to ever reach `ready` again. A refused or failed
+ * action leaves the state as it was and sets `actionError` instead (#642).
  */
 export function useStartupStatus(enabled = true) {
   const [status, setStatus] = useState<StartupStatus | null>(null);
   const [connectionIssue, setConnectionIssue] = useState(false);
+  /** Why the last accept, decline or retry request did not start setup. */
+  const [actionError, setActionError] = useState<string | null>(null);
   // The gate is an instance-first-run surface, not a mount-first-run surface:
   // retain the latch across a browser reload so a retry never re-blocks a
   // client that has already reached the workspace.
@@ -73,6 +97,7 @@ export function useStartupStatus(enabled = true) {
   const activeRef = useRef(true);
   const timerRef = useRef<number | undefined>(undefined);
   const failuresRef = useRef(0);
+  const lastStateRef = useRef<StartupStatus["state"] | null>(null);
   // Holds the latest `poll` so the scheduled setTimeout and the model-setup
   // actions below can trigger a re-poll without `poll` referencing itself
   // directly (a stale-closure footgun the react-hooks lint rule now flags).
@@ -90,6 +115,16 @@ export function useStartupStatus(enabled = true) {
       const next = (await response.json()) as StartupStatus;
       if (!activeRef.current) return;
       failuresRef.current = 0;
+      // A refusal explains the state it was made in. Once the server has
+      // moved on, say because another client started setup, it no longer
+      // applies and must not sit under a different button.
+      if (
+        lastStateRef.current !== null &&
+        lastStateRef.current !== next.state
+      ) {
+        setActionError(null);
+      }
+      lastStateRef.current = next.state;
       setStatus(next);
       setConnectionIssue(false);
       if (
@@ -132,37 +167,58 @@ export function useStartupStatus(enabled = true) {
     };
   }, [enabled, poll]);
 
-  const acceptGemma = useCallback(async () => {
-    const response = await apiFetch("/api/model/accept-gemma", {
-      method: "POST",
-    });
-    if (response.ok) {
-      setStatus({ state: "downloading", model: "EmbeddingGemma 300M Q4" });
+  /** Run one model-setup request. On success the local state moves to
+   * `downloading` and polling resumes; on a refusal or a failed request the
+   * reason lands in `actionError` for the screen to show (#642), and nothing
+   * is thrown. */
+  const runModelAction = useCallback(
+    async (path: string, optimistic: StartupStatus) => {
+      setActionError(null);
+      let response: Response;
+      try {
+        response = await apiFetch(path, { method: "POST" });
+      } catch {
+        if (activeRef.current) setActionError(MODEL_SETUP_CONNECTION_ERROR);
+        return;
+      }
+      if (!response.ok) {
+        const message = await modelSetupErrorMessage(response);
+        if (activeRef.current) setActionError(message);
+        return;
+      }
+      setStatus(optimistic);
       void poll();
-    }
-  }, [poll]);
+    },
+    [poll],
+  );
 
-  const declineGemma = useCallback(async () => {
-    const response = await apiFetch("/api/model/decline-gemma", {
-      method: "POST",
-    });
-    if (response.ok) {
-      setStatus({ state: "downloading", model: "Nomic Embed Text v1.5" });
-      void poll();
-    }
-  }, [poll]);
+  const acceptGemma = useCallback(
+    () =>
+      runModelAction("/api/model/accept-gemma", {
+        state: "downloading",
+        model: "EmbeddingGemma 300M Q4",
+      }),
+    [runModelAction],
+  );
 
-  const retryModelSetup = useCallback(async () => {
-    const response = await apiFetch("/api/model/retry", { method: "POST" });
-    if (response.ok) {
-      setStatus({ state: "downloading" });
-      void poll();
-    }
-  }, [poll]);
+  const declineGemma = useCallback(
+    () =>
+      runModelAction("/api/model/decline-gemma", {
+        state: "downloading",
+        model: "Nomic Embed Text v1.5",
+      }),
+    [runModelAction],
+  );
+
+  const retryModelSetup = useCallback(
+    () => runModelAction("/api/model/retry", { state: "downloading" }),
+    [runModelAction],
+  );
 
   return {
     status,
     connectionIssue,
+    actionError,
     hasSteppedPastGate,
     acceptGemma,
     declineGemma,

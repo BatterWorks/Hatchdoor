@@ -243,4 +243,39 @@ describe("StartupGate's How does this work? link (#423)", () => {
       CONTEXTUAL_HELP.modelChoice.heading,
     );
   });
+
+  it("shows why Accept or Decline did not start setup, as an alert (#642)", () => {
+    renderGate({
+      status: { state: "terms_required" },
+      actionError: "Model setup could not be started.",
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Model setup could not be started.",
+    );
+  });
+
+  it("shows no alert while nothing has failed", () => {
+    renderGate({ status: { state: "terms_required" } });
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("tells a finished download that is loading apart from a download (#642)", () => {
+    renderGate({
+      status: {
+        state: "downloading",
+        step: "load",
+        model: "Nomic Embed Text v1.5",
+      },
+    });
+
+    expect(
+      screen.getByText(/Loading Nomic Embed Text v1\.5\./),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Download complete")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Loading the search model" }),
+    ).toBeInTheDocument();
+  });
 });

@@ -184,6 +184,7 @@ export function SearchDialog({
   scope,
   inputRef,
   startupStatus,
+  modelSetupError = null,
   onRetryModelSetup,
   demoMode = false,
   onClose,
@@ -216,6 +217,8 @@ export function SearchDialog({
    * a failed model download replace the result area with a dedicated block
    * instead of blocking the whole app. Typing stays live either way. */
   startupStatus: StartupStatus | null;
+  /** Why the last "Retry setup" did not start (#642), shown under it. */
+  modelSetupError?: string | null;
   onRetryModelSetup: () => void;
   /** A public demo (#339): model-setup trouble is described in a visitor's
    * words, never the server's operator diagnostic, and offers no retry — the
@@ -564,6 +567,13 @@ export function SearchDialog({
               description={
                 (startupStatus?.state === "failed" && startupStatus.message) ||
                 "The search model could not be downloaded or loaded."
+              }
+              details={
+                modelSetupError ? (
+                  <p className="error" role="alert">
+                    {modelSetupError}
+                  </p>
+                ) : undefined
               }
               actionLabel="Retry setup"
               onAction={onRetryModelSetup}

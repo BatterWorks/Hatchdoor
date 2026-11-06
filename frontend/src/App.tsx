@@ -94,9 +94,12 @@ import { WhatsNew } from "./features/whats-new";
 
 function VaultWorkspace({
   startupStatus,
+  modelSetupError = null,
   onRetryModelSetup,
 }: {
   startupStatus: StartupStatus | null;
+  /** Why the last "Retry setup" did not start (#642). */
+  modelSetupError?: string | null;
   onRetryModelSetup: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
@@ -1182,6 +1185,7 @@ function VaultWorkspace({
           scope={scope}
           inputRef={searchInputRef}
           startupStatus={startupStatus}
+          modelSetupError={modelSetupError}
           onRetryModelSetup={onRetryModelSetup}
           demoMode={demoMode}
           onClose={() => setSearchOpen(false)}
@@ -1369,11 +1373,13 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
         hasRegistryRecovery={hasRegistryRecovery}
         hasNoVaults={hasNoVaults}
         demoMode={collection.demoMode}
+        actionError={startup.actionError}
         onAcceptGemma={() => void startup.acceptGemma()}
         onDeclineGemma={() => void startup.declineGemma()}
       >
         <VaultWorkspace
           startupStatus={startup.status}
+          modelSetupError={startup.actionError}
           onRetryModelSetup={() => void startup.retryModelSetup()}
         />
         {/* After an upgrade (#418), over the workspace only: the gate holds

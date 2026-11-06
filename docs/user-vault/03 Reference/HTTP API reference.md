@@ -43,7 +43,7 @@ With no web token configured (and not in demo mode), every route except `/mcp` a
 | --- | --- | --- |
 | GET | `/health` | Liveness probe, also used by the container's own `--healthcheck`. Returns `200 ok` as plain text. |
 | GET | `/ready` | `200 ready` once the search model is set up and every active Vault's first index has settled, else `503 not ready`. A Vault that failed to index, or has no folder, counts as settled: its problem shows on that Vault (`GET /api/v1/vaults`), not here. An instance with no active Vaults is ready as soon as the model is set up. The exception is a Vault list that needs recovery (see [[Vault lifecycle states#Registry recovery]]): it stays `503` until the file is fixed. Once `200`, it stays `200` through later reindexing. |
-| GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). While first-run indexing runs, `percent` and `eta_seconds` cover every active Vault, including ones still waiting their turn, and `percent` never goes down; the `notes_*`, `chunks_*` and `tokens_*` counters describe only the Vault indexing right now. `Cache-Control: no-store`. |
+| GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). While first-run indexing runs, `percent` and `eta_seconds` cover every active Vault, including ones still waiting their turn, and `percent` never goes down; the `notes_*`, `chunks_*` and `tokens_*` counters describe only the Vault indexing right now. While `downloading`, `step` is `download` as the model's files arrive (with `downloaded_bytes`, `total_bytes` and `percent`, per file) and `load` once they are on disk; a download that receives no data for 60 seconds, or runs past two hours, turns `failed` with a message saying so. `Cache-Control: no-store`. |
 
 ## Manual
 
@@ -96,7 +96,7 @@ First-run embedding model selection. Not present in demo mode.
 | --- | --- | --- |
 | POST | `/api/model/accept-gemma` | Accept Gemma terms and start downloading/indexing with it. `202` on success, `409` if a model is already active. |
 | POST | `/api/model/decline-gemma` | Decline Gemma and use Nomic Embed Text v1.5 instead. Same status codes. |
-| POST | `/api/model/retry` | Retry startup with the already-selected model. `409` if terms are still pending, `500` on an internal persist failure. |
+| POST | `/api/model/retry` | Retry startup with the already-selected model, continuing any files a stopped download already fetched. `409` if terms are still pending or setup is already running, `500` on an internal persist failure. Errors carry `{"error": "<sentence>"}`. |
 
 ## Settings
 
