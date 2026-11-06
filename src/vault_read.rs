@@ -193,6 +193,7 @@ impl VaultReadError {
             // Exact reads of one Note's contents.
             | "note_not_found"
             | "note_unreadable"
+            | "note_too_large"
             | "invalid_frontmatter"
             // One addressed saved query (#277), reported by MCP's
             // `evaluate_saved_query`; no HTTP route evaluates a single one.
@@ -791,9 +792,7 @@ impl<'a> VaultReadCore<'a> {
                 note.filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(|note| VaultQualifiedNote::new(vault_id, note))
             })
-            .map_err(|error| {
-                unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
-            })
+            .map_err(|error| note_read_error(vault_id, slug, error, "vault_read_unavailable"))
     }
 
     pub fn exact_note_links(
@@ -1418,14 +1417,13 @@ impl<'a> VaultReadCore<'a> {
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
-        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
-            unavailable(
-                vault_id,
-                "note_unreadable",
-                format!("failed to read note '{}': {error}", entry.relative_path),
-                false,
-            )
-        })?;
+        let content = crate::vault::read_bounded(&entry.path, crate::vault::MAX_NOTE_BYTES)
+            .and_then(|bytes| {
+                String::from_utf8(bytes).map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error).into()
+                })
+            })
+            .map_err(|error| note_read_error(vault_id, slug, error, "note_unreadable"))?;
         Ok(Some((entry, content)))
     }
 
@@ -1546,9 +1544,7 @@ impl<'a> VaultReadCore<'a> {
         let (control, index) = self.control_and_catalog(vault_id)?;
         let note = index
             .read_note_by_slug(slug)
-            .map_err(|error| {
-                unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
-            })?
+            .map_err(|error| note_read_error(vault_id, slug, error, "vault_read_unavailable"))?
             .filter(|note| !self.surface.hides(note.layer.as_deref()));
         Ok(note.map(|note| NoteDownload {
             note: VaultQualifiedNote::new(vault_id, note),
@@ -1857,6 +1853,41 @@ fn saved_query_error(vault_id: VaultId, code: &str, message: String) -> VaultRea
         message,
         vault_id: Some(vault_id),
         retryable: false,
+    }
+}
+
+/// A Note's file that could not be read (#636). A file over the size bound
+/// or not a regular file is refused for good; any other failure is reported
+/// under `io_code`, retryable when that is the transient `vault_read_unavailable`.
+fn note_read_error(
+    vault_id: VaultId,
+    slug: &str,
+    error: crate::vault::BoundedReadError,
+    io_code: &str,
+) -> VaultReadError {
+    use crate::vault::BoundedReadError;
+    match error {
+        BoundedReadError::TooLarge { limit } => unavailable(
+            vault_id,
+            "note_too_large",
+            format!(
+                "note '{slug}' is larger than {} MiB, the most Hatchdoor reads",
+                limit / (1024 * 1024)
+            ),
+            false,
+        ),
+        BoundedReadError::NotRegular => unavailable(
+            vault_id,
+            "note_unreadable",
+            format!("note '{slug}' is not a regular file"),
+            false,
+        ),
+        BoundedReadError::Io(error) => unavailable(
+            vault_id,
+            io_code,
+            format!("failed to read note '{slug}': {error}"),
+            io_code == "vault_read_unavailable",
+        ),
     }
 }
 
@@ -3545,6 +3576,78 @@ mod tests {
         assert!(response.notes.is_empty());
         assert_eq!(response.total_unread, 1);
         assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
+    }
+
+    /// A FIFO never written to would block a plain `open` for ever (#636).
+    #[cfg(unix)]
+    #[test]
+    fn a_text_match_reports_a_note_replaced_by_a_fifo_as_unread_without_blocking() {
+        let workspace = workspace(&[("Notes", &[("Other.md", "zzz"), ("Kept.md", "zzz")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let path = workspace.vault_paths[0].join("Other.md");
+        std::fs::remove_file(&path).expect("remove note");
+        crate::vault::make_fifo(&path);
+
+        let response = found(&reads, VaultScope::All, &text("zzz"));
+        assert_eq!(found_paths(&response), ["Kept"]);
+        assert_eq!(response.total_unread, 1);
+        assert_eq!(response.unread[0].relative_path, "Other");
+        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
+    }
+
+    #[test]
+    fn a_text_match_reports_a_note_over_the_size_limit_as_unread() {
+        let workspace = workspace(&[("Notes", &[("Big.md", "zzz"), ("Kept.md", "zzz")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.vault_paths[0].join("Big.md"))
+            .expect("open note");
+        file.set_len(200 * 1024 * 1024).expect("sparse note");
+
+        let response = found(&reads, VaultScope::All, &text("zzz"));
+        assert_eq!(found_paths(&response), ["Kept"]);
+        assert_eq!(response.total_unread, 1);
+        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::TooLarge);
+    }
+
+    #[test]
+    fn an_exact_read_refuses_a_note_over_the_size_limit() {
+        let workspace = workspace(&[("Notes", &[("Big.md", "# Big")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault = workspace.vault_ids[0];
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.vault_paths[0].join("Big.md"))
+            .expect("open note");
+        file.set_len(200 * 1024 * 1024).expect("sparse note");
+
+        let error = reads.exact_note(vault, "big").expect_err("too large");
+        assert_eq!(error.public_code(), "note_too_large");
+        assert!(!error.retryable);
+        let Err(error) = reads.exact_note_for_download(vault, "big") else {
+            panic!("a download read the note");
+        };
+        assert_eq!(error.public_code(), "note_too_large");
+        let error = reads.note_outline(vault, "big").expect_err("too large");
+        assert_eq!(error.public_code(), "note_too_large");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exact_read_of_a_note_replaced_by_a_fifo_finds_no_note_without_blocking() {
+        let workspace = workspace(&[("Notes", &[("Odd.md", "# Odd")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault = workspace.vault_ids[0];
+        let path = workspace.vault_paths[0].join("Odd.md");
+        std::fs::remove_file(&path).expect("remove note");
+        crate::vault::make_fifo(&path);
+
+        // The catalogue an exact read builds skips what is not a regular
+        // file, so the FIFO is no note at all; `read_bounded` refuses one
+        // that appears between that walk and the read.
+        assert!(reads.exact_note(vault, "odd").expect("read").is_none());
+        assert!(reads.note_outline(vault, "odd").expect("read").is_none());
     }
 
     #[test]

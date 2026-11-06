@@ -4,6 +4,7 @@ mod layers;
 mod link_style;
 mod links;
 mod markdown_links;
+mod note_file;
 mod paths;
 mod sections;
 #[cfg(test)]
@@ -14,6 +15,9 @@ mod write;
 pub use exclude::{DEFAULT_EXCLUDE_PATTERNS, ExcludeMatcher};
 pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME};
 pub use link_style::{LinkPathForm, LinkStyle, VaultLinkStyle, count_link_forms, vault_link_style};
+#[cfg(all(test, unix))]
+pub(crate) use note_file::make_fifo;
+pub(crate) use note_file::{BoundedReadError, MAX_NOTE_BYTES, read_bounded};
 #[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{

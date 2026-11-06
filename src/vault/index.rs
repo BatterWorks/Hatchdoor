@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 use super::layers::LayerMap;
 use super::links::build_link_graph;
 use super::markdown_links::{NotePaths, note_link_target};
+use super::note_file::{BoundedReadError, MAX_NOTE_BYTES, read_bounded};
 use super::paths::{
     content_snippet, folder_distance, is_servable_asset, nfc_title, normalize_link_target,
     normalize_title, note_slug_base, relative_note_path_without_ext, resolve_path_ladder, slugify,
@@ -416,12 +417,15 @@ impl VaultIndex {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn read_note_by_slug(&self, slug: &str) -> io::Result<Option<Note>> {
+    /// The note `slug` names, read now. A file that is not a regular file or
+    /// is over [`MAX_NOTE_BYTES`] is refused before it is read (#636).
+    pub fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, BoundedReadError> {
         let Some(entry) = self.find_by_slug(slug) else {
             return Ok(None);
         };
 
-        let content = fs::read_to_string(&entry.path)?;
+        let content = String::from_utf8(read_bounded(&entry.path, MAX_NOTE_BYTES)?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // The parser the frontmatter read uses, so the two cannot drift. Bad
         // frontmatter leaves the note readable: that is how it gets repaired.
         let metadata = parse_frontmatter_metadata(&content)

@@ -1575,6 +1575,7 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/link_style.rs`
 - `src/vault/links.rs`
 - `src/vault/markdown_links.rs`
+- `src/vault/note_file.rs`
 - `src/vault/paths.rs`
 - `src/vault/sections.rs`
 - `src/vault/types.rs`
@@ -1608,6 +1609,7 @@ process-wide memo keeps each note's counts until its size or modification
 time changes, so a listing re-reads only changed notes. The scanner records
 inline images as `MarkdownLink::Image` for that count only, and no rewriter
 touches them.
+`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_by_slug`, the read core's exact reads and `find_text`, and `count_link_forms` read notes through it under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap), and the `app.json` probe under 64 KiB.
 `sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every body ATX heading outside fenced or indented code (at most three leading spaces, no leading tab, one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text. The write layer, the read core's outline and section reads, and the chunker's heading paths share this scan and cannot disagree about a span or a path (#635). The crate-private `body_start` re-export locates the end of the canonical frontmatter block for section scanning and the read core's text-match place classification. `scan` skips that block automatically; `scan_from` starts at a caller-supplied line boundary for a caller that already has the same offset (#625).
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
@@ -1629,6 +1631,7 @@ watching, application startup, and chunking (`NoteSections` for heading paths, #
 - Excluded/noise paths do not enter the index.
 - Layer markers remain visible to classification even under broad exclusions.
 - A note remains addressable while its layer is reported to callers.
+- Every read the read model and the read core make of a note's or `app.json`'s bytes goes through `read_bounded`, so none can block on a FIFO or read without a size bound (#636).
 - `read_note_by_slug` fills `Note.metadata` from the file it just read, with the parser the frontmatter read uses, so an exact note read and `exact_note_frontmatter` agree. Frontmatter that does not parse leaves `metadata` as `None` and never fails the read, because reading the note is how it gets repaired (#521).
 - A backslash before a wikilink's alias pipe is syntax rather than part of the
   target, so `[[Note\|alias]]` - the form a Markdown table cell forces - names
@@ -1911,7 +1914,7 @@ projections, plus `VaultReadCore::saved_queries` and its wire types
 (`SavedQueriesResponse`, `SavedQueryResult`, `SavedQueryOutcome`,
 `SavedQueryTable`, `SavedQueryColumn`, `SavedQueryRow`, `SavedQueryTruncation`,
 `SavedQueryTruncationReason`), and `VaultReadCore::saved_query` with its
-wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46), and `VaultReadCore::note_outline` and `note_sections` with their wire types (`NoteOutline`, `OutlineHeading`, `NoteSectionsResponse`, `NoteSectionEntry`, `NoteSection`, `NoteSectionMiss`, `NoteSectionError`, `NoteSectionErrorCode`; #502). `VaultQualifiedNote`
+wire types (`SavedQueryEvaluation`, `SavedQueryRows`), and `VaultReadCore::find_text` with its request and wire types (`TextMatchRequest`, `TextMatchResponse`, `TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet`, `TextMatchPlace`, `TextMatchUnread`, `TextMatchUnreadReason`; #500, ADR-46; `too_large` since #636), and `VaultReadCore::note_outline` and `note_sections` with their wire types (`NoteOutline`, `OutlineHeading`, `NoteSectionsResponse`, `NoteSectionEntry`, `NoteSection`, `NoteSectionMiss`, `NoteSectionError`, `NoteSectionErrorCode`; #502). `VaultQualifiedNote`
 carries `saved_queries: Vec<SavedQuerySummary>` (#277). `BrowseSurface` names which layer surface a caller may read.
 `Everything` is the established behavior and stays the default: a layer demotes
 a Note from the default *search* surface only, and an operator still reaches it
@@ -2164,6 +2167,7 @@ link graph, and the Index turn's retained `IndexedAssets`.
 
 - Exact reads inspect the requested Vault's Markdown directory; SQLite remains
   a disposable projection (ADR-01).
+- A Note over `MAX_NOTE_BYTES` is refused on every exact read with `note_too_large` (HTTP 413) before its bytes are read, and `find_text` lists it as unread with `too_large`; a Note path that is no longer a regular file is `note_unreadable` and `unreadable` (#636).
 - Note content and its hash are never older than disk. Links and backlinks
   are the one exception the maintainer accepted (#361): after an edit made
   outside Hatchdoor they may lag disk until the watcher reports the change,
