@@ -91,6 +91,7 @@ Work down this list. Most of the time it is the first or second item.
 - **The Vault is paused.** A paused Vault disappears from the sidebar and search but keeps all its notes. Look for it in **Settings**, where every Vault is listed, and resume it there. See [[How to manage multiple Vaults#Pause and resume a Vault]].
 - **The Vault is still indexing.** A newly added Vault, or one with many new notes, takes a while to read. Notes appear in the sidebar first, and search by meaning catches up after. See the next section.
 - **The file is not a note.** Only files ending in `.md` are notes. Hidden folders such as `.obsidian`, `.trash` and `.hatchdoor-trash` are left out, as is anything matching the Vault's **Ignore these files and folders** setting.
+- **The note is larger than 8 MiB.** Hatchdoor lists it but will not open it, and an agent's `get_note` is refused with `note_too_large`. Split it into smaller notes, or open it in another editor.
 - **The note is in a layer.** A folder with a `.hatchdoor-layer` file in it is left out of ordinary search on purpose. Its notes still appear in the sidebar. See [[The layer system]].
 - **The note is in a folder Hatchdoor cannot see.** Hatchdoor only sees the folders shared with it at install time. See [[Connect your first Vault#Add a folder Hatchdoor cannot see yet]].
 - **You edited it outside Hatchdoor a moment ago.** An edit made in another app can take a few seconds to show up, or about a minute when your notes are in a Windows folder used through Docker Desktop.
