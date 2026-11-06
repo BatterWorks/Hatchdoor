@@ -290,6 +290,33 @@ describe("pure helpers", () => {
     expect(unfinished.sentence).toContain("part-way through a merge");
     expect(unfinished.files).toEqual(["notes/Home.md"]);
 
+    const missingBranch = describeGitFailure({
+      code: "managed_git_branch_not_found",
+      message: "the configured branch does not exist on the remote",
+      retryable: false,
+    });
+    expect(missingBranch.label).toBe("branch not found");
+    expect(missingBranch.tier).toBe("error");
+
+    for (const code of [
+      "managed_git_unsupported_file_names",
+      "existing_git_local_history_unsupported_file_names",
+    ]) {
+      const leftOut = describeGitFailure({
+        code,
+        message: "left out",
+        retryable: false,
+        detail: {
+          kind: "affected_paths",
+          paths: ["notes/caf\\xe9-latin1.md"],
+          total: 1,
+        },
+      });
+      expect(leftOut.label).toBe("unreadable file names");
+      expect(leftOut.tier).toBe("warn");
+      expect(leftOut.files).toEqual(["notes/caf\\xe9-latin1.md"]);
+    }
+
     const unknown = describeGitFailure({
       code: "managed_git_not_remote",
       message: "not a remote vault",

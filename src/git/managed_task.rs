@@ -602,6 +602,9 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
         DestinationInvalid => ("managed_git_destination_invalid", false),
         CloneFailed => ("managed_git_remote_unreachable", true),
         AuthenticationFailed => ("managed_git_authentication_failed", false),
+        // Only the remote or the Vault's settings can fix it, so retrying on
+        // backoff would download the whole repository again each time (#638).
+        BranchNotFound => ("managed_git_branch_not_found", false),
         ValidationFailed => ("managed_git_validation_failed", false),
         AtomicInstallFailed(_) => ("managed_git_install_failed", false),
     };
@@ -660,6 +663,13 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
         RecoveryRejected { .. } => ("managed_git_recovery_push_rejected", false, None),
         Authentication => ("managed_git_authentication_failed", false, None),
         Remote => ("managed_git_remote_unreachable", true, None),
+        // Everything else committed and synchronized; these files wait for
+        // someone to rename them, which no retry can do (#638).
+        UnsupportedFileNames { files } => (
+            "managed_git_unsupported_file_names",
+            false,
+            Some(VaultWorkErrorDetail::AffectedPaths(files)),
+        ),
     };
     let work_error = VaultWorkError::new(code, message, retryable);
     match detail {
@@ -683,6 +693,7 @@ pub(crate) fn is_remote_only_failure(code: &str) -> bool {
             | "managed_git_push_race_exhausted"
             | "managed_git_remote_unreachable"
             | "managed_git_authentication_failed"
+            | "managed_git_branch_not_found"
             | "managed_git_pull_only_local_commits"
     )
 }

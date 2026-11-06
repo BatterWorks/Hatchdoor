@@ -880,7 +880,8 @@ LEGACY_MIGRATION_DOC_URL}`,
 types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
-operations, store-owned `vault_path` resolution for runtime consumers, the
+operations (a configured Git branch must pass `git2::Branch::name_is_valid`,
+#638), store-owned `vault_path` resolution for runtime consumers, the
 crate-private `ensure_outside_instance_state` containment check the folder
 listing reuses to hide instance state,
 a remote-backed source's own `poll_interval_secs` (issue #97's reopening
@@ -3019,7 +3020,13 @@ The uniquely selected managed remote and its push URL must remain the
 configured credential-free HTTPS repository identity; unrelated remotes in an
 operator-owned `ExistingGit` checkout are outside this boundary and untouched.
 Public HTTPS makes no credential callback; supplied credentials are callback
-input only and remain redacted. Every fetch, push and clone first calls the
+input only and remain redacted. The crate-private `offer_credentials_once`
+(`git/mod.rs`) is the one credential callback for every clone, fetch and push:
+it offers the token only when the scheme, host and port libgit2 asks for
+match the configured repository URL's (reading libgit2's bracketless IPv6
+form too), so a redirect to another host gets
+none, and at most once per URL, so a rejected token ends the attempt instead
+of being replayed (#638). Every fetch, push and clone first calls the
 crate-private `bound_network_waits` (`git/mod.rs`), which sets libgit2's
 process-wide socket timeouts once: 15 s to connect, 120 s without a byte
 moving. A remote that stalls mid-transfer therefore fails the turn as the
@@ -3061,9 +3068,24 @@ reached an operator as a bare "install failed" over a filesystem that could
 not do `RENAME_NOREPLACE` (#345); the install falls back to check-then-rename
 there, as the Vault write layer does (ADR-26). The classification keeps
 distinguishing authentication failures (`ManagedCheckoutError::AuthenticationFailed`,
-`ManagedSyncError::Authentication`, detected via `git2::ErrorCode::Auth`) from
-other remote failures. It takes a `&ManagedCheckoutLease` rather than acquiring
-its own (issue #95): the process-lifetime ownership boundary the checkout
+`ManagedSyncError::Authentication`: `git2::ErrorCode::Auth`, which the
+credential callback's refusal to offer a token twice produces, or a 403 after
+the token went out, both read by `sign_in_rejected`) from other remote
+failures. A clone that fetched but found no branch by the
+configured name is `ManagedCheckoutError::BranchNotFound`
+(`managed_git_branch_not_found`, not retryable, and remote-only for
+`is_remote_only_failure`), never a transient remote failure that would
+download the repository again on every backoff (#638). Status paths are read
+as bytes (`status_bytes_in_vault`): a changed file inside the Vault whose name
+is not valid UTF-8 is left out of the commit while everything else commits
+and synchronizes, and the turn then reports it, escaped by `escaped_path`, as
+`ManagedSyncError::UnsupportedFileNames` (`managed_git_unsupported_file_names`)
+or, for Local history, `GitError::UnsupportedFileNames`
+(`existing_git_local_history_unsupported_file_names`), both non-retryable with
+the files as affected paths (#638). Until those files are renamed every
+commit turn ends in that error, so the commit cooldown spaces automatic
+commits five minutes apart. It takes a `&ManagedCheckoutLease` rather than
+acquiring its own (issue #95): the process-lifetime ownership boundary the checkout
 lease documents is held by the caller across every turn for a Vault, not
 reacquired and dropped within each one. `ManagedGitScheduler` is one
 process-wide instance — mirroring the coordinator's single-worker design, it
@@ -3330,7 +3352,8 @@ against its in-memory result; the files of a submodule `HEAD` already has,
 paths reached through a symbolic link, and a name a case-insensitive disk
 only matches by case are never counted.
 Managed acquisition never writes credentials to URLs, Git configuration,
-reads, logs, errors, or status; it never deletes, overwrites, or silently adopts a checkout destination. The
+reads, logs, errors, or status, and never offers them to any origin but the
+configured remote's; it never deletes, overwrites, or silently adopts a checkout destination. The
 managed-Git scheduler adds no persisted queue, priority, or second execution
 lane (ADR-13); a Git turn's returned failure always completes that Vault's
 turn so the shared worker is released for the next Vault. A `ManagedGit` or

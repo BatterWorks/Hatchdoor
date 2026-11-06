@@ -79,6 +79,11 @@ pub enum ManagedCheckoutError {
     /// `CloneFailed` so a caller can wait for a credential change or manual
     /// retry instead of retrying blindly on a schedule.
     AuthenticationFailed,
+    /// The remote has no branch by the configured name. Found only after the
+    /// clone fetched, so it is reported as a configuration problem rather
+    /// than a transient remote failure, which would download the whole
+    /// repository again on every backoff (#638).
+    BranchNotFound,
     ValidationFailed,
     /// The checkout could not be installed at its final name. The string says
     /// why, because the first report of this reached an operator as a bare
@@ -110,6 +115,7 @@ impl std::fmt::Display for ManagedCheckoutError {
             Self::DestinationInvalid => "managed checkout destination is invalid",
             Self::CloneFailed => "managed checkout clone failed",
             Self::AuthenticationFailed => "managed checkout authentication failed",
+            Self::BranchNotFound => "managed checkout branch was not found on the remote",
             Self::ValidationFailed => "managed checkout validation failed",
             Self::AtomicInstallFailed(_) => unreachable!("handled above"),
         };
@@ -286,27 +292,42 @@ fn clone_repository(
         clone.branch(branch);
     }
     let mut fetch_options = git2::FetchOptions::new();
-    if let Some(credentials) = &request.credentials {
-        let credentials = credentials.clone();
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(move |_url, _username_from_url, _allowed| {
-            git2::Cred::userpass_plaintext(&credentials.username, &credentials.token)
-        });
-        fetch_options.remote_callbacks(callbacks);
-    }
+    let mut callbacks = git2::RemoteCallbacks::new();
+    let offers = request.credentials.as_ref().map(|credentials| {
+        super::offer_credentials_once(
+            &mut callbacks,
+            &request.repository_url,
+            credentials.username.clone(),
+            credentials.token.clone(),
+        )
+    });
+    fetch_options.remote_callbacks(callbacks);
     clone.fetch_options(fetch_options);
     clone
         .clone(&request.repository_url, temporary)
-        .map_err(classify_remote_error)?;
+        .map_err(|error| classify_clone_error(&error, offers.as_ref(), request.branch.is_some()))?;
     Ok(())
 }
 
-/// Distinguish a credential rejection from any other remote failure, so a
-/// caller can wait for a credential change or manual retry rather than
-/// backing off and retrying blindly.
-fn classify_remote_error(error: git2::Error) -> ManagedCheckoutError {
-    if error.code() == git2::ErrorCode::Auth {
+/// Distinguish a refused sign-in and a missing branch from any other remote
+/// failure, so a caller waits for a configuration change instead of backing
+/// off and retrying blindly.
+///
+/// A clone asked for a branch the remote does not have fails looking up
+/// `refs/remotes/origin/<branch>` once the fetch is done: `NotFound` in the
+/// reference class. Nothing else a clone does produces that pair.
+fn classify_clone_error(
+    error: &git2::Error,
+    offers: Option<&super::CredentialOffers>,
+    branch_requested: bool,
+) -> ManagedCheckoutError {
+    if super::sign_in_rejected(error, offers) {
         ManagedCheckoutError::AuthenticationFailed
+    } else if branch_requested
+        && error.code() == git2::ErrorCode::NotFound
+        && error.class() == git2::ErrorClass::Reference
+    {
+        ManagedCheckoutError::BranchNotFound
     } else {
         ManagedCheckoutError::CloneFailed
     }
@@ -1124,27 +1145,114 @@ mod tests {
         assert!(moved.join("note.md").is_file());
     }
 
-    #[test]
-    fn remote_errors_are_classified_as_authentication_or_generic_clone_failure() {
-        let auth_error = git2::Error::new(
-            git2::ErrorCode::Auth,
-            git2::ErrorClass::Http,
-            "authentication required",
-        );
-        assert_eq!(
-            classify_remote_error(auth_error),
-            ManagedCheckoutError::AuthenticationFailed
-        );
+    /// Clone `url` into a fresh temporary directory with a fake token, the
+    /// way a managed Vault's first turn does.
+    fn clone_with_token(url: &str, branch: Option<&str>) -> Result<(), ManagedCheckoutError> {
+        let root = tempdir().expect("temporary clone");
+        let request = ManagedCheckoutRequest {
+            state_directory: root.path().to_path_buf(),
+            vault_id: VaultId::generate().expect("Vault ID"),
+            repository_url: url.to_string(),
+            branch: branch.map(str::to_owned),
+            vault_subdirectory: None,
+            credentials: Some(ManagedHttpsCredentials {
+                username: "hatchdoor".into(),
+                token: "fake-token".into(),
+            }),
+        };
+        clone_repository(&request, &root.path().join("clone"))
+    }
 
-        let network_error = git2::Error::new(
-            git2::ErrorCode::GenericError,
-            git2::ErrorClass::Net,
-            "could not resolve host",
+    #[test]
+    fn a_rejected_token_is_an_authentication_failure_offered_once() {
+        let server =
+            super::super::test_http::Server::start(|_| super::super::test_http::unauthorized());
+
+        let error = clone_with_token(&format!("{}/notes.git", server.base), None)
+            .expect_err("a server refusing every request cannot be cloned");
+
+        assert_eq!(error, ManagedCheckoutError::AuthenticationFailed);
+        let with_token = server
+            .requests()
+            .iter()
+            .filter(|request| request.authorization.is_some())
+            .count();
+        assert_eq!(with_token, 1, "{:?}", server.requests());
+    }
+
+    #[test]
+    fn a_403_after_the_token_went_out_is_an_authentication_failure() {
+        let server = super::super::test_http::Server::start(|request| {
+            if request.authorization.is_some() {
+                super::super::test_http::respond("403 Forbidden", &[], b"")
+            } else {
+                super::super::test_http::unauthorized()
+            }
+        });
+
+        let error = clone_with_token(&format!("{}/notes.git", server.base), None)
+            .expect_err("a forbidden clone fails");
+
+        assert_eq!(error, ManagedCheckoutError::AuthenticationFailed);
+    }
+
+    #[test]
+    fn a_redirect_to_another_host_never_receives_the_token() {
+        let elsewhere =
+            super::super::test_http::Server::start(|_| super::super::test_http::unauthorized());
+        let target = format!(
+            "{}/notes.git/info/refs?service=git-upload-pack",
+            elsewhere.base
         );
-        assert_eq!(
-            classify_remote_error(network_error),
-            ManagedCheckoutError::CloneFailed
+        let configured = super::super::test_http::Server::start(move |_| {
+            super::super::test_http::respond("302 Found", &[("Location", target.as_str())], b"")
+        });
+
+        let error = clone_with_token(&format!("{}/notes.git", configured.base), None)
+            .expect_err("the redirect target refuses every request");
+
+        assert_eq!(error, ManagedCheckoutError::AuthenticationFailed);
+        assert!(
+            !elsewhere.requests().is_empty(),
+            "the redirect was followed"
         );
+        assert!(
+            elsewhere
+                .requests()
+                .iter()
+                .all(|request| request.authorization.is_none()),
+            "{:?}",
+            elsewhere.requests()
+        );
+    }
+
+    #[test]
+    fn a_token_the_remote_accepts_clones_with_one_offer() {
+        let root = tempdir().expect("temporary remote");
+        remote_with_default_branch(root.path(), "trunk");
+        let server = super::super::test_http::Server::start(super::super::test_http::git_backend(
+            root.path().to_path_buf(),
+            super::super::test_http::basic("hatchdoor", "fake-token"),
+        ));
+
+        clone_with_token(&format!("{}/remote.git", server.base), None)
+            .expect("a clone with an accepted token");
+    }
+
+    #[test]
+    fn a_branch_the_remote_lacks_is_reported_as_such() {
+        let root = tempdir().expect("temporary state");
+        let remote = remote_with_default_branch(root.path(), "trunk");
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let state_directory = root.path().join("state");
+        fs::create_dir(&state_directory).expect("state directory");
+        let mut request = request(state_directory.clone(), vault_id, &remote);
+        request.branch = Some("mian".into());
+        let lease = ManagedCheckoutLease::acquire(state_directory, vault_id).expect("lease");
+
+        let error = acquire_or_reuse(&lease, &request).expect_err("no such branch");
+
+        assert_eq!(error, ManagedCheckoutError::BranchNotFound);
     }
 
     #[test]

@@ -242,6 +242,17 @@ export type GitFailureDescription = {
   filesTotal?: number;
 };
 
+/** Issue #638: everything else was committed (and, for a Vault with a
+ * remote, synchronized); only the listed files were left out. A warning, not
+ * an error, because the rest of the Vault is safe. */
+const UNSUPPORTED_FILE_NAMES = {
+  label: "unreadable file names",
+  tier: "warn" as const,
+  files: true,
+  sentence: () =>
+    "Hatchdoor committed everything else, but left out the files below because their names are not valid UTF-8 text. They are still on disk. Rename them, then press Try again.",
+};
+
 /** Issue #121's nine failures, verbatim from its resolution: "the
  * destination is invalid, the remote is unreachable, authentication failed,
  * validation failed, the install failed, the working copy is dirty, a
@@ -346,6 +357,17 @@ const GIT_FAILURE_COPY: Record<
     sentence: () =>
       "This Vault's Git checkout is part-way through a merge or similar operation, so Hatchdoor committed and pushed nothing. Finish or abort it with Git in the checkout, then press Try again.",
   },
+  // Issue #638. A branch the remote lacks is found only after a full
+  // download, so the server stops retrying until someone fixes the name.
+  managed_git_branch_not_found: {
+    label: "branch not found",
+    tier: "error",
+    files: false,
+    sentence: () =>
+      "This Vault's remote has no branch with the name set above, so nothing was downloaded. Nothing was lost. Correct the branch name, or create the branch on your Git host, then press Try again.",
+  },
+  managed_git_unsupported_file_names: UNSUPPORTED_FILE_NAMES,
+  existing_git_local_history_unsupported_file_names: UNSUPPORTED_FILE_NAMES,
 };
 
 export function describeGitFailure(

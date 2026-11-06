@@ -4,8 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use git2::{
-    Cred, FetchOptions, MergeOptions, PushOptions, RemoteCallbacks, Repository, ResetType,
-    Signature,
+    FetchOptions, MergeOptions, PushOptions, RemoteCallbacks, Repository, ResetType, Signature,
 };
 
 use super::managed_checkout::ManagedHttpsCredentials;
@@ -103,6 +102,12 @@ pub enum ManagedSyncError {
     /// rather than backing off and retrying blindly.
     Authentication,
     Remote,
+    /// The turn committed and synchronized everything else, but left out
+    /// these files inside the Vault because their names are not valid UTF-8.
+    /// Each name is written with its undecodable bytes as `\xNN` (#638).
+    UnsupportedFileNames {
+        files: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for ManagedSyncError {
@@ -154,6 +159,9 @@ impl std::fmt::Display for ManagedSyncError {
             }
             Self::Authentication => formatter.write_str("managed checkout authentication failed"),
             Self::Remote => formatter.write_str("managed checkout remote operation failed"),
+            Self::UnsupportedFileNames { files } => {
+                formatter.write_str(&super::left_out_message(files))
+            }
         }
     }
 }
@@ -202,8 +210,9 @@ pub fn commit_managed_checkout(
         return Err(ManagedSyncError::Validation);
     }
     let repository = open_commit_repository(config)?;
-    let committed = prepare_two_way_worktree(&repository, config, ledger)?;
-    Ok(if committed {
+    let prepared = prepare_two_way_worktree(&repository, config, ledger)?;
+    prepared.report_left_out()?;
+    Ok(if prepared.committed {
         ManagedSyncOutcome::TwoWaySynchronized {
             committed: true,
             integrated: false,
@@ -324,12 +333,14 @@ fn synchronize_two_way_with_push<F>(
 where
     F: FnMut(&Repository, &ManagedSyncConfig) -> Result<(), ManagedSyncError>,
 {
-    let mut committed = prepare_two_way_worktree(repository, config, ledger)?;
+    let prepared = prepare_two_way_worktree(repository, config, ledger)?;
+    let mut committed = prepared.committed;
     let mut integrated = false;
 
     for attempt in 0..MAX_PUSH_RACE_ATTEMPTS {
         fetch(repository, config)?;
-        committed |= prepare_two_way_worktree(repository, config, ledger)?;
+        let prepared = prepare_two_way_worktree(repository, config, ledger)?;
+        committed |= prepared.committed;
         let relation = graph(repository, config)?;
 
         if relation.behind > 0 {
@@ -343,6 +354,7 @@ where
         }
 
         if graph(repository, config)?.ahead == 0 {
+            prepared.report_left_out()?;
             return Ok(if committed || integrated {
                 ManagedSyncOutcome::TwoWaySynchronized {
                     committed,
@@ -355,6 +367,7 @@ where
 
         match push_operation(repository, config) {
             Ok(()) => {
+                prepared.report_left_out()?;
                 return Ok(ManagedSyncOutcome::TwoWaySynchronized {
                     committed,
                     integrated,
@@ -510,6 +523,8 @@ fn managed_remote_name(
 fn safe_managed_remote_url(url: &str) -> bool {
     crate::vault_registry::is_safe_https_repository_url(url)
         || (cfg!(test) && url.starts_with('/') && !url.contains(['?', '#']))
+        // The credential tests' plain-HTTP server (`git::test_http`).
+        || (cfg!(test) && url.starts_with("http://127.0.0.1:"))
 }
 
 fn reject_dirty_worktree(repository: &Repository) -> Result<(), ManagedSyncError> {
@@ -517,16 +532,34 @@ fn reject_dirty_worktree(repository: &Repository) -> Result<(), ManagedSyncError
     if files.is_empty() {
         Ok(())
     } else {
-        Err(dirty_worktree_error(files))
+        Err(dirty_worktree_error(&files))
     }
 }
 
-fn dirty_worktree_error(files: Vec<PathBuf>) -> ManagedSyncError {
+fn dirty_worktree_error(files: &[Vec<u8>]) -> ManagedSyncError {
     ManagedSyncError::DirtyWorkingCopy {
-        files: files
-            .into_iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect(),
+        files: files.iter().map(|path| super::escaped_path(path)).collect(),
+    }
+}
+
+/// What [`prepare_two_way_worktree`] did: whether it committed, and the
+/// files inside the Vault it had to leave out.
+struct PreparedWorktree {
+    committed: bool,
+    left_out: Vec<String>,
+}
+
+impl PreparedWorktree {
+    /// Report the left-out files once the rest of the turn has gone through,
+    /// so one undecodable name never holds back every other note (#638).
+    fn report_left_out(&self) -> Result<(), ManagedSyncError> {
+        if self.left_out.is_empty() {
+            Ok(())
+        } else {
+            Err(ManagedSyncError::UnsupportedFileNames {
+                files: self.left_out.clone(),
+            })
+        }
     }
 }
 
@@ -534,37 +567,47 @@ fn prepare_two_way_worktree(
     repository: &Repository,
     config: &ManagedSyncConfig,
     ledger: &WriteLedger,
-) -> Result<bool, ManagedSyncError> {
+) -> Result<PreparedWorktree, ManagedSyncError> {
     let vault_relative = vault_relative_path(repository, config)?;
     let files = changed_paths(repository)?;
     let outside = files
         .iter()
-        .filter(|path| !path.starts_with(&vault_relative))
-        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| !super::status_bytes_in_vault(path, &vault_relative))
+        .cloned()
         .collect::<Vec<_>>();
     if !outside.is_empty() {
-        return Err(ManagedSyncError::DirtyWorkingCopy { files: outside });
+        return Err(dirty_worktree_error(&outside));
     }
-    if files.is_empty() {
-        return Ok(false);
+    let left_out = files
+        .iter()
+        .filter(|path| std::str::from_utf8(path).is_err())
+        .map(|path| super::escaped_path(path))
+        .collect::<Vec<_>>();
+    if files.len() == left_out.len() {
+        return Ok(PreparedWorktree {
+            committed: false,
+            left_out,
+        });
     }
-    commit_vault_drift(repository, config, &vault_relative, ledger)
+    let committed = commit_vault_drift(repository, config, &vault_relative, ledger)?;
+    Ok(PreparedWorktree {
+        committed,
+        left_out,
+    })
 }
 
-fn changed_paths(repository: &Repository) -> Result<Vec<PathBuf>, ManagedSyncError> {
+/// Every path Git reports as changed, as raw bytes: a name that is not valid
+/// UTF-8 is still a change, and must still be placed inside or outside the
+/// Vault and named in a refusal (#638).
+fn changed_paths(repository: &Repository) -> Result<Vec<Vec<u8>>, ManagedSyncError> {
     let mut options = git2::StatusOptions::new();
     options.include_untracked(true).recurse_untracked_dirs(true);
-    repository
+    Ok(repository
         .statuses(Some(&mut options))
         .map_err(|_| ManagedSyncError::Validation)?
         .iter()
-        .map(|entry| {
-            entry
-                .path()
-                .map(PathBuf::from)
-                .map_err(|_| ManagedSyncError::Validation)
-        })
-        .collect()
+        .map(|entry| entry.path_bytes().to_vec())
+        .collect())
 }
 
 fn vault_relative_path(
@@ -689,8 +732,10 @@ fn has_staged_vault_changes(
             if found {
                 return Ok(true);
             }
-            let path = entry.path().map_err(|_| ManagedSyncError::Validation)?;
-            Ok(Path::new(path).starts_with(vault_relative) && entry.status().intersects(staged))
+            Ok(
+                super::status_bytes_in_vault(entry.path_bytes(), vault_relative)
+                    && entry.status().intersects(staged),
+            )
         })
 }
 
@@ -713,7 +758,11 @@ fn stage_vault_drift(
         .map_err(|_| ManagedSyncError::Validation)?
         .iter()
     {
-        let path = entry.path().map_err(|_| ManagedSyncError::Validation)?;
+        // A name that is not valid UTF-8 is left out here and reported by
+        // `prepare_two_way_worktree` instead (#638).
+        let Ok(path) = entry.path() else {
+            continue;
+        };
         let path = Path::new(path);
         let Ok(vault_path) = path.strip_prefix(vault_relative) else {
             continue;
@@ -744,17 +793,19 @@ fn fetch(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Mana
         .map_err(|_| ManagedSyncError::Validation)?;
     super::bound_network_waits();
     let mut options = FetchOptions::new();
-    if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
-        options.remote_callbacks(callbacks);
-    }
+    let (callbacks, offers) = managed_remote_callbacks(config);
+    options.remote_callbacks(callbacks);
     remote
         .fetch(&[&config.branch], Some(&mut options), None)
-        .map_err(classify_remote_error)
+        .map_err(|error| classify_remote_error(&error, offers.as_ref()))
 }
 
 /// Distinguish a credential rejection from any other remote failure.
-fn classify_remote_error(error: git2::Error) -> ManagedSyncError {
-    if error.code() == git2::ErrorCode::Auth {
+fn classify_remote_error(
+    error: &git2::Error,
+    offers: Option<&super::CredentialOffers>,
+) -> ManagedSyncError {
+    if super::sign_in_rejected(error, offers) {
         ManagedSyncError::Authentication
     } else {
         ManagedSyncError::Remote
@@ -806,7 +857,7 @@ fn fast_forward(
             remote.as_object(),
             Some(&mut safe_checkout_keeping_ignored()),
         )
-        .map_err(|_| dirty_worktree_error(changed_paths(repository).unwrap_or_default()))?;
+        .map_err(|_| dirty_worktree_error(&changed_paths(repository).unwrap_or_default()))?;
     repository
         .reference(
             &reference,
@@ -881,7 +932,7 @@ fn merge_remote(
         .map_err(|_| ManagedSyncError::Validation)?;
     repository
         .checkout_head(Some(&mut safe_checkout_keeping_ignored()))
-        .map_err(|_| dirty_worktree_error(changed_paths(repository).unwrap_or_default()))
+        .map_err(|_| dirty_worktree_error(&changed_paths(repository).unwrap_or_default()))
 }
 
 /// A safe checkout that also treats an ignored file in its way as a conflict.
@@ -1190,7 +1241,7 @@ fn push_refspec(
     // callback: without one, `git_remote_push` discards the per-ref status
     // and returns success for a push that landed nothing (#323).
     let rejection = std::cell::RefCell::new(None::<String>);
-    let mut callbacks = managed_remote_callbacks(config.credentials.as_ref()).unwrap_or_default();
+    let (mut callbacks, offers) = managed_remote_callbacks(config);
     callbacks.push_update_reference(|_refname, status| {
         if let Some(reason) = status {
             rejection
@@ -1207,7 +1258,7 @@ fn push_refspec(
         if error.code() == git2::ErrorCode::NotFastForward {
             ManagedSyncError::PushRace
         } else {
-            classify_remote_error(error)
+            classify_remote_error(&error, offers.as_ref())
         }
     })?;
     match rejection.into_inner() {
@@ -1244,15 +1295,22 @@ fn push_rejection_reason(reason: &str) -> String {
     }
 }
 
+/// The callbacks every fetch and push to the managed remote starts from.
+/// Public HTTPS sets no credential callback; supplied credentials are offered
+/// to the configured remote alone, once per URL (#638).
 fn managed_remote_callbacks<'a>(
-    credentials: Option<&ManagedHttpsCredentials>,
-) -> Option<RemoteCallbacks<'a>> {
-    let credentials = credentials?.clone();
+    config: &ManagedSyncConfig,
+) -> (RemoteCallbacks<'a>, Option<super::CredentialOffers>) {
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(move |_url, _username, _allowed| {
-        Cred::userpass_plaintext(&credentials.username, &credentials.token)
+    let offers = config.credentials.as_ref().map(|credentials| {
+        super::offer_credentials_once(
+            &mut callbacks,
+            &config.repository_url,
+            credentials.username.clone(),
+            credentials.token.clone(),
+        )
     });
-    Some(callbacks)
+    (callbacks, offers)
 }
 
 fn signature(config: &ManagedSyncConfig) -> Result<Signature<'_>, ManagedSyncError> {
@@ -1362,27 +1420,99 @@ mod tests {
         String::from_utf8(blob.content().to_vec()).expect("UTF-8 file")
     }
 
-    #[test]
-    fn remote_errors_are_classified_as_authentication_or_generic_remote_failure() {
-        let auth_error = git2::Error::new(
-            git2::ErrorCode::Auth,
-            git2::ErrorClass::Http,
-            "authentication required",
-        );
-        assert_eq!(
-            classify_remote_error(auth_error),
-            ManagedSyncError::Authentication
-        );
+    /// Point the fixture's checkout at `url` and give it a fake token.
+    fn served_by(config: &mut ManagedSyncConfig, url: String) {
+        Repository::open(&config.repository_path)
+            .expect("checkout")
+            .remote_set_url("origin", &url)
+            .expect("point origin at the test server");
+        config.repository_url = url;
+        config.credentials = Some(ManagedHttpsCredentials {
+            username: "hatchdoor".into(),
+            token: "fake-token".into(),
+        });
+    }
 
-        let network_error = git2::Error::new(
-            git2::ErrorCode::GenericError,
-            git2::ErrorClass::Net,
-            "could not resolve host",
-        );
+    #[test]
+    fn a_rejected_token_fails_a_fetch_as_authentication_after_one_offer() {
+        for mode in [ManagedSyncMode::PullOnly, ManagedSyncMode::TwoWay] {
+            let (_root, mut config) = fixture(mode);
+            let server =
+                crate::git::test_http::Server::start(|_| crate::git::test_http::unauthorized());
+            served_by(&mut config, format!("{}/remote.git", server.base));
+
+            let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+                .expect_err("a server refusing every request");
+
+            assert_eq!(error, ManagedSyncError::Authentication);
+            let with_token = server
+                .requests()
+                .iter()
+                .filter(|request| request.authorization.is_some())
+                .count();
+            assert_eq!(with_token, 1, "{:?}", server.requests());
+        }
+    }
+
+    #[test]
+    fn an_accepted_token_fetches_and_pushes_over_http() {
+        let (root, mut config) = fixture(ManagedSyncMode::TwoWay);
+        let server = crate::git::test_http::Server::start(crate::git::test_http::git_backend(
+            root.path().to_path_buf(),
+            crate::git::test_http::basic("hatchdoor", "fake-token"),
+        ));
+        served_by(&mut config, format!("{}/remote.git", server.base));
+        remote_commit(root.path(), "vault/Remote.md", "remote\n", "remote note");
+        std::fs::write(config.vault_path.join("Local.md"), "local\n").expect("local note");
+
+        let outcome = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect("sync with an accepted token");
+
         assert_eq!(
-            classify_remote_error(network_error),
-            ManagedSyncError::Remote
+            outcome,
+            ManagedSyncOutcome::TwoWaySynchronized {
+                committed: true,
+                integrated: true,
+            }
         );
+        let remote = Repository::open(root.path().join("remote.git")).expect("remote");
+        assert_eq!(file_at_head(&remote, "vault/Local.md"), "local\n");
+    }
+
+    #[test]
+    fn an_undecodable_file_name_is_left_out_and_named_while_the_rest_commits() {
+        use std::os::unix::ffi::OsStrExt;
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let odd = config
+            .vault_path
+            .join(std::ffi::OsStr::from_bytes(b"caf\xe9-latin1.md"));
+        if std::fs::write(&odd, "odd\n").is_err() {
+            // A filesystem that refuses non-UTF-8 names cannot hold the case.
+            return;
+        }
+        std::fs::write(config.vault_path.join("After.md"), "after\n").expect("new note");
+
+        let error = commit_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("the left-out file is reported");
+
+        assert_eq!(
+            error,
+            ManagedSyncError::UnsupportedFileNames {
+                files: vec!["vault/caf\\xe9-latin1.md".to_string()],
+            }
+        );
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(file_at_head(&checkout, "vault/After.md"), "after\n");
+        assert!(odd.exists(), "the left-out file stays on disk");
+
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("a sync still names it");
+        assert!(matches!(
+            error,
+            ManagedSyncError::UnsupportedFileNames { .. }
+        ));
+        let remote = Repository::open(root.path().join("remote.git")).expect("remote");
+        assert_eq!(file_at_head(&remote, "vault/After.md"), "after\n");
     }
 
     fn run_against_stalled_remote(
