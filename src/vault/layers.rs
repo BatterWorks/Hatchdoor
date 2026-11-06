@@ -158,6 +158,35 @@ fn sanitize_description(raw: &str) -> String {
     collapsed.chars().take(MAX_DESCRIPTION_CHARS).collect()
 }
 
+/// Every layer marker file under `root`, outside `.git`. Ignores exclusions on
+/// purpose (see [`LayerMap::collect`]), so it also enters folders no note
+/// lives in, such as a root-owned `lost+found` or another tool's private
+/// folder. An entry it may not open is skipped rather than failing the walk,
+/// so one such folder cannot take the Vault offline (#637); an unreadable
+/// root or any other error still fails it. Skipped at debug level: a folder the catalogue
+/// walk also enters is reported there, and an excluded one holds no note.
+fn marker_walk(root: &Path) -> Result<Vec<walkdir::DirEntry>, String> {
+    let mut markers = Vec::new();
+    let walk = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git");
+    for entry in walk {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if super::paths::walk_error_costs_only_itself(&error) => {
+                tracing::debug!(%error, "Skipping a Vault entry the layer-marker walk cannot read");
+                continue;
+            }
+            Err(error) => return Err(format!("vault walk failed: {error}")),
+        };
+        if entry.file_type().is_file() && entry.file_name().to_str() == Some(MARKER_FILE_NAME) {
+            markers.push(entry);
+        }
+    }
+    Ok(markers)
+}
+
 /// Which layer each marked directory declares, keyed by vault-relative
 /// directory path (`""` is the vault root). Resolution is longest-prefix.
 #[derive(Debug, Clone, Default)]
@@ -178,19 +207,22 @@ impl LayerMap {
         let mut chosen: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
 
         let mut marker_paths: Vec<(String, String)> = Vec::new();
-        for entry in WalkDir::new(root).follow_links(false) {
-            let entry = entry.map_err(|e| format!("vault walk failed: {e}"))?;
-            if !entry.file_type().is_file() || entry.file_name().to_str() != Some(MARKER_FILE_NAME)
-            {
-                continue;
-            }
-            let relative_dir = entry
+        for entry in marker_walk(root)? {
+            let Some(relative_dir) = entry
                 .path()
                 .parent()
                 .and_then(|parent| parent.strip_prefix(root).ok())
                 .and_then(|relative| relative.to_str())
                 .map(|relative| relative.replace('\\', "/"))
-                .ok_or_else(|| "marker path outside vault root".to_string())?;
+            else {
+                // No relative path can name this folder, and none of its
+                // notes is listed either (#637).
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    "Skipping a layer marker whose folder path is not valid UTF-8"
+                );
+                continue;
+            };
             let display = if relative_dir.is_empty() {
                 MARKER_FILE_NAME.to_string()
             } else {
@@ -296,12 +328,7 @@ impl LayerMap {
     /// markers are skipped here — they surface as an index build failure instead.
     pub fn description_conflicts(root: &Path) -> Result<Vec<(String, Vec<String>)>, String> {
         let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for entry in WalkDir::new(root).follow_links(false) {
-            let entry = entry.map_err(|e| format!("vault walk failed: {e}"))?;
-            if !entry.file_type().is_file() || entry.file_name().to_str() != Some(MARKER_FILE_NAME)
-            {
-                continue;
-            }
+        for entry in marker_walk(root)? {
             let Ok(contents) = fs::read_to_string(entry.path()) else {
                 continue;
             };

@@ -1238,7 +1238,7 @@ impl VaultMutation {
         target_relative_path: &str,
         expected_content_hash: Option<&str>,
     ) -> Result<(), VaultOperationError> {
-        let target_relative_path = &note_upload_path(target_relative_path);
+        let target_relative_path = target_relative_path.trim();
         self.reject_marker_write(target_relative_path)?;
         self.reject_noise_note_write(target_relative_path)?;
         let Some(expected_content_hash) = expected_content_hash else {
@@ -1278,7 +1278,7 @@ impl VaultMutation {
         }
         let content = String::from_utf8(bytes)
             .map_err(|_| invalid("an uploaded note must be valid UTF-8 text".to_string()))?;
-        let target_relative_path = &note_upload_path(target_relative_path);
+        let target_relative_path = target_relative_path.trim();
         let Some(expected_content_hash) = expected_content_hash else {
             return self
                 .create_note(target_relative_path, &content, false)
@@ -1696,29 +1696,12 @@ impl VaultMutation {
 }
 
 /// Whether an upload to `target_relative_path` is a note upload rather than
-/// an attachment one (ADR-32): its filename ends in `.md`, in any case. A path
-/// with no extension is not a note, though `create_note` would add one.
+/// an attachment one (ADR-32): its filename ends in `.md`, in any case, by the
+/// rule the index and the write layer share (#637). A path with no extension
+/// is not a note, though `create_note` would add one. The target is written as
+/// given, so `Report.MD` replaces the `Report.MD` note the index lists.
 pub fn is_note_upload_target(target_relative_path: &str) -> bool {
-    std::path::Path::new(target_relative_path.trim())
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-}
-
-/// The path a note upload writes: the target with its `.md` extension in
-/// lower case, so a link for `Report.MD` writes `Report.md` rather than
-/// `create_note`'s `Report.MD.md`, and replaces the note the index knows
-/// there.
-fn note_upload_path(target_relative_path: &str) -> String {
-    let trimmed = target_relative_path.trim();
-    match trimmed.len().checked_sub(3) {
-        Some(stem)
-            if trimmed.is_char_boundary(stem) && trimmed[stem..].eq_ignore_ascii_case(".md") =>
-        {
-            format!("{}.md", &trimmed[..stem])
-        }
-        _ => trimmed.to_string(),
-    }
+    crate::vault::is_note_path(std::path::Path::new(target_relative_path.trim()))
 }
 
 /// Run a blocking `vault/write` call on the blocking pool, turning a panic
@@ -1760,7 +1743,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{VaultMutationCore, VaultOperationError, is_note_upload_target, note_upload_path};
+    use super::{VaultMutationCore, VaultOperationError, is_note_upload_target};
     use crate::cache::SqliteCache;
     use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
     use crate::vault::SectionMode;
@@ -1777,13 +1760,6 @@ mod tests {
         for other in ["Report", "Imports/scan.png", ".md", "a.mdx", "md"] {
             assert!(!is_note_upload_target(other), "{other}");
         }
-    }
-
-    #[test]
-    fn a_note_upload_writes_its_target_with_a_lower_case_extension() {
-        assert_eq!(note_upload_path(" Imports/Report.MD "), "Imports/Report.md");
-        assert_eq!(note_upload_path("a.Md"), "a.md");
-        assert_eq!(note_upload_path("Imports/Report.md"), "Imports/Report.md");
     }
 
     /// One Vault on a real filesystem, reconciled through the real registry
@@ -2544,6 +2520,8 @@ mod tests {
             assert_eq!(workspace.read("Media/payload.png"), "payload\n");
             assert!(!workspace.exists("Media/blocked.png"));
         }
+        // A note upload writes its target as named (#637); a note pattern
+        // still covers every case of the extension.
         for path in [
             "Notes/Drawing.excalidraw.md",
             r"Notes\Drawing.excalidraw.MD",

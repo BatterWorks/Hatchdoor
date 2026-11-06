@@ -1081,3 +1081,168 @@ fn resolve_wikilink_reads_a_leading_slash_as_the_vault_root() {
     let suffix = vault.resolve_wikilink_from("a/b/Plan", "").expect("suffix");
     assert_eq!(suffix.relative_path, "a/b/Plan");
 }
+
+/// Whether this process ignores file permissions, as root does: a test that
+/// takes a folder's permissions away proves nothing then.
+#[cfg(unix)]
+fn permissions_are_ignored() -> bool {
+    // SAFETY: `geteuid` reads the process's effective user and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Puts a folder's permissions back when dropped, so a failed assertion still
+/// lets the temporary directory be removed.
+#[cfg(unix)]
+struct LockedFolder(std::path::PathBuf);
+
+#[cfg(unix)]
+impl LockedFolder {
+    fn lock(path: std::path::PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("lock folder");
+        Self(path)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LockedFolder {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// One unreadable folder, even an excluded one the layer-marker walk still
+/// enters, used to fail the whole build and take the Vault offline (#637).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_folder_costs_only_itself() {
+    if permissions_are_ignored() {
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Home.md"), "# Home\n").expect("note");
+    fs::create_dir_all(dir.path().join(".trash/private")).expect("trash");
+    fs::create_dir_all(dir.path().join("Shared/locked")).expect("shared");
+    fs::write(dir.path().join("Shared/Open.md"), "# Open\n").expect("note");
+    fs::write(dir.path().join("Shared/locked/Hidden.md"), "# Hidden\n").expect("note");
+    let _trash = LockedFolder::lock(dir.path().join(".trash/private"));
+    let _shared = LockedFolder::lock(dir.path().join("Shared/locked"));
+
+    let index = VaultIndex::build(dir.path()).expect("the rest of the Vault still builds");
+
+    assert!(index.find_by_slug("home").is_some());
+    assert!(index.find_by_slug("open").is_some());
+    assert!(index.find_by_slug("hidden").is_none());
+}
+
+#[test]
+fn an_unreadable_root_still_fails_the_build() {
+    let dir = tempdir().expect("tempdir");
+    assert!(VaultIndex::build(dir.path().join("missing")).is_err());
+}
+
+/// A path that is not UTF-8 used to become `Untitled` at the root, sharing
+/// that name with every other such note and with a real `Untitled.md` (#637).
+#[cfg(unix)]
+#[test]
+fn a_note_path_that_is_not_utf8_is_left_out() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Untitled.md"), "# Untitled\n").expect("note");
+    fs::write(dir.path().join(OsStr::from_bytes(b"bad\xffname.md")), "x").expect("note");
+    let folder = dir.path().join(OsStr::from_bytes(b"dir\xfe"));
+    fs::create_dir_all(&folder).expect("folder");
+    fs::write(folder.join(OsStr::from_bytes(b"n\xffx.md")), "x").expect("note");
+    // A layer marker there has no folder path to name either.
+    fs::write(folder.join(MARKER_FILE_NAME), "layer: raw\n").expect("marker");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+
+    assert_eq!(index.total_notes(), 1);
+    let note = index.find_by_slug("untitled").expect("Untitled.md stays");
+    assert_eq!(note.relative_path, "Untitled");
+    assert!(note.path.ends_with("Untitled.md"));
+    assert!(index.layers.layer_names().is_empty());
+}
+
+/// `.MD` was invisible to the index while the write layer called it a note
+/// (#247, #637).
+#[test]
+fn an_upper_case_extension_is_a_note() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Upper.MD"), "# Upper\n").expect("note");
+    fs::write(dir.path().join("Mixed.Md"), "# Mixed\n").expect("note");
+    fs::write(dir.path().join("Readme.mdx"), "not a note").expect("file");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+
+    let upper = index.find_by_slug("upper").expect("Upper.MD is a note");
+    assert_eq!(upper.title, "Upper");
+    assert_eq!(upper.relative_path, "Upper");
+    assert!(index.find_by_slug("mixed").is_some());
+    assert_eq!(index.total_notes(), 2);
+    assert_eq!(
+        index
+            .read_note_by_slug("upper")
+            .expect("read")
+            .expect("note")
+            .content,
+        "# Upper\n"
+    );
+}
+
+#[test]
+fn strip_md_extension_matches_any_case() {
+    assert_eq!(strip_md_extension("Note.MD"), "Note");
+    assert_eq!(strip_md_extension("a/Note.Md"), "a/Note");
+    assert_eq!(strip_md_extension("Note.mdx"), "Note.mdx");
+    assert_eq!(strip_md_extension("é.MD"), "é");
+    assert_eq!(strip_md_extension("md"), "md");
+}
+
+/// `.git/` was walked on every exact read and served as Vault content (#637).
+#[test]
+fn a_git_folder_is_not_content_unless_re_included() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Home.md"), "# Home\n").expect("note");
+    fs::create_dir_all(dir.path().join(".git/objects/ab")).expect("git");
+    fs::write(dir.path().join(".git/hooks-readme.md"), "# Hooks\n").expect("note");
+    fs::write(dir.path().join(".git/objects/ab/cdef"), "blob").expect("object");
+    // A marker there must not classify anything either.
+    fs::write(dir.path().join(".git/.hatchdoor-layer"), "layer: raw\n").expect("marker");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+    assert!(index.find_by_slug("hooks-readme").is_none());
+    assert_eq!(index.total_notes(), 1);
+    assert!(index.layers.layer_names().is_empty());
+
+    let reinstated = VaultScanConfig {
+        exclude: ExcludeMatcher::new(&["!.git/".to_string()]).expect("patterns"),
+    };
+    let index = VaultIndex::build_with_config(dir.path(), &reinstated).expect("build");
+    assert!(index.find_by_slug("hooks-readme").is_some());
+}
+
+/// `Twin.md` and `Twin.MD` in one folder would share one relative path, so
+/// one note address. The lower-case one is kept (#637).
+#[test]
+fn extension_case_twins_keep_the_lower_case_note() {
+    let dir = tempdir().expect("tempdir");
+    for name in ["Twin.MD", "Twin.Md", "Twin.md"] {
+        fs::write(dir.path().join(name), format!("# {name}\n")).expect("note");
+    }
+    fs::write(dir.path().join("Solo.MD"), "# Solo\n").expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+
+    assert_eq!(index.total_notes(), 2);
+    let twin = index.find_by_slug("twin").expect("one twin");
+    assert!(twin.path.ends_with("Twin.md"));
+    assert!(index.find_by_slug("twin-2").is_none());
+    assert_eq!(note_file_name(dir.path(), "Twin"), "Twin.md");
+    assert_eq!(note_file_name(dir.path(), "Solo"), "Solo.MD");
+    assert_eq!(note_file_name(dir.path(), "Gone"), "Gone.md");
+}

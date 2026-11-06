@@ -433,9 +433,17 @@ pub(super) fn read_existing_note(path: &Path, label: &str) -> Result<String, Wri
         BoundedReadError::NotRegular => {
             WriteError::InvalidInput(format!("note '{label}' is not a regular file"))
         }
+        // `read_open_bounded` returns bytes; the UTF-8 check is below.
+        BoundedReadError::NotUtf8 => io_error(&error),
         BoundedReadError::Io(error) => io_error(&error),
     })?;
-    String::from_utf8(bytes).map_err(|error| io_error(&error))
+    // Editing it would mean rewriting bytes that are not text, and retrying
+    // cannot change that, so it is refused like any other unusable input.
+    String::from_utf8(bytes).map_err(|_| {
+        WriteError::InvalidInput(format!(
+            "note '{label}' is not valid UTF-8 text; re-save it as UTF-8 to edit it"
+        ))
+    })
 }
 
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<(), WriteError> {

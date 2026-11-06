@@ -25,6 +25,9 @@ pub enum BoundedReadError {
     NotRegular,
     /// The file holds more than `limit` bytes.
     TooLarge { limit: u64 },
+    /// The note's bytes are not UTF-8, so it has no text to return (#637).
+    /// Only [`read_note_text`] reports this; [`read_bounded`] returns bytes.
+    NotUtf8,
     /// Opening or reading failed; `NotFound` when nothing is there.
     Io(io::Error),
 }
@@ -34,6 +37,7 @@ impl fmt::Display for BoundedReadError {
         match self {
             Self::NotRegular => formatter.write_str("not a regular file"),
             Self::TooLarge { limit } => write!(formatter, "larger than {limit} bytes"),
+            Self::NotUtf8 => formatter.write_str("not valid UTF-8"),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -76,10 +80,46 @@ pub fn read_open_bounded(file: File, limit: u64) -> Result<Vec<u8>, BoundedReadE
 }
 
 /// The note at `path` as text, bounded by [`MAX_NOTE_BYTES`]. A file that is
-/// not UTF-8 fails as `InvalidData`, as `fs::read_to_string` did.
+/// not UTF-8 fails as [`BoundedReadError::NotUtf8`], which every exact read
+/// reports as the one non-retryable `note_unreadable` (#637).
 pub fn read_note_text(path: &Path) -> Result<String, BoundedReadError> {
-    String::from_utf8(read_bounded(path, MAX_NOTE_BYTES)?)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error).into())
+    String::from_utf8(read_bounded(path, MAX_NOTE_BYTES)?).map_err(|_| BoundedReadError::NotUtf8)
+}
+
+/// The Vault-relative file name of the note whose extension-free relative
+/// path is `relative_path`, for a caller that holds only that path, such as a
+/// published snapshot row. A note's extension is `.md` in any case (#637), so
+/// when no `.md` file is there, the folder is searched for the one other case
+/// the catalogue lists; with none, the `.md` name comes back, and reading it
+/// reports the note missing.
+pub(crate) fn note_file_name(root: &Path, relative_path: &str) -> String {
+    let lower = format!("{relative_path}.md");
+    if fs::symlink_metadata(root.join(&lower)).is_ok() {
+        return lower;
+    }
+    let (folder, stem) = match relative_path.rsplit_once('/') {
+        Some((folder, stem)) => (Some(folder), stem),
+        None => (None, relative_path),
+    };
+    let Ok(entries) = fs::read_dir(folder.map_or_else(|| root.to_path_buf(), |f| root.join(f)))
+    else {
+        return lower;
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| {
+            name.len() == stem.len() + 3
+                && name.starts_with(stem)
+                && super::paths::is_note_path(Path::new(name))
+        })
+        .collect();
+    // The catalogue's own choice among case twins: the first in path order.
+    names.sort();
+    match (names.into_iter().next(), folder) {
+        (Some(name), Some(folder)) => format!("{folder}/{name}"),
+        (Some(name), None) => name,
+        (None, _) => lower,
+    }
 }
 
 /// Opens `path` for reading without following a final symbolic link and
