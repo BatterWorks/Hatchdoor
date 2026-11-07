@@ -2,14 +2,13 @@ use rusqlite::OptionalExtension;
 use tracing::{info, warn};
 
 use super::SqliteCache;
-use super::migrate::{PREVIOUS_SCHEMA_VERSION, migrate_from_previous_schema};
+use super::migrate::{can_migrate_from, migrate_to_current};
 use crate::embed::{Embedder, PENDING_IDENTITY};
 
 // Bump this when the schema structure or data-population logic changes. A
 // cache on any other version is wiped and rebuilt from Markdown on startup,
-// except one on `PREVIOUS_SCHEMA_VERSION` while a migration from it exists
-// (ADR-50).
-pub(super) const SCHEMA_VERSION: &str = "13";
+// except one on a version `migrate.rs` has a step from (ADR-50).
+pub(super) const SCHEMA_VERSION: &str = "14";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -24,12 +23,12 @@ impl SqliteCache {
             }
             // Left as it is: the migration runs only after the model check,
             // which needs the loaded embedder (`reset_if_embedder_changed`).
-            SchemaState::Previous => {
+            SchemaState::Behind(version) => {
                 info!(
-                    old = PREVIOUS_SCHEMA_VERSION,
+                    old = %version,
                     new = SCHEMA_VERSION,
-                    "SQLite cache is one schema version behind; migrating it once the \
-                     embedding model is loaded"
+                    "SQLite cache is behind the current schema version; migrating it once \
+                     the embedding model is loaded"
                 );
                 Ok(())
             }
@@ -108,13 +107,13 @@ impl SqliteCache {
             create_schema(&conn, embedder.embedding_dim())?;
             return Ok(());
         }
-        self.migrate_if_previous_schema(embedder.embedding_dim())
+        self.migrate_if_behind(embedder.embedding_dim())
     }
 
     /// Run the model check, and so any pending migration, as soon as a model
     /// has loaded and before it serves a search. Index turns run the same
     /// check, but a search arriving before the first one would otherwise
-    /// query a cache still on the previous schema. Holds the model epoch, as
+    /// query a cache still on an older schema. Holds the model epoch, as
     /// every snapshot builder does.
     pub fn prepare_for_embedder(&self, embedder: &dyn Embedder) -> Result<(), String> {
         let _epoch = self
@@ -124,19 +123,19 @@ impl SqliteCache {
         self.reset_if_embedder_changed(embedder)
     }
 
-    /// Bring a cache written by the previous schema version up to date,
+    /// Bring a cache written by an earlier schema version up to date,
     /// keeping its vectors (ADR-50). Runs only after the model check, so a
     /// migration never carries vectors from one model to another. Any failure
     /// wipes and rebuilds, and the log names the check that failed.
-    fn migrate_if_previous_schema(&self, embedding_dim: usize) -> Result<(), String> {
+    fn migrate_if_behind(&self, embedding_dim: usize) -> Result<(), String> {
         let mut conn = self.connection()?;
-        if !matches!(existing_schema_version(&conn)?, SchemaState::Previous) {
+        let SchemaState::Behind(version) = existing_schema_version(&conn)? else {
             return Ok(());
-        }
-        match migrate_from_previous_schema(&mut conn) {
+        };
+        match migrate_to_current(&mut conn, &version) {
             Ok(()) => {
                 info!(
-                    old = PREVIOUS_SCHEMA_VERSION,
+                    old = %version,
                     new = SCHEMA_VERSION,
                     "migrated the SQLite cache and kept its vectors"
                 );
@@ -144,7 +143,7 @@ impl SqliteCache {
             }
             Err(failure) => {
                 warn!(
-                    old = PREVIOUS_SCHEMA_VERSION,
+                    old = %version,
                     new = SCHEMA_VERSION,
                     failure = %failure,
                     "SQLite cache migration failed; wiping cache for full rebuild"
@@ -162,8 +161,9 @@ enum SchemaState {
     Fresh,
     /// Fully initialised and on the current schema version.
     Current,
-    /// Fully initialised and one version behind, which migrates (ADR-50).
-    Previous,
+    /// Fully initialised and on an earlier version `migrate.rs` has a step
+    /// from, which migrates (ADR-50).
+    Behind(String),
     /// Fully initialised but on an older/newer schema version → rebuild.
     VersionMismatch(String),
     /// Half-initialised (objects but no metadata, or metadata but no
@@ -209,7 +209,7 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<SchemaState, S
 
     match version {
         Some(version) if version == SCHEMA_VERSION => Ok(SchemaState::Current),
-        Some(version) if version == PREVIOUS_SCHEMA_VERSION => Ok(SchemaState::Previous),
+        Some(version) if can_migrate_from(&version) => Ok(SchemaState::Behind(version)),
         Some(version) => Ok(SchemaState::VersionMismatch(version)),
         None => Ok(SchemaState::Corrupt(
             "metadata table exists but schema_version row is missing".to_string(),
@@ -341,9 +341,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             slug TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL,
-            normalized_title TEXT NOT NULL,
             relative_path TEXT NOT NULL UNIQUE,
-            normalized_relative_path TEXT NOT NULL,
             absolute_path TEXT NOT NULL,
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
@@ -375,10 +373,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             PRIMARY KEY (note_slug, tag)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_notes_normalized_title
-            ON notes(normalized_title);
-        CREATE INDEX IF NOT EXISTS idx_notes_normalized_relative_path
-            ON notes(normalized_relative_path);
         CREATE INDEX IF NOT EXISTS idx_note_links_target_slug
             ON note_links(target_slug);
         CREATE INDEX IF NOT EXISTS idx_tags_tag
@@ -460,9 +454,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             vault_id TEXT NOT NULL REFERENCES vault_snapshots(vault_id) ON DELETE CASCADE,
             slug TEXT NOT NULL,
             title TEXT NOT NULL,
-            normalized_title TEXT NOT NULL,
             relative_path TEXT NOT NULL,
-            normalized_relative_path TEXT NOT NULL,
             absolute_path TEXT NOT NULL,
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
@@ -505,10 +497,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
                 REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
         );
 
-        CREATE INDEX IF NOT EXISTS idx_vault_notes_normalized_title
-            ON vault_notes(vault_id, normalized_title);
-        CREATE INDEX IF NOT EXISTS idx_vault_notes_normalized_relative_path
-            ON vault_notes(vault_id, normalized_relative_path);
         CREATE INDEX IF NOT EXISTS idx_vault_note_links_target
             ON vault_note_links(vault_id, target_slug);
         CREATE INDEX IF NOT EXISTS idx_vault_tags_tag
@@ -722,8 +710,8 @@ mod tests {
         let cache = SqliteCache::in_memory(384).expect("open");
         let conn = cache.connection().expect("conn");
         conn.execute(
-            "INSERT INTO notes(slug, title, normalized_title, relative_path, normalized_relative_path, absolute_path, content, content_hash, mtime_ns, size_bytes, indexed_at) \
-             VALUES ('n1','N1','n1','n1.md','n1.md','/tmp/n1.md','','h',0,0,0)",
+            "INSERT INTO notes(slug, title, relative_path, absolute_path, content, content_hash, mtime_ns, size_bytes, indexed_at) \
+             VALUES ('n1','N1','n1.md','/tmp/n1.md','','h',0,0,0)",
             [],
         ).expect("insert note");
         conn.execute(

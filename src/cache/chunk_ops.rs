@@ -153,11 +153,10 @@ mod tests {
     fn insert_minimal_note(cache: &SqliteCache, slug: &str) {
         let conn = cache.connection().expect("conn");
         conn.execute(
-            r#"INSERT INTO notes (slug, title, normalized_title, relative_path,
-                normalized_relative_path, absolute_path, content, content_hash,
-                mtime_ns, size_bytes, indexed_at)
-               VALUES (?, 'T', 't', ?, ?, '/abs', 'c', 'h', 0, 0, 0)"#,
-            params![slug, format!("{slug}.md"), format!("{slug}.md")],
+            r#"INSERT INTO notes (slug, title, relative_path, absolute_path, content,
+                content_hash, mtime_ns, size_bytes, indexed_at)
+               VALUES (?, 'T', ?, '/abs', 'c', 'h', 0, 0, 0)"#,
+            params![slug, format!("{slug}.md")],
         )
         .expect("insert note");
     }

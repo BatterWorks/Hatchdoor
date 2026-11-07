@@ -14,7 +14,7 @@ use crate::cache::chunk_ops::{
 use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::startup::IndexingProgressSnapshot;
-use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex, normalize_title};
+use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex};
 use crate::vault_registry::VaultId;
 
 use super::SqliteCache;
@@ -1501,28 +1501,22 @@ fn update_note_file_metadata(
     snapshot: FileSnapshot,
     indexed_at: i64,
 ) -> Result<(), String> {
-    let normalized_title = normalize_title(&entry.title);
-    let normalized_relative_path = normalize_title(&entry.relative_path);
     let absolute_path = entry.path.to_string_lossy().to_string();
     tx.execute(
         r#"
         UPDATE notes
         SET title = ?2,
-            normalized_title = ?3,
-            slug = ?4,
-            normalized_relative_path = ?5,
-            absolute_path = ?6,
-            mtime_ns = ?7,
-            size_bytes = ?8,
-            indexed_at = ?9
+            slug = ?3,
+            absolute_path = ?4,
+            mtime_ns = ?5,
+            size_bytes = ?6,
+            indexed_at = ?7
         WHERE relative_path = ?1
         "#,
         params![
             &entry.relative_path,
             &entry.title,
-            &normalized_title,
             &entry.slug,
-            &normalized_relative_path,
             &absolute_path,
             snapshot.mtime_ns,
             snapshot.size_bytes,
@@ -1576,8 +1570,6 @@ fn upsert_note_content(
     indexed_at: i64,
 ) -> Result<(), String> {
     let absolute_path = entry.path.to_string_lossy().to_string();
-    let normalized_title = normalize_title(&entry.title);
-    let normalized_relative_path = normalize_title(&entry.relative_path);
     let frontmatter = parse_frontmatter_metadata(content).unwrap_or_else(|error| {
         tracing::warn!(slug = %entry.slug, error = %error, "Ignoring malformed YAML frontmatter");
         Default::default()
@@ -1596,9 +1588,7 @@ fn upsert_note_content(
         INSERT INTO notes(
             slug,
             title,
-            normalized_title,
             relative_path,
-            normalized_relative_path,
             absolute_path,
             content,
             content_hash,
@@ -1609,12 +1599,10 @@ fn upsert_note_content(
             size_bytes,
             indexed_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(relative_path) DO UPDATE SET
             slug = excluded.slug,
             title = excluded.title,
-            normalized_title = excluded.normalized_title,
-            normalized_relative_path = excluded.normalized_relative_path,
             absolute_path = excluded.absolute_path,
             content = excluded.content,
             content_hash = excluded.content_hash,
@@ -1628,9 +1616,7 @@ fn upsert_note_content(
         params![
             &entry.slug,
             &entry.title,
-            &normalized_title,
             &entry.relative_path,
-            &normalized_relative_path,
             &absolute_path,
             content,
             hash,
