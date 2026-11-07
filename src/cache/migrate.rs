@@ -409,8 +409,8 @@ mod tests {
 
     use tempfile::{TempDir, tempdir};
 
-    use crate::cache::SqliteCache;
     use crate::cache::vault_snapshots::{NoteBodies, VaultSnapshotRead};
+    use crate::cache::{ModelFiles, SqliteCache};
     use crate::embed::{Embedder, StubEmbedder};
     use crate::search::LayerSelection;
     use crate::vault::VaultIndex;
@@ -739,7 +739,7 @@ mod tests {
         let vectors_before = vector_rows(&cache);
 
         cache
-            .prepare_for_embedder(&StubEmbedder::new(384))
+            .prepare_for_embedder(&StubEmbedder::new(384), ModelFiles::AlreadyPinned)
             .expect("loading the model migrates the cache");
         cache
             .reset_if_embedder_changed(&StubEmbedder::new(384))
@@ -965,6 +965,183 @@ mod tests {
             schema_version(&cache).as_deref(),
             Some(super::SCHEMA_VERSION)
         );
+    }
+
+    /// The stub's identity with a revision marker, as #643 appends one, and
+    /// a count of the texts it embeds.
+    struct MarkedStub {
+        identity: &'static str,
+        embedded: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MarkedStub {
+        fn new(identity: &'static str) -> Self {
+            Self {
+                identity,
+                embedded: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Embedder for MarkedStub {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.embedded
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            StubEmbedder::new(384).embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+        fn identity(&self) -> String {
+            self.identity.to_string()
+        }
+        fn token_count(&self, text: &str, add: bool) -> Result<usize, String> {
+            StubEmbedder::new(384).token_count(text, add)
+        }
+    }
+
+    const MARKED: &str = "stub-384-rev-5090578d9565";
+
+    fn stored_identities(cache: &SqliteCache) -> Vec<String> {
+        let conn = cache.connection().expect("conn");
+        let mut statement = conn
+            .prepare(
+                "SELECT value FROM metadata WHERE key = 'embedder_id' \
+                 UNION ALL SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' \
+                 UNION ALL SELECT embedder_id FROM vault_embedding_progress",
+            )
+            .expect("prepare");
+        statement
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect()
+    }
+
+    /// Saved progress under the old identity, as an interrupted turn leaves.
+    fn save_progress(cache: &SqliteCache) {
+        cache
+            .connection()
+            .expect("conn")
+            .execute(
+                "INSERT INTO vault_embedding_progress(vault_id, content_hash, embedder_id, \
+                 embed_layers, embedding, embedding_millis) \
+                 VALUES (?1, 'h', 'stub-384', 1, x'00', 1)",
+                [vault_ids()[0].to_string()],
+            )
+            .expect("save progress");
+    }
+
+    /// #693: a v2.9.0 cache, whose identity has no revision marker, is kept
+    /// when the start found the pinned model files in place, and the next
+    /// Index turn embeds nothing.
+    #[test]
+    fn a_cache_from_before_the_revision_marker_is_kept_when_no_file_moved() {
+        for version in ["12", "13"] {
+            let (directory, path) = cache_at_version(version);
+            let cache = SqliteCache::open(&path, 384).expect("open");
+            save_progress(&cache);
+            let semantic_before = fixed_searches(&cache);
+            let vectors_before = vector_rows(&cache);
+            let embedder = MarkedStub::new(MARKED);
+            let logs = crate::config::log_capture::CapturedLogs::default();
+
+            tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::INFO), || {
+                cache
+                    .prepare_for_embedder(&embedder, ModelFiles::AlreadyPinned)
+                    .expect("prepare");
+            });
+
+            assert!(
+                logs.lines()
+                    .iter()
+                    .any(|line| line.contains("model files were already the pinned revision")),
+                "{version}: {:#?}",
+                logs.lines()
+            );
+            let identities = stored_identities(&cache);
+            assert!(identities.len() >= 5, "{version}: {identities:?}");
+            assert!(
+                identities.iter().all(|identity| identity == MARKED),
+                "{version}: {identities:?}"
+            );
+            assert_eq!(published_vaults(&cache), 3, "{version}");
+            assert_eq!(vector_rows(&cache), vectors_before, "{version}");
+            assert_eq!(fixed_searches(&cache), semantic_before, "{version}");
+
+            for (n, vault_id) in vault_ids().into_iter().enumerate() {
+                let index =
+                    VaultIndex::build(directory.path().join(format!("vault-{n}"))).expect("index");
+                cache
+                    .replace_vault_snapshot(vault_id, &index, &embedder)
+                    .expect("Index turn");
+            }
+            assert_eq!(
+                embedder.embedded.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{version}: the Index turn reuses every vector"
+            );
+            assert_eq!(published_vaults(&cache), 3, "{version}");
+            // Publishing numbers the chunks afresh; the notes found and their
+            // distances are what must not change.
+            let without_chunk_ids = |searches: Vec<Vec<Hit>>| -> Vec<Vec<(String, String, f32)>> {
+                searches
+                    .into_iter()
+                    .map(|hits| {
+                        hits.into_iter()
+                            .map(|(vault, _, slug, distance)| (vault, slug, distance))
+                            .collect()
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                without_chunk_ids(fixed_searches(&cache)),
+                without_chunk_ids(semantic_before),
+                "{version}"
+            );
+        }
+    }
+
+    /// #693: when this start fetched a model file, nothing proves the old
+    /// vectors came from the pinned files, so the cache is rebuilt.
+    #[test]
+    fn a_cache_from_before_the_revision_marker_is_wiped_when_a_file_was_fetched() {
+        let (_directory, path) = cache_at_version("12");
+        let cache = SqliteCache::open(&path, 384).expect("open");
+        let logs = crate::config::log_capture::CapturedLogs::default();
+
+        tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::INFO), || {
+            cache
+                .prepare_for_embedder(&MarkedStub::new(MARKED), ModelFiles::Fetched)
+                .expect("prepare");
+        });
+
+        assert!(
+            logs.lines()
+                .iter()
+                .any(|line| line.contains("model files were fetched at this start")),
+            "{:#?}",
+            logs.lines()
+        );
+        assert_eq!(published_vaults(&cache), 0);
+        assert!(stored_identities(&cache).is_empty());
+    }
+
+    /// #693: only the revision marker may differ; any other change to the
+    /// identity is a different model and still wipes.
+    #[test]
+    fn an_identity_differing_beyond_the_revision_marker_is_wiped() {
+        for other in [
+            "stub-768-rev-5090578d9565",
+            "stub-384-mrl256-rev-5090578d9565",
+        ] {
+            let (_directory, path) = cache_at_version("12");
+            let cache = SqliteCache::open(&path, 384).expect("open");
+            cache
+                .prepare_for_embedder(&MarkedStub::new(other), ModelFiles::AlreadyPinned)
+                .expect("prepare");
+            assert_eq!(published_vaults(&cache), 0, "{other}");
+        }
     }
 
     #[test]

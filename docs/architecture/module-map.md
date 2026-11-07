@@ -335,8 +335,19 @@ that production inventory are still checked for stale paths and duplicates.
   pinned commit, which is what FastEmbed's Nomic load reads; Gemma loads from
   the snapshot folder by path (`FastembedEmbedder::embedding_gemma_300m_q4_from`).
   The revision is part of each embedder identity, so a revision change
-  rebuilds the vectors. `main.rs` drops `HF_HOME` before the runtime starts,
-  because FastEmbed reads it ahead of the folder Hatchdoor passes. A
+  rebuilds the vectors. Before any model file is fetched, removed or
+  re-pointed (`prepare_download` on a cache that is not valid,
+  `reset_download_cache`, `point_main_at_pinned_revision` moving `main`),
+  `files-changed.json` is written in the model's folder; setup clears it
+  once `prepare_for_embedder` has succeeded, so a start that stopped in
+  between still counts as a change. Setup passes `prepare_for_embedder` a
+  `ModelFiles` verdict from that record: `Fetched` while it exists,
+  `AlreadyPinned` otherwise. With `AlreadyPinned`, a cache whose stored
+  identity is the current one without its `-rev-` marker (written before
+  #643) is kept and its identity rewritten in place; with `Fetched`, or any
+  other difference, the model check wipes it (#693). `main.rs` drops
+  `HF_HOME` before the runtime starts, because FastEmbed reads it ahead of
+  the folder Hatchdoor passes. A
   selection or terms record that cannot be parsed reads as "terms required"
   instead of stopping the server, and records are written with `sync_all` on
   the file and its folder. It also owns the model download (#642):
@@ -2796,7 +2807,12 @@ and embedder identity/dimensions.
   table (#308).
 - A refresh commits a coherent new read snapshot.
 - Shared semantic vectors have one embedder identity and dimension; a mismatch
-  wipes the disposable cache before any partial rebuild can participate.
+  wipes the disposable cache before any partial rebuild can participate. The
+  one identity change that keeps it is a revision marker gained at a start
+  whose model files were all already the pinned ones (`ModelFiles`,
+  `prepare_for_embedder`, #693): the identity is rewritten in the shared
+  stamp, every Vault's snapshot metadata and saved progress in one
+  transaction.
   The cache-wide model epoch covers snapshot and legacy builders, and stamps
   the shared identity atomically with snapshot participation.
 - Every shared snapshot row and relationship is Vault-ID-qualified; failed

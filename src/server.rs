@@ -26,7 +26,7 @@ use crate::auth::{
     AssetReadTokens, WebOrLiveMcpToken, WebToken, require_local_host_and_origin,
     require_web_or_live_mcp_read_token, require_web_or_live_mcp_token, require_web_token,
 };
-use crate::cache::SqliteCache;
+use crate::cache::{ModelFiles, SqliteCache};
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::handlers::{
@@ -983,9 +983,25 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                     Ok(embedder) => {
                         // Before the model is installed, so no search reaches
                         // a cache still waiting for its migration (ADR-50).
-                        // An Index turn retries the same check on failure.
-                        if let Err(error) = sqlite.prepare_for_embedder(embedder.as_ref()) {
-                            warn!("Could not prepare the search cache for the model: {error}");
+                        // An Index turn retries the model check on failure, but
+                        // without the step that keeps an index from before #643.
+                        // A change of model files at this start, or at one
+                        // that stopped before this check, decides whether an
+                        // index built before #643 is kept (#693).
+                        let files = if model_setup.files_changed_since_index(selected) {
+                            ModelFiles::Fetched
+                        } else {
+                            ModelFiles::AlreadyPinned
+                        };
+                        match sqlite.prepare_for_embedder(embedder.as_ref(), files) {
+                            Ok(()) => {
+                                if let Err(error) = model_setup.files_reached_index(selected) {
+                                    warn!("{error}");
+                                }
+                            }
+                            Err(error) => {
+                                warn!("Could not prepare the search cache for the model: {error}");
+                            }
                         }
                         runtime.set(embedder, selected == SelectedModel::Gemma);
                         return Ok(());

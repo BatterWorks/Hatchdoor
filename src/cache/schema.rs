@@ -1,9 +1,9 @@
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use tracing::{info, warn};
 
 use super::SqliteCache;
 use super::migrate::{can_migrate_from, migrate_to_current};
-use crate::embed::{Embedder, PENDING_IDENTITY};
+use crate::embed::{Embedder, PENDING_IDENTITY, identity_without_revision};
 
 // Bump this when the schema structure or data-population logic changes. A
 // cache on any other version is wiped and rebuilt from Markdown on startup,
@@ -81,20 +81,7 @@ impl SqliteCache {
                     .to_string(),
             );
         }
-        let stored = match self.get_metadata("embedder_id")? {
-            Some(identity) => Some(identity),
-            None => {
-                let conn = self.connection()?;
-                conn.query_row(
-                    "SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' LIMIT 1",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|error| format!("read Vault snapshot embedder identity: {error}"))?
-            }
-        };
-        if let Some(stored) = stored
+        if let Some(stored) = self.stored_embedder_identity()?
             && stored != current
         {
             warn!(
@@ -115,12 +102,92 @@ impl SqliteCache {
     /// check, but a search arriving before the first one would otherwise
     /// query a cache still on an older schema. Holds the model epoch, as
     /// every snapshot builder does.
-    pub fn prepare_for_embedder(&self, embedder: &dyn Embedder) -> Result<(), String> {
+    ///
+    /// `files` says whether this start fetched or replaced any model file.
+    /// It decides whether an index recorded before #643, under the model's
+    /// identity without its revision marker, is kept (#693).
+    pub fn prepare_for_embedder(
+        &self,
+        embedder: &dyn Embedder,
+        files: ModelFiles,
+    ) -> Result<(), String> {
         let _epoch = self
             .snapshot_model_epoch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.adopt_revision_marker(embedder, files)?;
         self.reset_if_embedder_changed(embedder)
+    }
+
+    /// The embedder identity the cache was built with: the shared stamp, or
+    /// a published Vault's when the shared one is missing.
+    fn stored_embedder_identity(&self) -> Result<Option<String>, String> {
+        if let Some(identity) = self.get_metadata("embedder_id")? {
+            return Ok(Some(identity));
+        }
+        self.connection()?
+            .query_row(
+                "SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("read Vault snapshot embedder identity: {error}"))
+    }
+
+    /// Keep an index built before #643, whose stored identity is the current
+    /// one without its revision marker, when this start found the pinned
+    /// model files already in place: its vectors came from those same files.
+    /// Every place the cache records the identity is rewritten in one
+    /// transaction, so the model check that follows finds it current. When a
+    /// file was fetched or replaced, nothing proves the old vectors came from
+    /// the pinned files, and the model check wipes as before (#693).
+    fn adopt_revision_marker(
+        &self,
+        embedder: &dyn Embedder,
+        files: ModelFiles,
+    ) -> Result<(), String> {
+        let current = embedder.identity();
+        let Some(unmarked) = identity_without_revision(&current) else {
+            return Ok(());
+        };
+        let Some(stored) = self.stored_embedder_identity()? else {
+            return Ok(());
+        };
+        if stored != unmarked {
+            return Ok(());
+        }
+        if files == ModelFiles::Fetched {
+            warn!(
+                old = %stored,
+                new = %current,
+                "embedder identity gained its revision marker, but model files were fetched \
+                 at this start; rebuilding the SQLite cache from scratch"
+            );
+            return Ok(());
+        }
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("start embedder identity update: {error}"))?;
+        for statement in [
+            "UPDATE metadata SET value = ?1 WHERE key = 'embedder_id' AND value = ?2",
+            "UPDATE vault_snapshot_metadata SET value = ?1 \
+             WHERE key = 'embedder_id' AND value = ?2",
+            "UPDATE vault_embedding_progress SET embedder_id = ?1 WHERE embedder_id = ?2",
+        ] {
+            tx.execute(statement, params![current, stored])
+                .map_err(|error| format!("update embedder identity: {error}"))?;
+        }
+        tx.commit()
+            .map_err(|error| format!("commit embedder identity update: {error}"))?;
+        info!(
+            old = %stored,
+            new = %current,
+            "embedder identity gained its revision marker and the model files were already \
+             the pinned revision; kept the SQLite cache and its vectors"
+        );
+        Ok(())
     }
 
     /// Bring a cache written by an earlier schema version up to date,
@@ -153,6 +220,17 @@ impl SqliteCache {
             }
         }
     }
+}
+
+/// Whether the model files a start loaded were all in place before it, or
+/// some had to be fetched or replaced (#693).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelFiles {
+    /// Every file already matched its shipped digest and nothing moved.
+    AlreadyPinned,
+    /// At least one file was downloaded, or the cache was pointed at the
+    /// pinned revision, at this start.
+    Fetched,
 }
 
 /// The state of an existing cache database, as read at startup.
