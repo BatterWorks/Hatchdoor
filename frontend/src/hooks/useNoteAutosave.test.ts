@@ -1,14 +1,14 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useNoteAutosave } from "./useNoteAutosave";
+import { type Sender, useNoteAutosave } from "./useNoteAutosave";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 function setup(save = vi.fn().mockResolvedValue({ content_hash: "h1" })) {
   const hook = renderHook(() =>
-    useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+    useNoteAutosave({ noteKey: "a", baseHash: "h0", enabled: true, save }),
   );
   return { hook, save };
 }
@@ -55,6 +55,7 @@ describe("useNoteAutosave", () => {
     const hook = renderHook(
       ({ baseHash }) =>
         useNoteAutosave({
+          noteKey: "a",
           baseHash,
           enabled: true,
           save: (content, hash) => send(content, hash),
@@ -220,7 +221,7 @@ describe("overlapping writes", () => {
   it("does not drop an edit made while a write is in flight", async () => {
     const { save, calls } = deferredSave();
     const hook = renderHook(() =>
-      useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+      useNoteAutosave({ noteKey: "a", baseHash: "h0", enabled: true, save }),
     );
 
     act(() => {
@@ -243,7 +244,7 @@ describe("overlapping writes", () => {
   it("writes only the newest content when several edits queue up", async () => {
     const { save, calls } = deferredSave();
     const hook = renderHook(() =>
-      useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+      useNoteAutosave({ noteKey: "a", baseHash: "h0", enabled: true, save }),
     );
 
     act(() => {
@@ -267,7 +268,13 @@ describe("overlapping writes", () => {
     const save = vi.fn().mockResolvedValue({ content_hash: "h1" });
     const flushSave = vi.fn().mockResolvedValue({ content_hash: "h1" });
     const hook = renderHook(() =>
-      useNoteAutosave({ baseHash: "h0", enabled: true, save, flushSave }),
+      useNoteAutosave({
+        noteKey: "a",
+        baseHash: "h0",
+        enabled: true,
+        save,
+        flushSave,
+      }),
     );
 
     act(() => {
@@ -285,7 +292,13 @@ describe("overlapping writes", () => {
     const { save, calls } = deferredSave();
     const flushSave = vi.fn().mockResolvedValue({ content_hash: "h1" });
     const hook = renderHook(() =>
-      useNoteAutosave({ baseHash: "h0", enabled: true, save, flushSave }),
+      useNoteAutosave({
+        noteKey: "a",
+        baseHash: "h0",
+        enabled: true,
+        save,
+        flushSave,
+      }),
     );
 
     act(() => {
@@ -313,6 +326,7 @@ describe("overlapping writes", () => {
     const onSaved = vi.fn();
     const hook = renderHook(() =>
       useNoteAutosave({
+        noteKey: "a",
         baseHash: "h0",
         enabled: true,
         save,
@@ -351,7 +365,13 @@ describe("overlapping writes", () => {
     const save = vi.fn().mockRejectedValue(failure);
     const flushSave = vi.fn().mockResolvedValue({ content_hash: "h1" });
     const hook = renderHook(() =>
-      useNoteAutosave({ baseHash: "h0", enabled: true, save, flushSave }),
+      useNoteAutosave({
+        noteKey: "a",
+        baseHash: "h0",
+        enabled: true,
+        save,
+        flushSave,
+      }),
     );
 
     await act(async () => {
@@ -370,7 +390,7 @@ describe("overlapping writes", () => {
   it("does not report saved while an edit is still queued", async () => {
     const { save, calls } = deferredSave();
     const hook = renderHook(() =>
-      useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+      useNoteAutosave({ noteKey: "a", baseHash: "h0", enabled: true, save }),
     );
 
     act(() => {
@@ -387,5 +407,110 @@ describe("overlapping writes", () => {
       calls[1].resolve("h2");
     });
     expect(hook.result.current.status).toBe("saved");
+  });
+});
+
+describe("a reply for the note just left (#658)", () => {
+  function twoNotes(save: Parameters<typeof useNoteAutosave>[0]["save"]) {
+    const saved = vi.fn();
+    const hook = renderHook(
+      ({ noteKey, baseHash }) =>
+        useNoteAutosave({
+          noteKey,
+          baseHash,
+          enabled: true,
+          save,
+          onSaved: (result, content) => saved(noteKey, result, content),
+        }),
+      { initialProps: { noteKey: "a", baseHash: "a-1" } },
+    );
+    return { hook, saved };
+  }
+
+  function held() {
+    const replies: Array<(outcome: Error | { content_hash: string }) => void> =
+      [];
+    const save = vi.fn<Sender>(
+      () =>
+        new Promise<{ content_hash: string }>((resolve, reject) => {
+          replies.push((outcome) =>
+            outcome instanceof Error ? reject(outcome) : resolve(outcome),
+          );
+        }),
+    );
+    return { save, replies };
+  }
+
+  function conflict() {
+    const error = new Error("changed");
+    error.name = "ConflictError";
+    return error;
+  }
+
+  it("keeps the next note's hash when the late save succeeds", async () => {
+    const { save, replies } = held();
+    const { hook, saved } = twoNotes(save);
+    await act(async () => hook.result.current.commit("a text"));
+    hook.rerender({ noteKey: "b", baseHash: "b-1" });
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+
+    expect(saved).toHaveBeenCalledWith("a", { content_hash: "a-2" }, "a text");
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.isOwnWrite("a-2")).toBe(false);
+    await act(async () => hook.result.current.commit("b text"));
+    expect(save).toHaveBeenLastCalledWith("b text", "b-1");
+  });
+
+  it("keeps saving the next note when the late save is refused", async () => {
+    const { save, replies } = held();
+    const { hook, saved } = twoNotes(save);
+    await act(async () => hook.result.current.commit("a text"));
+    hook.rerender({ noteKey: "b", baseHash: "b-1" });
+    await act(async () => replies[0](conflict()));
+
+    expect(hook.result.current.status).toBe("idle");
+    expect(saved).not.toHaveBeenCalled();
+    await act(async () => hook.result.current.commit("b text"));
+    expect(save).toHaveBeenLastCalledWith("b text", "b-1");
+  });
+
+  it("sends the next note's edit by its own save, not behind the late one", async () => {
+    const { save, replies } = held();
+    const { hook } = twoNotes(save);
+    await act(async () => hook.result.current.commit("a text"));
+    hook.rerender({ noteKey: "b", baseHash: "b-1" });
+    await act(async () => hook.result.current.commit("b text"));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenLastCalledWith("b text", "b-1");
+
+    await act(async () => replies[1]({ content_hash: "b-2" }));
+    expect(hook.result.current.status).toBe("saved");
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.status).toBe("saved");
+    await act(async () => hook.result.current.commit("b again"));
+    expect(save).toHaveBeenLastCalledWith("b again", "b-2");
+  });
+
+  it("starts the next note with saving on after a refusal on the last one", async () => {
+    const save = vi.fn().mockRejectedValueOnce(conflict());
+    save.mockResolvedValue({ content_hash: "b-2" });
+    const { hook } = twoNotes(save);
+    await act(async () => hook.result.current.commit("a text"));
+    expect(hook.result.current.status).toBe("conflict");
+    hook.rerender({ noteKey: "b", baseHash: "b-1" });
+    expect(hook.result.current.status).toBe("idle");
+    await act(async () => hook.result.current.commit("b text"));
+    expect(save).toHaveBeenLastCalledWith("b text", "b-1");
+  });
+
+  it("drops an idle pause left by the note just left", async () => {
+    const save = vi.fn().mockResolvedValue({ content_hash: "x" });
+    const { hook } = twoNotes(save);
+    act(() => hook.result.current.touch("a typing"));
+    hook.rerender({ noteKey: "b", baseHash: "b-1" });
+    await act(async () => vi.advanceTimersByTime(5000));
+    expect(save).not.toHaveBeenCalled();
+    expect(hook.result.current.hasUnsaved()).toBe(false);
   });
 });

@@ -1128,6 +1128,137 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     );
   });
 
+  /** Holds home's next autosave until the test releases it, answering it
+   * from the disk as it stands then (`refuse` makes it a 409). */
+  function holdHomeSave(
+    disk: Record<string, { content: string; hash: string }>,
+  ) {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const realImpl = fetchMock.getMockImplementation()!;
+    const held: { release: (refuse: boolean) => void; sent: boolean } = {
+      release: () => {},
+      sent: false,
+    };
+    fetchMock.mockImplementation(async (input, init) => {
+      if (
+        init?.method === "PUT" &&
+        String(input).includes("/notes/home") &&
+        !held.sent
+      ) {
+        held.sent = true;
+        const refuse = await new Promise<boolean>((resolve) => {
+          held.release = resolve;
+        });
+        if (refuse) disk.home = { content: "Elsewhere\n", hash: "home-2" };
+      }
+      return realImpl(input, init);
+    });
+    return held;
+  }
+
+  async function leaveHomeMidSave(
+    disk: Record<string, { content: string; hash: string }>,
+  ) {
+    const held = holdHomeSave(disk);
+    renderWithNav();
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    await screen.findByText("Other body.");
+    return held;
+  }
+
+  for (const refuse of [false, true]) {
+    it(`saves the next note normally after a late ${refuse ? "refused" : "successful"} save of the one just left (#658)`, async () => {
+      const disk = {
+        home: { content: "Home body.\n", hash: "home-1" },
+        other: { content: "Other body.\n", hash: "other-1" },
+      };
+      const sent = mockTwoNotes(disk);
+      const held = await leaveHomeMidSave(disk);
+      await act(async () => held.release(refuse));
+
+      typeInOpenBlock("Other edited.\n");
+      fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+      await waitFor(() =>
+        expect(
+          sent.filter((entry) => entry.url.includes("/notes/other")),
+        ).toHaveLength(1),
+      );
+      const otherPut = sent.find((entry) =>
+        entry.url.includes("/notes/other"),
+      )!;
+      expect(JSON.parse(String(otherPut.init.body)).expected_content_hash).toBe(
+        "other-1",
+      );
+      await waitFor(() => expect(disk.other.content).toBe("Other edited.\n"));
+      expect(
+        screen.queryByText(/This note changed somewhere else/),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+      // The late reply is still booked for the note it was for.
+      expect(loadNoteDraft("vault-1", "home.md")?.content).toBe(
+        refuse ? "Home edited.\n" : undefined,
+      );
+      expect(disk.home.content).toBe(refuse ? "Elsewhere\n" : "Home edited.\n");
+    });
+  }
+
+  it("does not book a late refusal from an earlier visit against a return to the same note (#658)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    mockTwoNotes(disk);
+    const held = holdHomeSave(disk);
+    renderWithNav(<Link to="/v/vault-1/n/home">Back home</Link>);
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    await screen.findByText("Other body.");
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText("Home edited.");
+
+    await act(async () => held.release(true));
+
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+  });
+
+  it("never sends an edit made in the next note through the save of the one just left (#658)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    const held = await leaveHomeMidSave(disk);
+
+    // Typed and committed in other while home's save is still out.
+    typeInOpenBlock("Other edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(disk.other.content).toBe("Other edited.\n"));
+    await act(async () => held.release(false));
+
+    await waitFor(() => expect(disk.home.content).toBe("Home edited.\n"));
+    const homeBodies = sent
+      .filter((entry) => entry.url.includes("/notes/home"))
+      .map((entry) => JSON.parse(String(entry.init.body)).content);
+    expect(homeBodies).toEqual(["Home edited.\n"]);
+    const otherPut = sent.find((entry) => entry.url.includes("/notes/other"))!;
+    expect(JSON.parse(String(otherPut.init.body)).expected_content_hash).toBe(
+      "other-1",
+    );
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+  });
+
   it("drops the conflict review when the user navigates to another note", async () => {
     const disk = {
       home: { content: "Home body.\n", hash: "home-1" },

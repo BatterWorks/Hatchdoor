@@ -5731,7 +5731,12 @@ cancelled with it. It is one send, not a side channel — the hook books its
 outcome like any other save, so a tab that was only hidden comes back with a
 current hash rather than conflicting on the next keystroke. That flush now
 takes `pendingRef ?? queuedRef`, so an edit parked behind an in-flight save
-leaves with the page too. `lib/reloadGuard.ts` is the seam that keeps the
+leaves with the page too. The hook also takes a `noteKey` (#658): its hash, stopped
+flag, queue, idle pause and status belong to that one note, a new key starts
+them afresh, and a save still out for the previous key neither holds the new
+note's edits back nor drains them, while its reply reaches only the `onSaved`
+captured for its own note; `NotePage`'s `onSaved` and its refusal notices act
+only while the note they were sent for is open. `lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
 edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`
