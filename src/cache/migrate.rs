@@ -1,17 +1,28 @@
-//! The one cache migration ADR-50 allows: from the previous schema version to
-//! the current one, keeping the vectors instead of re-embedding every chunk.
-//! Delete this migration when the next schema change lands; a cache two
-//! versions old is wiped and rebuilt, as before.
+//! The cache migrations ADR-50 and ADR-52 allow: from a schema version no
+//! older than the one the latest release wrote, to the current one, keeping
+//! the vectors instead of re-embedding every chunk. Each step brings the
+//! cache one version forward, and a cache several versions behind runs them
+//! in order, in one transaction. A step is deleted once its starting version
+//! is older than the latest release's; a cache older than the first step is
+//! wiped and rebuilt, as before.
 //!
 //! Version 12 to 13 (#634): the keyword index tokenized Chinese, Japanese,
 //! Korean and Thai as whole clauses, so a word inside a sentence never
 //! matched. Version 13 indexes those scripts as overlapping pairs, read from
 //! a new `vault_chunks.keyword_text` column (`keyword::keyword_index_text`).
-//! The migration fills that column from the chunk text the cache already
-//! holds and rebuilds only the keyword index from it. No vector table is
-//! written, and ADR-50's checks prove it: the rows per Vault, a BLAKE3 digest
-//! of every vector row, every row's Vault against its chunk's, and a sample
-//! of vectors finding themselves.
+//! The step fills that column from the chunk text the cache already holds
+//! and rebuilds only the keyword index from it.
+//!
+//! Version 13 to 14 (#655): `notes` and `vault_notes` carried
+//! `normalized_title` and `normalized_relative_path`, each with its own index,
+//! for the cache's wikilink resolver, which #653 removed. Nothing reads them
+//! any more. The step drops the four indexes and the four columns.
+//!
+//! No step writes a vector table, and ADR-50's checks prove it: the rows per
+//! Vault, a BLAKE3 digest of every vector row, every row's Vault against its
+//! chunk's, and a sample of vectors finding themselves. The note rows per
+//! Vault are counted before and after, and the keyword index must hold one
+//! entry per chunk.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +31,29 @@ use rusqlite::{Connection, Transaction, params};
 use super::keyword::keyword_index_text;
 use super::schema::{SCHEMA_VERSION, vault_chunk_keyword_index_sql};
 
-pub(super) const PREVIOUS_SCHEMA_VERSION: &str = "12";
+/// One step forward: the version it starts from and what it does to get to
+/// the next one.
+struct Step {
+    from: &'static str,
+    run: fn(&Transaction<'_>) -> Result<(), String>,
+}
+
+/// Every step, oldest first. The last one ends at `SCHEMA_VERSION`.
+const STEPS: [Step; 2] = [
+    Step {
+        from: "12",
+        run: index_keyword_pairs,
+    },
+    Step {
+        from: "13",
+        run: drop_normalized_note_columns,
+    },
+];
+
+/// Whether a cache on `version` can be migrated rather than wiped.
+pub(super) fn can_migrate_from(version: &str) -> bool {
+    STEPS.iter().any(|step| step.from == version)
+}
 
 /// How many stored vectors per Vault and table must find themselves by KNN.
 const SELF_RETRIEVAL_SAMPLE: usize = 16;
@@ -43,10 +76,14 @@ const VECTOR_TABLES: [VectorTable; 2] = [
     },
 ];
 
-/// Run the whole migration in one transaction and commit only after every
-/// check has passed. The error names the step or check that failed. On error
-/// the caller wipes the cache rather than trusting the rollback (ADR-50).
-pub(super) fn migrate_from_previous_schema(conn: &mut Connection) -> Result<(), String> {
+/// Run every step from `from` to the current version in one transaction and
+/// commit only after every check has passed. The error names the step or
+/// check that failed. On error the caller wipes the cache rather than
+/// trusting the rollback (ADR-50).
+pub(super) fn migrate_to_current(conn: &mut Connection, from: &str) -> Result<(), String> {
+    let Some(first) = STEPS.iter().position(|step| step.from == from) else {
+        return Err(format!("no migration from schema version {from}"));
+    };
     let tx = conn
         .transaction()
         .map_err(|error| format!("start migration: {error}"))?;
@@ -58,24 +95,18 @@ pub(super) fn migrate_from_previous_schema(conn: &mut Connection) -> Result<(), 
             vector_digest(&tx, table)?,
         ));
     }
+    let notes_before = notes_per_vault(&tx)?;
 
-    tx.execute_batch(
-        "DROP TRIGGER vault_chunk_fts_ai;
-         DROP TRIGGER vault_chunk_fts_ad;
-         DROP TRIGGER vault_chunk_fts_au;
-         DROP TABLE vault_chunk_fts;
-         ALTER TABLE vault_chunks ADD COLUMN keyword_text TEXT;",
-    )
-    .map_err(|error| format!("drop the old keyword index: {error}"))?;
-    fill_keyword_text(&tx)?;
-    tx.execute_batch(&vault_chunk_keyword_index_sql())
-        .map_err(|error| format!("create the new keyword index: {error}"))?;
-    tx.execute(
-        "INSERT INTO vault_chunk_fts(vault_chunk_fts) VALUES ('rebuild')",
-        [],
-    )
-    .map_err(|error| format!("rebuild the keyword index: {error}"))?;
+    for step in &STEPS[first..] {
+        (step.run)(&tx)?;
+    }
 
+    let notes_after = notes_per_vault(&tx)?;
+    if notes_after != notes_before {
+        return Err(format!(
+            "note count check failed: {notes_before:?} before, {notes_after:?} after"
+        ));
+    }
     for (table, (rows_before, digest_before)) in VECTOR_TABLES.iter().zip(&before) {
         let rows_after = vectors_per_vault(&tx, table.name)?;
         if &rows_after != rows_before {
@@ -109,6 +140,60 @@ pub(super) fn migrate_from_previous_schema(conn: &mut Connection) -> Result<(), 
     .map_err(|error| format!("stamp the schema version: {error}"))?;
     tx.commit()
         .map_err(|error| format!("commit migration: {error}"))
+}
+
+/// 12 to 13 (#634): index Chinese, Japanese, Korean and Thai as character
+/// pairs, from a new `keyword_text` column filled from the stored chunks.
+fn index_keyword_pairs(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(
+        "DROP TRIGGER vault_chunk_fts_ai;
+         DROP TRIGGER vault_chunk_fts_ad;
+         DROP TRIGGER vault_chunk_fts_au;
+         DROP TABLE vault_chunk_fts;
+         ALTER TABLE vault_chunks ADD COLUMN keyword_text TEXT;",
+    )
+    .map_err(|error| format!("drop the old keyword index: {error}"))?;
+    fill_keyword_text(tx)?;
+    tx.execute_batch(&vault_chunk_keyword_index_sql())
+        .map_err(|error| format!("create the new keyword index: {error}"))?;
+    tx.execute(
+        "INSERT INTO vault_chunk_fts(vault_chunk_fts) VALUES ('rebuild')",
+        [],
+    )
+    .map_err(|error| format!("rebuild the keyword index: {error}"))?;
+    Ok(())
+}
+
+/// 13 to 14 (#655): drop the two normalized note columns nothing reads, and
+/// their indexes, from the candidate and the published note tables.
+fn drop_normalized_note_columns(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(
+        "DROP INDEX idx_notes_normalized_title;
+         DROP INDEX idx_notes_normalized_relative_path;
+         DROP INDEX idx_vault_notes_normalized_title;
+         DROP INDEX idx_vault_notes_normalized_relative_path;
+         ALTER TABLE notes DROP COLUMN normalized_title;
+         ALTER TABLE notes DROP COLUMN normalized_relative_path;
+         ALTER TABLE vault_notes DROP COLUMN normalized_title;
+         ALTER TABLE vault_notes DROP COLUMN normalized_relative_path;",
+    )
+    .map_err(|error| format!("drop the normalized note columns: {error}"))
+}
+
+/// Note rows per Vault in the published snapshots, with the candidate
+/// `notes` table under the empty key.
+fn notes_per_vault(tx: &Transaction<'_>) -> Result<BTreeMap<String, i64>, String> {
+    let mut statement = tx
+        .prepare(
+            "SELECT vault_id, COUNT(*) FROM vault_notes GROUP BY vault_id
+             UNION ALL SELECT '', COUNT(*) FROM notes",
+        )
+        .map_err(|error| format!("count note rows: {error}"))?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| format!("count note rows: {error}"))?;
+    rows.collect::<rusqlite::Result<_>>()
+        .map_err(|error| format!("count note rows: {error}"))
 }
 
 /// Vector rows per Vault key in `table`.
@@ -325,6 +410,7 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use crate::cache::SqliteCache;
+    use crate::cache::vault_snapshots::{NoteBodies, VaultSnapshotRead};
     use crate::embed::{Embedder, StubEmbedder};
     use crate::search::LayerSelection;
     use crate::vault::VaultIndex;
@@ -337,8 +423,36 @@ mod tests {
     ];
     const QUERIES: [&str; 4] = ["melatonin sleep", "garden tomatoes", "rust borrow", "notes"];
 
-    /// The version 12 keyword index, verbatim.
-    const PREVIOUS_LAYOUT: &str = "
+    /// The version 13 note columns and their indexes. `ADD COLUMN` needs a
+    /// default for `NOT NULL` and appends the column, where version 13's
+    /// `CREATE TABLE` declared no default and put them mid-table; the
+    /// migration depends on neither.
+    const VERSION_13_NOTE_COLUMNS: &str = "
+        ALTER TABLE notes ADD COLUMN normalized_title TEXT NOT NULL DEFAULT '';
+        ALTER TABLE notes ADD COLUMN normalized_relative_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE vault_notes ADD COLUMN normalized_title TEXT NOT NULL DEFAULT '';
+        ALTER TABLE vault_notes ADD COLUMN normalized_relative_path TEXT NOT NULL DEFAULT '';
+        UPDATE notes SET normalized_title = lower(title),
+                         normalized_relative_path = lower(relative_path);
+        UPDATE vault_notes SET normalized_title = lower(title),
+                               normalized_relative_path = lower(relative_path);
+        CREATE INDEX idx_notes_normalized_title ON notes(normalized_title);
+        CREATE INDEX idx_notes_normalized_relative_path ON notes(normalized_relative_path);
+        CREATE INDEX idx_vault_notes_normalized_title
+            ON vault_notes(vault_id, normalized_title);
+        CREATE INDEX idx_vault_notes_normalized_relative_path
+            ON vault_notes(vault_id, normalized_relative_path);";
+
+    /// The version 12 keyword index, verbatim, put back in place of version
+    /// 13's.
+    const VERSION_12_KEYWORD_INDEX: &str = "
+        DROP TRIGGER vault_chunk_fts_ai;
+        DROP TRIGGER vault_chunk_fts_ad;
+        DROP TRIGGER vault_chunk_fts_au;
+        DROP TABLE vault_chunk_fts;
+        DROP VIEW vault_chunk_keyword_source;
+        ALTER TABLE vault_chunks DROP COLUMN keyword_text;
+
         CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_fts USING fts5(
             vault_id UNINDEXED,
             content,
@@ -362,7 +476,15 @@ mod tests {
                 VALUES ('delete', old.id, old.vault_id, old.content);
             INSERT INTO vault_chunk_fts(rowid, vault_id, content)
                 VALUES (new.id, new.vault_id, new.content);
-        END;";
+        END;
+
+        INSERT INTO vault_chunk_fts(vault_chunk_fts) VALUES ('rebuild');";
+
+    /// Makes the 13 to 14 step fail on its last statement, after the
+    /// `notes` columns are already gone: SQLite refuses to drop a column a
+    /// view names.
+    const BLOCK_THE_LAST_COLUMN_DROP: &str =
+        "CREATE VIEW block_drop AS SELECT normalized_relative_path FROM vault_notes;";
 
     fn vault_ids() -> Vec<VaultId> {
         VAULTS
@@ -391,10 +513,10 @@ mod tests {
         }
     }
 
-    /// A cache file in the version 12 layout holding three published Vaults,
-    /// with demoted vectors. Built by publishing with today's code, then
-    /// putting the old keyword index back with the old DDL.
-    fn previous_version_cache() -> (TempDir, std::path::PathBuf) {
+    /// A cache file in the layout of schema `version` (12 or 13) holding
+    /// three published Vaults, with demoted vectors. Built by publishing with
+    /// today's code, then putting the older layout back.
+    fn cache_at_version(version: &str) -> (TempDir, std::path::PathBuf) {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("cache.sqlite3");
         let embedder = StubEmbedder::new(384);
@@ -409,23 +531,29 @@ mod tests {
                     .expect("publish");
             }
             let conn = cache.connection().expect("conn");
-            conn.execute_batch(
-                "DROP TRIGGER vault_chunk_fts_ai;
-                 DROP TRIGGER vault_chunk_fts_ad;
-                 DROP TRIGGER vault_chunk_fts_au;
-                 DROP TABLE vault_chunk_fts;
-                 DROP VIEW vault_chunk_keyword_source;
-                 ALTER TABLE vault_chunks DROP COLUMN keyword_text;",
+            // The shared file's candidate table is normally empty; one row
+            // makes the migration rewrite it with data in it.
+            conn.execute(
+                "INSERT INTO notes(slug, title, relative_path, absolute_path, content, \
+                 content_hash, mtime_ns, size_bytes, indexed_at) \
+                 VALUES ('left-over', 'Left Over', 'Left Over.md', '/abs', 'c', 'h', 0, 0, 0)",
+                [],
             )
-            .expect("remove the new keyword index");
-            conn.execute_batch(PREVIOUS_LAYOUT).expect("old layout");
-            conn.execute_batch(
-                "INSERT INTO vault_chunk_fts(vault_chunk_fts) VALUES ('rebuild');
-                 UPDATE metadata SET value = '12' WHERE key = 'schema_version';
-                 UPDATE vault_snapshot_metadata SET value = '12'
-                     WHERE key = 'schema_version';",
+            .expect("a candidate note");
+            conn.execute_batch(VERSION_13_NOTE_COLUMNS)
+                .expect("version 13 note columns");
+            match version {
+                "13" => {}
+                "12" => conn
+                    .execute_batch(VERSION_12_KEYWORD_INDEX)
+                    .expect("version 12 keyword index"),
+                other => panic!("no fixture for version {other}"),
+            }
+            conn.execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+                [version],
             )
-            .expect("fill the old layout");
+            .expect("stamp the version");
             let demoted: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM vault_chunk_vectors_demoted",
@@ -544,23 +672,70 @@ mod tests {
         cache.get_metadata("schema_version").expect("version")
     }
 
-    #[test]
-    fn a_migrated_cache_finds_words_inside_cjk_sentences_without_re_embedding() {
-        let (directory, path) = previous_version_cache();
-        let cache = SqliteCache::open(&path, 384).expect("open the previous version");
+    fn snapshots(cache: &SqliteCache) -> Vec<VaultSnapshotRead> {
+        vault_ids()
+            .into_iter()
+            .map(|vault_id| {
+                cache
+                    .read_vault_snapshot(vault_id, NoteBodies::Load)
+                    .expect("read snapshot")
+                    .expect("published")
+                    .read
+            })
+            .collect()
+    }
+
+    /// How many normalized columns `notes` and `vault_notes` still have,
+    /// and how many indexes still name one: `(4, 4)` before the 13 to 14
+    /// step, `(0, 0)` after it.
+    fn normalized_columns_and_indexes(conn: &rusqlite::Connection) -> (i64, i64) {
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM pragma_table_info('notes')
+                         WHERE name LIKE 'normalized_%')
+                  + (SELECT COUNT(*) FROM pragma_table_info('vault_notes')
+                         WHERE name LIKE 'normalized_%'),
+                    (SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'index' AND name LIKE '%normalized%')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read the schema")
+    }
+
+    fn stored_version(conn: &rusqlite::Connection) -> String {
+        conn.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("version")
+    }
+
+    /// Opens a cache at `version`, migrates it through the model check, and
+    /// checks that every read answers as before and no vector is embedded
+    /// again. Returns the migrated cache for version-specific checks.
+    fn migrate_and_compare(version: &str) -> (TempDir, SqliteCache) {
+        let (directory, path) = cache_at_version(version);
+        let cache = SqliteCache::open(&path, 384).expect("open the older version");
         assert_eq!(
             schema_version(&cache).as_deref(),
-            Some(super::PREVIOUS_SCHEMA_VERSION),
+            Some(version),
             "opening must leave the cache alone until the model check has run"
+        );
+        assert_eq!(
+            normalized_columns_and_indexes(&cache.connection().expect("conn")),
+            (4, 4)
         );
         let semantic_before = fixed_searches(&cache);
         assert!(semantic_before.iter().all(|hits| !hits.is_empty()));
-        let latin_before = keyword_search(&cache, "melatonin");
-        assert_eq!(latin_before.len(), 6);
-        assert!(
+        let keyword_before = keyword_search(&cache, "melatonin");
+        assert_eq!(keyword_before.len(), 6);
+        assert_eq!(
             keyword_search(&cache, "本文").is_empty(),
-            "the old index holds the whole clause as one token"
+            version == "12",
+            "only the version 12 index holds the whole clause as one token"
         );
+        let snapshots_before = snapshots(&cache);
         let vectors_before = vector_rows(&cache);
 
         cache
@@ -574,15 +749,15 @@ mod tests {
             schema_version(&cache).as_deref(),
             Some(super::SCHEMA_VERSION)
         );
+        assert_eq!(
+            normalized_columns_and_indexes(&cache.connection().expect("conn")),
+            (0, 0)
+        );
         assert_eq!(published_vaults(&cache), 3, "migration must not wipe");
         assert_eq!(vector_rows(&cache), vectors_before);
         assert_eq!(fixed_searches(&cache), semantic_before);
-        assert_eq!(keyword_search(&cache, "melatonin"), latin_before);
-        for word in ["本文", "漢字", "日本語", "本"] {
-            let hits = keyword_search(&cache, word);
-            assert_eq!(hits.len(), 3, "{word}: {hits:?}");
-            assert!(hits.iter().all(|hit| hit.2 == "日本語のノート"), "{word}");
-        }
+        assert_eq!(keyword_search(&cache, "melatonin"), keyword_before);
+        assert_eq!(snapshots(&cache), snapshots_before);
 
         let embedder = CountingStub::default();
         let index = VaultIndex::build(directory.path().join("vault-0")).expect("index");
@@ -594,45 +769,80 @@ mod tests {
             0,
             "an unchanged Vault must reuse every migrated vector"
         );
+        assert_eq!(snapshots(&cache), snapshots_before);
+        (directory, cache)
+    }
+
+    #[test]
+    fn a_version_13_cache_drops_the_normalized_columns_and_serves_the_same_reads() {
+        let (_directory, cache) = migrate_and_compare("13");
         assert_eq!(keyword_search(&cache, "本文").len(), 3);
     }
 
     #[test]
-    fn a_failed_step_names_itself_and_commits_nothing() {
-        let (_directory, path) = previous_version_cache();
+    fn a_version_12_cache_runs_both_steps_and_finds_words_inside_cjk_sentences() {
+        let (_directory, cache) = migrate_and_compare("12");
+        for word in ["本文", "漢字", "日本語", "本"] {
+            let hits = keyword_search(&cache, word);
+            assert_eq!(hits.len(), 3, "{word}: {hits:?}");
+            assert!(hits.iter().all(|hit| hit.2 == "日本語のノート"), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_failed_column_drop_names_itself_and_rolls_back_the_drops_before_it() {
+        let (_directory, path) = cache_at_version("13");
+        let cache = SqliteCache::open(&path, 384).expect("open");
+        let mut conn = cache.connection().expect("conn");
+        conn.execute_batch(BLOCK_THE_LAST_COLUMN_DROP)
+            .expect("block the last column drop");
+
+        let failure = super::migrate_to_current(&mut conn, "13")
+            .expect_err("a column a view names must fail the migration");
+        assert!(
+            failure.contains("drop the normalized note columns"),
+            "{failure}"
+        );
+        assert_eq!(stored_version(&conn), "13", "nothing may commit");
+        assert_eq!(
+            normalized_columns_and_indexes(&conn),
+            (4, 4),
+            "the indexes and the columns dropped before the failure must be back"
+        );
+    }
+
+    #[test]
+    fn a_failed_first_step_from_version_12_commits_nothing() {
+        let (_directory, path) = cache_at_version("12");
         let cache = SqliteCache::open(&path, 384).expect("open");
         let mut conn = cache.connection().expect("conn");
         conn.execute_batch("DROP TRIGGER vault_chunk_fts_au;")
             .expect("a half-built keyword index");
 
-        let failure = super::migrate_from_previous_schema(&mut conn)
+        let failure = super::migrate_to_current(&mut conn, "12")
             .expect_err("a missing trigger must fail the migration");
         assert!(failure.contains("drop the old keyword index"), "{failure}");
-        let (version, column, index): (String, bool, bool) = conn
+        let (column, index): (bool, bool) = conn
             .query_row(
-                "SELECT (SELECT value FROM metadata WHERE key = 'schema_version'),
-                        EXISTS(SELECT 1 FROM pragma_table_info('vault_chunks')
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('vault_chunks')
                                WHERE name = 'keyword_text'),
                         EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'vault_chunk_fts')",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("read the cache after the failure");
-        assert_eq!(
-            version,
-            super::PREVIOUS_SCHEMA_VERSION,
-            "nothing may commit"
-        );
+        assert_eq!(stored_version(&conn), "12", "nothing may commit");
         assert!(!column, "the new column must be rolled back");
         assert!(
             index,
             "the old keyword index must be back after the rollback"
         );
+        assert_eq!(normalized_columns_and_indexes(&conn), (4, 4));
     }
 
     #[test]
     fn a_vector_filed_under_another_vaults_key_fails_the_mapping_check() {
-        let (_directory, path) = previous_version_cache();
+        let (_directory, path) = cache_at_version("13");
         let cache = SqliteCache::open(&path, 384).expect("open");
         let mut conn = cache.connection().expect("conn");
         conn.execute(
@@ -642,35 +852,75 @@ mod tests {
         )
         .expect("misfile one vector");
 
-        let failure = super::migrate_from_previous_schema(&mut conn)
+        let failure = super::migrate_to_current(&mut conn, "13")
             .expect_err("a misfiled vector must fail the migration");
         assert!(
             failure.contains("Vault mapping check failed on vault_chunk_vectors"),
             "{failure}"
         );
-        let version: String = conn
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("version");
-        assert_eq!(
-            version,
-            super::PREVIOUS_SCHEMA_VERSION,
-            "nothing may commit"
-        );
+        assert_eq!(stored_version(&conn), "13", "nothing may commit");
     }
 
     #[test]
     fn a_failed_migration_wipes_and_rebuilds_a_searchable_cache() {
-        let (directory, path) = previous_version_cache();
+        let (directory, path) = cache_at_version("13");
         let cache = SqliteCache::open(&path, 384).expect("open");
         cache
             .connection()
             .expect("conn")
-            .execute_batch("DROP TRIGGER vault_chunk_fts_au;")
-            .expect("a half-built keyword index");
+            .execute_batch(BLOCK_THE_LAST_COLUMN_DROP)
+            .expect("block the last column drop");
+
+        let embedder = StubEmbedder::new(384);
+        cache
+            .reset_if_embedder_changed(&embedder)
+            .expect("a failed migration recovers by wiping");
+        assert_eq!(
+            published_vaults(&cache),
+            0,
+            "the cache must have been wiped"
+        );
+        assert_eq!(
+            schema_version(&cache).as_deref(),
+            Some(super::SCHEMA_VERSION)
+        );
+        assert_eq!(
+            normalized_columns_and_indexes(&cache.connection().expect("conn")),
+            (0, 0)
+        );
+
+        let vault_id = vault_ids()[0];
+        let index = VaultIndex::build(directory.path().join("vault-0")).expect("index");
+        cache
+            .replace_vault_snapshot(vault_id, &index, &embedder)
+            .expect("rebuild");
+        assert!(!semantic_search(&cache, &[vault_id], "melatonin sleep", true).is_empty());
+        assert_eq!(keyword_search(&cache, "melatonin").len(), 2);
+        assert_eq!(keyword_search(&cache, "本文").len(), 1);
+    }
+
+    #[test]
+    fn the_steps_run_one_version_at_a_time_up_to_the_current_one() {
+        let versions: Vec<u32> = super::STEPS
+            .iter()
+            .map(|step| step.from.parse().expect("numeric version"))
+            .collect();
+        let current: u32 = super::SCHEMA_VERSION.parse().expect("numeric version");
+        for pair in versions.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "steps must be consecutive");
+        }
+        assert_eq!(versions.last().map(|last| last + 1), Some(current));
+    }
+
+    #[test]
+    fn a_failed_migration_from_version_12_wipes_and_rebuilds_a_searchable_cache() {
+        let (directory, path) = cache_at_version("12");
+        let cache = SqliteCache::open(&path, 384).expect("open");
+        cache
+            .connection()
+            .expect("conn")
+            .execute_batch(BLOCK_THE_LAST_COLUMN_DROP)
+            .expect("block the last column drop, after the keyword step has run");
 
         let embedder = StubEmbedder::new(384);
         cache
@@ -696,8 +946,8 @@ mod tests {
     }
 
     #[test]
-    fn a_cache_two_versions_old_is_wiped_not_migrated() {
-        let (_directory, path) = previous_version_cache();
+    fn a_cache_older_than_the_first_step_is_wiped_not_migrated() {
+        let (_directory, path) = cache_at_version("12");
         {
             let cache = SqliteCache::open(&path, 384).expect("open");
             cache
@@ -718,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn a_previous_version_cache_from_another_model_is_wiped_not_migrated() {
+    fn an_older_cache_from_another_model_is_wiped_not_migrated() {
         struct OtherModel(StubEmbedder);
         impl Embedder for OtherModel {
             fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
@@ -735,15 +985,18 @@ mod tests {
             }
         }
 
-        let (_directory, path) = previous_version_cache();
-        let cache = SqliteCache::open(&path, 384).expect("open");
-        cache
-            .reset_if_embedder_changed(&OtherModel(StubEmbedder::new(384)))
-            .expect("a model change wipes");
-        assert_eq!(published_vaults(&cache), 0);
-        assert_eq!(
-            schema_version(&cache).as_deref(),
-            Some(super::SCHEMA_VERSION)
-        );
+        for version in ["12", "13"] {
+            let (_directory, path) = cache_at_version(version);
+            let cache = SqliteCache::open(&path, 384).expect("open");
+            cache
+                .reset_if_embedder_changed(&OtherModel(StubEmbedder::new(384)))
+                .expect("a model change wipes");
+            assert_eq!(published_vaults(&cache), 0, "{version}");
+            assert_eq!(
+                schema_version(&cache).as_deref(),
+                Some(super::SCHEMA_VERSION),
+                "{version}"
+            );
+        }
     }
 }

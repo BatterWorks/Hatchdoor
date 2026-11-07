@@ -1272,9 +1272,8 @@ fn copy_notes(
 ) -> Result<(), String> {
     let mut statement = source
         .prepare(
-            "SELECT slug, title, normalized_title, relative_path, normalized_relative_path, \
-                    absolute_path, content, content_hash, layer, aliases_json, frontmatter_json, \
-                    mtime_ns, size_bytes, indexed_at FROM notes",
+            "SELECT slug, title, relative_path, absolute_path, content, content_hash, layer, \
+                    aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at FROM notes",
         )
         .map_err(|error| format!("prepare candidate notes: {error}"))?;
     let rows = statement
@@ -1286,14 +1285,12 @@ fn copy_notes(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
             ))
         })
         .map_err(|error| format!("query candidate notes: {error}"))?;
@@ -1301,9 +1298,7 @@ fn copy_notes(
         let (
             slug,
             title,
-            normalized_title,
             relative_path,
-            normalized_relative_path,
             absolute_path,
             content,
             content_hash,
@@ -1315,17 +1310,15 @@ fn copy_notes(
             indexed_at,
         ) = row.map_err(|error| format!("read candidate note: {error}"))?;
         tx.execute(
-            "INSERT INTO vault_notes(vault_id, slug, title, normalized_title, relative_path, \
-             normalized_relative_path, absolute_path, content, content_hash, layer, aliases_json, \
-             frontmatter_json, mtime_ns, size_bytes, indexed_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO vault_notes(vault_id, slug, title, relative_path, absolute_path, \
+             content, content_hash, layer, aliases_json, frontmatter_json, mtime_ns, size_bytes, \
+             indexed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 vault_id,
                 slug,
                 title,
-                normalized_title,
                 relative_path,
-                normalized_relative_path,
                 absolute_path,
                 content,
                 content_hash,
@@ -1388,9 +1381,8 @@ fn seed_notes(
 ) -> Result<(), String> {
     let mut statement = source
         .prepare(
-            "SELECT slug, title, normalized_title, relative_path, normalized_relative_path, \
-                    absolute_path, content, content_hash, layer, aliases_json, frontmatter_json, \
-                    mtime_ns, size_bytes, indexed_at FROM vault_notes WHERE vault_id = ?1",
+            "SELECT slug, title, relative_path, absolute_path, content, content_hash, layer, \
+                    aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at FROM vault_notes WHERE vault_id = ?1",
         )
         .map_err(|error| format!("prepare snapshot notes: {error}"))?;
     let rows = statement
@@ -1402,14 +1394,12 @@ fn seed_notes(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
             ))
         })
         .map_err(|error| format!("query snapshot notes: {error}"))?;
@@ -1417,9 +1407,7 @@ fn seed_notes(
         let (
             slug,
             title,
-            normalized_title,
             relative_path,
-            normalized_relative_path,
             absolute_path,
             content,
             content_hash,
@@ -1432,17 +1420,15 @@ fn seed_notes(
         ) = row.map_err(|error| format!("read snapshot note: {error}"))?;
         let note_id: i64 = tx
             .query_row(
-                "INSERT INTO notes(slug, title, normalized_title, relative_path, \
-                 normalized_relative_path, absolute_path, content, content_hash, layer, \
-                 aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                "INSERT INTO notes(slug, title, relative_path, absolute_path, content, \
+                 content_hash, layer, aliases_json, frontmatter_json, mtime_ns, size_bytes, \
+                 indexed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  RETURNING id",
                 params![
                     slug,
                     title,
-                    normalized_title,
                     relative_path,
-                    normalized_relative_path,
                     absolute_path,
                     content,
                     content_hash,

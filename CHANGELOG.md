@@ -5,6 +5,7 @@
 ### Changed
 - MCP agents on the `2026-07-28` revision now get a refused tool call, such as an unknown tool, a write while writes are off or an invalid argument, with HTTP 200 and the JSON-RPC error in the body, where it was HTTP 400; the error code and message are unchanged, so a client that reads the body sees no difference. An `initialize` that names `2026-07-28`, a revision with no handshake, now opens a `2025-11-25` session, and that session no longer claims `tools.listChanged: true`, which only the modern revision can deliver. A request with no session that is not `initialize` is refused with `400 Bad Request: Session ID is required` instead of `422 Unexpected message, expect initialize request`. These come with the MCP library moving to 3.8.0. [#621]
 - Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
+- The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
 - The Graph page now works from the keyboard and with a screen reader. Tab reaches the graph, which a screen reader names "Note graph"; the arrow keys step through the notes by title, Home and End jump to the first and last, Enter opens the selected note and Escape clears the selection. A note out of view is brought to the middle of the screen, and the selected title is read out. Rename, Move, Archive, Delete and New note now put focus back on the button that opened them when they close, where it used to drop to the top of the page. The browser bar colour and the installed app's splash screen now follow the theme colours themselves instead of a copy of them. [#648]
@@ -64,6 +65,7 @@
 [#646]: https://github.com/BatterWorks/Hatchdoor/issues/646
 [#647]: https://github.com/BatterWorks/Hatchdoor/issues/647
 [#648]: https://github.com/BatterWorks/Hatchdoor/issues/648
+[#655]: https://github.com/BatterWorks/Hatchdoor/issues/655
 [#661]: https://github.com/BatterWorks/Hatchdoor/issues/661
 [#670]: https://github.com/BatterWorks/Hatchdoor/issues/670
 

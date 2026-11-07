@@ -2766,23 +2766,28 @@ and embedder identity/dimensions.
   chunks. It travels with candidate and published snapshot metadata, so an
   upgrade repairs cached BOM metadata even when the note itself did not change.
 - Schema or embedder identity mismatch rebuilds rather than mixing data, with
-  one exception (ADR-50): a cache one schema version behind is left alone at
-  open and migrated by `migrate.rs` right after `reset_if_embedder_changed`
+  one exception (ADR-50, ADR-52): a cache on a version `migrate.rs` has a step from
+  (back to the latest release's) is left alone at open and migrated right
+  after `reset_if_embedder_changed`
   has found the same embedder identity. Runtime composition calls
   `prepare_for_embedder` when a model loads and before it installs it, so no
   search reaches a cache still waiting to migrate. If that call fails, the
   model is installed anyway and semantic search reports `search_unavailable`
-  until an Index turn's own model check succeeds. The current migration
-  (12 to 13, #634) writes no vector table: it fills `keyword_text` from the
-  stored chunk text and rebuilds only the keyword index. It commits only once
-  ADR-50's row-count, identical-vector (a BLAKE3 digest of every vector row
-  before and after), Vault-mapping and self-retrieval checks pass, the
-  keyword index holds one entry per chunk and passes FTS5's
-  `integrity-check`, and `PRAGMA integrity_check` passes; any failure wipes
-  and rebuilds. Seeding a
-  candidate never copies a snapshot's recorded `schema_version` over the
-  candidate's own. The next schema bump replaces the migration rather than
-  adding a second one.
+  until an Index turn's own model check succeeds. Two steps exist, and a
+  version 12 cache runs both in one transaction. 12 to 13 (#634) fills
+  `vault_chunks.keyword_text` from the stored chunk text and rebuilds only
+  the keyword index. 13 to 14 (#655) drops `normalized_title` and
+  `normalized_relative_path` from `notes` and `vault_notes`, with their four
+  indexes, which nothing read once the cache's wikilink resolver went (#653).
+  Neither writes a vector table. The migration commits only once ADR-50's
+  row-count, identical-vector (a BLAKE3 digest of every vector row before and
+  after), Vault-mapping and self-retrieval checks pass, the note rows per
+  Vault are the same before and after, the keyword index holds one entry per
+  chunk and passes FTS5's `integrity-check`, and `PRAGMA integrity_check`
+  passes; any failure wipes and rebuilds. Seeding a candidate never copies a
+  snapshot's recorded `schema_version` over the candidate's own. A schema
+  bump adds a step; a step is deleted once its starting version is older than
+  the latest release's (ADR-52).
 - No vec0 table has a TEXT metadata column: sqlite-vec leaks the SQL it
   formats for every write and delete of one (#600). The per-Vault vector
   tables file each vector under an integer `vault_key` from `vault_keys`,
