@@ -10,6 +10,7 @@ pub(crate) mod vault_snapshots;
 pub use populate::BuildOptions;
 pub(crate) use populate::{BuildHandles, IndexYield};
 pub use queries::SemanticHit;
+pub use schema::ModelFiles;
 use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;

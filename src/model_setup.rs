@@ -232,12 +232,36 @@ impl ModelSetup {
     /// again before FastEmbed can use it, and the answer is then `Missing`.
     /// Only a cache that needs a download must find
     /// [`MIN_SETUP_FREE_BYTES`] free (#643).
+    ///
+    /// A cache that is not `Valid` is about to change, so this records that
+    /// first ([`Self::files_changed_since_index`]).
     pub fn prepare_download(&self, selected: SelectedModel) -> Result<CacheIntegrity, String> {
-        prepare_cache(
-            &self.model_cache_dir(selected),
-            pinned(selected)?,
-            MIN_SETUP_FREE_BYTES,
-        )
+        let dir = self.model_cache_dir(selected);
+        let integrity = prepare_cache(&dir, pinned(selected)?, MIN_SETUP_FREE_BYTES)?;
+        if integrity != CacheIntegrity::Valid {
+            mark_files_changed(&dir)?;
+        }
+        Ok(integrity)
+    }
+
+    /// Whether the selected model's files were fetched, replaced or
+    /// re-pointed since a search index last accepted them. Kept on disk, so
+    /// a start that changed the files and stopped before the index check
+    /// still counts as a change at the next start (#693).
+    pub fn files_changed_since_index(&self, selected: SelectedModel) -> bool {
+        self.model_cache_dir(selected)
+            .join(FILES_CHANGED_RECORD)
+            .exists()
+    }
+
+    /// Record that the search index has checked itself against the selected
+    /// model's current files.
+    pub fn files_reached_index(&self, selected: SelectedModel) -> Result<(), String> {
+        match std::fs::remove_file(self.model_cache_dir(selected).join(FILES_CHANGED_RECORD)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("clear the model files change record: {error}")),
+        }
     }
 
     /// The folder holding the selected model's files at its pinned revision,
@@ -277,7 +301,9 @@ impl ModelSetup {
     /// takes no revision and reads `main`, so this is what keeps it on the
     /// files [`Self::verify_cache`] checked. A ref already right is left
     /// alone, so a valid cache on a full volume is not written to, and a
-    /// failed write cannot send setup into resetting a good cache.
+    /// failed write cannot send setup into resetting a good cache. Moving it
+    /// counts as a change of files: a Nomic load before #643 read whatever
+    /// commit `main` named (#693).
     pub fn point_main_at_pinned_revision(&self, selected: SelectedModel) -> Result<(), String> {
         let model = pinned(selected)?;
         let main = self
@@ -288,6 +314,7 @@ impl ModelSetup {
         if std::fs::read_to_string(&main).is_ok_and(|current| current.trim() == model.revision) {
             return Ok(());
         }
+        mark_files_changed(&self.model_cache_dir(selected))?;
         Cache::new(self.model_cache_dir(selected))
             .repo(Repo::model(model.repository.to_string()))
             .create_ref(model.revision)
@@ -368,7 +395,9 @@ impl ModelSetup {
     /// Discard downloaded artifacts while retaining a Gemma acceptance receipt.
     /// Used after an unrecoverable first attempt before one clean retry.
     pub fn reset_download_cache(&self, selected: SelectedModel) -> Result<(), String> {
-        remove_downloaded_artifacts(&self.model_cache_dir(selected))
+        let dir = self.model_cache_dir(selected);
+        mark_files_changed(&dir)?;
+        remove_downloaded_artifacts(&dir)
     }
 
     fn acceptance_is_current(&self) -> bool {
@@ -824,7 +853,23 @@ pub fn run_fetch_child(args: &[String], out: impl Write + Send + 'static) -> i32
 const LEGACY_INTEGRITY_RECORD: &str = "integrity.json";
 
 fn is_local_metadata(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()) == Some("acceptance.json")
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("acceptance.json" | FILES_CHANGED_RECORD)
+    )
+}
+
+/// Written in a model's folder before its files change, removed once the
+/// search index has checked itself against them (#693).
+const FILES_CHANGED_RECORD: &str = "files-changed.json";
+
+/// Record, before anything in `dir` changes, that its files are changing.
+fn mark_files_changed(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("create model directory: {error}"))?;
+    write_json_atomic(
+        &dir.join(FILES_CHANGED_RECORD),
+        &serde_json::json!({ "changed": true }),
+    )
 }
 
 fn file_sha256(path: &Path) -> Result<String, String> {
@@ -1310,6 +1355,50 @@ mod tests {
             cached.get("tokenizer.json"),
             Some(snapshot.join("tokenizer.json")),
             "FastEmbed's `main` lookup finds the pinned snapshot"
+        );
+    }
+
+    /// #693: every change of model files is recorded on disk before it
+    /// happens and survives until the index has checked itself, so a start
+    /// that stops in between still counts as a change at the next one.
+    #[test]
+    fn a_change_of_model_files_is_recorded_until_the_index_has_checked() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let setup = ModelSetup::new(temp.path().join("models"));
+        let selected = SelectedModel::Nomic;
+        assert!(!setup.files_changed_since_index(selected));
+
+        assert_eq!(
+            setup.prepare_download(selected).expect("prepare"),
+            CacheIntegrity::Missing
+        );
+        assert!(
+            setup.files_changed_since_index(selected),
+            "a download follows"
+        );
+        setup.files_reached_index(selected).expect("clear");
+        assert!(!setup.files_changed_since_index(selected));
+        setup
+            .files_reached_index(selected)
+            .expect("clearing twice is fine");
+
+        setup
+            .point_main_at_pinned_revision(selected)
+            .expect("point main");
+        assert!(setup.files_changed_since_index(selected), "main moved");
+        setup.files_reached_index(selected).expect("clear");
+        setup
+            .point_main_at_pinned_revision(selected)
+            .expect("main already right");
+        assert!(
+            !setup.files_changed_since_index(selected),
+            "a ref already right changes nothing"
+        );
+
+        setup.reset_download_cache(selected).expect("reset");
+        assert!(
+            setup.files_changed_since_index(selected),
+            "the record survives the reset it announces"
         );
     }
 

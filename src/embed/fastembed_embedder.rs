@@ -395,9 +395,22 @@ fn revision_marker(revision: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// `identity` without the revision marker it ends with, or `None` when it
+/// ends with none. An index built before #643 recorded this shorter form for
+/// the same model, so the cache can recognise it (#693).
+pub fn identity_without_revision(identity: &str) -> Option<&str> {
+    let (unmarked, revision) = identity.rsplit_once("-rev-")?;
+    let is_marker = !revision.is_empty()
+        && revision.len() <= 12
+        && revision.bytes().all(|byte| byte.is_ascii_hexdigit());
+    is_marker.then_some(unmarked)
+}
+
 #[cfg(test)]
 mod identity_tests {
-    use super::{embedder_identity, gemma_retrieval_document, revision_marker};
+    use super::{
+        embedder_identity, gemma_retrieval_document, identity_without_revision, revision_marker,
+    };
 
     #[test]
     fn identity_marks_the_contextual_embedding_contract() {
@@ -421,6 +434,32 @@ mod identity_tests {
             "NomicEmbedTextV15-768-max1024-fastembed-v5-ctx1-rev-e9b6763023c6"
         );
         assert_eq!(revision_marker(None), "");
+    }
+
+    #[test]
+    fn the_revision_marker_comes_off_only_at_the_end() {
+        assert_eq!(
+            identity_without_revision(
+                "EmbeddingGemma300MQ4-768-max2048-fastembed-v5-ctx1-gemma-retrieval-v1-rev-5090578d9565"
+            ),
+            Some("EmbeddingGemma300MQ4-768-max2048-fastembed-v5-ctx1-gemma-retrieval-v1")
+        );
+        assert_eq!(
+            identity_without_revision(
+                "NomicEmbedTextV15-768-max2048-fastembed-v5-ctx1-rev-e9b6763023c6"
+            ),
+            Some("NomicEmbedTextV15-768-max2048-fastembed-v5-ctx1")
+        );
+        for unmarked in [
+            "NomicEmbedTextV15-768-max2048-fastembed-v5-ctx1",
+            "stub-384",
+            "model-rev-5090578d9565-mrl256",
+            "model-rev-",
+            "model-rev-not-hex",
+            "model-rev-5090578d9565bb",
+        ] {
+            assert_eq!(identity_without_revision(unmarked), None, "{unmarked}");
+        }
     }
 
     #[test]
