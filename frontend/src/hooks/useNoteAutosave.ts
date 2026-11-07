@@ -30,14 +30,23 @@ export type Sender = (
  * is never left half-saved. Writes fire on unit commit and after an idle pause
  * while typing inside one unit; a conflict stops autosaving rather than
  * retrying into a losing race.
+ *
+ * Everything it holds belongs to the one note named by `noteKey`. The page is
+ * reused across notes, and a save takes about a second, so a reply for the note
+ * just left routinely lands after the next one opened (#658). That reply still
+ * reaches its own `onSaved`, but never this note's hash, status or queue.
  */
 export function useNoteAutosave({
+  noteKey,
   baseHash,
   enabled,
   save,
   flushSave,
   onSaved,
 }: {
+  /** Which note the edits are for. A new key starts afresh: saving on, the
+   * current `baseHash`, nothing pending, nothing in flight. */
+  noteKey: string;
   baseHash: string;
   enabled: boolean;
   save: (content: string, expectedHash: string) => Promise<SaveResult>;
@@ -66,7 +75,10 @@ export function useNoteAutosave({
   const ownHashesRef = useRef<Set<string>>(new Set([baseHash]));
   const timerRef = useRef<number | null>(null);
   const pendingRef = useRef<string | null>(null);
-  const inFlightRef = useRef(false);
+  const noteKeyRef = useRef(noteKey);
+  // The note whose save is out, so a save still out for the note just left
+  // neither holds this one's edits back nor drains them into its own send.
+  const inFlightKeyRef = useRef<string | null>(null);
   const queuedRef = useRef<string | null>(null);
   const stoppedRef = useRef(false);
   const unsavedRef = useRef(false);
@@ -77,8 +89,28 @@ export function useNoteAutosave({
     callbacksRef.current = { save, flushSave, onSaved };
   }, [save, flushSave, onSaved]);
 
+  // A layout effect, so the reset lands before any effect of the page's can
+  // send for the new note.
+  useLayoutEffect(() => {
+    if (noteKeyRef.current === noteKey) {
+      return;
+    }
+    noteKeyRef.current = noteKey;
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    pendingRef.current = null;
+    queuedRef.current = null;
+    unsavedRef.current = false;
+    stoppedRef.current = false;
+    hashRef.current = baseHash;
+    ownHashesRef.current = new Set([baseHash]);
+    setStatus("idle");
+  }, [noteKey, baseHash]);
+
   useEffect(() => {
-    if (!unsavedRef.current && !inFlightRef.current) {
+    if (!unsavedRef.current && inFlightKeyRef.current !== noteKeyRef.current) {
       hashRef.current = baseHash;
       ownHashesRef.current.add(baseHash);
     }
@@ -103,12 +135,13 @@ export function useNoteAutosave({
       // change commits, so edits arriving mid-flight are routine. Queue the
       // newest one rather than dropping it: dropping loses the edit outright
       // and still reports "Saved".
-      if (inFlightRef.current) {
+      if (inFlightKeyRef.current === noteKeyRef.current) {
         queuedRef.current = next;
         return;
       }
 
-      inFlightRef.current = true;
+      const key = noteKeyRef.current;
+      inFlightKeyRef.current = key;
       const { save, onSaved } = callbacksRef.current;
       try {
         let current: string | null = next;
@@ -117,12 +150,24 @@ export function useNoteAutosave({
           setStatus("saving");
           try {
             const result = await send(current, hashRef.current);
+            if (noteKeyRef.current !== key) {
+              // The page has moved on. The note this was for still books it
+              // (its draft, through the closure captured above); the open
+              // note's hash and queue are not this send's to touch.
+              onSaved?.(result, current);
+              return;
+            }
             if (result?.content_hash) {
               hashRef.current = result.content_hash;
               ownHashesRef.current.add(result.content_hash);
             }
             onSaved?.(result, current);
           } catch (error) {
+            if (noteKeyRef.current !== key) {
+              // Refused for the note just left: its draft stays held for its
+              // next visit, and the open note keeps saving.
+              return;
+            }
             stoppedRef.current = true;
             queuedRef.current = null;
             setStatus(
@@ -143,7 +188,9 @@ export function useNoteAutosave({
           }
         }
       } finally {
-        inFlightRef.current = false;
+        if (inFlightKeyRef.current === key) {
+          inFlightKeyRef.current = null;
+        }
       }
     },
     [enabled],
@@ -165,7 +212,9 @@ export function useNoteAutosave({
     (next: string) => {
       unsavedRef.current = true;
       if (!stoppedRef.current)
-        setStatus(inFlightRef.current ? "saving" : "idle");
+        setStatus(
+          inFlightKeyRef.current === noteKeyRef.current ? "saving" : "idle",
+        );
       pendingRef.current = next;
       clearTimer();
       timerRef.current = window.setTimeout(() => {
@@ -244,7 +293,7 @@ export function useNoteAutosave({
       // the draft written alongside covers the refused one.
       if (
         terminating &&
-        inFlightRef.current &&
+        inFlightKeyRef.current === noteKeyRef.current &&
         flushSave &&
         enabled &&
         !stoppedRef.current

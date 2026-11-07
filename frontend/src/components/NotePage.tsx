@@ -335,10 +335,18 @@ export function NotePage({
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
-  // Bumped to open the address afresh, as a new visit would: the "gone"
-  // notice's button (#627), which must not carry this note's editor state,
-  // pending saves or draft target onto the file the address names now.
+  // Bumped on every arrival at a note, and to open the address afresh: the
+  // "gone" notice's button (#627), which must not carry this note's editor
+  // state, pending saves or draft target onto the file the address names now.
+  // A return to a note is a new visit too, so a save still out from the last
+  // one is never booked against it (#658). Adjusted during render, so no
+  // render ever pairs the new address with the old visit.
   const [visit, setVisit] = useState(0);
+  const [visitedAddress, setVisitedAddress] = useState(`${vaultId}:${slug}`);
+  if (visitedAddress !== `${vaultId}:${slug}`) {
+    setVisitedAddress(`${vaultId}:${slug}`);
+    setVisit((current) => current + 1);
+  }
   const noteKey = `${vaultId}:${slug}#${visit}`;
   const currentNoteKeyRef = useRef(noteKey);
   // Only ever the open note's own disk version, whatever is left in state.
@@ -1003,8 +1011,28 @@ export function NotePage({
   // a page that comes back has a current hash instead of conflicting on the
   // next keystroke. A page that is really gone never sees it resolve, which is
   // what the draft above covers.
+  /** The notice a refused save raises, shown only while the note it was for is
+   * still open: a late refusal for the note just left is not this one's (#658).
+   * Same defense-in-depth backstop as every other write path (#152): autosave
+   * stops either way, but a demo refusal must show the app's one sentence, not
+   * the generic "could not reach the vault" banner. */
+  const refuseSaveFor = useCallback(
+    (sentFor: string, error: unknown) => {
+      if (sentFor !== currentNoteKeyRef.current) {
+        return;
+      }
+      if (onDemoRefusal?.(error)) {
+        setAutosaveDemoRefusal(true);
+      } else if (isNoteMovedError(error)) {
+        setNoteMoved(true);
+      }
+    },
+    [onDemoRefusal],
+  );
+
   const flushSave = useCallback(
     async (content: string, expectedHash: string) => {
+      const sentFor = noteKey;
       writeDraftNow(content);
       const keepalive =
         new TextEncoder().encode(content).length < KEEPALIVE_BODY_LIMIT_BYTES;
@@ -1013,26 +1041,28 @@ export function NotePage({
           keepalive,
           expectedRelativePath: openPathAtRender,
         });
-        savedContentRef.current = content;
+        if (sentFor === currentNoteKeyRef.current) {
+          savedContentRef.current = content;
+        }
         return outcome;
       } catch (error) {
-        if (onDemoRefusal?.(error)) {
-          setAutosaveDemoRefusal(true);
-        } else if (isNoteMovedError(error)) {
-          setNoteMoved(true);
-        }
+        refuseSaveFor(sentFor, error);
         throw error;
       }
     },
-    [onDemoRefusal, openPathAtRender, slug, vaultId, writeDraftNow],
+    [openPathAtRender, refuseSaveFor, slug, vaultId, writeDraftNow, noteKey],
   );
 
   const autosave = useNoteAutosave({
+    // Each note gets its own autosave: a reply for the note just left never
+    // moves this one's hash or stops its saving (#658).
+    noteKey,
     baseHash: note?.content_hash ?? "",
     // Once the slug names another note nothing is sent by it; the text stays
     // in the editor and in the draft filed under this note's path (#627).
     enabled: inlineEditingEnabled && !noteMoved,
     save: async (nextContent, expectedHash) => {
+      const sentFor = noteKey;
       try {
         const outcome = await updateNote(
           vaultId,
@@ -1041,29 +1071,28 @@ export function NotePage({
           expectedHash,
           { expectedRelativePath: openPathAtRender },
         );
-        savedContentRef.current = nextContent;
+        if (sentFor === currentNoteKeyRef.current) {
+          savedContentRef.current = nextContent;
+        }
         return outcome;
       } catch (error) {
-        // Same defense-in-depth backstop as every other write path (#152):
-        // the hook's own catch still stops autosave for this session either
-        // way, but the notice shown for it must be the app's one sentence,
-        // not the generic "could not reach the vault" banner below.
-        if (onDemoRefusal?.(error)) {
-          setAutosaveDemoRefusal(true);
-        } else if (isNoteMovedError(error)) {
-          setNoteMoved(true);
-        }
+        refuseSaveFor(sentFor, error);
         throw error;
       }
     },
     flushSave,
     onSaved: (result, savedContent) => {
-      setNote((prev) =>
-        prev && result.content_hash
-          ? { ...prev, content_hash: result.content_hash }
-          : prev,
-      );
-      setInlineDirty(latestContentRef.current !== savedContent);
+      // Captured with this render, so a reply landing after the user opened
+      // another note still names the note it was for (#658).
+      const savedFor = noteKey;
+      if (savedFor === currentNoteKeyRef.current) {
+        setNote((prev) =>
+          prev && result.content_hash
+            ? { ...prev, content_hash: result.content_hash }
+            : prev,
+        );
+        setInlineDirty(latestContentRef.current !== savedContent);
+      }
       // The vault holds this text now, so the local copy has nothing left to
       // rescue. A debounced write scheduled since carries newer text and
       // legitimately recreates it a moment later; one carrying the text that
@@ -1112,24 +1141,6 @@ export function NotePage({
     autosaveRef.current = autosave;
     autosaveStatusRef.current = autosave.status;
   }, [autosave]);
-
-  // A save refused on the previous note stopped autosave, and the route
-  // reuses this page, so the next note started with saving off ("Open it"
-  // after a slug changed hands always took that path, #627). Each note starts
-  // with saving on. The hash is the one held now; a new note whose read
-  // brings another hash moves it through `baseHash`.
-  const { resume: resumeAutosave, discard: discardAutosave } = autosave;
-  const autosaveKeyRef = useRef(noteKey);
-  useEffect(() => {
-    if (autosaveKeyRef.current === noteKey) {
-      return;
-    }
-    autosaveKeyRef.current = noteKey;
-    // The old note's draft was flushed by the route-reset effect above.
-    // Its unsaved flag must not prevent adopting the new note's first hash.
-    discardAutosave();
-    resumeAutosave(note?.content_hash ?? "");
-  }, [noteKey, note?.content_hash, resumeAutosave, discardAutosave]);
 
   // The slug names another file, but that alone does not say whose move it
   // was (#627), so the server is asked who is at the opened path now.
