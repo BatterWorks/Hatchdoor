@@ -26,13 +26,18 @@ import {
   DEV_HOST,
   MCP_TOKEN_SETTING,
   devSetting,
+  notAnswering,
   portFrom,
+  runScrubbed,
   scrubbed,
+  standardInput,
   takeOption,
 } from "./dev-common.mjs";
 import { ToolError } from "./proto-common.mjs";
 
-const PROTOCOL_VERSION = "2025-06-18";
+// The newest version that still opens with `initialize`
+// (`SUPPORTED_PROTOCOL_VERSIONS` in `src/mcp/config.rs`).
+const PROTOCOL_VERSION = "2025-11-25";
 const USAGE =
   "usage: just mcp-call <tool> '<json arguments>'   as in: just mcp-call list_vaults\n" +
   "       just mcp-call -                            one `<tool> <json arguments>` a line on standard input";
@@ -109,9 +114,7 @@ export async function openSession({
         body: JSON.stringify(message),
       });
     } catch {
-      throw new ToolError(
-        `the dev server did not answer at ${url}; \`just dev-start\` starts it and \`just dev-wait\` waits for it`,
-      );
+      throw new ToolError(notAnswering("dev server", url));
     }
     const body = await response.text();
     if (!response.ok) {
@@ -233,14 +236,6 @@ export function callsFrom(text) {
   return calls;
 }
 
-async function standardInput() {
-  let text = "";
-  for await (const chunk of process.stdin) {
-    text += chunk;
-  }
-  return text;
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const port = portFrom(takeOption(args, "--port"), BACKEND_PORT);
@@ -253,7 +248,7 @@ async function main() {
 
   const batch = tool === "-";
   const calls = batch
-    ? callsFrom(await standardInput())
+    ? callsFrom(String(await standardInput()))
     : [{ tool, args: argumentsFrom(json) }];
   const session = await openSession({ port, token });
   try {
@@ -275,13 +270,5 @@ async function main() {
 }
 
 if (process.argv[1] === import.meta.filename) {
-  try {
-    await main();
-  } catch (error) {
-    if (!(error instanceof ToolError)) {
-      throw error;
-    }
-    console.error(`error: ${error.message}`);
-    process.exitCode = 1;
-  }
+  await runScrubbed(main, () => [devSetting(MCP_TOKEN_SETTING)]);
 }

@@ -10,7 +10,6 @@ import {
   mediaName,
   pageOf,
   slugOf,
-  tokenFrom,
   withoutToken,
 } from "./proto-new.mjs";
 import { fileFor } from "./proto-serve.mjs";
@@ -48,16 +47,6 @@ test("a page loses every access_token, and one still holding it is refused", () 
   );
   assert.throws(() => withoutToken("<p>t0k</p>", "t0k"), ToolError);
   assert.equal(withoutToken("<p>plain</p>", ""), "<p>plain</p>");
-});
-
-test("the token comes from the environment first, then .env", () => {
-  const env = "OTHER=1\nHATCHDOOR_WEB_BEARER_TOKEN='from-file'\n";
-  assert.equal(
-    tokenFrom({ HATCHDOOR_WEB_BEARER_TOKEN: " exported " }, env),
-    "exported",
-  );
-  assert.equal(tokenFrom({}, env), "from-file");
-  assert.equal(tokenFrom({}, ""), "");
 });
 
 test("a captured page links the shipped stylesheet and keeps its theme", () => {

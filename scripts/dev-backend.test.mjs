@@ -156,9 +156,13 @@ test("a server started by hand on the backend port is stopped too", async (t) =>
   assert.equal(await answers(ports.backend), false);
 });
 
-test("dev-restart-backend refuses, before starting anything, without dev Vaults", async (t) => {
-  const { just } = await scene(t);
+test("dev-restart-backend refuses without dev Vaults, before it stops or starts anything", async (t) => {
+  const { folder, ports, start, just } = await scene(t);
+  const backend = await start("backend");
   const restart = await just("dev-restart-backend");
   assert.equal(restart.status, 1);
   assert.match(restart.stderr, /no dev Vault fixtures yet; 'just dev-start'/);
+  assert.equal(alive(backend.pid), true);
+  assert.equal(await answers(ports.backend), true);
+  assert.equal(fs.existsSync(path.join(folder, "backend.pid")), true);
 });

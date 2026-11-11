@@ -6489,7 +6489,8 @@ packet scope:
   `.dev/state/vaults.json`; from the frontend the storage keys named above.
   `dev-note` lists what it placed in `.dev/vaults/placed-notes.txt`, inside
   the tree `scripts/dev-vaults.sh` removes whole on a reset. Validate with
-  `node --test scripts/dev-*.test.mjs scripts/mcp-call.test.mjs`;
+  `node --test scripts/dev-*.test.mjs scripts/mcp-call.test.mjs
+  scripts/proto.test.mjs`;
   `dev-backend.test.mjs` runs the `justfile`'s stop recipes against stand-in
   processes.
   `scripts/smoke-install.sh`, started by `just smoke-install` (#569), builds

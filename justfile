@@ -103,13 +103,7 @@ dev-stop-backend: (_stop-tracked "backend" backend_port)
 # `cargo run`. Returns once the backend's health endpoint answers.
 #
 # Stop the backend, start it again, and wait for it. The frontend stays up.
-dev-restart-backend: _prepare-cargo (_stop-tracked "backend" backend_port)
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -f "$HATCHDOOR_VAULT_REGISTRY_PATH" ]; then
-        echo "error: there are no dev Vault fixtures yet; 'just dev-start' makes them and starts both halves" >&2
-        exit 1
-    fi
+dev-restart-backend: _require-dev-vaults _prepare-cargo (_stop-tracked "backend" backend_port)
     {{just_executable()}} _start-backend
     node scripts/dev-wait.mjs --only backend --backend-port {{backend_port}} --dev-dir "{{dev_dir}}"
 
@@ -122,7 +116,7 @@ dev-restart-backend: _prepare-cargo (_stop-tracked "backend" backend_port)
 # Place a test note in a dev fixture Vault: <vault> <file or -> [path in the Vault].
 [positional-arguments]
 dev-note *args:
-    @node scripts/dev-note.mjs --backend-port {{backend_port}} --frontend-port {{frontend_port}} --dev-dir "{{justfile_directory()}}/{{dev_dir}}" "$@"
+    @node scripts/dev-note.mjs --backend-port {{backend_port}} --frontend-port {{frontend_port}} --dev-dir "{{justfile_directory()}}/{{dev_dir}}" --registry "$HATCHDOOR_VAULT_REGISTRY_PATH" "$@"
 
 # Does the whole handshake and never prints the token. `just mcp-call -`
 # reads one `<tool> <json arguments>` a line and makes them all in one
@@ -229,7 +223,19 @@ _stop-tracked name port:
         fuser {{port}}/tcp >/dev/null 2>&1 || break
         sleep 0.2
     done
-    fuser -k -KILL {{port}}/tcp >/dev/null 2>&1 || true
+    if fuser {{port}}/tcp >/dev/null 2>&1; then
+        echo "something still holds port {{port}} after five seconds, killing it"
+        fuser -k -KILL {{port}}/tcp >/dev/null 2>&1 || true
+    fi
+
+# Before anything is stopped: a backend with no registry to read cannot
+# come back.
+_require-dev-vaults:
+    #!/usr/bin/env bash
+    if [ ! -f "$HATCHDOOR_VAULT_REGISTRY_PATH" ]; then
+        echo "error: there are no dev Vault fixtures yet; 'just dev-start' makes them and starts both halves" >&2
+        exit 1
+    fi
 
 # The backend half of `dev-start`, in its own process group and tracked by
 # pid, so `_stop-tracked` can stop all of it.

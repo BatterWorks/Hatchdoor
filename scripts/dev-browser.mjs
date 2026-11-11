@@ -32,6 +32,7 @@ import {
   FRONTEND_PORT,
   WEB_TOKEN_SETTING,
   devSetting,
+  notAnswering,
   scrubbed,
 } from "./dev-common.mjs";
 import { ROOT, SIZES, THEMES, ToolError } from "./proto-common.mjs";
@@ -154,9 +155,7 @@ export async function signedInBrowser({
   try {
     await fetch(origin);
   } catch {
-    throw new ToolError(
-      `the dev frontend did not answer at ${origin}; \`just dev-start\` starts it and \`just dev-wait\` waits for it`,
-    );
+    throw new ToolError(notAnswering("dev frontend", origin));
   }
   const browser = await playwright().chromium.launch({
     executablePath: chromePath(),
@@ -166,11 +165,12 @@ export async function signedInBrowser({
       contextOptions({ size, theme, token }),
     );
     // Runs before the app's own scripts on every load, and writes on the
-    // first one only (the tab remembers), so what a check changes, such as
-    // the theme or signing out, outlives a reload.
+    // first one only, so what a check changes, such as the theme or signing
+    // out, outlives a reload. The mark is in `localStorage`, which every tab
+    // of this context shares and no other run does.
     await context.addInitScript((stored) => {
-      if (sessionStorage.getItem("hatchdoor-dev-browser") === null) {
-        sessionStorage.setItem("hatchdoor-dev-browser", "1");
+      if (localStorage.getItem("hatchdoor-dev-browser") === null) {
+        localStorage.setItem("hatchdoor-dev-browser", "1");
         for (const [key, value] of stored) {
           localStorage.setItem(key, value);
         }

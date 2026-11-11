@@ -97,6 +97,10 @@ function fakeBackend(vaults, indexed = () => true) {
   const seen = { bearers: new Set() };
   return serve((request, response) => {
     seen.bearers.add(request.headers.authorization);
+    if (request.headers.authorization !== `Bearer ${FAKE_TOKEN}`) {
+      response.writeHead(401).end(`no such token: ${request.headers.authorization}`);
+      return;
+    }
     const json = (status, body) =>
       response
         .writeHead(status, { "content-type": "application/json" })
@@ -107,10 +111,14 @@ function fakeBackend(vaults, indexed = () => true) {
       json(200, { vaults: [{ vault_id: READONLY, search: "unavailable", index_turn: "waiting" }] });
       return;
     }
+    if (!folders[id]) {
+      json(404, { code: "vault_not_found", message: "Vault definition was not found", retryable: false });
+      return;
+    }
     const folder = path.join(vaults, folders[id]);
     if (rest === "tree") {
       if (!indexed()) {
-        json(503, { code: "vault_unavailable", message: `no snapshot for ${request.headers.authorization}` });
+        json(503, { code: "vault_unavailable", message: `no snapshot for ${request.headers.authorization}`, retryable: true });
         return;
       }
       json(200, {
@@ -335,6 +343,47 @@ test("dev-note places, waits for the index, and prints the slug and address", as
     for (const run of [healthy, readonly, again, existing, slow]) {
       assert.doesNotMatch(run.stdout + run.stderr, new RegExp(FAKE_TOKEN));
     }
+  } finally {
+    await backend.close();
+    remove();
+  }
+});
+
+test("dev-note writes nothing when the dev server refuses to list the Vault", async () => {
+  const { devDir, vaults, registry, remove } = fixture();
+  const backend = await fakeBackend(vaults);
+  const run = (env, ...rest) =>
+    runNode(
+      [SCRIPT, "--backend-port", String(backend.port), "--dev-dir", devDir, ...rest],
+      { env, input: "x" },
+    );
+  try {
+    // A token the server does not hold.
+    const wrong = "wrong-token-77aa";
+    const refused = await run({ HATCHDOOR_WEB_BEARER_TOKEN: wrong }, "healthy", "-", "Refused.md");
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /refused to list the Healthy Vault \(401.*nothing was written/);
+    assert.doesNotMatch(refused.stdout + refused.stderr, new RegExp(wrong));
+    assert.equal(fs.existsSync(path.join(vaults, "healthy", "Refused.md")), false);
+
+    // A backend started before the fixtures were rebuilt: it has no such Vault.
+    const stale = path.join(devDir, "stale.json");
+    const moved = structuredClone(registry);
+    moved.vaults["12121212-1212-4121-8121-121212121212"] = moved.vaults[HEALTHY];
+    delete moved.vaults[HEALTHY];
+    fs.writeFileSync(stale, JSON.stringify(moved));
+    const unknown = await run(
+      { HATCHDOOR_WEB_BEARER_TOKEN: FAKE_TOKEN },
+      "--registry",
+      stale,
+      "healthy",
+      "-",
+      "Unknown.md",
+    );
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /\(404: Vault definition was not found\), so nothing was written.*just dev-restart-backend/);
+    assert.equal(fs.existsSync(path.join(vaults, "healthy", "Unknown.md")), false);
+    assert.equal(fs.existsSync(path.join(vaults, PLACED_LIST)), false);
   } finally {
     await backend.close();
     remove();

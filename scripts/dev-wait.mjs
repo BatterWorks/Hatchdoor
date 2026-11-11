@@ -65,8 +65,13 @@ export function trackedState(name, devDir = DEV_DIR) {
   }
 }
 
+// A half's log, as a path to read from where the command was run.
+function logOf(name, devDir) {
+  return path.join(path.relative(process.cwd(), devDir) || ".", `${name}.log`);
+}
+
 function whyNot(name, state, devDir) {
-  const log = path.join(path.relative(process.cwd(), devDir) || ".", `${name}.log`);
+  const log = logOf(name, devDir);
   const start =
     name === "backend"
       ? "`just dev-restart-backend` starts it alone, `just dev-start` starts both"
@@ -110,7 +115,7 @@ export async function waitFor({
           .map(
             (name) =>
               `the ${name} did not answer at ${halves[name]} within ${seconds} seconds; ` +
-              `${path.join(path.relative(process.cwd(), devDir) || ".", `${name}.log`)} shows what it is doing`,
+              `${logOf(name, devDir)} shows what it is doing`,
           )
           .join("\n"),
       );

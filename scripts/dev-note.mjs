@@ -27,9 +27,11 @@ import {
   FRONTEND_PORT,
   WEB_TOKEN_SETTING,
   devSetting,
+  notAnswering,
   portFrom,
-  scrubbed,
+  runScrubbed,
   sleep,
+  standardInput,
   takeOption,
 } from "./dev-common.mjs";
 import { ToolError } from "./proto-common.mjs";
@@ -114,17 +116,17 @@ function writable(target) {
 export function placeNote(vaultFolder, place, content) {
   const root = fs.realpathSync(vaultFolder);
   const target = path.join(root, place);
-  // The deepest folder that exists. It must be the Vault's own: a fixture
+  // `anchor` is the deepest folder that exists. It must be the Vault's own: a fixture
   // holds links that lead out of it.
   let existing = path.dirname(target);
   while (!fs.existsSync(existing)) {
     existing = path.dirname(existing);
   }
-  const real = fs.realpathSync(existing);
-  if (real !== root && !inside(root, real)) {
+  const anchor = fs.realpathSync(existing);
+  if (anchor !== root && !inside(root, anchor)) {
     throw new ToolError(`${place} leads out of the Vault, so nothing was written`);
   }
-  if (!fs.statSync(real).isDirectory()) {
+  if (!fs.statSync(anchor).isDirectory()) {
     throw new ToolError(`${place} goes through a file, not a folder`);
   }
   // `lstat`, so a dangling link counts as taken too.
@@ -135,15 +137,15 @@ export function placeNote(vaultFolder, place, content) {
   }
 
   const readOnly = !writable(root);
-  const opened = !writable(real);
-  const mode = fs.statSync(real).mode & 0o7777;
+  const unlocked = !writable(anchor);
+  const mode = fs.statSync(anchor).mode & 0o7777;
   const made = [];
   try {
-    if (opened) {
-      fs.chmodSync(real, mode | 0o200);
+    if (unlocked) {
+      fs.chmodSync(anchor, mode | 0o200);
     }
-    let folder = real;
-    for (const part of path.relative(real, path.dirname(target)).split(path.sep)) {
+    let folder = anchor;
+    for (const part of path.relative(anchor, path.dirname(target)).split(path.sep)) {
       if (!part) {
         continue;
       }
@@ -162,8 +164,8 @@ export function placeNote(vaultFolder, place, content) {
         fs.chmodSync(folder, 0o555);
       }
     }
-    if (opened) {
-      fs.chmodSync(real, mode);
+    if (unlocked) {
+      fs.chmodSync(anchor, mode);
     }
   }
 }
@@ -226,14 +228,6 @@ export async function slugOnceIndexed({
   }
 }
 
-async function standardInput() {
-  const chunks = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const backendPort = portFrom(takeOption(args, "--backend-port"), BACKEND_PORT);
@@ -242,6 +236,9 @@ async function main() {
     FRONTEND_PORT,
   );
   const devDir = takeOption(args, "--dev-dir") ?? DEV_DIR;
+  // The registry the backend reads: the recipe passes the path it exports.
+  const registryPath =
+    takeOption(args, "--registry") || path.join(devDir, "state", "vaults.json");
   const limit = takeOption(args, "--timeout");
   const seconds = limit === undefined ? DEFAULT_SECONDS : Number(limit);
   const [wanted, source, asPath, ...extra] = args.filter((arg) => arg !== "");
@@ -252,9 +249,7 @@ async function main() {
   const vaultsDir = path.join(devDir, "vaults");
   let registry;
   try {
-    registry = JSON.parse(
-      fs.readFileSync(path.join(devDir, "state", "vaults.json"), "utf8"),
-    );
+    registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
   } catch {
     throw new ToolError(
       "there are no dev fixture Vaults yet; `just dev-start` makes them",
@@ -272,33 +267,50 @@ async function main() {
 
   const token = devSetting(WEB_TOKEN_SETTING);
   const origin = `http://${DEV_HOST}:${backendPort}`;
-  // A reading of the dev server: the JSON, or nothing while it has none.
-  const api = async (route) => {
+  // One reading of the dev server: its status and its JSON, if it sent any.
+  const ask = async (route) => {
     let response;
     try {
       response = await fetch(origin + route, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
     } catch {
-      throw new ToolError(
-        `the dev server did not answer at ${origin}; \`just dev-start\` starts it and \`just dev-wait\` waits for it`,
-      );
+      throw new ToolError(notAnswering("dev server", origin));
     }
     const text = await response.text();
+    let body;
     try {
-      return response.ok ? JSON.parse(text) : undefined;
+      body = JSON.parse(text);
     } catch {
-      return undefined;
+      body = undefined;
     }
+    return { ok: response.ok, status: response.status, body, text };
+  };
+  // The JSON, or nothing while the server has none to give.
+  const api = async (route) => {
+    const answer = await ask(route);
+    return answer.ok ? answer.body : undefined;
   };
 
-  // Asked before anything is written, so a server that is down places nothing.
-  const first = await api(
-    `/api/v1/vaults/${encodeURIComponent(vault.id)}/tree`,
-  );
-  const tree = first?.data?.[0]?.tree;
-  const before = tree
-    ? new Set(notesIn(tree).map((note) => note.slug))
+  // Asked before anything is written, so nothing is placed when the server
+  // is down, refuses the token or does not know the Vault. A Vault still
+  // waiting for its first index answers with a refusal worth retrying, and
+  // that one is waited out below.
+  const treeRoute = `/api/v1/vaults/${encodeURIComponent(vault.id)}/tree`;
+  const asked = await ask(treeRoute);
+  if (!asked.ok && asked.body?.retryable !== true) {
+    const said = asked.body?.message ?? asked.text.trim();
+    const hint =
+      asked.status === 404
+        ? "; a backend started before the fixtures were rebuilt does not know them, and `just dev-restart-backend` puts that right"
+        : "";
+    throw new ToolError(
+      `the dev server refused to list the ${vault.name} Vault (${asked.status}${said ? `: ${said}` : ""}), so nothing was written${hint}`,
+    );
+  }
+  const treeBefore = asked.ok ? asked.body?.data?.[0]?.tree : undefined;
+  const before = treeBefore
+    ? new Set(notesIn(treeBefore).map((note) => note.slug))
     : undefined;
 
   placeNote(vault.folder, place, content);
@@ -330,15 +342,5 @@ async function main() {
 }
 
 if (process.argv[1] === import.meta.filename) {
-  try {
-    await main();
-  } catch (error) {
-    if (!(error instanceof ToolError)) {
-      throw error;
-    }
-    console.error(
-      scrubbed(`error: ${error.message}`, [devSetting(WEB_TOKEN_SETTING)]),
-    );
-    process.exitCode = 1;
-  }
+  await runScrubbed(main, () => [devSetting(WEB_TOKEN_SETTING)]);
 }

@@ -107,6 +107,7 @@ test(
           assert.deepEqual(
             had,
             {
+              "hatchdoor-dev-browser": "1",
               hatchdoor_web_token: FAKE_TOKEN,
               "hatchdoor.theme": "dark",
               hatchdoor_whats_new_seen: "999999.0.0",
@@ -121,6 +122,11 @@ test(
           await app.open("/");
           assert.match(await page.textContent("#root main"), /"hatchdoor.theme":"light"/);
           assert.match(await page.textContent("#root main"), /"hatchdoor.noteReadingView":"1"/);
+          // In a second tab of the same browser as well.
+          const tab = await app.context.newPage();
+          await tab.goto(app.origin);
+          await tab.waitForSelector("#root main");
+          assert.match(await tab.textContent("#root main"), /"hatchdoor.theme":"light"/);
         } finally {
           await app.close();
         }

@@ -88,6 +88,35 @@ export function takeOption(args, name) {
   return at >= 0 ? args.splice(at, 2)[1] : undefined;
 }
 
+// All of standard input, as bytes.
+export async function standardInput() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// What a helper says when the dev server is not there to ask.
+export function notAnswering(what, url) {
+  return `the ${what} did not answer at ${url}; \`just dev-start\` starts it and \`just dev-wait\` waits for it`;
+}
+
+// Run a helper's `main`. A `ToolError` is printed without a stack and with
+// every secret cut from it, as `run` in `proto-common.mjs` does for the
+// tools that hold none.
+export async function runScrubbed(main, secrets) {
+  try {
+    await main();
+  } catch (error) {
+    if (!(error instanceof ToolError)) {
+      throw error;
+    }
+    console.error(scrubbed(`error: ${error.message}`, secrets()));
+    process.exitCode = 1;
+  }
+}
+
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

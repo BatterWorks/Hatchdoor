@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WEB_TOKEN_SETTING, devSetting, settingFrom } from "./dev-common.mjs";
+import { WEB_TOKEN_SETTING, devSetting } from "./dev-common.mjs";
 import {
   chromePath,
   contextOptions,
@@ -46,11 +46,6 @@ import {
 // web token in, on note images among others. A prototype is served to the
 // whole LAN, so it is cut from every address before anything is written.
 const ACCESS_TOKEN_PARAM = /([?&])access_token=[^&#"'\s]*(&?)/g;
-// The web token: the environment first, then `.env`.
-export function tokenFrom(environment, envFileText) {
-  return settingFrom(WEB_TOKEN_SETTING, environment, envFileText);
-}
-
 // A path as part of a file name: `/notes/a b?x=1` is `notes-a-b-x-1`.
 export function slugOf(route) {
   const slug = route.replace(/[^A-Za-z0-9_]+/g, "-").replace(/^-+|-+$/g, "");
