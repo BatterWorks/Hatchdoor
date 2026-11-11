@@ -166,7 +166,7 @@ The folder on the server that belongs to one person, made when that person is ad
 _Avoid_: Personal Vault (a home folder holds Vaults, it is not one), user directory
 
 **Owner**:
-The person whose home folder holds a Vault. The owner and the admin decide who else is granted that Vault.
+The person whose home folder holds a Vault. The owner and the admin decide who else is granted that Vault. A Vault outside every home folder has no owner, and any admin manages it.
 _Avoid_: Creator, author
 
 **Grant**:
