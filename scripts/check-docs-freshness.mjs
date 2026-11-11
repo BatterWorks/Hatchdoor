@@ -22,10 +22,11 @@
 // with a `Changelog: none, <reason>` trailer on one of its commits, so the
 // reason stays in history.
 
-import { spawnSync } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { changedPaths, git, mergeBaseOf, resolveBase } from "./git-changes.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -339,7 +340,7 @@ function shippedChanges(files) {
 // The `Changelog:` trailers on the branch's own commits. Only committed work
 // can carry one, so a waiver lands with the commit it explains.
 function changelogWaivers(mergeBase) {
-  const result = git([
+  const result = git(repositoryRoot, [
     "log",
     "--format=%(trailers:key=Changelog,valueonly,separator=%x00)%x00",
     `${mergeBase}..HEAD`,
@@ -351,79 +352,6 @@ function changelogWaivers(mergeBase) {
     .split("\0")
     .map((value) => value.trim())
     .filter((value) => value !== "");
-}
-
-function git(args) {
-  const result = spawnSync("git", args, {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
-  if (result.error) {
-    throw result.error;
-  }
-  return result;
-}
-
-// Every path this script reads comes from a NUL-separated `-z` listing. The
-// default line-based output is not usable here: `git status --porcelain`
-// c-quotes any path containing a space, and nearly every note under
-// `docs/user-vault` has spaces in its name, while `git diff --name-only`
-// leaves those same paths bare and octal-escapes non-ASCII instead. Parsing
-// both as lines made one file arrive under two spellings, and made a note
-// edited but not yet committed look untouched.
-function gitFields(args) {
-  const result = git(args);
-  if (result.status !== 0) {
-    throw new Error(
-      `git ${args.join(" ")} failed: ${result.stderr.trim() || "unknown error"}`,
-    );
-  }
-  return result.stdout.split("\0").filter((field) => field !== "");
-}
-
-function resolveBase(requested) {
-  for (const candidate of [requested, `origin/${requested}`]) {
-    const result = git([
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `${candidate}^{commit}`,
-    ]);
-    if (result.status === 0) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-// Each `-z` status record is `XY <path>`. A rename or copy adds the original
-// path as its own following field, which describes where the content came
-// from rather than what changed now, so it is skipped. `-uall` expands
-// untracked directories, which the default output collapses to a bare
-// `newdir/` that would match no surface prefix.
-function workingTreePaths() {
-  const fields = gitFields(["status", "--porcelain", "-z", "-uall"]);
-  const paths = [];
-
-  for (let index = 0; index < fields.length; index += 1) {
-    const record = fields[index];
-    const status = record.slice(0, 2);
-    paths.push(record.slice(3));
-    if (status.includes("R") || status.includes("C")) {
-      index += 1;
-    }
-  }
-
-  return paths;
-}
-
-function changedPaths(mergeBase) {
-  return [
-    ...new Set([
-      ...gitFields(["diff", "--name-only", "-z", mergeBase, "HEAD"]),
-      ...workingTreePaths(),
-    ]),
-  ].sort();
 }
 
 function matches(file, prefix) {
@@ -559,7 +487,7 @@ if (validateTable) {
   process.exit(0);
 }
 
-const base = resolveBase(requestedBase);
+const base = resolveBase(repositoryRoot, requestedBase);
 if (base === null) {
   console.error(
     `Documentation freshness check failed: no ref named ${requestedBase} or origin/${requestedBase}.`,
@@ -568,16 +496,15 @@ if (base === null) {
   process.exit(2);
 }
 
-const mergeBaseResult = git(["merge-base", base, "HEAD"]);
-if (mergeBaseResult.status !== 0) {
+const mergeBase = mergeBaseOf(repositoryRoot, base);
+if (mergeBase === null) {
   console.error(
     `Documentation freshness check failed: no merge base between ${base} and HEAD.`,
   );
   process.exit(2);
 }
-const mergeBase = mergeBaseResult.stdout.trim();
 
-const files = changedPaths(mergeBase);
+const files = changedPaths(repositoryRoot, mergeBase);
 const surfaces = touchedSurfaces(files);
 
 const shipped = shippedChanges(files);

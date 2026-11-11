@@ -203,10 +203,33 @@ dev-clean: _prepare-cargo
 # backend tests once, and the frontend. Skips the tests that load real model
 # weights. See CONTRIBUTING.md.
 #
+# A branch that changed only documentation runs the script checks alone; one
+# that also edited manual pages adds the tests that read the manual. A tree
+# that already passed is not checked again. The first line names the mode
+# (scripts/check-mode.mjs).
+#
 # The test lines drop HATCHDOOR_VAULT_REGISTRY_PATH, which this file exports
 # for the dev server: the tests must see the deployed default, not .dev/.
-check: _check-scripts _check-static && _check-frontend
-    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
+check: _prepare-cargo
+    #!/usr/bin/env bash
+    set -euo pipefail
+    status=0
+    plan=$(node scripts/check-mode.mjs start) || status=$?
+    if [ "$status" -eq 10 ]; then exit 0; fi
+    if [ "$status" -ne 0 ]; then exit "$status"; fi
+    read -r mode tree <<<"$plan"
+    {{just_executable()}} _check-scripts
+    if [ "$mode" = full ]; then
+        {{just_executable()}} _check-static
+        env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
+        {{just_executable()}} _check-frontend
+    elif [ "$mode" = manual ]; then
+        mapfile -t rust < <(node scripts/check-mode.mjs manual-tests rust)
+        mapfile -t front < <(node scripts/check-mode.mjs manual-tests frontend)
+        env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --features eval --lib -- "${rust[@]}"
+        (cd frontend && npx vitest run "${front[@]}")
+    fi
+    node scripts/check-mode.mjs record "$mode" "$tree"
 
 # Everything `check` covers, plus the backend tests in the exact configuration
 # a deployment ships and the tests that load real model weights (the first run
