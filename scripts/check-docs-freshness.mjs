@@ -7,8 +7,9 @@
 // let a branch that moved a user-facing surface reach `development` without
 // someone having looked. It reports which surfaces the branch touched, which
 // notes in `docs/user-vault` claim to document them, and whether those notes
-// moved in the same range. One entry on that reading list lives outside the
-// vault: the Docker Hub overview, which repeats the install steps.
+// moved in the same range. Three entries on that reading list live outside
+// the vault, because each repeats the install steps: the Docker Hub overview,
+// the README and the smoke script that runs them.
 //
 // Run it, read the notes it names, fix what drifted, then re-run with
 // `--acknowledge` to record that the review happened. Acknowledging without
@@ -41,6 +42,15 @@ const CONCEPTS = `${VAULT_ROOT}/04 Concepts`;
 // Published to Docker Hub by the release hook. Not a manual note, but it
 // repeats the install steps, so it sits on the reading list like one.
 const DOCKER_HUB_OVERVIEW = "docs/maintenance/docker-hub/overview.md";
+
+// Runs the Quick Start (#569). Not a note either, but a copy of the install
+// steps, so the table pairs it with the pages it copies, both ways.
+const SMOKE_INSTALL_SCRIPT = "scripts/smoke-install.sh";
+const INSTALL_PAGES = [
+  "README.md",
+  `${GET_STARTED}/Install Hatchdoor with Docker Compose.md`,
+  `${GUIDES}/How to deploy Hatchdoor with an agent.md`,
+];
 
 // Each surface names the source paths that produce a user-facing behaviour and
 // the notes that describe it. A changed file may match several surfaces; that
@@ -274,6 +284,20 @@ const SURFACES = [
       `${GET_STARTED}/Install Hatchdoor with Docker Compose.md`,
     ],
     notes: [DOCKER_HUB_OVERVIEW],
+  },
+  {
+    id: "install-smoke-script",
+    label: "The install steps the smoke script follows",
+    // #569: scripts/smoke-install.sh is a hand-written copy of the Quick
+    // Start, so whatever changes those steps names it, and it names them.
+    paths: [...INSTALL_PAGES, "docker-compose.yml", ".env.example"],
+    notes: [SMOKE_INSTALL_SCRIPT],
+  },
+  {
+    id: "install-smoke-docs",
+    label: "The smoke script that follows the install steps",
+    paths: [SMOKE_INSTALL_SCRIPT],
+    notes: INSTALL_PAGES,
   },
 ];
 

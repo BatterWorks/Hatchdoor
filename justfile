@@ -266,6 +266,14 @@ release-prepare version:
 release-publish version:
     node scripts/release-publish.mjs '{{version}}'
 
+# Takes minutes, so it runs at release and on demand, never in `check`.
+# Without an image it builds localhost/hatchdoor-smoke:latest from this
+# checkout. See scripts/smoke-install.sh and CONTRIBUTING.md.
+#
+# Build with Docker, then follow the README Quick Start in rootless Podman.
+smoke-install image="": _prepare-cargo
+    scripts/smoke-install.sh {{ if image == "" { "" } else { quote(image) } }}
+
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.
 prod-check: _prepare-cargo

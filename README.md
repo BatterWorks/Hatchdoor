@@ -237,18 +237,19 @@ What these mean:
   host-side locations for the generated cache, authoritative Vault registry,
   and downloaded models; Compose defaults them beside the project.
 
-Before the first managed-Vault start, create the default authoritative state
-directory with access for the image's numeric `nonroot` user. Docker otherwise
-may create a missing bind source as root, leaving the registry unwritable:
+Before the first start, create the data folders and hand them to the image's
+numeric `nonroot` user. Docker otherwise creates a missing bind source as root,
+and Hatchdoor cannot write its cache, its Vault registry or its model:
 
 ```bash
-mkdir -p data/state
-chmod 700 data/state
-sudo chown 65532:65532 data/state
+mkdir -p data/cache data/state models
+chmod 700 data/cache data/state models
+sudo chown -R 65532:65532 data models
 ```
 
-For rootless Podman, use `podman unshare chown 65532:65532 data/state` instead
-of `sudo chown`. Apply the same ownership rule to a custom `HOST_STATE_PATH`.
+For rootless Podman, use `podman unshare chown -R 65532:65532 data models`
+instead of `sudo chown`. Apply the same ownership rule to a custom
+`HOST_CACHE_PATH`, `HOST_STATE_PATH` or `HOST_MODELS_PATH`.
 
 Do not add ordinary Settings values to `.env`: an unset value can be changed
 live in Settings. See [Configuration](#configuration) for the few deployment

@@ -80,6 +80,46 @@ before the fix, and new behavior with tests that cover it.
 Do not commit real vault content, private eval queries, tokens, generated cache
 databases, or local model caches.
 
+## Install smoke test
+
+`just smoke-install` follows the README Quick Start the way a new user does,
+with rootless Podman, in a throwaway folder under `/tmp` (or
+`HATCHDOOR_SMOKE_TMPDIR`). It builds the image
+from your checkout with Docker, as the release does, loads it into Podman and
+runs it there. It copies `docker-compose.yml` and `.env.example`, expects the
+first start to stop and save a web token, adds the token to `.env`, starts
+again, picks the English-only search model, adds a Vault holding one note,
+turns on agent access and checks that one MCP search finds that note. Each
+step prints its name. A failure names the step, keeps the folder with the
+container's log and exits non-zero; a pass removes the container, its network
+and the folder.
+
+```bash
+just smoke-install                       # build from this checkout
+just smoke-install localhost/my-image:tag # an image already in Podman's store
+```
+
+Run it at release, where the judgment checklist asks for it, and whenever you
+change the README Quick Start, the deploy guide, `docker-compose.yml`,
+`.env.example`, the refused first start or the setup API. It is not part of
+`just check`: a cold image build takes about 20 minutes, a rebuild after a
+code change 3 to 4 minutes, and the Quick Start itself about 10 seconds. Run
+nothing else heavy alongside it.
+
+What it needs:
+
+- Docker to build the image, Podman with a working `podman compose` to run
+  it, plus `curl`, `jq`, `openssl` and `python3`.
+- A copy of the English-only model, `nomic-embed-text-v1.5`, in `models/` at
+  the repository root, where `just dev-start` keeps it once you have picked
+  that model. `HATCHDOOR_SMOKE_MODELS` points at another folder holding it. The
+  run never downloads the model; without a copy it says so and stops.
+
+It uses its own container name, Compose project and a free port, so it runs
+beside `just dev-start` or a real install. It keeps the image it builds,
+tagged `localhost/hatchdoor-smoke:latest` in Docker and in Podman, so the next
+build starts warm, and removes the one that tag held before.
+
 ## Documentation freshness
 
 `docs/user-vault/` is the canonical source of the user documentation. Before
