@@ -168,3 +168,7 @@ _Avoid_: Personal Vault (a home folder holds Vaults, it is not one), user direct
 **Owner**:
 The person whose home folder holds a Vault. The owner and the admin decide who else is granted that Vault.
 _Avoid_: Creator, author
+
+**Grant**:
+Access to one whole Vault given to one person, at one of two levels: read, or read and write. A grant never lets its holder share the Vault or change its settings; those stay with the owner and the admin.
+_Avoid_: Permission, share, role, ACL
