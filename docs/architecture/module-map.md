@@ -1720,7 +1720,10 @@ resolves it by searching the vault, so a purely note-relative reading broke ever
 embed in a vault using one top-level attachments folder (#158). `is_servable_asset`
 is shared with the read core's contained-resource seam
 (`src/vault_read/assets.rs`), so resolution can never name a path the asset
-route or the MCP `get_attachment` tool would refuse.
+route or the MCP `get_attachment` tool would refuse. Since #579 the servable
+extensions include `canvas` (ADR-53), which puts every Obsidian canvas in
+`asset_paths`: the write layer's canvas repair and the explorer tree's file
+list both read it from there, so neither walks the Vault for canvases.
 `resolve_note_link` answers a Markdown note link (ADR-28) through the same
 path ladder (`resolve_path_ladder` in `paths.rs`, which `resolve_asset` now
 calls too) over `note_paths`, the catalogue's notes keyed by path and by
@@ -1794,6 +1797,7 @@ watching, application startup, and chunking (`NoteSections` for heading paths, #
 - `src/vault/write.rs`
 - `src/vault/write/assets.rs`
 - `src/vault/write/attachments.rs`
+- `src/vault/write/canvas.rs`
 - `src/vault/write/frontmatter.rs`
 - `src/vault/write/fs_ops.rs`
 - `src/vault/write/intent.rs`
@@ -1803,6 +1807,7 @@ watching, application startup, and chunking (`NoteSections` for heading paths, #
 - `src/vault/write/tags.rs`
 - `src/vault/write/types.rs`
 - `src/vault/write/tests.rs`
+- `src/vault/write/tests/canvas.rs`
 - `src/vault/write/tests/journaled.rs`
 
 **Public contract:** write functions and result/error types re-exported from
@@ -1957,6 +1962,27 @@ write API/types, and configuration for archive or upload limits.
   an outside edit, and logs each action. A record from a newer schema, or
   one that cannot be read, is logged and left in place.
 - Delete is recoverable trash; archive is move-based (ADR-11).
+- A rename, move or archive of a note or an attachment repairs the Vault's
+  Obsidian canvases, the one non-Markdown file this layer rewrites (#579,
+  ADR-53). `canvas_rewrite_plan` in `canvas.rs` reads each `.canvas` file the
+  index catalogued (`VaultIndex::asset_paths`, so none in an excluded
+  folder) under the note size bound and, for every `file` node of the
+  top-level `nodes` list whose decoded value equals an operation move's old
+  Vault-relative path, replaces the characters between that value's quotes
+  with the new path, escaped as JSON. Every other byte is copied (ADR-22),
+  and the edited text is parsed again and must equal the original document
+  with those values replaced, or the canvas is skipped. The moves are the
+  operation's own: the note or attachment and each asset travelling with a
+  note. The rewrites are appended to the operation's one plan, so they are
+  recorded, compared against the plan-time hash, undone with the rest and
+  finished by a restart like a backlink (ADR-51); a canvas that itself moves
+  is keyed to its destination. A canvas that is not valid UTF-8 JSON, is
+  over the bound or fails that reparse never refuses the operation: it is
+  left untouched and named, one over the bound always and any other when
+  its text contains an old path, in `WriteOutcome::quality_warnings` for a
+  note and `AttachmentOutcome::cleanup_warning` for an attachment, and in
+  the log. A delete of a note or an attachment plans no canvas rewrite.
+  `rewritten_notes` never counts a canvas; `affected_paths` names it.
 - A rename, move or delete changes only a wikilink that resolves, from its
   own note's folder, uniquely to the moved note; any other link, one that
   ties with a namesake included, is copied through byte for byte, unless the
@@ -2036,7 +2062,8 @@ write API/types, and configuration for archive or upload limits.
   known gap #103 opened is closed.
 
 **Validation:** `cargo test vault::write`, `cargo test vault_mutation`, and
-the full backend checks.
+the full backend checks. `cargo test canvas` runs the canvas editor's cases
+and the canvas cases of every write.
 
 ### Vault-qualified read projections
 
@@ -2254,6 +2281,14 @@ an empty folder stay distinguishable; under `all` it lands on the participant,
 the same route any other non-participation takes, which is why `collection`'s
 per-Vault projection is fallible — and `trees` raises it back to a refusal when
 no Vault produced a tree, so the blur does not simply move up to the collection.
+`TreeScope::include_files` (#579, ADR-53) adds `files` to each folder: one
+`VaultExplorerFile` (`name`, `relative_path`) per `.canvas` path in the
+Vault's `IndexedAssets`, withheld under a layer the browse surface hides and
+empty before the Vault's first Index turn. Only the HTTP tree route sets it.
+`files` is left out of a payload where it is empty and out of the
+`JsonSchema`, so `get_tree`'s reply and `outputSchema` are unchanged. A
+folder holding only a canvas is a folder of that tree. The content-type table
+answers `application/json` for a canvas.
 Zero enabled Vaults stays the empty projection it has always been. `VaultExplorerFolder` reports `note_count`
 (the Notes directly inside it) and marks `truncated` when `max_depth` held it
 back; `VaultExplorerNote` carries no `vault_id`, because the `VaultTree` around
@@ -3594,7 +3629,11 @@ for the MCP `get_attachment` tool (#176) went with #188: attachment resolution,
 the servable-extension allow-list, the content-type table, and the size bound
 now belong to the read core (`src/vault_read/assets.rs`), which applies
 `VaultReadCore`'s browse-surface gating to them, so both surfaces refuse the
-same paths. What `assets.rs` keeps is this route's own wire shaping.
+same paths. What `assets.rs` keeps is this route's own wire shaping: an SVG
+is sandboxed and sent as a download, and so is `application/json`, the type
+of an Obsidian canvas, which Hatchdoor does not draw (#579, ADR-53). The
+tree route is the one caller that asks the read core for each folder's
+canvases (`TreeScope::include_files`).
 `transfer.rs` redeems transfer links (ADR-27, ADR-32) on
 `/api/v1/vaults/{vault_id}/transfers/{*path}`: `GET` downloads through
 `vault_scoped_asset_handler` with the `McpAssetRead` ceiling after spending the
@@ -4155,7 +4194,11 @@ collection read that names more: since #192 it also takes optional `folder`,
 `max_depth` and `include_notes`, so it no longer shares the scope-only schema
 builder with `get_stats` and `get_graph`, whose schemas are unchanged. It maps
 those three onto the read core's `TreeScope` and nothing else; the narrowing
-itself, and the `folder_not_found` refusal, belong to the core. Every collection read
+itself, and the `folder_not_found` refusal, belong to the core. It never asks
+for a folder's canvases, so its reply and schema carry no `files` (ADR-53);
+`get_attachment` fetches a `.canvas` like any other servable file, and the
+rename, move and archive tool descriptions say that canvases are repaired
+and where a skipped one is named. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
 existing-Vault control names `vault_id`. Revisioned registry management calls the
 Vault collection management core directly (#187) rather than proxying an HTTP
@@ -4846,7 +4889,11 @@ Each flattened candidate (`NoteCandidate`) also carries its Vault-relative
 `relativePath`, built from the folder chain and the note's title, which is its
 file name; the editor writes a Markdown link's path from it (ADR-33).
 `WireVaultTree` is the payload shape and `VaultTree` the attributed one every
-component below the hook consumes. The sidebar is three zones — the
+component below the hook consumes. A folder's optional `files` (#579,
+ADR-53) are its Obsidian canvases, stamped with the Vault like its notes;
+`FolderTree` lists each after the folder's notes as a `.file-link` row with
+`CanvasIcon` in the index's column. The row is a plain download link to the
+asset route, built with `withAccessToken`, and never a route of the app. The sidebar is three zones — the
 shell-owned Scope zone, a scrolling nav, and a fixed footer holding the rail
 of whole-vault destinations beside the create action (#530) — and
 `.explorer-nav` is the scroll container the shell restores scroll position
@@ -5408,7 +5455,10 @@ cache the hook fills, one `resolve-batch` per call, for the live editor's
 links, and `cachedAssetHref` (#544) gives one embed target the href the
 rendered body would draw now, the server's path once the hook's batch has
 filled the cache and the note-relative reading before, for the editor's image
-and PDF widgets. A note embed (#573), `![[Other note]]`, goes out as a
+and PDF widgets. A link or an embed whose target ends in `.canvas` (#579,
+ADR-53) is treated as a file like a PDF link: it goes out as an asset target
+only and is rewritten to a plain link to the asset route, which downloads
+it, never to an image. A note embed (#573), `![[Other note]]`, goes out as a
 note target as well as an asset target (PDF embeds aside) and is rewritten to
 the link the same wikilink gets, `#^id` dropped to the note itself (what a
 block embed draws is #699's), when its

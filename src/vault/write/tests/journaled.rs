@@ -187,6 +187,37 @@ fn a_rename_stopped_at_any_step_is_finished_by_the_repair() {
     });
 }
 
+/// A canvas rewrite is one more rewrite in the recorded plan (ADR-53), so a
+/// restart finishes it like a backlink.
+#[test]
+fn a_rename_stopped_at_any_step_finishes_its_canvas_rewrite() {
+    let setup = |root: &Path| {
+        hub_with_backlinks(root);
+        fs::write(
+            root.join("Board.canvas"),
+            "{\n\t\"nodes\":[ {\"type\":\"file\", \"file\":\"Hub.md\", \"extra\":1} ]\n}\n",
+        )
+        .expect("canvas");
+    };
+    interrupted_at_every_step(&setup, &|vault, intent_log| {
+        let index = build(vault);
+        let hub = index.find_by_slug("hub").expect("hub");
+        super::super::move_or_rename_note(
+            vault,
+            &index,
+            hub,
+            "Hub Renamed.md",
+            &content_hash("# Hub\n"),
+            Some(intent_log),
+        )
+        .expect("rename");
+        assert_eq!(
+            fs::read_to_string(vault.join("Board.canvas")).expect("canvas"),
+            "{\n\t\"nodes\":[ {\"type\":\"file\", \"file\":\"Hub Renamed.md\", \"extra\":1} ]\n}\n"
+        );
+    });
+}
+
 #[test]
 fn a_delete_stopped_at_any_step_is_finished_by_the_repair() {
     interrupted_at_every_step(&hub_with_backlinks, &|vault, intent_log| {

@@ -7,6 +7,7 @@ use crate::vault::sections::NoteSections;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::asset_move_plan;
+use super::canvas::{SkippedCanvas, canvas_rewrite_plan, split_rewritten};
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::{
     MutationJournal, atomic_create, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
@@ -731,6 +732,7 @@ fn move_or_rename_note_with_hook(
         expected_content_hash,
         &asset_moves,
         merge_rewrites(backlink_rewrites, asset_rewrites),
+        CanvasRepair::Retarget(index),
         &mut after_phase,
     )?;
     let moved_assets = asset_moves.len();
@@ -738,9 +740,11 @@ fn move_or_rename_note_with_hook(
     // which this operation already reports as its subject. `rewritten_notes`
     // counts the *other* notes, so counting it would report the same write
     // twice, and `affected_paths` would name the destination twice (#254).
-    let mut affected_paths = mutation.rewritten;
+    // A rewritten canvas is an affected path and not a note (ADR-53).
+    let (mut affected_paths, rewritten_canvases) = split_rewritten(mutation.rewritten);
     let rewrote_its_own_body = affected_paths.contains(&target_path);
     let rewritten_notes = affected_paths.len() - usize::from(rewrote_its_own_body);
+    affected_paths.extend(rewritten_canvases);
     affected_paths.push(entry.path.clone());
     if !rewrote_its_own_body {
         affected_paths.push(target_path.clone());
@@ -754,7 +758,7 @@ fn move_or_rename_note_with_hook(
         slug: Some(slug),
         relative_path: Some(target_without_ext),
         content_hash: Some(content_hash(&mutation.moved_content)),
-        quality_warnings: Vec::new(),
+        quality_warnings: mutation.canvas_warnings,
         rewritten_notes,
         moved_assets,
         trashed_path: None,
@@ -868,6 +872,9 @@ fn delete_note_with_hook(
         expected_content_hash,
         &asset_moves,
         merge_rewrites(backlink_rewrites, asset_rewrites),
+        // A delete leaves every canvas as written: its cards show as
+        // missing, as they do after a delete in Obsidian (ADR-53).
+        CanvasRepair::Leave,
         &mut after_phase,
     )?;
     let moved_assets = asset_moves.len();
@@ -910,8 +917,21 @@ fn create_destination_dirs(
 }
 
 struct CompletedNoteMutation {
+    /// Every path a rewrite landed on, notes first and then canvases.
     rewritten: Vec<std::path::PathBuf>,
     moved_content: String,
+    /// One sentence per canvas that may name a moved file and was skipped.
+    canvas_warnings: Vec<String>,
+}
+
+/// What a note mutation does about the Vault's canvases (ADR-53).
+#[derive(Clone, Copy)]
+enum CanvasRepair<'a> {
+    /// Point every canvas card that names a moved file at its new path,
+    /// reading the canvases this index catalogued.
+    Retarget(&'a VaultIndex),
+    /// Write no canvas.
+    Leave,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -923,7 +943,8 @@ fn execute_note_mutation(
     target_path: &Path,
     expected_content_hash: &str,
     asset_moves: &[AssetMove],
-    rewrites: Vec<TextRewrite>,
+    mut rewrites: Vec<TextRewrite>,
+    canvases: CanvasRepair<'_>,
     after_phase: &mut impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<CompletedNoteMutation, WriteError> {
     let mut journal = MutationJournal::new(vault_root, intent_log);
@@ -934,6 +955,14 @@ fn execute_note_mutation(
                 .map(|asset| (asset.source.as_path(), asset.destination.as_path())),
         )
         .collect::<Vec<_>>();
+    // Canvas rewrites go last in the one plan, so they are recorded, applied
+    // and undone with the note rewrites (ADR-51, ADR-53).
+    let mut canvas_warnings = Vec::new();
+    if let CanvasRepair::Retarget(index) = canvases {
+        let plan = canvas_rewrite_plan(vault_root, index, &moves);
+        canvas_warnings = plan.skipped.iter().map(SkippedCanvas::warning).collect();
+        rewrites.extend(plan.rewrites);
+    }
     if let Err(error) = journal.begin(operation, &moves, &rewrites) {
         return Err(journal.rollback(error));
     }
@@ -981,6 +1010,7 @@ fn execute_note_mutation(
     Ok(CompletedNoteMutation {
         rewritten,
         moved_content,
+        canvas_warnings,
     })
 }
 

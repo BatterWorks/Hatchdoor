@@ -218,6 +218,9 @@ fn content_type_for_path(path: &FsPath) -> &'static str {
         Some("avif") => "image/avif",
         Some("bmp") => "image/bmp",
         Some("pdf") => "application/pdf",
+        // An Obsidian canvas is JSON; the HTTP adapter sends it as a
+        // download (ADR-53).
+        Some("canvas") => "application/json",
         _ => "application/octet-stream",
     }
 }
@@ -330,6 +333,25 @@ mod tests {
             content_type_for_path(FsPath::new("Attachments/manual.pdf")),
             "application/pdf"
         );
+    }
+
+    /// ADR-53: a canvas is servable, as JSON, and nothing else new is.
+    #[test]
+    fn a_canvas_is_servable_as_json_and_other_unknown_extensions_are_not() {
+        assert!(is_allowed_asset_extension(FsPath::new(
+            "Boards/Plan.canvas"
+        )));
+        assert!(is_allowed_asset_extension(FsPath::new("Plan.CANVAS")));
+        assert_eq!(
+            content_type_for_path(FsPath::new("Boards/Plan.canvas")),
+            "application/json"
+        );
+        for refused in ["data.json", "query.base", "notes.txt", "Plan.canvas.bak"] {
+            assert!(
+                !is_allowed_asset_extension(FsPath::new(refused)),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

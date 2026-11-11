@@ -140,6 +140,24 @@ describe("rewriteWikilinks asset resolution", () => {
     );
   });
 
+  // #579, ADR-53: a canvas is not drawn, so linked or embedded it is a link
+  // to the file, which the asset route sends as a download.
+  it("turns a canvas link and a canvas embed into a link to the file", () => {
+    const assets = new Map([["Plan.canvas", "Boards/Plan.canvas"]]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "[[Plan.canvas]] and ![[Plan.canvas|the board]]",
+        "Notes/Some note.md",
+        new Map(),
+        assets,
+      ),
+    ).toBe(
+      "[Plan\\.canvas](/api/v1/vaults/vault-1/assets/Boards/Plan.canvas) and [the board](/api/v1/vaults/vault-1/assets/Boards/Plan.canvas)",
+    );
+  });
+
   it("keeps the anchor suffix when the target resolves", () => {
     const assets = new Map([["Plan.pdf", "98_Attachments/Plan.pdf"]]);
 

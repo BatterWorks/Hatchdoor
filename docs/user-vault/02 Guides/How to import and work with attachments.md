@@ -12,7 +12,7 @@ Three lists of file types apply, and people often mix them up:
 | --- | --- | --- |
 | What may be **uploaded** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | Hatchdoor's rule for what may enter a Vault through it. |
 | What Hatchdoor will **manage** once present | anything that is not Markdown | A Vault is a plain folder you also edit in Obsidian and sync with Git, so it holds video, audio, data and archives whatever Hatchdoor accepts as an upload. Those files are yours, and Hatchdoor can list, move, rename and delete them. |
-| What Hatchdoor will **fetch or display** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`, `pdf` | What the Web UI can render and `get_attachment` can hand back. |
+| What Hatchdoor will **fetch or display** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`, `pdf`, `canvas` | What the Web UI can render and `get_attachment` can hand back. A `canvas`, Obsidian's whiteboard, is the exception: it is listed in the explorer and downloaded, not drawn. |
 
 So a `.mp4` screen recording already in your Vault can be listed, moved, renamed and deleted, and it moves with its note. It cannot be uploaded through Hatchdoor, and `get_attachment` refuses to return it. Open it from the filesystem or in Obsidian.
 

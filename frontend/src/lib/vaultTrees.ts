@@ -37,5 +37,14 @@ function attributeFolder(
       title: note.title,
       slug: note.slug,
     })),
+    ...(folder.files?.length
+      ? {
+          files: folder.files.map((file) => ({
+            vault_id: vaultId,
+            name: file.name,
+            relative_path: file.relative_path,
+          })),
+        }
+      : {}),
   };
 }

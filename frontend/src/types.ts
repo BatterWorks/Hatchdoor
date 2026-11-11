@@ -199,6 +199,16 @@ export type WireExplorerFolder = {
   truncated?: boolean;
   folders: WireExplorerFolder[];
   notes: WireExplorerNote[];
+  /** The folder's Obsidian canvases, which the explorer lists as downloads
+   * (ADR-53). Left out of the payload when the folder has none. */
+  files?: WireExplorerFile[];
+};
+
+/** A listed file that is not a note. `relative_path` is the Vault-relative
+ * path the asset route serves it at. */
+export type WireExplorerFile = {
+  name: string;
+  relative_path: string;
 };
 
 /** A note as the tree sends it: not vault-qualified, because the enclosing
@@ -224,6 +234,15 @@ export type ExplorerFolder = {
   name: string;
   folders: ExplorerFolder[];
   notes: ExplorerNote[];
+  /** Absent when the folder holds no listed file. */
+  files?: ExplorerFile[];
+};
+
+/** A listed file stamped with its Vault, like `ExplorerNote`. */
+export type ExplorerFile = {
+  vault_id: VaultId;
+  name: string;
+  relative_path: string;
 };
 
 export type ExplorerNote = {

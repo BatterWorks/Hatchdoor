@@ -809,6 +809,13 @@
     box-shadow: inset 3px 0 0 var(--hot);
   }
   .note-link.is-active .idx { color: var(--hot); }
+  /* A listed file that is not a note: a glyph in the index's column. */
+  .note-link .file-glyph {
+    display: inline-flex;
+    justify-content: center;
+    transform: none;
+  }
+  .note-link .file-glyph svg { width: 1.45em; height: 1.45em; }
   .sidebar-resizer {
     width: 8px;
     cursor: col-resize;
@@ -2042,6 +2049,8 @@
 
       <p class="blurb">Folders use a CSS-only chevron caret that rotates open. <b>Notes show a mono index</b> &mdash; that is what tells note rows apart from folder rows without changing size or weight. Active note: hot-orange left rail + hot-soft background + bolded, and it is <b>canonical in the tree only</b>. Applying it in the recency lists too is what made one note light up in three places at once.</p>
 
+      <p class="blurb"><b>A file that is not a note carries a glyph where a note carries its index.</b> An Obsidian canvas is listed after its folder&rsquo;s notes as <span class="key">.file-link</span>: the same row, with the Sharp <i>dashboard</i> symbol in <span class="key">.file-glyph</span>, centred in the index&rsquo;s own column so note and file labels share one left edge. The label keeps the extension, because the extension is what says the row is not a note. The row downloads the file and opens nothing, so it never takes the active state.</p>
+
       <p class="blurb"><b>The index is centred optically, not geometrically.</b> It is always lining digits &mdash; ascent only, no descender &mdash; while the title beside it hangs about two pixels below their shared baseline. <span class="key">align-items: center</span> lines the two <i>boxes</i> up exactly and still leaves the digits reading high by half that descender, so <span class="key">.idx</span> takes a <span class="key">translateY(0.1em)</span> correction, in em so it survives a resize. The residual is content-dependent &mdash; a title full of descenders sits lower than an all-caps one &mdash; so the target is the face&rsquo;s typical profile, never any single string&rsquo;s ink.</p>
 
       <p class="blurb"><b>Depth is carried by weight and by the caret, not by size.</b> The whole tree sits at one reading size: <span class="key">0.9rem</span> for a Vault head, for the folders and notes beneath it, and for <span class="key">RECENTLY VIEWED</span>&rsquo;s rows above it. None of this is chrome &mdash; it is all the operator&rsquo;s own text, and setting the head above the rest made it shout. What separates a head from its contents is <span class="key">wght 700</span> and, when it is open, the hot rail; folders and notes separate from each other the same way, <span class="key">wght 500</span> with a caret against <span class="key">wght 400</span> with the mono index. Buying a size step here would cost legibility to say something weight already says. Carets shrink the same way: <span class="key">6&times;10</span> at a Vault head, <span class="key">6&times;6</span> at a folder. A child marker larger than its parent&rsquo;s reads as the child outranking it, which is what an <span class="key">8&times;8</span> folder caret under a <span class="key">5&times;8</span> head was doing.</p>
@@ -2116,6 +2125,7 @@
                   <a class="note-link is-active" href="#"><span class="idx">001</span>Field notes from the orchard</a>
                   <a class="note-link" href="#"><span class="idx">002</span>On pruning</a>
                   <a class="note-link is-hover" href="#"><span class="idx">003</span>The grafting calendar</a>
+                  <a class="note-link file-link" href="#"><span class="idx file-glyph"><svg viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></svg></span>Orchard plan.canvas</a>
                 </div>
               </div>
               <div class="folder-item"><a class="folder-row" href="#"><span class="caret"></span>20-reading</a></div>
@@ -2144,7 +2154,7 @@
         <span class="key">.scope-zone</span><span class="key">.scope-zone .scope-zone-head</span><span class="key">.scope-zone-keycap</span><span class="key">.scope-zone-current</span><span class="key">.scope-zone-viewing-line</span><span class="key">.scope-zone-list</span><span class="key">.scope-row</span><span class="key">.scope-row.is-selected</span><span class="key">.scope-row-label</span><span class="key">.scope-row-viewing</span>
         <span class="key">.side-section</span><span class="key">.side-head</span><span class="key">.side-label</span><span class="key">.side-rule</span><span class="key">.side-count</span><span class="key">.side-caret</span>
         <span class="key">.folder-item[data-open]</span><span class="key">.folder-row</span><span class="key">.caret</span><span class="key">.children</span>
-        <span class="key">.note-link</span><span class="key">.note-link.active-note</span><span class="key">.idx</span>
+        <span class="key">.note-link</span><span class="key">.note-link.active-note</span><span class="key">.idx</span><span class="key">.file-link</span><span class="key">.file-glyph</span>
         <span class="key">.recent-notes</span><span class="key">.recent-notes .side-head</span><span class="key">.explorer-changes</span><span class="key">.sidebar-resizer</span>
       </div>
     </section>

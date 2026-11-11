@@ -7,6 +7,7 @@ use super::*;
 use crate::cache::parse::{content_hash, extract_tags};
 use crate::vault::types::{VaultIndex, VaultScanConfig};
 
+mod canvas;
 mod journaled;
 
 // The multi-note writes take the Vault's intent log as their last argument
