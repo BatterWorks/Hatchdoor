@@ -254,7 +254,10 @@ export function FolderTree({
         />
       ))}
       {root.files?.map((file) => (
-        <FileNode key={`file-${file.relative_path}`} file={file} />
+        <FileNode
+          key={`file-${file.vault_id}-${file.relative_path}`}
+          file={file}
+        />
       ))}
     </ul>
   );
@@ -361,7 +364,10 @@ function FolderNode({
                 />
               ))}
               {folder.files?.map((file) => (
-                <FileNode key={`file-${file.relative_path}`} file={file} />
+                <FileNode
+                  key={`file-${file.vault_id}-${file.relative_path}`}
+                  file={file}
+                />
               ))}
             </>
           ) : null}

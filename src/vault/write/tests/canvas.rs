@@ -388,3 +388,65 @@ fn a_failure_after_the_canvas_rewrite_puts_the_canvas_back() {
         canvas
     );
 }
+
+#[test]
+fn a_canvas_that_cannot_be_opened_is_reported() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Idea.md"), "body").expect("note");
+    let canvas = root.join("Locked.canvas");
+    fs::write(&canvas, odd_canvas("Idea.md")).expect("canvas");
+    fs::set_permissions(&canvas, fs::Permissions::from_mode(0o000)).expect("lock");
+    if fs::read(&canvas).is_ok() {
+        // Root reads anything, so there is nothing to observe.
+        return;
+    }
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+
+    let outcome = move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("body"))
+        .expect("rename");
+
+    assert_eq!(
+        outcome.quality_warnings,
+        vec!["Canvas 'Locked.canvas' was not updated: it could not be read".to_string()]
+    );
+}
+
+#[test]
+fn a_canvas_saved_elsewhere_after_the_plan_fails_the_rename_and_is_named_as_a_canvas() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Idea.md"), "body").expect("note");
+    fs::write(root.join("Plan.canvas"), odd_canvas("Idea.md")).expect("canvas");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+    let saved_elsewhere = format!("{}\n", odd_canvas("Idea.md"));
+
+    let error = super::super::notes::move_or_rename_note_with_failure(
+        root,
+        &index,
+        entry,
+        "Renamed.md",
+        &content_hash("body"),
+        |phase| {
+            if phase == super::super::types::MutationPhase::Note {
+                fs::write(root.join("Plan.canvas"), &saved_elsewhere).expect("outside save");
+            }
+            Ok(())
+        },
+    )
+    .expect_err("a canvas that moved on is not overwritten");
+
+    assert!(
+        matches!(&error, super::WriteError::Conflict(message) if message.starts_with("Canvas 'Plan.canvas' changed")),
+        "got {error:?}"
+    );
+    assert!(root.join("Idea.md").exists(), "the rename was undone");
+    assert_eq!(
+        fs::read_to_string(root.join("Plan.canvas")).expect("canvas"),
+        saved_elsewhere
+    );
+}

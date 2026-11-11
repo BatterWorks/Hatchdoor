@@ -261,16 +261,16 @@ export function useResolvedWikilinks(
     void (async () => {
       const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
       // A PDF or a canvas is a file whether it is linked or embedded.
-      const isPdf = (match: RegExpMatchArray) => {
+      const isFileTarget = (match: RegExpMatchArray) => {
         const target = parseWikilinkTarget(match[2]).target;
         return isPdfAssetTarget(target) || isCanvasAssetTarget(target);
       };
       const isAsset = (match: RegExpMatchArray) =>
-        match[1] === "!" || isPdf(match);
-      // Embeds go out as note targets too, PDFs aside: one that names no file
+        match[1] === "!" || isFileTarget(match);
+      // Embeds go out as note targets too, PDFs and canvases aside: one that names no file
       // may name a note, and is then drawn as a link to it (#573).
       const rawTargets = matches
-        .filter((m) => !isPdf(m))
+        .filter((m) => !isFileTarget(m))
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];

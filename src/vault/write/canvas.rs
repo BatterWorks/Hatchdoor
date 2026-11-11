@@ -64,9 +64,11 @@ pub(super) struct CanvasPlan {
 /// moving is rewritten where the move will have put it, because rewrites are
 /// applied after the moves.
 ///
-/// Nothing here refuses: a canvas that cannot be read as JSON, or is over
+/// Planning never refuses: a canvas that cannot be read as JSON, or is over
 /// the bound, lands in [`CanvasPlan::skipped`] and the operation goes on
-/// (ADR-53, decision 5).
+/// (ADR-53, decision 5). A planned rewrite is then held to the journal's
+/// rules like any other, so a canvas saved elsewhere between the plan and
+/// its commit fails the operation with a conflict and everything is undone.
 pub(super) fn canvas_rewrite_plan(
     vault_root: &Path,
     index: &VaultIndex,
@@ -107,9 +109,12 @@ pub(super) fn canvas_rewrite_plan(
                 ));
                 continue;
             }
-            // A canvas that cannot be opened is skipped as an unreadable
-            // note is: there is nothing to judge it by.
-            Err(_) => continue,
+            // A canvas that cannot be opened cannot be judged, so it is
+            // named like one that is too large to read.
+            Err(_) => {
+                skip("it could not be read".to_string());
+                continue;
+            }
         };
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
@@ -153,8 +158,12 @@ pub(super) fn split_rewritten(rewritten: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<Pat
 }
 
 fn vault_relative(vault_root: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(vault_root).ok()?;
-    Some(relative.to_str()?.replace('\\', "/"))
+    // As written on disk: a canvas spells a path with `/`, and a backslash
+    // in a file name is part of that name.
+    path.strip_prefix(vault_root)
+        .ok()?
+        .to_str()
+        .map(str::to_string)
 }
 
 /// Whether `text` holds any old path, as written or as JSON escapes it. Only

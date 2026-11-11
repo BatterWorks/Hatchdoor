@@ -1978,8 +1978,8 @@ write API/types, and configuration for archive or upload limits.
   finished by a restart like a backlink (ADR-51); a canvas that itself moves
   is keyed to its destination. A canvas that is not valid UTF-8 JSON, is
   over the bound or fails that reparse never refuses the operation: it is
-  left untouched and named, one over the bound always and any other when
-  its text contains an old path, in `WriteOutcome::quality_warnings` for a
+  left untouched and named, one over the bound or impossible to open always
+  and any other when its text contains an old path, in `WriteOutcome::quality_warnings` for a
   note and `AttachmentOutcome::cleanup_warning` for an attachment, and in
   the log. A delete of a note or an attachment plans no canvas rewrite.
   `rewritten_notes` never counts a canvas; `affected_paths` names it.
