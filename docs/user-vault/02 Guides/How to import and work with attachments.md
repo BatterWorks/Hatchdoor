@@ -93,6 +93,8 @@ These tools act on bytes the Vault already stores, so the upload list does not a
 | `rename_attachment` | Renames the file where it is and rewrites every reference. | Required |
 | `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference, the way `delete_note` trashes a note (see [[MCP tools reference#Write content tools]]), so you can get the file back from disk. | Required |
 
+Moving or renaming an attachment also updates every Obsidian canvas card that shows it; see [[Supported Markdown reference#Obsidian syntax Hatchdoor does not handle]] for what Hatchdoor does with a canvas.
+
 Reference rewriting goes by the file extension, so a link to a file with no extension is left as written when that file moves. Rename the file to carry an extension if you want its links to follow it.
 
 A note that is not valid UTF-8 text, such as a Latin-1 export from an older tool, cannot have its references rewritten without damaging the bytes that are not text. If one references the attachment you move, rename or delete, the call is refused with `link_rewrite_unsupported` and nothing is written; the message names each such note. Re-save those notes as UTF-8 and try again.
