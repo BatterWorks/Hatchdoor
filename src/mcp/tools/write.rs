@@ -248,6 +248,48 @@ pub(super) const WRITE_OPS: &[&str] = &[
     "delete_tag",
 ];
 
+/// What a write inside `batch` passes as `expected_content_hash` to mean "the
+/// hash an earlier item in this same call read for this note" (#599). `batch`
+/// swaps it for that hash before the item reaches [`dispatch_write_tool`]. It
+/// can never be a real hash, which always starts with its algorithm's name.
+pub(super) const FROM_BATCH_HASH: &str = "from_batch";
+
+/// The code a write carries when it reaches dispatch still holding
+/// [`FROM_BATCH_HASH`].
+const BATCH_HASH_UNAVAILABLE_CODE: &str = "batch_hash_unavailable";
+
+/// Refuses a write whose `expected_content_hash` is still the
+/// [`FROM_BATCH_HASH`] marker: a batch item with no earlier read or write of
+/// that note in its call, or a standalone call, where there is no batch to
+/// take a hash from. A code of its own, not `write_conflict`, because the
+/// note did not change and retrying with the hash a conflict reports would
+/// teach the caller to write without having read.
+fn refuse_unresolved_batch_hash(vault: &McpVault, arguments: &Value) -> Result<(), JsonRpcFailure> {
+    if !asks_for_batch_hash(arguments) {
+        return Ok(());
+    }
+    Err(mutation_error(VaultOperationError::new(
+        BATCH_HASH_UNAVAILABLE_CODE,
+        "Nothing was written: expected_content_hash \"from_batch\" stands for the hash an earlier \
+         item in the same batch call returned for this note, and there is none. Read the note \
+         earlier in the same batch with get_note, get_note_outline, get_note_section or \
+         get_frontmatter, using the same vault_id and slug as this write, or pass the note's \
+         real content_hash. Only the tools that change, move or delete an existing note take \
+         \"from_batch\"; create_upload_link needs the real hash.",
+        Some(vault.vault_id),
+        false,
+    )))
+}
+
+/// Whether a write's arguments carry [`FROM_BATCH_HASH`] as their
+/// `expected_content_hash`.
+pub(super) fn asks_for_batch_hash(arguments: &Value) -> bool {
+    arguments
+        .get("expected_content_hash")
+        .and_then(Value::as_str)
+        == Some(FROM_BATCH_HASH)
+}
+
 /// Dispatches one write op to its underlying tool function. Shared by the
 /// top-level MCP dispatcher (`mod.rs`, one call per request) and the `batch`
 /// tool (`batch.rs`, one call per item): both resolve the target Vault and
@@ -261,6 +303,7 @@ pub(super) async fn dispatch_write_tool(
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
+    refuse_unresolved_batch_hash(vault, &arguments)?;
     match op {
         "create_note" => create_note_tool(state, vault, arguments).await,
         "update_note" => update_note_tool(state, vault, arguments).await,

@@ -7196,6 +7196,182 @@ mod tests {
         assert_eq!(written, "one\ntwo\n");
     }
 
+    // `"from_batch"`: a write checked against a hash read earlier in the
+    // same batch (#599).
+
+    const HOME_NOTE: &str = "# Home\nalpha token\n[[Plan]]";
+
+    /// One read of `home` for each op that records a hash.
+    fn hash_reads(vault_id: crate::vault_registry::VaultId) -> Vec<Value> {
+        vec![
+            json!({"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}}),
+            json!({"op": "get_note_outline", "arguments": {"vault_id": vault_id, "slug": "home"}}),
+            json!({"op": "get_note_section", "arguments": {
+                "vault_id": vault_id, "slug": "home", "headings": ["Home"]
+            }}),
+            json!({"op": "get_frontmatter", "arguments": {"vault_id": vault_id, "slug": "home"}}),
+        ]
+    }
+
+    fn edit_home(vault_id: crate::vault_registry::VaultId, hash: &str) -> Value {
+        json!({"op": "edit_note", "arguments": {
+            "vault_id": vault_id, "slug": "home",
+            "old_string": "alpha", "new_string": "beta",
+            "expected_content_hash": hash
+        }})
+    }
+
+    #[tokio::test]
+    async fn a_batch_write_can_take_its_hash_from_any_whole_note_read_before_it() {
+        for read_index in 0..4 {
+            let (state, _tmp) = write_state();
+            let vault_id = vault_id_of(&state);
+            let read = hash_reads(vault_id).remove(read_index);
+            let op = read["op"].clone();
+
+            let body = call_tool(
+                &state,
+                "batch",
+                json!({"operations": [read, edit_home(vault_id, "from_batch")]}),
+            )
+            .await;
+
+            let content = &body["result"]["structuredContent"];
+            assert_eq!(content["failed"], 0, "{op}: {body:#}");
+            assert_eq!(content["items"][1]["ok"], true, "{op}: {body:#}");
+            let written = std::fs::read_to_string(registered_vault_path(&state).join("Home.md"))
+                .expect("read home");
+            assert_eq!(written, "# Home\nbeta token\n[[Plan]]", "{op}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_from_batch_write_fails_when_the_note_changed_after_the_read() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let path = registered_vault_path(&state).join("Home.md");
+        let config = McpConfig::from_snapshot(&state.runtime_snapshot()).expect("config");
+        let changed = "# Home\nalpha token, edited elsewhere\n";
+
+        // An editor outside Hatchdoor saves the note between the two items.
+        let outside_path = path.clone();
+        let mut outside_edit = move |index: usize| {
+            if index == 1 {
+                std::fs::write(&outside_path, changed).expect("outside edit");
+            }
+        };
+        let reply = crate::mcp::tools::batch_with_item_hook(
+            state.clone(),
+            json!({"operations": [
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}},
+                edit_home(vault_id, "from_batch")
+            ]}),
+            &config,
+            &mut outside_edit,
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("batch refused: {}", failure.message));
+
+        let content = &reply["structuredContent"];
+        assert_eq!(content["items"][0]["ok"], true, "{reply:#}");
+        assert_eq!(content["items"][1]["ok"], false, "{reply:#}");
+        assert_eq!(
+            content["items"][1]["error"]["code"], "write_conflict",
+            "{reply:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), changed);
+    }
+
+    #[tokio::test]
+    async fn a_from_batch_write_with_nothing_before_it_is_refused_unwritten() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let path = registered_vault_path(&state).join("Home.md");
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                // A read of another note lends this one nothing.
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "plan"}},
+                // Neither does a read that failed.
+                {"op": "get_note_section", "arguments": {
+                    "vault_id": vault_id, "slug": "home", "headings": []
+                }},
+                edit_home(vault_id, "from_batch")
+            ]}),
+        )
+        .await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["items"][0]["ok"], true, "{body:#}");
+        assert_eq!(content["items"][1]["ok"], false, "{body:#}");
+        let error = &content["items"][2]["error"];
+        assert_eq!(error["code"], "batch_hash_unavailable", "{body:#}");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["vault_id"], vault_id.to_string());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), HOME_NOTE);
+
+        // Outside a batch there is no earlier item at all: the same code.
+        let alone = call_tool(
+            &state,
+            "edit_note",
+            edit_home(vault_id, "from_batch")["arguments"].clone(),
+        )
+        .await;
+        assert_eq!(alone["result"]["isError"], true, "{alone:#}");
+        assert_eq!(
+            alone["result"]["structuredContent"]["code"], "batch_hash_unavailable",
+            "{alone:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), HOME_NOTE);
+    }
+
+    #[tokio::test]
+    async fn a_real_stale_hash_is_not_rescued_by_a_read_in_the_same_batch() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+        let path = registered_vault_path(&state).join("Home.md");
+        let stale = crate::cache::parse::content_hash("# Home\nan older version\n");
+
+        let mut operations = hash_reads(vault_id);
+        operations.push(edit_home(vault_id, &stale));
+        let body = call_tool(&state, "batch", json!({"operations": operations})).await;
+
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["succeeded"], 4, "{body:#}");
+        assert_eq!(
+            content["items"][4]["error"]["code"], "write_conflict",
+            "{body:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), HOME_NOTE);
+    }
+
+    #[tokio::test]
+    async fn a_write_earlier_in_the_batch_outranks_a_read_for_from_batch() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}},
+                edit_home(vault_id, "from_batch"),
+                // The read's hash is now stale; the edit's own hash chains.
+                {"op": "append_to_note", "arguments": {
+                    "vault_id": vault_id, "slug": "home", "content": "more",
+                    "expected_content_hash": "from_batch"
+                }}
+            ]}),
+        )
+        .await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["failed"], 0, "{body:#}");
+        let written = std::fs::read_to_string(registered_vault_path(&state).join("Home.md"))
+            .expect("read home");
+        assert_eq!(written, "# Home\nbeta token\n[[Plan]]\nmore\n");
+    }
+
     #[tokio::test]
     async fn batch_write_items_are_gated_by_mcp_write_enabled_per_item() {
         let (state, _tmp) = test_state();

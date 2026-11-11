@@ -422,6 +422,18 @@ pub(super) fn transfer_link_signer<'a>(
     Ok((state.transfer_links.key(&state.runtime_config, token), base))
 }
 
+/// `batch`, with `before_item` called with each item's index just before the
+/// item runs, so a test can change a file between two items of one call.
+#[cfg(test)]
+pub(super) async fn batch_with_item_hook(
+    state: AppState,
+    arguments: Value,
+    config: &McpConfig,
+    before_item: &mut (dyn FnMut(usize) + Send),
+) -> Result<Value, JsonRpcFailure> {
+    batch::run_batch(state, arguments, config, before_item).await
+}
+
 pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
     let value = value.trim().to_string();
     if value.is_empty() {

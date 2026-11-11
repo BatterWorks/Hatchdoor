@@ -508,6 +508,21 @@ When the manual explains the refusal, the structured result also carries `docs`,
 
 **`expected_content_hash` inside a batch.** Once a batch has written a note, later items in that same call targeting the same `vault_id` + `slug` have their `expected_content_hash` replaced with the hash that write produced. You cannot know that hash without the round trip a batch exists to avoid, so send any placeholder and Hatchdoor discards it. This applies to `create_note` too: create a note and edit it later in the same call. A note the batch has not written yet has its `expected_content_hash` checked as in a standalone call. The substitution is safe because Hatchdoor takes the write lock on every Vault the batch writes to before the first item runs, and holds them all until the call ends, so no other Hatchdoor writer can get in behind a substituted hash. That lock does not bind Obsidian. An outside editor is stopped by the swap each save makes, described under **Write content tools**, and on a filesystem that cannot do the swap the same narrow race applies here.
 
+**Editing a note you have not read yet.** Read the note earlier in the same batch, then pass the literal `"from_batch"` as the write's `expected_content_hash`. Hatchdoor replaces it with the hash that read returned, so one call both reads a note and edits it. The reads that count are `get_note`, `get_note_outline`, `get_note_section` and `get_frontmatter`, each of which returns the whole note's `content_hash`. The read must have succeeded, and the write must name the note by the same `vault_id` and `slug`.
+
+```json
+{
+  "operations": [
+    {"op": "get_frontmatter", "arguments": {"vault_id": "<id>", "slug": "projects/plan"}},
+    {"op": "edit_note", "arguments": {"vault_id": "<id>", "slug": "projects/plan", "old_string": "draft", "new_string": "final", "expected_content_hash": "from_batch"}}
+  ]
+}
+```
+
+The write is still checked. If the note changed between the read and the write, the item fails with `write_conflict` and nothing is written. `"from_batch"` on a note that no earlier item in the call read or wrote fails with `batch_hash_unavailable` and writes nothing, and so does `"from_batch"` in a call made outside `batch`. The tools that change, move or delete an existing note take the marker; `create_upload_link` does not and needs the real hash, because the upload happens after the batch has ended. Only the marker opts in: a real hash is checked as you sent it, even when an earlier item in the batch read a newer version, so an edit planned on an old version is never applied to one you have not seen. A note the batch has already written keeps chaining as described above, whatever you send.
+
+The read comes back in the same reply as the write's result, so you plan the edit before seeing the text. That suits an edit you can state without it, such as replacing a known string with `edit_note`, appending, or merging frontmatter keys. An `edit_note` whose `old_string` is not in the note fails on its own and changes nothing.
+
 **Result shape.** `items` holds one entry per requested operation, with `index`, `op`, `ok`, and then either `result`, which is that tool's normal result, or `error`. `succeeded` and `failed` count them. A batch that ran at all returns success at the tool level. To find out what happened, read `failed` and each item's `ok`, never the call's own status. An item's `error` is the same `{code, message, retryable, vault_id?}` object a standalone refusal carries, and its `code` is always a string to branch on. A refusal that a standalone call reports as a JSON-RPC error, such as malformed arguments or a missing `vault_id`, becomes `invalid_arguments` inside a batch, with the JSON-RPC number kept as `jsonrpc_code`.
 
 **Reply size.** A batch's reply holds about 8 MB in all, results and errors together. A base64 `get_attachment` item that would not fit in what is left is refused with `attachment_too_large_for_base64` before the file is read, and any other read whose answer would not fit fails with `batch_reply_too_large`. Nothing is lost either way: call that item on its own, or split the batch. A write item's result is always kept.
