@@ -665,9 +665,24 @@ mod tests {
     /// the Vault's absolute host path.
     #[test]
     fn a_local_history_failure_is_reported_without_the_host_path() {
-        let root = tempfile::tempdir().expect("not a repository");
+        // The Vault folder is deliberately never created, so opening it as a
+        // repository fails wherever the temp folder lives. An empty folder
+        // would not do: with `TMPDIR` inside a checkout (the justfile's
+        // default target dir), discovery finds that checkout above it and
+        // the turn succeeds (#711). `Repository::discover` passes no ceiling
+        // directories and libgit2 reads `GIT_CEILING_DIRECTORIES` only when
+        // opening from the environment, so a ceiling cannot stop it.
+        let root = tempfile::tempdir().expect("temp root");
         let vault_path = root.path().join("vault");
-        fs::create_dir(&vault_path).expect("vault directory");
+
+        // The internal error carries a host path, so the check below would
+        // catch the client message repeating it.
+        let internal = validate_local_repo(&base_config(&vault_path))
+            .expect_err("a missing Vault folder cannot be opened as a repository");
+        assert!(
+            internal.to_string().contains('/'),
+            "the internal error should carry a host path: {internal}"
+        );
 
         let error = run_local_history_git_turn(
             vault_path,
@@ -675,7 +690,7 @@ mod tests {
             "hatchdoor@example.test".to_string(),
             &WriteLedger::new(),
         )
-        .expect_err("no enclosing repository");
+        .expect_err("a missing Vault folder has no repository");
 
         assert_eq!(error.code(), "existing_git_local_history_validation_failed");
         assert!(
