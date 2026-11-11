@@ -6474,6 +6474,24 @@ packet scope:
   too. It drives `playwright-core` from the frontend's dev dependencies and
   the Chrome on the path, or the one `HATCHDOOR_DEV_BROWSER` names. Validate
   with `node --test scripts/proto.test.mjs`.
+  The live-acceptance helpers (#616) are `scripts/mcp-call.mjs` (`just
+  mcp-call`), `scripts/dev-note.mjs` (`just dev-note`), `scripts/dev-wait.mjs`
+  (`just dev-wait`, and the wait at the end of `just dev-restart-backend`)
+  and `scripts/dev-browser.mjs`, the signed-in browser a Playwright script
+  imports, which also holds the sign-in `proto-new` uses. They share
+  `scripts/dev-common.mjs`: the dev ports, which a test holds equal to the
+  `justfile`'s, the `.env` reading, and the scrubbing that keeps a token out
+  of everything printed. Every address is built from `127.0.0.1`, so none
+  can reach a deployed instance. They copy from the server the MCP handshake
+  and `/mcp` path, `/health`, `/api/v1/vaults`, `/api/v1/vaults/{id}/tree`
+  and `/api/v1/vaults/{id}/notes/{slug}` with its `relative_path`, the
+  `/v/{vault_id}/n/{slug}` page address, and the registry's shape in
+  `.dev/state/vaults.json`; from the frontend the storage keys named above.
+  `dev-note` lists what it placed in `.dev/vaults/placed-notes.txt`, inside
+  the tree `scripts/dev-vaults.sh` removes whole on a reset. Validate with
+  `node --test scripts/dev-*.test.mjs scripts/mcp-call.test.mjs`;
+  `dev-backend.test.mjs` runs the `justfile`'s stop recipes against stand-in
+  processes.
   `scripts/smoke-install.sh`, started by `just smoke-install` (#569), builds
   the image from the checkout with Docker, loads it into rootless Podman and
   follows the README Quick Start there. It copies the deploy guide's API calls (`/api/model/decline-gemma`,
