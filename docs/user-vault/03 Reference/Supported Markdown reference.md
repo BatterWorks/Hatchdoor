@@ -145,12 +145,13 @@ Store an image near the note that references it, and give it a safe filename: lo
 
 ## Wikilinks
 
-Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Five forms:
+Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Six forms:
 
 - Plain: `[[Connect your agent]]` → [[Connect your agent]]
 - Aliased: `[[Connect your agent|connect an agent]]` shows the text after the `|`.
 - Aliased inside a table cell: `[[Connect your agent\|connect an agent]]`. A bare `|` would end the cell, so the alias pipe is written escaped. Hatchdoor reads that backslash as syntax rather than as part of the note's name, so the link resolves, shows up in backlinks, and is rewritten by a rename like any other.
 - Heading-scoped: `[[Connect your agent#Configure your MCP client]]` opens the note at that heading.
+- Block-scoped: `[[Connect your agent#^a1b2c3]]` opens the note at the paragraph, list item or quote that ends in the block id `^a1b2c3`, the form Obsidian writes when you link to a block. A quote or a table can also carry its id on a line of its own right under it, after a blank line. The Reading view hides the `^a1b2c3` text itself. A block id that no longer exists opens the note at the top, and in the editor a block link opens the note at the top too.
 - To a note that does not exist yet: `[[This Note Does Not Exist Yet]]` still renders, and leads nowhere until that note is created.
 
 When two notes share a name, add part of the folder path to pick one: with `projects/a/Plan` and `projects/b/Plan`, `[[b/Plan]]` opens the second, and a leading `/` counts from the Vault root, so `[[/Plan]]` opens a `Plan` at the top level. Without a folder, a link whose capitals match a note's name exactly wins over one that matches with case ignored, and after that the note nearest the linking note wins. A link that still fits both equally goes to the first in path order, and a rename or delete of either note leaves it alone. When a rename or move would hand a link to a different same-named note, Hatchdoor writes that link's folder path in, so it keeps opening the note it opened before. A link can also name a note by its address, such as `[[connect-your-agent]]`, but never by the numbered address a second same-named note gets: `[[Plan 2]]` stays a link to a note that does not exist yet even when a second `Plan` has the address `plan-2`. Names are compared the same way however the file system stored their accents and syllables, so a Korean or Japanese note synced from a Mac is reached by a link typed on any keyboard.
@@ -164,6 +165,7 @@ A plain Markdown link whose target is a `.md` file is a note link too, the form 
 - With the path in angle brackets, so spaces need no escaping: `[the launch plan](<../20-projects/Beacon Launch.md>)`
 - Reference style: `[the launch plan][launch]`, with `[launch]: ../20-projects/Beacon%20Launch.md` on a line of its own
 - Straight to a heading: `[first run](Install.md#First%20Run)` or `[first run](Install.md#first-run)`. Both reach the same heading, and a heading that no longer exists opens the note at the top.
+- Straight to a block: `[that step](Install.md#^a1b2c3)`, which lands on the paragraph ending in `^a1b2c3` as the wikilink form does.
 
 The target is a path, not a title. Hatchdoor reads it the way it reads an attachment path: a leading `/` starts at the Vault root, otherwise it is tried from the linking note's own folder and then from the Vault root, and a bare filename such as `Beacon%20Launch.md` is found anywhere in the Vault, the nearest note of that name winning. A path that names a folder never falls back to a note of the same name elsewhere, so with two notes called `Plan`, `../a/Plan.md` always reaches `a/Plan`. Write a space as `%20`; a `%` that is not followed by two hex digits is read as a literal percent sign, so `Save%2020%%20now.md` still reaches `Save 20% now.md`. A target that names no note renders as a missing link rather than a link to nowhere.
 
@@ -232,7 +234,6 @@ An agent renaming a tag across the Vault with `rename_tag` goes by these same ru
 Obsidian reads a few things Hatchdoor does not draw yet. Here is what you see instead:
 
 - **An embedded note**, `![[Other note]]` or `![[Other note#Heading]]`, shows as a link to that note, or to that heading, rather than the note's content. An embedded block, `![[Other note#^id]]`, links to the note. A note that does not exist shows as a missing link. Embedded images and PDFs work as described under [[#Images and PDFs]].
-- **A link to a block**, `[[Other note#^id]]`, opens the note at the top rather than at that paragraph.
 - **An inline footnote**, `text^[a note]`, shows as written. Use a standard footnote, `text[^1]` with `[^1]: a note` on a line of its own, which works.
 - **A canvas file** (`.canvas`) and **a standalone Bases file** (`.base`) are not listed in the explorer and do not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
 

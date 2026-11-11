@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { escapeMarkdownLabel, parseWikilinkTarget } from "../../lib/markdown";
-import { slugifyHeading } from "../../lib/noteHeadings";
+import { blockAnchorId, fragmentAnchor } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
 import type { VaultId, VaultResolveBatchResponse } from "../../types";
 import {
@@ -110,7 +110,7 @@ export function rewriteWikilinks(
 
     if (bang === "!") {
       // A note embed draws as a link to the note (#573). Showing the note's
-      // content inline is #578. A name that reads as a note is tried as one
+      // content inline is #699. A name that reads as a note is tried as one
       // first; any other name only when no file answered to it, so
       // `![[Release 2.8]]` still finds its note.
       const [pathPart] = splitPathSuffix(parsed.target);
@@ -119,11 +119,10 @@ export function rewriteWikilinks(
       if (noteName || !filePath) {
         const hit = resolved.get(parsed.target) ?? null;
         if (hit) {
-          // A block id is not yet a place to land, so `#^id` opens the note
-          // at the top (#578).
-          const anchor = parsed.target.includes("#^")
-            ? ""
-            : extractAnchor(parsed.target);
+          // A block embed still links to the note itself; what it draws is
+          // #699's to decide.
+          const named = wikilinkAnchor(parsed.target);
+          const anchor = named.startsWith("^") ? "" : named;
           const href = noteRouteHref(vaultId, hit, anchor);
           const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
           return `[${escapeMarkdownLabel(label)}](${href})`;
@@ -153,7 +152,7 @@ export function rewriteWikilinks(
 
     const hit = resolved.get(parsed.target) ?? null;
     if (hit) {
-      const href = noteRouteHref(vaultId, hit, extractAnchor(parsed.target));
+      const href = noteRouteHref(vaultId, hit, wikilinkAnchor(parsed.target));
       const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
       return `[${escapeMarkdownLabel(label)}](${href})`;
     }
@@ -199,7 +198,7 @@ function rewriteMarkdownDestinations(
       ? noteRouteHref(
           vaultId,
           hit,
-          link.anchor ? slugifyHeading(decodePercent(link.anchor)) : "",
+          link.anchor ? fragmentAnchor(decodePercent(link.anchor)) : "",
         )
       : missingNoteHref(decodePercent(link.rawPath));
     edits.push({ ...link, href });
@@ -617,14 +616,19 @@ function dirname(relativePath: string): string {
   return parts.join("/");
 }
 
-function extractAnchor(target: string): string {
+/**
+ * The anchor a wikilink target lands on, without its `#`: a heading's for
+ * `Note#Heading`, a block's for `Note#^id` or `Note^id` (#578), empty for the
+ * note itself.
+ */
+export function wikilinkAnchor(target: string): string {
   const hashIdx = target.indexOf("#");
   if (hashIdx >= 0) {
-    return slugifyHeading(target.slice(hashIdx + 1));
+    return fragmentAnchor(target.slice(hashIdx + 1));
   }
   const caretIdx = target.indexOf("^");
   if (caretIdx >= 0) {
-    return target.slice(caretIdx + 1);
+    return blockAnchorId(target.slice(caretIdx + 1).trim());
   }
   return "";
 }

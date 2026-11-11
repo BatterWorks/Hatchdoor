@@ -43,6 +43,8 @@ const PAGES: Record<string, string> = {
     "",
     "It is in `.env`.",
     "",
+    "Keep it to yourself. ^secret",
+    "",
     "Back to [the manual](../index.md).",
   ].join("\n"),
   "/docs/reference/supported-markdown-reference.md": [
@@ -201,6 +203,17 @@ describe("Help panel", () => {
     });
     await waitFor(() => expect(scrolled).toContain(heading.id));
     expect(heading.id).toBe("help-where-do-i-find-my-token");
+  });
+
+  it("opens a given page scrolled to a given block (#578)", async () => {
+    const { panel } = renderHelp({
+      page: "get-started/install",
+      heading: "^secret",
+    });
+
+    const block = await within(panel).findByText("Keep it to yourself.");
+    await waitFor(() => expect(scrolled).toContain("help-^secret"));
+    expect(block.id).toBe("help-^secret");
   });
 
   it("finds pages by search and shows an empty state", async () => {

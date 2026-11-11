@@ -169,6 +169,34 @@ describe("rewriteWikilinks asset resolution", () => {
   });
 });
 
+describe("rewriteWikilinks with block links (#578)", () => {
+  const other = { slug: "other-note", archived: false };
+  const link = (markdown: string, target: string) =>
+    rewriteWikilinks(VAULT_ID, markdown, "Home.md", new Map([[target, other]]));
+
+  it("points a block link at the block's anchor", () => {
+    expect(link("[[Other note#^abc]]", "Other note#^abc")).toBe(
+      "[Other note](/v/vault-1/n/other-note#^abc)",
+    );
+    expect(link("[[Other note^abc|see]]", "Other note^abc")).toBe(
+      "[see](/v/vault-1/n/other-note#^abc)",
+    );
+    expect(link("[[#^abc]]", "#^abc")).toContain(
+      "(/v/vault-1/n/other-note#^abc)",
+    );
+  });
+
+  it("leaves a heading link as it was", () => {
+    expect(link("[[Other note#Some Heading]]", "Other note#Some Heading")).toBe(
+      "[Other note](/v/vault-1/n/other-note#some-heading)",
+    );
+    // A heading that happens to be named like the block id is another place.
+    expect(link("[[Other note#abc]]", "Other note#abc")).toBe(
+      "[Other note](/v/vault-1/n/other-note#abc)",
+    );
+  });
+});
+
 describe("rewriteWikilinks with note embeds (#573)", () => {
   const other = { slug: "other-note", archived: false };
   const embed = (
@@ -198,6 +226,9 @@ describe("rewriteWikilinks with note embeds (#573)", () => {
     ).toBe("[Other note](/v/vault-1/n/other-note#some-heading)");
     expect(
       embed("![[Other note#^abc123]]", [["Other note#^abc123", other]]),
+    ).toBe("[Other note](/v/vault-1/n/other-note)");
+    expect(
+      embed("![[Other note^abc123]]", [["Other note^abc123", other]]),
     ).toBe("[Other note](/v/vault-1/n/other-note)");
   });
 
@@ -328,6 +359,12 @@ describe("rewriteWikilinks with Markdown note links (ADR-28)", () => {
       rewrite("[a](Install.md#First%20Run) [b](Install.md#first-run)"),
     ).toBe(
       "[a](/v/vault-1/n/install#first-run) [b](/v/vault-1/n/install#first-run)",
+    );
+  });
+
+  it("points a block link at the block's anchor (#578)", () => {
+    expect(rewrite("[a](Install.md#^abc) [b](Install.md#%5Eabc)")).toBe(
+      "[a](/v/vault-1/n/install#^abc) [b](/v/vault-1/n/install#^abc)",
     );
   });
 

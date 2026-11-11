@@ -157,6 +157,30 @@ export function slugifyHeading(input: string): string {
   return out || "section";
 }
 
+/**
+ * The anchor of the block that carries `^id` (#578). The caret stays in the
+ * anchor, and `slugifyHeading` never emits one, so a block `^notes` and a
+ * heading "Notes" in the same note are two places. A block id holds letters,
+ * digits and hyphens only, so anything else a link wrote after the caret is
+ * dropped: the anchor goes into a Markdown destination, which a space or a
+ * bracket would end.
+ */
+export function blockAnchorId(id: string): string {
+  return `^${id.replace(/[^a-zA-Z0-9-]/g, "")}`;
+}
+
+/**
+ * The anchor a link's fragment names: the part after `#` in `[[Note#Heading]]`
+ * or `[text](Note.md#^id)`. A fragment that opens with a caret names a block,
+ * any other a heading.
+ */
+export function fragmentAnchor(fragment: string): string {
+  const text = fragment.trim();
+  return text.startsWith("^")
+    ? blockAnchorId(text.slice(1))
+    : slugifyHeading(text);
+}
+
 function normalizeHeadingText(value: string): string {
   return value
     .replace(/\[\[([^[\]]+)\]\]/g, (_whole, body: string) =>

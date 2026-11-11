@@ -17,6 +17,10 @@ import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 import type { VaultId } from "../../types";
 
+/** Maps the anchor `remarkBlockIds` gave a block (#578) to its element id;
+ * a block without one stays without. */
+type BlockAnchor = (id: string | undefined) => string | undefined;
+
 type MarkdownCodeProps = {
   children?: ReactNode;
   className?: string;
@@ -32,6 +36,7 @@ function createSharedMarkdownComponents(
   headingIdsBySourceLine: Map<number, string>,
   renderBaseBlock: (content: string, props: MarkdownCodeProps) => ReactNode,
   hiddenHeadingLine?: number,
+  blockAnchor: BlockAnchor = (id) => id,
 ) {
   return {
     pre(props: { children?: ReactNode }) {
@@ -81,20 +86,28 @@ function createSharedMarkdownComponents(
         />
       );
     },
-    li(props: { children?: ReactNode; className?: string }) {
-      return <ListItem className={props.className}>{props.children}</ListItem>;
+    li(props: { children?: ReactNode; className?: string; id?: string }) {
+      return (
+        <ListItem className={props.className} id={blockAnchor(props.id)}>
+          {props.children}
+        </ListItem>
+      );
     },
-    blockquote(props: { children?: ReactNode }) {
-      return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+    blockquote(props: { children?: ReactNode; id?: string }) {
+      return (
+        <CalloutOrQuote id={blockAnchor(props.id)}>
+          {props.children}
+        </CalloutOrQuote>
+      );
     },
     // A `hatchdoor-query` marker naming no block (#276): see
     // remarkHideQueryMarkers.
     [ORPHANED_MARKER_ELEMENT](props: { "data-name"?: string }) {
       return <OrphanedMarkerNotice name={props["data-name"]} />;
     },
-    table(props: { children?: ReactNode }) {
+    table(props: { children?: ReactNode; id?: string }) {
       return (
-        <div className="table-wrap">
+        <div className="table-wrap" id={blockAnchor(props.id)}>
           <table>{props.children}</table>
         </div>
       );
@@ -237,6 +250,7 @@ export function createNoteMarkdownComponents(
     },
     p: markAsParagraph(function NoteParagraph(props: {
       children?: ReactNode;
+      id?: string;
       node?: MarkdownElementNode;
     }) {
       // A lone PDF embed parses as a paragraph wrapping an image, but
@@ -248,7 +262,7 @@ export function createNoteMarkdownComponents(
       if (holdsOnlyPdfEmbed(vaultId, props.node, noteRelativePath)) {
         return <>{props.children}</>;
       }
-      return <p>{props.children}</p>;
+      return <p id={props.id}>{props.children}</p>;
     }),
     img(props: { src?: string; alt?: string }) {
       const source =
@@ -281,18 +295,25 @@ export function createNoteMarkdownComponents(
 export function createManualMarkdownComponents(
   headingIdsBySourceLine: Map<number, string>,
   renderLink: (href: string | undefined, children: ReactNode) => ReactNode,
+  /** Turns a block's anchor (`^id`, #578) into the id the caller scrolls to,
+   * the way it already chose the heading ids. */
+  blockAnchor: BlockAnchor = (id) => id,
 ) {
   return {
-    ...createSharedMarkdownComponents(headingIdsBySourceLine, (content) => (
-      <CodeBlock language="base" content={content} />
-    )),
+    ...createSharedMarkdownComponents(
+      headingIdsBySourceLine,
+      (content) => <CodeBlock language="base" content={content} />,
+      undefined,
+      blockAnchor,
+    ),
     a(props: { href?: string; children?: ReactNode }) {
       return renderLink(props.href, props.children);
     },
     p: markAsParagraph(function ManualParagraph(props: {
       children?: ReactNode;
+      id?: string;
     }) {
-      return <p>{props.children}</p>;
+      return <p id={blockAnchor(props.id)}>{props.children}</p>;
     }),
     img(props: { src?: string; alt?: string }) {
       return (

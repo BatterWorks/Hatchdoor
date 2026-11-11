@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  duplicateTitleHeadingLine,
   assignHeadingId,
+  blockAnchorId,
+  duplicateTitleHeadingLine,
   extractMarkdownHeadings,
+  fragmentAnchor,
   slugifyHeading,
 } from "./noteHeadings";
 
@@ -104,5 +106,24 @@ describe("duplicateTitleHeadingLine (#530)", () => {
       duplicateTitleHeadingLine(body, headings, undefined),
     ).toBeUndefined();
     expect(duplicateTitleHeadingLine("", [], "RackGate")).toBeUndefined();
+  });
+});
+
+describe("fragmentAnchor (#578)", () => {
+  it("names a block by its id, caret kept", () => {
+    expect(fragmentAnchor("^abc123")).toBe("^abc123");
+    expect(fragmentAnchor(" ^a-1 ")).toBe("^a-1");
+    expect(blockAnchorId("abc123")).toBe("^abc123");
+    // Nothing that could end a Markdown destination survives.
+    expect(fragmentAnchor("^a b)c")).toBe("^abc");
+  });
+
+  it("names a heading by its slug, as before", () => {
+    expect(fragmentAnchor("First Run")).toBe("first-run");
+    expect(fragmentAnchor("first-run")).toBe("first-run");
+  });
+
+  it("keeps a block and a heading of the same name apart", () => {
+    expect(fragmentAnchor("^notes")).not.toBe(fragmentAnchor("Notes"));
   });
 });
