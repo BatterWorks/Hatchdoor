@@ -241,6 +241,7 @@ pub(super) const READ_OPS: &[&str] = &[
     "recently_modified",
     "query_notes",
     "find_text",
+    "find_link_problems",
     "evaluate_saved_query",
     "get_attachment_import_config",
     "list_note_attachments",
@@ -270,6 +271,7 @@ pub(super) async fn dispatch_read_tool(
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "query_notes" => read::query_notes_tool(state, arguments).await,
         "find_text" => read::find_text_tool(state, arguments).await,
+        "find_link_problems" => read::find_link_problems_tool(state, arguments).await,
         "evaluate_saved_query" => read::evaluate_saved_query_tool(state, arguments).await,
         // Not gated on `write_enabled`: the tool reports the write posture
         // rather than exercising it, and an agent that cannot upload still

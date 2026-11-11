@@ -107,6 +107,17 @@ struct ScopeArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LinkFindingsArgs {
+    vault_id: String,
+    kind: crate::vault_read::LinkFindingKind,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     scope: String,
     query: String,
@@ -528,6 +539,23 @@ where
         .await
     {
         Ok(projection) => Ok(tool_result(&projection)),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn find_link_problems_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: LinkFindingsArgs = parse("find_link_problems", arguments)?;
+    let vault_id = scoped_vault_id(&args.vault_id)?;
+    match VaultReads::new(&state)
+        .read(move |core| {
+            core.find_link_problems(vault_id, args.kind, args.limit, args.cursor.as_deref())
+        })
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::FindLinkProblemsResult>(&projection)),
         Err(error) => read_failure(error),
     }
 }
@@ -1354,6 +1382,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an absolute HTTP download_url built on the server's configured public address if one is set, else on the address the client reached this MCP endpoint on, as reported by a reverse proxy's Forwarded or X-Forwarded-Proto/X-Forwarded-Host headers; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
+        find_link_problems_tool_schema(),
         find_text_tool_schema(),
         evaluate_saved_query_tool_schema(),
         json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
@@ -1502,6 +1531,26 @@ fn get_note_section_tool_schema() -> Value {
     })
 }
 
+/// One paged list of findings, not an automatic judgement about a Vault.
+fn find_link_problems_tool_schema() -> Value {
+    json!({
+        "name": "find_link_problems",
+        "description": collection_description("List one Vault's link findings. kind is broken_links, orphans or dead_ends. No score or repair. Each finding asks for a judgement: isolated notes can be useful and missing targets intentional. An orphan has no resolved links in or out, as in statistics. A note linking out but never linked to appears under neither orphans nor dead ends. Dead ends have no resolved outgoing links. Broken findings group missing or ambiguous wiki targets and missing Markdown note targets as written, with source notes. Code and attachment embeds are ignored. All readable layers participate. total counts findings; pass next_cursor as cursor to page. Works read-only and in batch."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "kind": {"type": "string", "enum": ["broken_links", "orphans", "dead_ends"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": crate::vault_read::LINK_FINDINGS_MAX_LIMIT, "default": crate::vault_read::LINK_FINDINGS_DEFAULT_LIMIT},
+                "cursor": {"type": "string", "description": "The previous page's next_cursor. Omit for the first page."}
+            },
+            "required": ["vault_id", "kind"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
+}
+
 /// `find_text` (ADR-46). The description has to keep an agent from reaching
 /// for `search_notes` when the question is exact, and has to say the two
 /// things that differ from its neighbours: it reads every layer, and it reads
@@ -1605,7 +1654,7 @@ fn query_notes_tool_schema() -> Value {
 /// at, is not advertised in read-only mode, hence the reread advice beside
 /// it. The `collection_revision` sentence follows
 /// `VaultCollectionState::collection_revision`.
-const COLLECTION_FRESHNESS: &str = "Every result says whether it is current, in participants[].state, one entry per Vault read: fresh, stale, not_searchable (semantic search only: some or all of the notes searched in that Vault have no embeddings, because they are not embedded yet or sit in a demoted layer with layer embedding switched off; any hits it returned still count, and keyword search reaches every note) or unavailable (nothing read; see its error; under a one-Vault scope the read fails with that error instead). partial is true when any participant is not fresh. A stale participant is still answered, but its part may be behind its Markdown: usually it is a prior index generation served while a turn catches up. When a participant reports stale, call refresh_vault for that Vault (write mode only; read-only callers read again in a few seconds, since a turn is usually already queued). A write can take up to about five seconds to reach the index, so a read straight after one can report fresh without it. collection_revision does not answer any of this. It counts Vault collection status changes (a Vault added, edited, enabled, disabled or disconnected, or its index, Git, watcher or local-file status moving) and does not track note content: a note write does not advance it, and the index turn that follows moves it only through the Vault's index status.";
+const COLLECTION_FRESHNESS: &str = "Every result says whether it is current, in participants[].state, one entry per Vault read: fresh, stale, not_searchable (semantic search only: some or all of the notes searched in that Vault have no embeddings, because they are not embedded yet or sit in a demoted layer with layer embedding switched off; any hits it returned still count, and keyword search reaches every note) or unavailable (nothing read; see its error; under a one-Vault scope the read fails with that error instead). partial is true when any participant is not fresh. A stale participant is still answered, but its part may be behind its Markdown: usually it is a prior index generation served while a turn catches up. When a participant reports stale, call refresh_vault for that Vault (write mode only; read-only callers read again in a few seconds, since a turn is usually already queued). A successful Hatchdoor write marks its index stale before returning; outside edits can still look fresh until the watcher notices them. collection_revision does not answer any of this. It counts Vault collection status changes (a Vault added, edited, enabled, disabled or disconnected, or its index, Git, watcher or local-file status moving) and does not track note content: a note write does not advance it, and the index turn that follows moves it only through the Vault's index status.";
 
 fn collection_description(summary: &str) -> String {
     format!("{summary} {COLLECTION_FRESHNESS}")
@@ -1776,6 +1825,7 @@ mod tests {
             checked,
             [
                 "evaluate_saved_query",
+                "find_link_problems",
                 "find_text",
                 "get_graph",
                 "get_stats",

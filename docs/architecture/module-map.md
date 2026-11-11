@@ -1723,7 +1723,8 @@ route or the MCP `get_attachment` tool would refuse.
 `resolve_note_link` answers a Markdown note link (ADR-28) through the same
 path ladder (`resolve_path_ladder` in `paths.rs`, which `resolve_asset` now
 calls too) over `note_paths`, the catalogue's notes keyed by path and by
-filename. `markdown_links.rs` is the one scanner for Markdown links: the link
+filename. `VaultIndex::link_resolution_catalog` builds only resolver lookups from published note identities, without touching disk, assets or graph edges. `unresolved_note_targets` in `links.rs` is the sibling pass used by link findings (#575): the graph's existing scanners skip code and attachment embeds, and its resolvers identify missing or ambiguous wiki targets and missing Markdown note targets. Existing outgoing and backlink behavior is unchanged.
+`markdown_links.rs` is the one scanner for Markdown links: the link
 graph reads it, and so does the write layer's rename, move and delete
 rewriting, through `rewrite_note_links`.
 `link_style.rs` answers a Vault's link style (ADR-33) through
@@ -2040,7 +2041,9 @@ the full backend checks.
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/sections.rs`, `src/vault_read/text_match.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/sections.rs`, `src/vault_read/text_match.rs`, `src/vault_read/link_findings.rs`.
+
+`VaultReadCore::find_link_problems` (#575) lists one Vault's broken or ambiguous note targets, orphans or dead ends under the shared freshness envelope. `LinkFindingKind`, `LinkFinding` and `LinkFindingsResponse` carry findings, `total` and an offset `next_cursor`, never a score or repair state. Paging defaults to 50 and caps at 200. Malformed cursors are non-retryable `invalid_link_findings_cursor`. The broken-link pass uses the published note bodies and a resolution-only catalogue rebuilt from that same snapshot's identities, so sources and targets cannot come from different generations. It uses the graph's scanners and resolvers without changing graph edges. Orphans share the statistics computation, and dead ends have no resolved outgoing links. Browse-surface restrictions apply before any finding is computed; all readable layers participate.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, `AssetSurface`,
 `NoteDownload` (#342), explicit `VaultScope`,
@@ -2671,8 +2674,7 @@ Frontmatter properties are parsed unless the pinned read asks for
 `NoteProperties::Omit`, which search does because it never returns them;
 `vault_snapshot_embeds_demoted_layers_on` reads the generation's
 `embed_layers` stamp on the same pinned read (#328).
-The detailed stats report is the only caller that does, because it counts
-words and images; bodies come back from the same pinned read as the note
+Detailed statistics load bodies to count words and images; broken-link findings load them to scan unresolved targets (#575). Bodies come back from the same pinned read as the note
 list so a projection can never pair one generation's rows with another's
 text. Publication carries the caller's freshness verdict rather than
 assuming `Fresh`, and `MutationGuardHandoff` is how an Index turn hands its
@@ -4067,6 +4069,8 @@ call's structured error when its `code` is one the manual explains
 finished result, so `batch` item errors, `VaultOperationError` and HTTP bodies
 never carry it, and errors for other codes, the writes-off `-32602` refusal and
 the plain-text setup refusals are unchanged. Additive. #583 extends the same table to `list_vaults`: the Vault-state codes (a folder Hatchdoor cannot open, the managed-Git sync failures) never come back as a tool error, so `docs_pointers::attach_to_vault_listing` adds `docs` to each Vault status error in the result (`activation_error`, `search_error`, `git_error`, `watcher_error`, `recovery_branch.error`) whose code the table lists, and `output_schema_for` describes the optional field on `list_vaults`' `VaultRuntimeError` definition alone. `VaultRuntimeError` itself and the HTTP Vault list keep their shape. A table test refuses a code that is neither in the management or read cores' closed lists or the mutation core's write codes nor spelled by a status producer (`vault_runtime.rs`, `git/managed_task.rs`, `git/sync.rs`). Additive. #502 adds `get_note_outline` and `get_note_section`, the seventeenth and eighteenth read tools and both `READ_OPS` entries (so `batch` may carry them): mappings onto `VaultReadCore::note_outline` and `note_sections`, answering `GetNoteOutlineResult` (`NoteOutline`) and `GetNoteSectionResult` (`NoteSectionsResponse`) with hand-written input schemas. They refuse a malformed `vault_id` and a missing Note exactly as `get_note` does, and every limit and matching rule is the core's: the adapter does not check `headings`, and its schema takes `maxItems` from the core's `MAX_SECTION_HEADINGS`. `get_note`'s description gains one sentence pointing to them, and its reply does not change. Catalogue grows to 51, purely additive. #521 changes `get_note`'s reply and no mapping: `note.metadata`, empty on every note until then, carries the frontmatter the read core now fills, and its `outputSchema` (generated from `Note`) allows `null` there for frontmatter that does not parse. `properties` is an object whenever `metadata` is, where it was always `null`. The description gains one sentence saying so. Behavior-changing for a client that assumed an object.
+
+#575 adds `find_link_problems`, a read-only, one-`vault_id` tool over the shared reader's link findings. Its strict schema takes `kind`, optional `limit` and optional `cursor`; `READ_OPS` and the shared dispatcher make it batchable. `FindLinkProblemsResult` aliases the core's typed projection and generates its output schema. No HTTP route or web interface is added.
 
 The adapter also records the name the calling client sent in `McpConfig::client_name` (#570, ADR-49), `None` when the request carried no client identity, which the SDK reports as its own placeholder name and version. Every write tool builds its `WriteOrigin` from that name, one per call, so each item of a `batch` shares it, and `create_upload_link` passes it to the transfer link it mints.
 

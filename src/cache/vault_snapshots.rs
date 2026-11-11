@@ -62,8 +62,8 @@ pub(crate) struct MutationGuardHandoff {
 
 /// Whether a snapshot read carries the Markdown text of its notes.
 ///
-/// Bodies are the expensive half of the notes table and only the detailed
-/// stats report counts anything in them, so every other read omits them. They
+/// Bodies are the expensive half of the notes table. Detailed statistics and
+/// broken-link findings need them; structural reads omit them. They
 /// are a flag on the snapshot read rather than a read of their own because
 /// they must describe the same published generation the note list does: read
 /// separately, an Index turn landing in between would pair one generation's
@@ -130,8 +130,8 @@ pub(crate) struct PublishedVaultSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// One published note's structural row. Deliberately without its Markdown
-/// body: every collection read projects these, and only the detailed stats
-/// report reads bodies at all, so it fetches them separately through
+/// body: every collection read projects these, while detailed statistics and
+/// broken-link findings also fetch bodies through
 /// [`SqliteCache::read_vault_note_bodies`] rather than making every tree,
 /// recent, graph, and query read carry the whole Vault's text.
 pub(crate) struct VaultSnapshotNote {

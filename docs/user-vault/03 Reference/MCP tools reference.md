@@ -13,7 +13,7 @@ Two switches decide what a call can do:
 - **`HATCHDOOR_MCP_ENABLED`** turns MCP on. It is off by default, and while it is off the instance answers no MCP call.
 - **`HATCHDOOR_MCP_WRITE_ENABLED`** turns the write tools on. It is off by default, even when MCP is on. A write tool called while it is off returns the JSON-RPC error `MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED`.
 
-Each Vault adds a third check, its own `capabilities.mutate`, which follows from the Vault's source type and state. A `pull_only` Git Vault, or a Vault that is not `ready` yet, refuses writes even with `HATCHDOOR_MCP_WRITE_ENABLED=true`. Read a Vault's capabilities from `list_vaults` before writing to it.
+Each Vault adds a third check, its own `capabilities.mutate`, which follows from the Vault's source type and state. A `pull_only` Git Vault, or a Vault whose folder is unavailable or read-only, refuses writes even with `HATCHDOOR_MCP_WRITE_ENABLED=true`. Read a Vault's capabilities from `list_vaults` before writing to it.
 
 > [!note]
 > Hatchdoor always lists every tool, even before model setup finishes and with no Vaults, so a client that caches the tool list when it connects never needs to reconnect because setup finished or a Vault was added. An upgrade is the exception: a session that stayed open across one can keep the older version's tools, as [Compact and full search hits](#compact-and-full-search-hits) describes. Before setup finishes, only these run: `get_model_setup_status`, `accept_gemma_terms`, `decline_gemma_terms`, the manual tools `read_docs` and `search_docs`, and the Vault collection tools such as `list_vaults`. Every other tool returns "Hatchdoor is still being set up." until a model is selected. `refresh_vault` is the one Vault collection tool that also waits: the index turn it asks for cannot run without a search model.
@@ -201,6 +201,7 @@ These work whenever MCP is on, with write mode on or off.
 | `get_graph` | `scope` | Grouped link graph for one Vault or all enabled Vaults. |
 | `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter without its Markdown body: `tags`, `aliases`, and every other top-level key under `properties`. A note with no frontmatter block answers `has_frontmatter: false` with empty lists, which is not an error. It also returns the note's `content_hash`, the same string `get_note` reports for that note at that moment. The hash covers the whole file, so a note with no frontmatter block has one too, and you can write metadata back without reading the body first. |
 | `recently_modified` | `scope` | Recently modified notes. Optional `limit` (1 to 25, default 5). |
+| `find_link_problems` | `vault_id`, `kind` | List one Vault's `broken_links`, `orphans` or `dead_ends`. Optional: `limit` (1 to 200, default 50), `cursor` (the previous page's `next_cursor`). See [[#Listing link findings]]. |
 | `query_notes` | `scope`, `conditions` | Select the notes whose tags, path, or frontmatter properties satisfy stated conditions. Optional: `properties` (names to return on each row), `limit` (1 to 200, default 50). See [[#Selecting notes by tag, path or property]]. |
 | `find_text` | `scope`, `text` | Find every note that contains one literal string, with how many times each contains it. Optional: `case_sensitive` (default `false`), `layers`, `path_prefix`, `limit` (1 to 500, default 50), `snippets_per_note` (0 to 3, default 3). See [[#Finding every note that contains a string]]. |
 | `evaluate_saved_query` | `vault_id`, `slug` | Evaluate one saved query in a note and return the notes it selects as rows. Optional `name`, required when the note holds more than one. See [[#Reading a note's saved queries]]. |
@@ -240,6 +241,20 @@ Pass `detail: "full"` to get the earlier shape: every hit carries the whole chun
 Both shapes return the same hits, with the same scores, in the same order. `detail` changes only what each hit carries. A `search_notes` item inside `batch` follows the same default.
 
 An agent session that was already open when Hatchdoor was upgraded from 2.7.x or earlier can keep the tool list it read before the upgrade. That list has no `detail` argument and says every hit must carry `content`, `outbound_links`, `metadata` and `chunk_id`, so the agent's own client rejects each compact reply before the agent reads it. Every `search_notes` call in that session fails, in both modes, with an error that starts `Structured content does not match the tool's output schema` and names those four as missing required properties. Hatchdoor ran the search and nothing is wrong with the Vault. Start a new agent session, or reconnect Hatchdoor from the agent's list of MCP servers, which `/mcp` opens in Claude Code. Clearing the conversation does not reload the tool list. Both remedies were checked with Claude Code 2.1.293, the client this was seen in. Until then the session also lacks every tool added since it connected, `find_text` included.
+
+### Listing link findings
+
+`find_link_problems` takes one `vault_id` and a `kind`:
+
+- `broken_links` groups missing or ambiguous note targets as written, from wikilinks and Markdown note links, with the source notes under `notes`. Resolution starts from each source note's folder, so a target that works from one folder is reported only for sources where it fails or is ambiguous. Attachment embeds and links in code are not reported.
+- `orphans` lists notes with no incoming and no outgoing resolved links, exactly the statistics page's meaning. A note linking out but never linked to appears under neither orphans nor dead ends.
+- `dead_ends` lists notes with no resolved outgoing links. A note whose only links are broken is a dead end.
+
+Each finding asks for a judgement: a note nothing links to can be useful, and a link to a missing note can be a deliberate placeholder. There is no score, grade or overall pass or fail, nothing is repaired, and there is no accepted-findings list.
+
+The reply uses the usual freshness envelope. `data` holds `vault_id`, `kind`, `findings`, `total` and `next_cursor`. Broken-link findings contain `target` and `notes`, each source carrying `slug` and `title`; orphan and dead-end findings contain `slug` and `title` directly. `total` counts findings before paging, not source notes. Targets are ordered as written and note lists by title then slug. Pass `next_cursor` as `cursor` for the next page; `null` means the list is complete. `limit` defaults to 50 and is capped at 200. A malformed cursor is refused as `invalid_link_findings_cursor`.
+
+All lists read the published index, including every layer the connection can read and no excluded notes. If it reports `stale`, read again after indexing. Paging is not a saved snapshot: when notes change between calls, start again to avoid missing or repeating a finding. The tool works in read-only mode and inside `batch`. The web interface and `get_note_links` are unchanged.
 
 ### Selecting notes by tag, path or property
 
