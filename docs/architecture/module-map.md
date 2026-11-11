@@ -6395,6 +6395,16 @@ packet scope:
   too. It drives `playwright-core` from the frontend's dev dependencies and
   the Chrome on the path, or the one `HATCHDOOR_DEV_BROWSER` names. Validate
   with `node --test scripts/proto.test.mjs`.
+  `scripts/smoke-install.sh`, started by `just smoke-install` (#569), builds
+  the image from the checkout with Docker, loads it into rootless Podman and
+  follows the README Quick Start there. It copies the deploy guide's API calls (`/api/model/decline-gemma`,
+  `/api/settings`, `/api/v1/vaults`, `/ready`, `/api/startup-status`, MCP
+  `list_vaults` and `search_notes`) and expects the refused first start to
+  leave `HATCHDOOR_WEB_BEARER_TOKEN=` in `data/state/new-web-token.env`
+  (`NEW_WEB_TOKEN_FILE` in `src/server.rs`). The docs-freshness table pairs it
+  with the README and both install guides. The release checklist
+  (`CHECKLIST_ITEMS` in `scripts/release-common.mjs`) asks for a pass. It has
+  no unit test; validate by running it.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.

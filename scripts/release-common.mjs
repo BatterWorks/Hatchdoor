@@ -388,6 +388,7 @@ export const CHECKLIST_ITEMS = [
   DOCS_FRESHNESS_ITEM,
   "No ADR is contradicted by what shipped.",
   "An MCP conformance run is recorded, if MCP behavior changed.",
+  "`just smoke-install` passed against an image built from the version-bump branch.",
   "The release title and notes are drafted.",
 ];
 

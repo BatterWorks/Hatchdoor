@@ -503,15 +503,20 @@ test("a usage report change names its reference page", async () => {
 const DOCKER_HUB_OVERVIEW = "docs/maintenance/docker-hub/overview.md";
 const INSTALL_GUIDE =
   "docs/user-vault/01 Get started/Install Hatchdoor with Docker Compose.md";
+const DEPLOY_GUIDE =
+  "docs/user-vault/02 Guides/How to deploy Hatchdoor with an agent.md";
+const SMOKE_INSTALL_SCRIPT = "scripts/smoke-install.sh";
 
 async function deploymentFixture() {
   const root = await fixture();
   git(root, ["switch", "--quiet", "development"]);
   await write(root, "docker-compose.yml");
   await write(root, DOCKER_HUB_OVERVIEW);
+  await write(root, "README.md");
+  await write(root, SMOKE_INSTALL_SCRIPT);
   for (const note of [
     INSTALL_GUIDE,
-    "docs/user-vault/02 Guides/How to deploy Hatchdoor with an agent.md",
+    DEPLOY_GUIDE,
     "docs/user-vault/01 Get started/Understand where your data lives.md",
   ]) {
     await write(root, note);
@@ -563,6 +568,43 @@ test("reports the Docker Hub overview as edited when the branch changed it", asy
     result.stderr,
     /docker-hub\/overview\.md {2}\(edited on this branch\)/,
   );
+});
+
+// #569: the smoke script is a hand-written copy of the install steps, so a
+// change to either side names the other.
+test("a README edit names the smoke script", async () => {
+  const root = await deploymentFixture();
+  await write(root, "README.md", "# A new Quick Start step\n");
+  await commit(root, "reword the quick start");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /\[install-smoke-script\]/);
+  assert.match(result.stderr, /scripts\/smoke-install\.sh {2}\(UNTOUCHED\)/);
+});
+
+test("a deploy guide edit names the smoke script", async () => {
+  const root = await deploymentFixture();
+  await write(root, DEPLOY_GUIDE, "# A new API step\n");
+  await addChangelogEntry(root);
+  await commit(root, "reword the deploy guide");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /scripts\/smoke-install\.sh {2}\(UNTOUCHED\)/);
+});
+
+test("a smoke script edit names the README and both install guides", async () => {
+  const root = await deploymentFixture();
+  await write(root, SMOKE_INSTALL_SCRIPT, "# a new step\n");
+  await commit(root, "add a smoke step");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /\[install-smoke-docs\]/);
+  assert.match(result.stderr, /README\.md {2}\(UNTOUCHED\)/);
+  assert.ok(result.stderr.includes(INSTALL_GUIDE));
+  assert.ok(result.stderr.includes(DEPLOY_GUIDE));
 });
 
 // The manual ships inside the binary (ADR-38), so editing a page changes

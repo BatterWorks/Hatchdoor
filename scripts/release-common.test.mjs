@@ -253,8 +253,18 @@ test("reads ticks, and reports edited or deleted items as missing", () => {
   assert.deepEqual(parsed.missing, [CHECKLIST_ITEMS[2], CHECKLIST_ITEMS[6]]);
   assert.deepEqual(
     parsed.items.map((item) => item.checked),
-    [true, true, false, false, false],
+    [true, true, false, false, false, false],
   );
+});
+
+test("the checklist asks for a smoke-install run before the bump merges", () => {
+  const item = CHECKLIST_ITEMS.find((text) => text.includes("just smoke-install"));
+  assert.ok(item, "no smoke-install item");
+  assert.ok(renderChecklist("").includes(`- [ ] ${item}`));
+  const parsed = parseChecklist(
+    renderChecklist("").replace(`- [ ] ${item}`, `- [x] ${item}`),
+  );
+  assert.equal(parsed.items.find((entry) => entry.text === item).checked, true);
 });
 
 test("a ticked box inside pasted output does not tick the real item", () => {
