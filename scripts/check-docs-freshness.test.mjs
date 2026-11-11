@@ -76,6 +76,10 @@ async function fixture() {
     sourceScript,
     path.join(root, "scripts", "check-docs-freshness.mjs"),
   );
+  await copyFile(
+    path.join(path.dirname(sourceScript), "git-changes.mjs"),
+    path.join(root, "scripts", "git-changes.mjs"),
+  );
   await write(root, "src/mcp/tools/read.rs");
   await write(root, "src/lib.rs");
   await write(root, "frontend/src/App.tsx");

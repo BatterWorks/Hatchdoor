@@ -114,7 +114,14 @@ integration points and have no default feature owner.
 
 Run the focused checks named in the work packet while developing. Before
 hand-off, run the full checks appropriate to all changed paths as documented in
-`CONTRIBUTING.md`.
+`CONTRIBUTING.md`: `just check` once per ticket, after review, not after every
+fix. It picks its own mode from the changes since the merge base with
+`development`: docs-only (script checks alone, seconds) when every change is
+documentation outside `docs/user-vault`, manual (adds the tests that read the
+manual) when the rest are text edits to existing manual pages, full
+otherwise. On a tree that already passed, it reports the earlier pass and
+exits 0, so rerunning it costs nothing. `just check-full` has neither
+shortcut.
 
 When production source files are added, moved, deleted, or reclassified, update the module map. `just check` runs `node scripts/check-module-map.mjs`, which verifies structural coverage only; run it alone for a quick answer.
 

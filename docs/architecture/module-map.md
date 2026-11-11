@@ -1587,7 +1587,10 @@ leave code blocks alone.
 **Coordination paths:** `src/lib.rs`, `Dockerfile` and `.dockerignore` (the
 image build must see `docs/user-vault` for `include_str!`), and
 `scripts/check-docs-freshness.mjs` (the `bundled-manual` surface, and
-`docs/user-vault/` as shipped content).
+`docs/user-vault/` as shipped content), and `scripts/check-mode.mjs`
+(`MANUAL_RUST_TESTS` and `MANUAL_FRONTEND_TESTS`: the tests `just check`
+runs when a branch only edits manual pages; its tests fail when a file that
+names the manual is missing from them).
 
 **Invariants:** every Markdown file under `docs/user-vault` is bundled and
 nothing else is (`every_manual_page_is_bundled`, `only_markdown_is_bundled`);
@@ -6405,6 +6408,12 @@ packet scope:
   with the README and both install guides. The release checklist
   (`CHECKLIST_ITEMS` in `scripts/release-common.mjs`) asks for a pass. It has
   no unit test; validate by running it.
+  `scripts/check-mode.mjs`, run by `just check` (#710), picks the check's
+  mode from the branch's changes since its merge base on `development`
+  (docs-only, manual or full) and remembers the tree of the last pass in
+  `.dev/check-pass.json`. It shares the base and merge-base lookup in
+  `scripts/git-changes.mjs` with `scripts/check-docs-freshness.mjs`. Validate
+  with `node --test scripts/check-mode.test.mjs`.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.
@@ -6420,7 +6429,10 @@ the docs-freshness table, and the tests under `scripts/`), formatting, clippy
 for the default and the all-features build, the backend tests with
 `--features eval`, and the frontend format, lint, typecheck, test and build
 steps. `CONTRIBUTING.md` lists the exact commands. Run
-`npm ci` in `frontend/` first on a fresh checkout.
+`npm ci` in `frontend/` first on a fresh checkout. A branch that changed only
+documentation runs the script checks alone, one that also edited manual pages
+adds the tests that read the manual, and a tree that already passed is not
+checked again (`scripts/check-mode.mjs`, `CONTRIBUTING.md`).
 
 `just check-full` adds the backend tests in the default configuration and with
 `--all-features`, which loads real model weights. Run it for changes to

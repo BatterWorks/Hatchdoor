@@ -39,7 +39,32 @@ npm run build
 
 Run `npm ci` in `frontend/` first on a fresh checkout or after the lockfile
 changes. While you work, run the individual commands for the side you are
-touching, or a focused `cargo test <module>`.
+touching, or a focused `cargo test <module>`. Run `just check` itself once,
+on the reviewed change, before you hand it off.
+
+Its first line names the mode it runs in, which
+`scripts/check-mode.mjs` picks from what the branch changed since its merge
+base on `development`, committed or not:
+
+- **docs-only** when every changed path is documentation: anything under
+  `docs/` except the bundled manual, anything under `demo-vaults/`, and
+  Markdown files at the repository root. It runs the first three commands
+  above and nothing else, in seconds.
+- **manual** when the rest of the changes are text edits to existing pages of
+  the bundled manual, `docs/user-vault`. The binary compiles those pages in,
+  and Rust tests read their text, search ranking included. This mode
+  adds those modules' tests and the frontend's help-link test to the script
+  checks, and skips the lints, the other tests and the frontend build. With a
+  warm build cache the tests take under a minute. The module list is
+  `MANUAL_RUST_TESTS` in `scripts/check-mode.mjs`. Its tests fail when a file
+  that names the manual is missing from that list.
+- **full** for anything else, including adding, deleting or renaming a
+  manual page. A branch with no change at all also runs in full.
+
+After a pass, `just check` remembers the tree it passed on in
+`.dev/check-pass.json`. When it runs again on the same content, it says so
+and stops at once. Any edit, committed or not, runs it again, and a failed run
+is never remembered. Deleting the file only costs a rerun.
 
 The offline benchmark harness (the `eval` and `index_microbench` binaries and
 the candle-backed embedders they sweep) sits behind the non-default `eval`
