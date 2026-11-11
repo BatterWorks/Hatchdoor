@@ -3631,7 +3631,13 @@ to 6 one-line items, action-needed items (`**Action needed:**`) first, each
 ending in at most one link into the manual. `the_bundled_page_parses` keeps a
 malformed page from shipping; `scripts/release-common.mjs` drafts and checks
 the same shape at release time. `PAGE` (`whats-new`, re-exported as
-`WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite.
+`WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite. The
+standing instructions also cite `guides/how-to-work-in-a-vault-as-an-agent`,
+the agent guide, to read before a first write (#568);
+`server_instructions_point_to_the_agent_guide_before_the_first_write` checks
+that `docs_bundle::page` resolves it and that *Connect your agent*'s example
+skill names the same page, and `server_instructions_fit_what_claude_code_keeps`
+keeps the instructions plus the version line within 2,000 characters (#480).
 `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata, a `switch`-kind value always sent
 as `"true"` or `"false"` by `is_truthy` on the resolved value (#581), and
