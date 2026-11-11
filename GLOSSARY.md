@@ -158,7 +158,7 @@ Someone who uses a shared instance under their own sign-in, with agents of their
 _Avoid_: User, account, member (when meant as the human)
 
 **Admin**:
-A person who manages the other people on an instance and can reach every Vault. Only an admin can add a Vault from a folder that already exists on the server.
+A person who manages the other people on an instance and can reach every Vault. An instance has at least one admin, and all its admins have the same powers. Only an admin can add a Vault from a folder that already exists on the server.
 _Avoid_: Superuser, root, owner (an owner holds one Vault, an admin the instance)
 
 **Home folder**:
