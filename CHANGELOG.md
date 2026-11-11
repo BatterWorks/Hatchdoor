@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- An agent that connects over MCP is now told to read the manual page *How to work in a Vault as an agent* before its first write, so it learns to search before creating a note, read a note before changing it and prefer small edits without you pointing it there. *Connect your agent* gains an example skill to copy into your agent's skills folder, which sends it to the same page on the Hatchdoor it is connected to. [#568]
+
 ### Changed
 - MCP agents on the `2026-07-28` revision now get a refused tool call, such as an unknown tool, a write while writes are off or an invalid argument, with HTTP 200 and the JSON-RPC error in the body, where it was HTTP 400; the error code and message are unchanged, so a client that reads the body sees no difference. An `initialize` that names `2026-07-28`, a revision with no handshake, now opens a `2025-11-25` session, and that session no longer claims `tools.listChanged: true`, which only the modern revision can deliver. A request with no session that is not `initialize` is refused with `400 Bad Request: Session ID is required` instead of `422 Unexpected message, expect initialize request`. These come with the MCP library moving to 3.8.0. [#621]
 - Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
@@ -39,6 +42,7 @@
 - Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
 - A Git sync no longer destroys a note kept in a path your ignore rules cover. Hatchdoor writes notes in folders a `.gitignore`, `.git/info/exclude` or `core.excludesFile` ignores, and never commits them, so they exist only on that disk. When the remote then brought a file at the same path, or a plain file named like an ignored folder, or a folder named like an ignored file, the sync replaced or deleted the note and still reported the Vault as ready. The sync now stops before writing anything and reports a conflict that names the notes in the way, as it does for any other local edit the remote would overwrite. An ignored note the remote does not touch never blocks a sync, nor does a submodule the remote moves. The troubleshooting guide says how to clear this kind of conflict, which a recovery branch cannot. [#623]
 
+[#568]: https://github.com/BatterWorks/Hatchdoor/issues/568
 [#621]: https://github.com/BatterWorks/Hatchdoor/issues/621
 [#623]: https://github.com/BatterWorks/Hatchdoor/issues/623
 [#624]: https://github.com/BatterWorks/Hatchdoor/issues/624
