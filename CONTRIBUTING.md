@@ -270,6 +270,12 @@ When changing `just proto-new` or `just proto-serve`, run:
 node --test scripts/proto.test.mjs
 ```
 
+When changing a live-acceptance helper (`just mcp-call`, `just dev-note`, `just dev-wait`, `just dev-stop-backend`, `just dev-restart-backend`, `scripts/dev-browser.mjs`) or the `justfile` recipes that stop and start the dev server, run:
+
+```bash
+node --test scripts/dev-*.test.mjs scripts/mcp-call.test.mjs scripts/proto.test.mjs
+```
+
 ## Review standards
 
 [`CODING_STANDARDS.md`](CODING_STANDARDS.md) holds the rules a reviewer applies to a finished diff: the judgement calls no check can make. Anything a machine can enforce belongs in `just check` instead.
