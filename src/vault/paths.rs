@@ -337,9 +337,13 @@ pub fn folder_distance(note_dir: &str, candidate: &str) -> usize {
 /// path the route would then refuse: a resolved embed that 404s is worse than
 /// an unresolved one, because it looks like a broken file rather than a
 /// broken link.
+///
+/// `canvas` is Obsidian's whiteboard file. It is served as a download and
+/// never drawn, and the catalogue is how a rename finds the canvases to
+/// repair (ADR-53).
 pub fn servable_asset_extensions() -> &'static [&'static str] {
     &[
-        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf", "canvas",
     ]
 }
 

@@ -409,6 +409,23 @@ pub struct VaultExplorerFolder {
     pub truncated: bool,
     pub folders: Vec<VaultExplorerFolder>,
     pub notes: Vec<VaultExplorerNote>,
+    /// The files in this folder that are listed without being notes: its
+    /// Obsidian canvases, for the web explorer to offer as downloads
+    /// (ADR-53). Present only on a read that asked for them with
+    /// [`TreeScope::include_files`], which the agent surface never does, so
+    /// it is left out of that surface's schema and out of any payload where
+    /// it is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    pub files: Vec<VaultExplorerFile>,
+}
+
+/// A listed file that is not a note. `relative_path` is the Vault-relative
+/// path the asset route serves it at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
+pub struct VaultExplorerFile {
+    pub name: String,
+    pub relative_path: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -441,6 +458,9 @@ pub struct TreeScope {
     pub max_depth: Option<u32>,
     /// Whether Notes appear at all. Folders and their counts always do.
     pub include_notes: bool,
+    /// Whether each folder lists its canvases (ADR-53). Off unless asked
+    /// for: only the web explorer shows them.
+    pub include_files: bool,
 }
 
 impl Default for TreeScope {
@@ -451,6 +471,7 @@ impl Default for TreeScope {
             folder: None,
             max_depth: None,
             include_notes: true,
+            include_files: false,
         }
     }
 }
@@ -941,10 +962,15 @@ impl<'a> VaultReadCore<'a> {
     ) -> Result<VaultReadProjection<Vec<VaultTree>>, VaultReadError> {
         let projection =
             self.try_collection(scope, NoteBodies::Omit, |vault_id, vault_name, snapshot| {
+                let files = if tree_scope.include_files {
+                    self.listed_files(vault_id)
+                } else {
+                    Vec::new()
+                };
                 Ok(VaultTree {
                     vault_id,
                     vault_name: vault_name.to_string(),
-                    tree: tree_for(vault_id, snapshot, &tree_scope)?,
+                    tree: tree_for(vault_id, snapshot, &tree_scope, &files)?,
                 })
             })?;
 
@@ -963,6 +989,29 @@ impl<'a> VaultReadCore<'a> {
             return Err(no_vault_has_folder(requested));
         }
         Ok(projection)
+    }
+
+    /// The Vault-relative paths of the canvases a tree lists for one Vault:
+    /// those its latest Index turn catalogued, so nothing excluded or noise,
+    /// and none under a layer this surface withholds. Empty before the first
+    /// turn has scanned the Vault, or when the Vault cannot be read: the
+    /// notes of the same tree come from a published snapshot and say so
+    /// themselves.
+    fn listed_files(&self, vault_id: VaultId) -> Vec<String> {
+        let Some(assets) = self
+            .control_block(vault_id)
+            .ok()
+            .and_then(|control| control.indexed_assets())
+        else {
+            return Vec::new();
+        };
+        assets
+            .asset_paths
+            .iter()
+            .filter(|path| is_listed_file(path))
+            .filter(|path| !self.surface.hides(assets.layers.layer_for(path)))
+            .cloned()
+            .collect()
     }
 
     pub fn statistics(
@@ -2002,8 +2051,19 @@ fn tree_for(
     vault_id: VaultId,
     snapshot: &VaultSnapshotRead,
     tree_scope: &TreeScope,
+    files: &[String],
 ) -> Result<VaultExplorerFolder, VaultReadError> {
     let mut root = FolderBuilder::default();
+    for relative_path in files {
+        let segments = relative_path.split('/').collect::<Vec<_>>();
+        let Some((name, folders)) = segments.split_last() else {
+            continue;
+        };
+        root.folder_at(folders).files.push(VaultExplorerFile {
+            name: (*name).to_string(),
+            relative_path: relative_path.clone(),
+        });
+    }
     for note in &snapshot.notes {
         let segments = note.relative_path.split('/').collect::<Vec<_>>();
         root.insert(
@@ -2022,6 +2082,15 @@ fn tree_for(
             .ok_or_else(|| folder_not_found(vault_id, requested))?,
     };
     Ok(folder.project(name, tree_scope.max_depth, tree_scope.include_notes))
+}
+
+/// Whether a catalogued asset is one a tree lists: an Obsidian canvas
+/// (ADR-53). Images and PDFs are reached through the notes that embed them.
+fn is_listed_file(relative_path: &str) -> bool {
+    std::path::Path::new(relative_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("canvas"))
 }
 
 /// A tree read narrowed to a folder this Vault does not have.
@@ -2091,18 +2160,21 @@ fn graph_nodes(vault_id: VaultId, snapshot: &VaultSnapshotRead) -> Vec<VaultGrap
 struct FolderBuilder {
     folders: BTreeMap<String, FolderBuilder>,
     notes: Vec<VaultExplorerNote>,
+    files: Vec<VaultExplorerFile>,
 }
 
 impl FolderBuilder {
     fn insert(&mut self, segments: &[&str], note: VaultExplorerNote) {
-        let Some((head, tail)) = segments.split_first() else {
-            self.notes.push(note);
-            return;
-        };
-        self.folders
-            .entry((*head).to_string())
-            .or_default()
-            .insert(tail, note);
+        self.folder_at(segments).notes.push(note);
+    }
+
+    /// The folder `segments` below this one, made on the way down.
+    fn folder_at(&mut self, segments: &[&str]) -> &mut FolderBuilder {
+        let mut folder = self;
+        for segment in segments {
+            folder = folder.folders.entry((*segment).to_string()).or_default();
+        }
+        folder
     }
 
     /// The folder at a Vault-relative path, with the name the Vault spells it
@@ -2153,6 +2225,7 @@ impl FolderBuilder {
                 truncated: !self.folders.is_empty() || (include_notes && note_count > 0),
                 folders: Vec::new(),
                 notes: Vec::new(),
+                files: Vec::new(),
             };
         }
         let mut notes = if include_notes {
@@ -2172,6 +2245,8 @@ impl FolderBuilder {
                 .map(|(child_name, child)| child.project(child_name, child_depth, include_notes))
                 .collect(),
             notes,
+            // Already in path order, which within one folder is name order.
+            files: self.files.clone(),
         }
     }
 }
@@ -5191,6 +5266,91 @@ mod tests {
         )])
     }
 
+    /// #579, ADR-53: the web explorer's tree lists each folder's canvases,
+    /// a tree that did not ask lists none, and a demo withholds one under a
+    /// demoted layer.
+    #[test]
+    fn a_tree_lists_canvases_only_when_asked_and_only_on_its_surface() {
+        let workspace = workspace(&[(
+            "Boards",
+            &[
+                ("Home.md", "# Home"),
+                ("Top.canvas", "{}"),
+                ("Top.png", "not listed"),
+                ("plans/Roadmap.CANVAS", "{}"),
+                ("plans/Alpha.canvas", "{}"),
+                ("only-boards/Lone.canvas", "{}"),
+                ("sources/.hatchdoor-layer", "name: sources\n"),
+                ("sources/Hidden.canvas", "{}"),
+                (".obsidian/Noise.canvas", "{}"),
+            ],
+        )]);
+        let vault_id = workspace.vault_ids[0];
+        let index = VaultIndex::build(&workspace.vault_paths[0]).expect("index");
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let with_files = TreeScope {
+            include_files: true,
+            ..TreeScope::default()
+        };
+        let tree = |reads: &VaultReadCore, scope: &TreeScope| {
+            reads
+                .trees(VaultScope::One(vault_id), scope.clone())
+                .expect("tree")
+                .data
+                .remove(0)
+                .tree
+        };
+        fn listed(folder: &VaultExplorerFolder) -> Vec<String> {
+            let mut paths = folder
+                .files
+                .iter()
+                .map(|file| file.relative_path.clone())
+                .collect::<Vec<_>>();
+            for child in &folder.folders {
+                paths.extend(listed(child));
+            }
+            paths
+        }
+
+        // Before an Index turn has scanned the Vault there is nothing to list.
+        assert!(listed(&tree(&reads, &with_files)).is_empty());
+
+        reads
+            .control_block(vault_id)
+            .expect("control block")
+            .retain_indexed_assets(&index);
+
+        let full = tree(&reads, &with_files);
+        assert_eq!(
+            listed(&full),
+            vec![
+                "Top.canvas",
+                "only-boards/Lone.canvas",
+                "plans/Alpha.canvas",
+                "plans/Roadmap.CANVAS",
+                "sources/Hidden.canvas",
+            ]
+        );
+        assert_eq!(full.files[0].name, "Top.canvas");
+        // A folder holding only a canvas is a folder of the tree.
+        assert_eq!(child(&full, "only-boards").note_count, 0);
+
+        assert!(listed(&tree(&reads, &TreeScope::default())).is_empty());
+        let unasked = serde_json::to_value(tree(&reads, &TreeScope::default())).expect("json");
+        assert!(unasked.get("files").is_none(), "{unasked}");
+
+        let demo = reads.on_surface(BrowseSurface::DefaultOnly);
+        assert_eq!(
+            listed(&tree(&demo, &with_files)),
+            vec![
+                "Top.canvas",
+                "only-boards/Lone.canvas",
+                "plans/Alpha.canvas",
+                "plans/Roadmap.CANVAS",
+            ]
+        );
+    }
+
     fn read_tree(workspace: &Workspace, tree_scope: TreeScope) -> VaultExplorerFolder {
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         reads
@@ -5573,6 +5733,7 @@ mod tests {
                 folder: Some("archive".to_string()),
                 max_depth: Some(1),
                 include_notes: false,
+                include_files: false,
             },
         );
         let year = child(&deeper, "2024");

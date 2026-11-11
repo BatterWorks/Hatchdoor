@@ -10,6 +10,7 @@ use crate::cache::parse::content_hash;
 use crate::rename_flags::{RenameFlag, rename_flagged_at};
 use crate::vault::types::NoteEntry;
 
+use super::canvas::is_canvas_path;
 use super::intent::{IntentLog, IntentRecord};
 use super::types::{MutationPhase, TextRewrite, WriteError};
 
@@ -223,8 +224,13 @@ impl MutationJournal {
                 // Vault-relative, because this message reaches an MCP client
                 // verbatim and the absolute host path is nobody's business
                 // there.
+                let kind = if is_canvas_path(&rewrite.path) {
+                    "Canvas"
+                } else {
+                    "Note"
+                };
                 return Err(WriteError::Conflict(format!(
-                    "Note '{}' changed after this change was planned; nothing was rewritten in it",
+                    "{kind} '{}' changed after this change was planned; nothing was rewritten in it",
                     bounded_vault_path(&self.vault_root, &rewrite.path)
                 )));
             }

@@ -7,6 +7,7 @@ use crate::vault::LayerMap;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
+use super::canvas::{SkippedCanvas, canvas_rewrite_plan, split_rewritten};
 use super::fs_ops::{MutationJournal, atomic_create_bytes_with_before_commit, atomic_write_bytes};
 use super::intent::IntentLog;
 use super::paths::{
@@ -258,7 +259,7 @@ fn move_attachment_by_paths_with_hook(
     ensure_movable_attachment_path(vault_root, source_path)?;
     ensure_movable_attachment_path(vault_root, target_path)?;
     let mut unrewritable = Vec::new();
-    let rewrites = asset_reference_rewrite_plan(
+    let mut rewrites = asset_reference_rewrite_plan(
         vault_root,
         index,
         "",
@@ -268,6 +269,18 @@ fn move_attachment_by_paths_with_hook(
         &mut unrewritable,
     );
     refuse_unrewritable(unrewritable)?;
+    // A move or rename repairs the canvases that name the attachment. A
+    // delete, the one caller with a trash path, leaves them as written
+    // (ADR-53).
+    let mut cleanup_warning = None;
+    if trashed_path.is_none() {
+        let plan = canvas_rewrite_plan(vault_root, index, &[(source_path, target_path)]);
+        if !plan.skipped.is_empty() {
+            let warnings = plan.skipped.iter().map(SkippedCanvas::warning);
+            cleanup_warning = Some(warnings.collect::<Vec<_>>().join(". "));
+        }
+        rewrites.extend(plan.rewrites);
+    }
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
     let mut journal = MutationJournal::new(vault_root, intent_log);
     if let Err(error) = journal.begin("move attachment", &[(source_path, target_path)], &rewrites) {
@@ -288,20 +301,21 @@ fn move_attachment_by_paths_with_hook(
     if had_rewrites && let Err(error) = after_phase(MutationPhase::Rewrite) {
         return Err(journal.rollback(error));
     }
-    let rewritten_notes = rewritten.len();
+    let (mut affected_paths, rewritten_canvases) = split_rewritten(rewritten);
+    let rewritten_notes = affected_paths.len();
+    affected_paths.extend(rewritten_canvases);
     let attachment = match attachment_info(vault_root, target_path, &index.layers) {
         Ok(attachment) => attachment,
         Err(error) => return Err(journal.rollback(error)),
     };
     journal.finish();
-    let mut affected_paths = rewritten;
     affected_paths.push(source_path.to_path_buf());
     affected_paths.push(target_path.to_path_buf());
     Ok(AttachmentOutcome {
         attachment,
         rewritten_notes,
         trashed_path,
-        cleanup_warning: None,
+        cleanup_warning,
         affected_paths,
     })
 }

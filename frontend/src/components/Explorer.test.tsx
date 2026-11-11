@@ -347,3 +347,70 @@ describe("FolderTree folders shown for the open note (#365)", () => {
     expectNoOpenEmptyFolder();
   });
 });
+
+describe("FolderTree canvas files (#579)", () => {
+  afterEach(cleanup);
+
+  const WITH_FILES: ExplorerFolder = {
+    name: "Vault",
+    folders: [
+      {
+        name: "boards",
+        folders: [],
+        notes: [note("b1")],
+        files: [
+          {
+            vault_id: VAULT_ID,
+            name: "Road map.canvas",
+            relative_path: "boards/Road map.canvas",
+          },
+        ],
+      },
+    ],
+    notes: [note("top")],
+    files: [
+      { vault_id: VAULT_ID, name: "Plan.canvas", relative_path: "Plan.canvas" },
+    ],
+  };
+
+  function renderWithFiles(expandedFolders: Record<string, boolean>) {
+    render(
+      <MemoryRouter>
+        <FolderTree
+          root={WITH_FILES}
+          currentPath="/"
+          expandedFolders={expandedFolders}
+          onExpandedFoldersChange={() => {}}
+          writeEnabled={false}
+          onCreateNoteInFolder={() => {}}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it("lists a canvas after the notes as a download, not a route", () => {
+    renderWithFiles({});
+
+    const link = screen.getByRole("link", { name: "Plan.canvas" });
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/v1/vaults/vault-1/assets/Plan.canvas",
+    );
+    expect(link).toHaveAttribute("download", "Plan.canvas");
+    expect(link).toHaveAttribute("title", "Download Plan.canvas");
+    const rows = [...document.querySelectorAll(".root-tree > li")];
+    expect(rows.at(-1)).toContainElement(link);
+    expect(screen.queryByText("Road map.canvas")).toBeNull();
+  });
+
+  it("lists a folder's canvas when the folder is open, with its path encoded", () => {
+    renderWithFiles({ boards: true });
+
+    expect(
+      screen.getByRole("link", { name: "Road map.canvas" }),
+    ).toHaveAttribute(
+      "href",
+      "/api/v1/vaults/vault-1/assets/boards/Road%20map.canvas",
+    );
+  });
+});

@@ -84,7 +84,8 @@ fn read_error_response(error: OffloadedReadError) -> Response {
 /// Always the whole tree. `get_tree`'s folder, depth and note narrowing (#192)
 /// lives in the read core and is exposed on the agent surface only: the web
 /// explorer draws the entire tree and has nothing to pass. Wiring the route to
-/// them later is small.
+/// them later is small. This route alone asks for each folder's canvases,
+/// which the explorer lists as downloads (ADR-53).
 pub async fn vault_scope_tree_handler(
     State(state): State<AppState>,
     Path(raw_scope): Path<String>,
@@ -94,7 +95,15 @@ pub async fn vault_scope_tree_handler(
         Err(error) => return vault_read_error_response(error),
     };
     match VaultReads::new(&state)
-        .read(move |core| core.trees(scope, TreeScope::default()))
+        .read(move |core| {
+            core.trees(
+                scope,
+                TreeScope {
+                    include_files: true,
+                    ..TreeScope::default()
+                },
+            )
+        })
         .await
     {
         Ok(projection) => (StatusCode::OK, Json(projection)).into_response(),

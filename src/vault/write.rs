@@ -1,5 +1,6 @@
 mod assets;
 mod attachments;
+mod canvas;
 mod frontmatter;
 mod fs_ops;
 mod intent;

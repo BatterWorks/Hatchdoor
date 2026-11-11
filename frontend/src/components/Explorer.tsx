@@ -3,11 +3,13 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import type {
   ExplorerFolder,
+  ExplorerFile,
   ExplorerNote,
   RecentNote,
   VaultSummary,
 } from "../types";
-import { AddIcon } from "./icons";
+import { withAccessToken } from "../api/api";
+import { AddIcon, CanvasIcon } from "./icons";
 import { UiPanel, VaultPrefix } from "./ui";
 import { pathToNoteIdentity, type NoteIdentity } from "../lib/notePath";
 
@@ -251,6 +253,12 @@ export function FolderTree({
           index={index}
         />
       ))}
+      {root.files?.map((file) => (
+        <FileNode
+          key={`file-${file.vault_id}-${file.relative_path}`}
+          file={file}
+        />
+      ))}
     </ul>
   );
 }
@@ -355,6 +363,12 @@ function FolderNode({
                   index={index}
                 />
               ))}
+              {folder.files?.map((file) => (
+                <FileNode
+                  key={`file-${file.vault_id}-${file.relative_path}`}
+                  file={file}
+                />
+              ))}
             </>
           ) : null}
         </ul>
@@ -391,6 +405,35 @@ function NoteNode({
         </span>
         <span className="note-label">{note.title}</span>
       </NavLink>
+    </li>
+  );
+}
+
+/**
+ * A canvas, listed after its folder's notes. Hatchdoor does not draw one, so
+ * the row is a download and not a place to go (ADR-53): a plain link the
+ * browser saves, never a route.
+ */
+function FileNode({ file }: { file: ExplorerFile }) {
+  return (
+    <li className="note-item">
+      <a
+        className="note-link file-link"
+        href={withAccessToken(
+          `/api/v1/vaults/${encodeURIComponent(file.vault_id)}/assets/${file.relative_path
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/")}`,
+        )}
+        download={file.name}
+        title={`Download ${file.name}`}
+      >
+        {/* §05: where a note carries its mono index, a file carries a glyph. */}
+        <span className="idx file-glyph" aria-hidden="true">
+          <CanvasIcon />
+        </span>
+        <span className="note-label">{file.name}</span>
+      </a>
     </li>
   );
 }

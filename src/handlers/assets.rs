@@ -38,6 +38,14 @@ pub(crate) fn asset_response(content_type: &'static str, bytes: Vec<u8>) -> Resp
             HeaderValue::from_static("attachment"),
         );
     }
+    if content_type == "application/json" {
+        // The one JSON asset is an Obsidian canvas, which Hatchdoor does not
+        // draw: a navigation to it saves the file (ADR-53).
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+    }
 
     (StatusCode::OK, headers, bytes).into_response()
 }
@@ -82,6 +90,22 @@ mod tests {
             asset_error_parts(AssetPathError::TooLarge, "big.pdf").1,
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    /// ADR-53: a canvas is JSON Hatchdoor does not draw, so it downloads.
+    #[test]
+    fn a_canvas_is_served_as_a_json_download_and_a_pdf_stays_inline() {
+        let response = asset_response("application/json", b"{}".to_vec());
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json"))
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION),
+            Some(&HeaderValue::from_static("attachment"))
+        );
+        let pdf = asset_response("application/pdf", b"%PDF".to_vec());
+        assert_eq!(pdf.headers().get(header::CONTENT_DISPOSITION), None);
     }
 
     #[test]

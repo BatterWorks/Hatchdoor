@@ -235,7 +235,8 @@ Obsidian reads a few things Hatchdoor does not draw yet. Here is what you see in
 
 - **An embedded note**, `![[Other note]]` or `![[Other note#Heading]]`, shows as a link to that note, or to that heading, rather than the note's content. An embedded block, `![[Other note#^id]]`, links to the note. A note that does not exist shows as a missing link. Embedded images and PDFs work as described under [[#Images and PDFs]].
 - **An inline footnote**, `text^[a note]`, shows as written. Use a standard footnote, `text[^1]` with `[^1]: a note` on a line of its own, which works.
-- **A canvas file** (`.canvas`) and **a standalone Bases file** (`.base`) are not listed in the explorer and do not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
+- **A canvas file** (`.canvas`), Obsidian's whiteboard, is not drawn. The explorer lists it in its folder, after the notes, and selecting it downloads the file. A link or an embed of one in a note, `[[Plan.canvas]]` or `![[Plan.canvas]]`, shows in the Reading view as a link that downloads it too. Hatchdoor keeps a canvas pointing at the right files: renaming, moving or archiving a note or an attachment, in the Web UI or through an agent, changes the path on every card that shows that file and nothing else in the canvas. Deleting a note or an attachment leaves its cards as they are, so Obsidian shows them as missing, as it does after a delete in Obsidian. A canvas that is not valid JSON, or is larger than 8 MB, is left untouched, and the result of the rename or move names it. A change made outside Hatchdoor is not followed. Canvases are not searched, and a card does not count as a link in backlinks or the graph.
+- **A standalone Bases file** (`.base`) is not listed in the explorer and does not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
 
 ---
 

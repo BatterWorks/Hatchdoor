@@ -137,10 +137,15 @@ export function rewriteWikilinks(
         noteRelativePath,
         resolvedAssets,
       );
+      if (isCanvasAssetTarget(parsed.target)) {
+        // Hatchdoor does not draw a canvas (ADR-53): its embed is a link
+        // that downloads the file, never an image that cannot load.
+        return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
+      }
       return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
     }
 
-    if (isPdfAssetTarget(parsed.target)) {
+    if (isPdfAssetTarget(parsed.target) || isCanvasAssetTarget(parsed.target)) {
       const source = assetHref(
         vaultId,
         parsed.target,
@@ -255,14 +260,17 @@ export function useResolvedWikilinks(
 
     void (async () => {
       const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
-      const isPdf = (match: RegExpMatchArray) =>
-        isPdfAssetTarget(parseWikilinkTarget(match[2]).target);
+      // A PDF or a canvas is a file whether it is linked or embedded.
+      const isFileTarget = (match: RegExpMatchArray) => {
+        const target = parseWikilinkTarget(match[2]).target;
+        return isPdfAssetTarget(target) || isCanvasAssetTarget(target);
+      };
       const isAsset = (match: RegExpMatchArray) =>
-        match[1] === "!" || isPdf(match);
-      // Embeds go out as note targets too, PDFs aside: one that names no file
+        match[1] === "!" || isFileTarget(match);
+      // Embeds go out as note targets too, PDFs and canvases aside: one that names no file
       // may name a note, and is then drawn as a link to it (#573).
       const rawTargets = matches
-        .filter((m) => !isPdf(m))
+        .filter((m) => !isFileTarget(m))
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
@@ -600,6 +608,11 @@ function isNoteEmbedTarget(pathPart: string): boolean {
 
 function isPdfAssetTarget(target: string): boolean {
   return splitPathSuffix(target)[0].toLowerCase().endsWith(".pdf");
+}
+
+/** Whether a target names an Obsidian canvas, which is served as a download. */
+function isCanvasAssetTarget(target: string): boolean {
+  return splitPathSuffix(target)[0].toLowerCase().endsWith(".canvas");
 }
 
 function splitPathSuffix(input: string): [string, string] {
