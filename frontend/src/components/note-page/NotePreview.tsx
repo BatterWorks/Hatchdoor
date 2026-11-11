@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 
-import { parseFrontmatter, stripBlockIds } from "../../lib/markdown";
+import { parseFrontmatter } from "../../lib/markdown";
 import { NOTE_SYNTAX_PLUGINS } from "../../lib/markdownSyntax";
 import { hideComments } from "../../lib/noteComments";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
@@ -38,7 +38,7 @@ export function NotePreview({
   const visibleBody = useMemo(() => hideComments(parsed.body), [parsed.body]);
   const { resolved: markdown } = useResolvedWikilinks(
     vaultId,
-    stripBlockIds(visibleBody),
+    visibleBody,
     relativePath,
   );
   const headingIdsBySourceLine = useMemo(

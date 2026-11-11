@@ -1562,7 +1562,8 @@ put through the note slug rule, so `03 Reference/MCP tools reference.md` is
 `reference/mcp-tools-reference`. `page` ignores case, surrounding slashes and a
 `#heading` fragment. A page's `markdown` has no frontmatter, and every wikilink
 outside code is a Markdown link to a page name, plus a `#heading` anchor in the
-note slug rule when the link names a heading. `search` is case-insensitive word
+note slug rule when the link names a heading, or the `#^id` it was written
+with when it names a block (#578), which the Help reader anchors. `search` is case-insensitive word
 matching with a trailing plural `s` folded and common words such as `how` and
 `the` dropped from the query. Pages rank by how many query words their title
 holds, then their headings outside code, then how often the words appear
@@ -5409,7 +5410,8 @@ rendered body would draw now, the server's path once the hook's batch has
 filled the cache and the note-relative reading before, for the editor's image
 and PDF widgets. A note embed (#573), `![[Other note]]`, goes out as a
 note target as well as an asset target (PDF embeds aside) and is rewritten to
-the link the same wikilink gets, `#^id` dropped to the note itself, when its
+the link the same wikilink gets, `#^id` dropped to the note itself (what a
+block embed draws is #699's), when its
 name reads as a note (`.md` or no extension) or no file answered to it; one
 that reads as a note and resolved as neither gets the `/__missing__/` link.
 `hideComments` (`lib/noteComments.ts`, #573) removes `%%` and HTML comments
@@ -5420,7 +5422,7 @@ link preview's `strip_comments` rule (shared cases in
 math and a whole-line `hatchdoor-query` marker are kept; the search dialog's
 snippets consume it too. The live editor still shows comments.
 `NOTE_SYNTAX_PLUGINS` (`lib/markdownSyntax.ts`, #572) is the one list of
-remark syntax plugins (GFM, math, highlights) that the reading view, the
+remark syntax plugins (GFM, math, highlights, block ids) that the reading view, the
 source-mode preview and the Help reader all render with; a view adds its own
 steps after it rather than keeping a copy. Its `remarkHighlight` reads
 Obsidian's `==text==` as a parser construct by the live editor's rule (an
@@ -5428,7 +5430,25 @@ exact pair of signs, emphasis flanking, closed within its paragraph) and renders
 it as `<mark class="note-highlight">`, so code, math and escaped signs keep
 theirs; `stripHighlights` drops the signs from plain-text excerpts outside
 code spans, for the search dialog's snippets and the Help reader's search
-excerpts. `NotePage.highlight.test.tsx` reads the editor's two toolbars'
+excerpts. Its `remarkBlockIds` (#578) is what reads Obsidian's block ids, on
+the parsed tree and not the text, so a `^id` in code or math is left alone and
+no line moves: a ` ^id` closing a paragraph, a list item's own line or a quote,
+or a `^id` alone on a line under a paragraph, a quote or a table, is taken out
+of the tree and the block gets the anchor `^id` (`blockAnchorId` in
+`lib/noteHeadings.ts`) as its element id, on the `li` for a list item and on
+whichever element `CalloutOrQuote` draws for a quote, which also moves an id
+from the first paragraph it takes apart onto that paragraph's last line; a
+heading only loses the text. The caret stays in the anchor and `slugifyHeading` never emits one, so a
+block and a heading of the same name are two elements. `fragmentAnchor` turns
+a link's fragment into its anchor (`^id` for a block, the slug for a heading)
+and `wikilinkAnchor` (`note-page/wikilinks.ts`) does it for a whole wikilink
+target; the reading view's links, Markdown note links and the live editor's
+link opening all go through them, so `[[Note#^id]]` and `[x](Note.md#^id)`
+carry `#^id` and `NotePage`'s fragment jump lands on the block as it does on a
+heading. `createManualMarkdownComponents` takes a `blockAnchor` mapping so the
+Help reader can prefix block ids the way it prefixes heading ids. The live
+editor has no block anchors: a block link opened into it lands at the top.
+`NotePage.highlight.test.tsx` reads the editor's two toolbars'
 sources and fails when a button wraps text in a delimiter the reading view
 does not draw. The contract
 also covers heading/search-hit navigation, Markdown transformations,

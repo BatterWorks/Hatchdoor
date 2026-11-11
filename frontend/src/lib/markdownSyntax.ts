@@ -3,7 +3,7 @@
 // copies of this list, and a syntax the editor's buttons write went missing
 // from all three unnoticed.
 
-import type { Nodes } from "mdast";
+import type { Nodes, Paragraph, Parents, Root, RootContent } from "mdast";
 import {
   fromMarkdown,
   type Extension as FromMarkdownExtension,
@@ -23,6 +23,8 @@ import type {
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { Processor } from "unified";
+
+import { blockAnchorId } from "./noteHeadings";
 
 declare module "mdast" {
   interface Highlight extends Parent {
@@ -213,8 +215,134 @@ export function remarkHighlight(this: Processor) {
   (data.fromMarkdownExtensions ??= []).push(highlightFromMarkdown);
 }
 
+/** A block id closing a block: ` ^id` after its text, or `^id` alone. */
+const BLOCK_ID_AT_END = /(^|[ \t\n])\^([a-zA-Z0-9-]+)[ \t]*$/;
+/** A block id closing a line that is not the block's last. */
+const BLOCK_ID_AT_LINE_END = / \^[a-zA-Z0-9-]+(?=\n)/g;
+
+type BlockIdCarrier = Extract<RootContent, { type: "paragraph" | "heading" }>;
+
+/**
+ * Obsidian's block ids (#578): a `^id` closing a paragraph, a list item or a
+ * quote, or standing on a line of its own under a quote or a table. The text
+ * is taken out of the tree and the block is given the anchor `^id`
+ * (`blockAnchorId`), which is where a link to `[[Note#^id]]` lands. Working on
+ * the parsed tree leaves a `^id` in code or math alone and changes no line of
+ * the text, so a rendered block still maps to its lines in the file.
+ *
+ * The anchor goes on the list item when the id closes the item's own line and
+ * on the quote when it closes the quote, since a callout rebuilds its
+ * paragraphs. A heading has an anchor already and only loses the text.
+ */
+export function remarkBlockIds() {
+  return (tree: Root) => {
+    anchorBlockIds(tree);
+  };
+}
+
+function anchorBlockIds(parent: Parents): void {
+  const siblings = parent.children as RootContent[];
+  for (let index = 0; index < siblings.length; index += 1) {
+    const node = siblings[index];
+    if (node.type !== "paragraph" && node.type !== "heading") {
+      if ("children" in node) {
+        anchorBlockIds(node);
+      }
+      continue;
+    }
+
+    hideLineEndBlockIds(node);
+    const found = closingBlockId(node);
+    if (!found) {
+      continue;
+    }
+    if (node.type === "heading") {
+      // A heading that is nothing but `^word` is a heading, not an id.
+      if (!found.alone) {
+        found.strip();
+      }
+      continue;
+    }
+    if (!found.alone) {
+      found.strip();
+      setBlockAnchor(blockIdTarget(parent, node), found.id);
+      continue;
+    }
+    // An id on a line of its own names the block above it. With no such block
+    // it stays as written, the way a stray `^word` always has.
+    const above = siblings[index - 1];
+    if (
+      above &&
+      (above.type === "paragraph" ||
+        above.type === "blockquote" ||
+        above.type === "table")
+    ) {
+      setBlockAnchor(above, found.id);
+      siblings.splice(index, 1);
+      index -= 1;
+    }
+  }
+}
+
+function hideLineEndBlockIds(node: BlockIdCarrier): void {
+  for (const child of node.children) {
+    if (child.type === "text") {
+      child.value = child.value.replace(BLOCK_ID_AT_LINE_END, "");
+    }
+  }
+}
+
+function closingBlockId(
+  node: BlockIdCarrier,
+): { id: string; alone: boolean; strip: () => void } | null {
+  const last = node.children.at(-1);
+  if (!last || last.type !== "text") {
+    return null;
+  }
+  const match = BLOCK_ID_AT_END.exec(last.value);
+  if (!match) {
+    return null;
+  }
+  const alone = node.children.length === 1 && match.index === 0 && !match[1];
+  // With no space before it the caret belongs to the word it touches.
+  if (!match[1] && !alone) {
+    return null;
+  }
+  return {
+    id: match[2],
+    alone,
+    strip: () => {
+      last.value = last.value.slice(0, match.index);
+    },
+  };
+}
+
+function blockIdTarget(parent: Parents, paragraph: Paragraph): RootContent {
+  if (parent.type === "listItem" && parent.children[0] === paragraph) {
+    return parent;
+  }
+  if (parent.type === "blockquote" && parent.children.at(-1) === paragraph) {
+    return parent;
+  }
+  return paragraph;
+}
+
+function setBlockAnchor(node: RootContent, id: string): void {
+  const data = (node.data ??= {}) as {
+    hProperties?: Record<string, unknown>;
+  };
+  const properties = (data.hProperties ??= {});
+  // A block names one place: the first id written on it.
+  properties.id ??= blockAnchorId(id);
+}
+
 /** The syntax plugins shared by every view that renders note Markdown. */
-export const NOTE_SYNTAX_PLUGINS = [remarkGfm, remarkMath, remarkHighlight];
+export const NOTE_SYNTAX_PLUGINS = [
+  remarkGfm,
+  remarkMath,
+  remarkHighlight,
+  remarkBlockIds,
+];
 
 /** Plain text with each `==highlight==`'s signs dropped, for a search
  * snippet, which shows the words and draws no highlight. It parses the text

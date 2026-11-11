@@ -2,7 +2,11 @@ import { render, screen } from "@testing-library/react";
 import ReactMarkdown from "react-markdown";
 import { describe, expect, it, vi } from "vitest";
 
-import { createNoteMarkdownComponents } from "./renderers";
+import { NOTE_SYNTAX_PLUGINS } from "../../lib/markdownSyntax";
+import {
+  createManualMarkdownComponents,
+  createNoteMarkdownComponents,
+} from "./renderers";
 
 vi.mock("./PdfPreview", () => ({
   PdfPreview: ({ src, label }: { src: string; label: string }) => (
@@ -109,5 +113,78 @@ describe("block embeds inside paragraphs", () => {
 
     expect(container.querySelector("p")).not.toBeNull();
     expect(container.querySelector("p img")).not.toBeNull();
+  });
+});
+
+describe("block anchors in the note renderers (#578)", () => {
+  function renderNote(markdown: string): HTMLElement {
+    return render(
+      <ReactMarkdown
+        remarkPlugins={NOTE_SYNTAX_PLUGINS}
+        components={createNoteMarkdownComponents(
+          VAULT_ID,
+          "Notes/Entry",
+          new Map(),
+        )}
+      >
+        {markdown}
+      </ReactMarkdown>,
+    ).container;
+  }
+
+  it("keeps a heading and a block that share a name as two elements", () => {
+    renderNote("## Notes\n\nA paragraph. ^notes\n");
+
+    expect(document.getElementById("notes")?.tagName).toBe("H2");
+    const block = document.getElementById("^notes");
+    expect(block?.tagName).toBe("P");
+    expect(block?.textContent).toBe("A paragraph.");
+  });
+
+  it.each([
+    ["a list item", "- one\n- two ^abc", "LI"],
+    ["a plain quote", "> Quoted. ^abc", "BLOCKQUOTE"],
+    ["a callout", "> [!note] Title\n> Body. ^abc", "DIV"],
+    ["a folding callout", "> [!tip]- Title\n> Body. ^abc", "DETAILS"],
+    ["a pull quote", "> [!quote] Someone\n> Said. ^abc", "FIGURE"],
+    ["a table", "| a |\n| - |\n| b |\n\n^abc", "DIV"],
+    [
+      "a line of a callout's first paragraph",
+      "> [!note] Title\n> Step. ^abc\n>\n> More.",
+      "P",
+    ],
+    [
+      "a callout that is only a title",
+      "> [!note] Title ^abc\n>\n> More.",
+      "DIV",
+    ],
+  ])("anchors %s on the element it draws", (_, markdown, tag) => {
+    const container = renderNote(markdown);
+
+    const anchored = container.querySelectorAll("[id='^abc']");
+    expect(anchored).toHaveLength(1);
+    expect(anchored[0].tagName).toBe(tag);
+    expect(container.textContent).not.toContain("^abc");
+  });
+
+  it("lets the manual choose the ids its blocks get", () => {
+    const { container } = render(
+      <ReactMarkdown
+        remarkPlugins={NOTE_SYNTAX_PLUGINS}
+        components={createManualMarkdownComponents(
+          new Map(),
+          (href, children) => (
+            <a href={href}>{children}</a>
+          ),
+          (id) => (id ? `help-${id}` : undefined),
+        )}
+      >
+        {"A paragraph. ^abc\n\n- item ^def\n\nPlain.\n"}
+      </ReactMarkdown>,
+    );
+
+    expect(
+      Array.from(container.querySelectorAll("[id]")).map((el) => el.id),
+    ).toEqual(["help-^abc", "help-^def"]);
   });
 });

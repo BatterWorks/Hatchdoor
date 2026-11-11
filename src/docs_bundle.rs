@@ -757,7 +757,8 @@ impl LinkTargets {
 /// `markdown` with every wikilink outside code rewritten to a Markdown link
 /// whose target is a page name, plus a `#heading` anchor when the link names
 /// a heading. `[[Page]]` becomes `[Page](name)`, `[[Page|label]]` becomes
-/// `[label](name)`, `[[Page#Heading]]` becomes `[Page > Heading](name#heading)`
+/// `[label](name)`, `[[Page#Heading]]` becomes `[Page > Heading](name#heading)`,
+/// `[[Page#^id]]`, a link to a block, becomes `[Page](name#^id)`
 /// and `[[#Heading]]` points into `this_page`. Embeds (`![[...]]`) and links
 /// that name no bundled page are left as written and returned in the second
 /// value, so a test can insist there are none.
@@ -879,13 +880,18 @@ fn link_markdown(
     } else {
         targets.resolve(page_part)?
     };
+    // `#^id` names a block, not a heading (#578): the reader anchors the
+    // block as `^id`, so the id goes through as written and stays out of a
+    // label that has a page name to show.
+    let block = heading.is_some_and(|heading| heading.starts_with('^'));
     let label = match (alias, heading) {
         (Some(alias), _) if !alias.is_empty() => alias.to_string(),
         (_, Some(heading)) if page_part.is_empty() => heading.to_string(),
-        (_, Some(heading)) => format!("{page_part} > {heading}"),
+        (_, Some(heading)) if !block => format!("{page_part} > {heading}"),
         _ => page_part.to_string(),
     };
     let anchor = match heading {
+        Some(heading) if block => Some(heading.to_string()),
         Some(heading) if !heading.is_empty() => Some(slugify(heading)),
         _ => None,
     };
@@ -1004,7 +1010,16 @@ mod tests {
                 let target = page(name).unwrap_or_else(|| {
                     panic!("{path} links to {destination}, which is not a bundled page")
                 });
-                if !anchor.is_empty() {
+                if let Some(block_id) = anchor.strip_prefix('^') {
+                    assert!(
+                        target
+                            .markdown
+                            .lines()
+                            .any(|line| line.trim_end().ends_with(&format!(" ^{block_id}"))),
+                        "{path} links to {destination}, but {} has no such block",
+                        target.name
+                    );
+                } else if !anchor.is_empty() {
                     assert!(
                         target
                             .markdown
@@ -1058,6 +1073,22 @@ mod tests {
              [The layer system > Demoted layers](concepts/the-layer-system#demoted-layers) \
              and [Upward](concepts/here#upward).\n\
              | a | [layer](concepts/the-layer-system) |\n"
+        );
+    }
+
+    #[test]
+    fn a_block_link_keeps_its_id_as_the_anchor() {
+        let targets = LinkTargets::new(["Home.md", "Guides/Setup.md"].into_iter());
+        let (markdown, unresolved) = rewrite_wikilinks(
+            "[[Setup#^a1b2c3]], [[Setup#^a1b2c3|that step]] and [[Setup#abc]].\n",
+            "home",
+            &targets,
+        );
+        assert!(unresolved.is_empty());
+        assert_eq!(
+            markdown,
+            "[Setup](guides/setup#^a1b2c3), [that step](guides/setup#^a1b2c3) \
+             and [Setup > abc](guides/setup#abc).\n"
         );
     }
 

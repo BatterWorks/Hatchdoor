@@ -14,11 +14,7 @@ import { readErrorMessage } from "../api/apiError";
 import rehypeKatex from "rehype-katex";
 
 import { noteInSyncConflict } from "../app/vaultSlotLogic";
-import {
-  parseFrontmatter,
-  stripBlockIds,
-  stripVaultNoteLinks,
-} from "../lib/markdown";
+import { parseFrontmatter, stripVaultNoteLinks } from "../lib/markdown";
 import {
   duplicateTitleHeadingLine,
   extractMarkdownHeadings,
@@ -103,6 +99,7 @@ import {
   resolveAssetTargets,
   resolveNoteTargets,
   useResolvedWikilinks,
+  wikilinkAnchor,
 } from "./note-page/wikilinks";
 
 /** The browser remembers whether notes open rendered or in the editor. */
@@ -881,11 +878,10 @@ export function NotePage({
   // What a reader sees of the body: comments hidden (#573), lines kept, so
   // every rendered block still maps to its line in the file.
   const visibleBody = useMemo(() => hideComments(parsed.body), [parsed.body]);
-  const renderInput = stripBlockIds(visibleBody);
   const noteRelativePath = note?.relative_path ?? "";
   const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
     vaultId,
-    renderInput,
+    visibleBody,
     noteRelativePath,
   );
   // The live editor's wikilinks, resolved by the server through the reading
@@ -899,7 +895,7 @@ export function NotePage({
   );
   // While resolution is in flight the rendered tree still describes the
   // previous document, so every block range on screen is stale (D28).
-  const settling = resolvedFor !== renderInput;
+  const settling = resolvedFor !== visibleBody;
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
@@ -1771,23 +1767,18 @@ export function NotePage({
       missing: !hit,
     };
   };
-  // Opens the note at the heading when the target names one. A `^block`
-  // reference carries its id as the fragment, the way the reading view's
-  // link does; neither view has a block to scroll to, so it opens at the top.
+  // Opens the note at the heading or the block the target names, by the
+  // anchor the reading view's link carries. The editor has no block to scroll
+  // to, so a block link opened into it lands at the top.
   const openNoteTarget = async (target: string) => {
     const hit = await resolveNoteLink(target);
     if (!hit) {
       return;
     }
-    const hashIdx = target.indexOf("#");
-    const caretIdx = target.indexOf("^");
-    const anchor =
-      hashIdx >= 0
-        ? `#${slugifyHeading(target.slice(hashIdx + 1))}`
-        : caretIdx >= 0
-          ? `#${target.slice(caretIdx + 1)}`
-          : "";
-    navigate(`/v/${encodeURIComponent(vaultId)}/n/${hit.slug}${anchor}`);
+    const anchor = wikilinkAnchor(target);
+    navigate(
+      `/v/${encodeURIComponent(vaultId)}/n/${hit.slug}${anchor ? `#${anchor}` : ""}`,
+    );
   };
 
   const formatNoteLink = (candidate: ExplorerNote): string => {
