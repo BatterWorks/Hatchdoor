@@ -151,11 +151,11 @@ vault you control.
 
 ## How Hatchdoor Compares
 
-The MCP-for-Obsidian field is crowded. The honest short version: if you live
-inside the Obsidian app and want the smallest possible bridge to it, the
-plugin-based tools are fine. Hatchdoor is for when you want the vault served
-independently of Obsidian: from a homelab box, for browsers and agents at
-once, across more than one vault.
+Tools for agents working with Obsidian vaults include Obsidian's own tools
+and third-party bridges. If you live inside the Obsidian app and want the
+smallest possible bridge to it, the plugin-based tools are fine. Hatchdoor is
+for when you want the vault served independently of Obsidian: from a homelab
+box, for browsers and agents at once, across more than one vault.
 
 | | Hatchdoor | [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian) | [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) | [Basic Memory](https://github.com/basicmachines-co/basic-memory) | [OpenKnowledge](https://github.com/inkeep/open-knowledge) |
 |---|---|---|---|---|---|
@@ -165,6 +165,14 @@ once, across more than one vault.
 | Serves multiple vaults | ✅ one server, per-vault git sync | ❌ | ❌ | ✅ projects | ❌ one folder per instance |
 | Write safety for agent edits | Atomic writes, optimistic concurrency | Via plugin REST API | — | Overwrite guards | — |
 | Deploys as a service | ✅ Docker/Podman, rootless, token auth | ❌ desktop-bound | ❌ | ❌ local process (cloud is paid) | ❌ local CLI app |
+
+Obsidian also offers its own agent tooling. [Obsidian CLI](https://help.obsidian.md/cli)
+reads, searches and edits notes through the desktop app, which must be running.
+[Obsidian Headless](https://help.obsidian.md/headless) runs Obsidian Sync and
+Obsidian Publish without the desktop app, but does not itself serve the vault.
+The [obsidian-skills repository](https://github.com/kepano/obsidian-skills)
+teaches agents Obsidian Markdown, Bases, JSON Canvas and the CLI. Hatchdoor
+serves the vault from a server with a web UI and MCP, without Obsidian installed.
 
 Basic Memory and OpenKnowledge are good projects solving adjacent problems
 (agent memory, an AI-native editor). Hatchdoor overlaps them only where your
