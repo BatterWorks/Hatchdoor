@@ -150,3 +150,21 @@ _Avoid_: Analytics, statistics, phone-home, diagnostics
 **Install ID**:
 The random identifier a usage report carries so that reports from one instance count as one install. It exists only while the usage report is on, is derived from nothing on the machine, and is replaced by a new one each time the report is turned off and on again. Distinct from a Vault ID, which never leaves the instance.
 _Avoid_: Instance ID, device ID, user ID
+
+### People and access (planned for 3.0)
+
+**Person**:
+Someone who uses a shared instance under their own sign-in, with agents of their own. A person reaches only the Vaults they own or have been granted.
+_Avoid_: User, account, member (when meant as the human)
+
+**Admin**:
+A person who manages the other people on an instance and can reach every Vault. Only an admin can add a Vault from a folder that already exists on the server.
+_Avoid_: Superuser, root, owner (an owner holds one Vault, an admin the instance)
+
+**Home folder**:
+The folder on the server that belongs to one person, made when that person is added. A person adds Vaults only inside it, either empty under a name they choose or cloned from a Git address, and never points Hatchdoor at any other folder.
+_Avoid_: Personal Vault (a home folder holds Vaults, it is not one), user directory
+
+**Owner**:
+The person whose home folder holds a Vault. The owner and the admin decide who else is granted that Vault.
+_Avoid_: Creator, author
