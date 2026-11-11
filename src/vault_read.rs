@@ -19,12 +19,17 @@ use crate::vault_registry::VaultId;
 use crate::vault_runtime::{IndexedAssets, VaultCapabilities, VaultCollectionRuntime};
 
 mod assets;
+mod link_findings;
 mod query;
 mod saved_query;
 mod sections;
 mod text_match;
 
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, encode_relative_path};
+pub use link_findings::{
+    LINK_FINDINGS_DEFAULT_LIMIT, LINK_FINDINGS_MAX_LIMIT, LinkFinding, LinkFindingKind,
+    LinkFindingsResponse,
+};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
 pub use saved_query::{
     SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryEvaluation,
@@ -206,6 +211,7 @@ impl VaultReadError {
             // A text match (ADR-46), reported by MCP's `find_text`; no HTTP
             // route runs one, so the HTTP adapter gives it no status yet.
             | "invalid_text_match"
+            | "invalid_link_findings_cursor"
             // A section read (#502), reported by MCP's `get_note_section`;
             // no HTTP route runs one either.
             | "invalid_heading_selection"
@@ -1257,9 +1263,8 @@ impl<'a> VaultReadCore<'a> {
         // while the snapshot loads. A Vault the gate below refuses gets no
         // history read at all.
         let dating = self.note_dating(vault_id);
-        // The one report that counts words rather than rows, so the one read
-        // that asks for Markdown text. Every other collection read projects
-        // structure alone and never pays for it.
+        // Counting words needs Markdown text, unlike structural statistics.
+        // Load it from the same snapshot as the note identities.
         let projection = self.collection_with(
             VaultScope::One(vault_id),
             NoteBodies::Load,
@@ -1680,7 +1685,7 @@ impl<'a> VaultReadCore<'a> {
     }
 
     /// [`Self::collection`] for a projection that reads Markdown text rather
-    /// than structure. Only the detailed stats report does, and it takes the
+    /// than structure. Detailed statistics and broken-link findings take the
     /// bodies from the same snapshot read as the note list so both describe
     /// one published generation.
     fn collection_with<T>(
@@ -2321,29 +2326,7 @@ fn detailed_stats_for(
             .then_with(|| a.folder.cmp(&b.folder))
     });
 
-    let linked_sources: BTreeSet<&str> = snapshot
-        .links
-        .iter()
-        .map(|link| link.source_slug.as_str())
-        .collect();
-    let linked_targets: BTreeSet<&str> = snapshot
-        .links
-        .iter()
-        .map(|link| link.target_slug.as_str())
-        .collect();
-    let mut orphan_notes: Vec<NoteRef> = snapshot
-        .notes
-        .iter()
-        .filter(|note| {
-            !linked_sources.contains(note.slug.as_str())
-                && !linked_targets.contains(note.slug.as_str())
-        })
-        .map(|note| NoteRef {
-            title: note.title.clone(),
-            slug: note.slug.clone(),
-        })
-        .collect();
-    orphan_notes.sort_by(|a, b| a.title.cmp(&b.title));
+    let orphan_notes = link_findings::orphan_notes(snapshot);
 
     let mut no_tag_notes: Vec<NoteRef> = snapshot
         .notes
@@ -3129,6 +3112,156 @@ mod tests {
     // -----------------------------------------------------------------------
     // Text match: every Note containing one literal string (#500, ADR-46)
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn link_findings_reports_missing_targets_outside_code() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[(
+                "Home.md",
+                "[[Absent]] [missing](Gone.md) `[[Inline]]`\n```md\n[[Fenced]]\n```\n![[missing.png]]",
+            )],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let result = reads
+            .find_link_problems(
+                workspace.vault_ids[0],
+                super::LinkFindingKind::BrokenLinks,
+                None,
+                None,
+            )
+            .expect("findings");
+        assert_eq!(result.data.total, 2);
+        assert_eq!(
+            serde_json::to_value(&result.data.findings).unwrap(),
+            serde_json::json!([
+                {"target": "Absent", "notes": [{"title": "Home", "slug": "home"}]},
+                {"target": "Gone.md", "notes": [{"title": "Home", "slug": "home"}]}
+            ])
+        );
+    }
+
+    #[test]
+    fn link_findings_orphans_agree_with_stats_and_dead_ends_are_paged() {
+        use super::LinkFindingKind::{DeadEnds, Orphans};
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Home.md", "[[Plan]]"),
+                ("Plan.md", "A linked destination."),
+                ("Alone.md", "An isolated note."),
+                ("Broken.md", "[[Missing]]"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let id = workspace.vault_ids[0];
+        let orphans = reads
+            .find_link_problems(id, Orphans, None, None)
+            .expect("orphans")
+            .data;
+        let stats = reads.statistics_detail(id).expect("stats").stats;
+        assert_eq!(
+            serde_json::to_value(&orphans.findings).unwrap(),
+            serde_json::to_value(stats.orphan_notes).unwrap()
+        );
+        assert_eq!(orphans.total, 2);
+        let page = reads
+            .find_link_problems(id, DeadEnds, Some(2), None)
+            .expect("first page")
+            .data;
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            serde_json::to_value(&page.findings).unwrap(),
+            serde_json::json!([
+                {"title":"Alone", "slug":"alone"}, {"title":"Broken", "slug":"broken"}
+            ])
+        );
+        let last = reads
+            .find_link_problems(id, DeadEnds, Some(2), page.next_cursor.as_deref())
+            .expect("last page")
+            .data;
+        assert_eq!(last.total, 3);
+        assert_eq!(
+            serde_json::to_value(&last.findings).unwrap(),
+            serde_json::json!([{"title":"Plan", "slug":"plan"}])
+        );
+        assert!(last.next_cursor.is_none());
+        assert!(
+            reads
+                .find_link_problems(id, DeadEnds, None, Some("999"))
+                .unwrap()
+                .data
+                .findings
+                .is_empty()
+        );
+        let error = reads
+            .find_link_problems(id, DeadEnds, None, Some("bad"))
+            .unwrap_err();
+        assert_eq!(error.public_code(), "invalid_link_findings_cursor");
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn link_findings_keep_source_context_ambiguity_and_one_generation() {
+        use super::LinkFindingKind::BrokenLinks;
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                (
+                    "Root.md",
+                    "[[Duplicate]] [path](../Target.md) [[Shared missing]] [[Shared missing]]",
+                ),
+                (
+                    "a/Source.md",
+                    "[[Duplicate]] [path](../Target.md) [[Shared missing]]",
+                ),
+                ("a/Duplicate.md", "First copy."),
+                ("b/Duplicate.md", "Second copy."),
+                ("Target.md", "A real destination."),
+                ("archive/.hatchdoor-layer", "archive"),
+                ("archive/Old.md", "[[Hidden missing]]"),
+                (".trash/Trashed.md", "[[Trash missing]]"),
+            ],
+        )]);
+        let id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        // A note added after publication must not change this generation's resolution.
+        std::fs::write(
+            workspace.vault_paths[0].join("Shared missing.md"),
+            "New destination.",
+        )
+        .unwrap();
+        let result = reads
+            .find_link_problems(id, BrokenLinks, Some(2), None)
+            .unwrap()
+            .data;
+        assert_eq!(result.total, 4);
+        assert_eq!(
+            serde_json::to_value(&result.findings).unwrap(),
+            serde_json::json!([
+                {"target":"../Target.md", "notes":[{"title":"Root", "slug":"root"}]},
+                {"target":"Duplicate", "notes":[{"title":"Root", "slug":"root"}]}
+            ])
+        );
+        let last = reads
+            .find_link_problems(id, BrokenLinks, Some(2), result.next_cursor.as_deref())
+            .unwrap()
+            .data;
+        assert_eq!(last.total, 4);
+        assert_eq!(
+            serde_json::to_value(&last.findings).unwrap(),
+            serde_json::json!([
+                {"target":"Hidden missing", "notes":[{"title":"Old", "slug":"old"}]},
+                {"target":"Shared missing", "notes":[{"title":"Root", "slug":"root"}, {"title":"Source", "slug":"source"}]}
+            ])
+        );
+        assert!(last.next_cursor.is_none());
+        let restricted = reads
+            .on_surface(BrowseSurface::DefaultOnly)
+            .find_link_problems(id, BrokenLinks, None, None)
+            .unwrap();
+        assert_eq!(restricted.data.total, 3);
+    }
 
     fn text(needle: &str) -> TextMatchRequest {
         TextMatchRequest {

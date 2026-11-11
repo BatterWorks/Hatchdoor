@@ -75,6 +75,30 @@ pub fn build_link_graph(
     (outgoing_by_slug, backlinks_by_slug)
 }
 
+impl VaultIndex {
+    /// Missing or ambiguous note targets, preserving their written spelling.
+    /// Uses the graph's scanners and resolvers without changing its edges.
+    pub(crate) fn unresolved_note_targets(&self, content: &str, folder: &str) -> Vec<String> {
+        let (wiki, _) = extract_wikilink_targets(content);
+        let mut targets: Vec<String> = wiki
+            .into_iter()
+            .filter(|target| {
+                self.resolve_wikilink_match(target, folder)
+                    .is_none_or(|found| !found.unique)
+            })
+            .collect();
+        targets.extend(
+            note_link_destinations(content)
+                .into_iter()
+                .filter(|destination| self.resolve_note_link(destination, folder).is_none())
+                .map(str::to_owned),
+        );
+        targets.sort();
+        targets.dedup();
+        targets
+    }
+}
+
 /// How many note links and attachment embeds one note writes in each form,
 /// for its Vault's link style (ADR-33). Reads them the way the link graph
 /// does: wikilinks and `![[...]]` embeds against Markdown note links and

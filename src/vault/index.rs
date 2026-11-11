@@ -51,14 +51,10 @@ impl VaultIndex {
         config: &VaultScanConfig,
     ) -> io::Result<Self> {
         let root = root.as_ref().to_path_buf();
-        let mut by_slug = HashMap::new();
-        let mut by_title: HashMap<String, Vec<String>> = HashMap::new();
-        let mut by_name_slug: HashMap<String, Vec<String>> = HashMap::new();
-        let mut ordered_slugs = Vec::new();
+        let mut catalog = Self::link_resolution_catalog(Vec::new());
         let mut markdown_paths = Vec::new();
         let mut asset_paths = BTreeSet::new();
         let mut assets_by_name: HashMap<String, Vec<String>> = HashMap::new();
-        let mut note_paths = NotePaths::default();
 
         // Markers are collected before pruning: a marker inside a directory a
         // noise pattern would prune is still read, so per-deployment noise
@@ -182,7 +178,7 @@ impl VaultIndex {
                 .to_string();
 
             let name_slug = note_slug_base(&stem);
-            let slug = unique_slug(&name_slug, &by_slug);
+            let slug = unique_slug(&name_slug, &catalog.by_slug);
             let note = NoteEntry {
                 title: stem.clone(),
                 slug: slug.clone(),
@@ -191,25 +187,17 @@ impl VaultIndex {
                 layer: layers.layer_for(&relative_without_ext).map(str::to_string),
             };
 
-            by_title
-                .entry(normalize_title(&stem))
-                .or_default()
-                .push(slug.clone());
-            by_name_slug
-                .entry(name_slug)
-                .or_default()
-                .push(slug.clone());
-            note_paths.insert(&relative_without_ext, &slug);
-            by_slug.insert(slug.clone(), note);
-            ordered_slugs.push(slug);
+            catalog.register_note(note, name_slug);
         }
 
-        ordered_slugs.sort_by(|left_slug, right_slug| {
-            let left = by_slug
+        catalog.ordered_slugs.sort_by(|left_slug, right_slug| {
+            let left = catalog
+                .by_slug
                 .get(left_slug)
                 .map(|entry| entry.relative_path.as_str())
                 .unwrap_or("");
-            let right = by_slug
+            let right = catalog
+                .by_slug
                 .get(right_slug)
                 .map(|entry| entry.relative_path.as_str())
                 .unwrap_or("");
@@ -221,20 +209,54 @@ impl VaultIndex {
         for paths in assets_by_name.values_mut() {
             paths.sort();
         }
-        note_paths.sort();
+        catalog.note_paths.sort();
+        catalog.asset_paths = asset_paths;
+        catalog.assets_by_name = assets_by_name;
+        catalog.layers = layers;
+        Ok(catalog)
+    }
 
-        Ok(Self {
-            by_slug,
-            by_title,
-            by_name_slug,
-            ordered_slugs,
-            asset_paths,
-            assets_by_name,
-            note_paths,
+    /// A resolution-only catalogue from already published note identities.
+    /// No filesystem reads, assets or graph: callers must not use it for reads.
+    pub(crate) fn link_resolution_catalog(mut notes: Vec<NoteEntry>) -> Self {
+        notes.sort_by(|a, b| {
+            a.layer
+                .is_some()
+                .cmp(&b.layer.is_some())
+                .then_with(|| a.relative_path.cmp(&b.relative_path))
+        });
+        let mut catalog = Self {
+            by_slug: HashMap::new(),
+            by_title: HashMap::new(),
+            by_name_slug: HashMap::new(),
+            ordered_slugs: Vec::new(),
+            asset_paths: BTreeSet::new(),
+            assets_by_name: HashMap::new(),
+            note_paths: NotePaths::default(),
             outgoing_by_slug: HashMap::new(),
             backlinks_by_slug: HashMap::new(),
-            layers,
-        })
+            layers: LayerMap::default(),
+        };
+        for note in notes {
+            let name_slug = note_slug_base(&note.title);
+            catalog.register_note(note, name_slug);
+        }
+        catalog.note_paths.sort();
+        catalog
+    }
+
+    fn register_note(&mut self, note: NoteEntry, name_slug: String) {
+        self.by_title
+            .entry(normalize_title(&note.title))
+            .or_default()
+            .push(note.slug.clone());
+        self.by_name_slug
+            .entry(name_slug)
+            .or_default()
+            .push(note.slug.clone());
+        self.note_paths.insert(&note.relative_path, &note.slug);
+        self.ordered_slugs.push(note.slug.clone());
+        self.by_slug.insert(note.slug.clone(), note);
     }
 
     pub fn ordered_entries(&self) -> Vec<NoteEntry> {

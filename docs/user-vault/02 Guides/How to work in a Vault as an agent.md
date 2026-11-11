@@ -43,6 +43,8 @@ Use keyword search to find the notes most relevant to an exact term:
 
 A query that is a single tag, such as `#area/health`, runs as a tag match whatever mode you ask for.
 
+Use `find_link_problems` with one `vault_id` and `kind` to list `broken_links`, `orphans` or `dead_ends`. An orphan has no incoming or outgoing resolved links, the same meaning as the statistics page. A note linking out but never linked to appears under neither orphans nor dead ends. Each finding asks for a judgement: an isolated note can be useful, and a missing target can be a deliberate placeholder. Nothing is repaired. Follow `next_cursor` to read the next page; `total` counts findings, not a score.
+
 Use `resolve_wikilink` when the user names a note as an Obsidian wikilink target.
 
 Use `get_note` only after search or wikilink resolution has found the note you need.
@@ -57,7 +59,7 @@ When you need to know how Hatchdoor itself works, `read_docs` and `search_docs` 
 
 ## Stale collection reads
 
-`search_notes`, `query_notes`, `get_tree`, `get_graph`, `get_stats` and `recently_modified` answer from a published snapshot rather than reading every file, and they say how fresh that snapshot is. `partial: true` means not every enabled Vault contributed. The reason sits on that Vault's entry in `participants`, so read it there rather than guessing from `partial` alone.
+`search_notes`, `query_notes`, `get_tree`, `get_graph`, `get_stats`, `find_link_problems` and `recently_modified` answer from a published snapshot rather than reading every file, and they say how fresh that snapshot is. `partial: true` means at least one Vault's answer is not current or could not contribute. The reason sits on that Vault's entry in `participants`, so read it there rather than guessing from `partial` alone.
 
 An entry reading `stale` is the case you can do something about: that Vault's snapshot is known to be behind its Markdown. Call `refresh_vault` with its `vault_id` to ask for the index turn that republishes it, then read again. Like every Vault-management tool, `refresh_vault` needs write mode; on a read-only connection, wait a few seconds and read again, since the turn is usually already queued.
 

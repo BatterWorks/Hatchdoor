@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Agents can use `find_link_problems` to page through one Vault's broken or ambiguous note links, isolated notes and dead ends. The read-only lists carry no score and change nothing; each finding needs a judgement. [#575]
 - An agent that connects over MCP is now told to read the manual page *How to work in a Vault as an agent* before its first write, so it learns to search before creating a note, read a note before changing it and prefer small edits without you pointing it there. *Connect your agent* gains an example skill to copy into your agent's skills folder, which sends it to the same page on the Hatchdoor it is connected to. [#568]
 
 ### Changed
@@ -43,6 +44,7 @@
 - Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
 - A Git sync no longer destroys a note kept in a path your ignore rules cover. Hatchdoor writes notes in folders a `.gitignore`, `.git/info/exclude` or `core.excludesFile` ignores, and never commits them, so they exist only on that disk. When the remote then brought a file at the same path, or a plain file named like an ignored folder, or a folder named like an ignored file, the sync replaced or deleted the note and still reported the Vault as ready. The sync now stops before writing anything and reports a conflict that names the notes in the way, as it does for any other local edit the remote would overwrite. An ignored note the remote does not touch never blocks a sync, nor does a submodule the remote moves. The troubleshooting guide says how to clear this kind of conflict, which a recovery branch cannot. [#623]
 
+[#575]: https://github.com/BatterWorks/Hatchdoor/issues/575
 [#568]: https://github.com/BatterWorks/Hatchdoor/issues/568
 [#569]: https://github.com/BatterWorks/Hatchdoor/issues/569
 [#621]: https://github.com/BatterWorks/Hatchdoor/issues/621

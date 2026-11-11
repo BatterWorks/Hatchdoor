@@ -1118,6 +1118,7 @@ mod tests {
                 "get_attachment",
                 "get_attachment_import_config",
                 "query_notes",
+                "find_link_problems",
                 "find_text",
                 "evaluate_saved_query",
                 "recently_modified",
@@ -3783,6 +3784,80 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Text match (#500, ADR-46)
     // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn find_link_problems_works_read_only_and_in_batch_with_a_strict_schema() {
+        let (state, _tmp) = test_state();
+        // This fixture has Home -> Plan and MCP writes disabled.
+        let body = call_tool(&state, "find_link_problems", json!({"kind":"dead_ends"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["data"]["total"], 1, "{body:#}");
+        assert_eq!(
+            content["data"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["findings", "kind", "next_cursor", "total", "vault_id"]
+        );
+        assert_eq!(
+            content["data"]["findings"],
+            json!([{"title":"Plan", "slug":"plan"}])
+        );
+        let catalogue = tools_list_result(&state).await;
+        let tool = tool_named(&catalogue, "find_link_problems");
+        let validator = jsonschema::validator_for(&tool["outputSchema"]).expect("valid schema");
+        assert!(validator.is_valid(content), "{content:#}");
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert!(tool["description"].as_str().unwrap().len() <= 2048);
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 200);
+        for kind in ["broken_links", "orphans"] {
+            let reply = call_tool(&state, "find_link_problems", json!({"kind":kind})).await;
+            let data = &reply["result"]["structuredContent"];
+            assert!(validator.is_valid(data), "{reply:#}");
+            assert_eq!(data["data"]["total"], 0);
+        }
+        let vault_id = content["data"]["vault_id"].clone();
+        let batch = call_tool(
+            &state,
+            "batch",
+            json!({"operations":[
+                {"op":"find_link_problems", "arguments":{"vault_id":vault_id, "kind":"dead_ends"}}
+            ]}),
+        )
+        .await;
+        assert_eq!(
+            batch["result"]["structuredContent"]["items"][0]["ok"], true,
+            "{batch:#}"
+        );
+        assert_eq!(
+            batch["result"]["structuredContent"]["items"][0]["result"],
+            *content
+        );
+        for arguments in [
+            json!({"kind":"unknown"}),
+            json!({"kind":"orphans", "extra":true}),
+        ] {
+            let refused = call_tool(&state, "find_link_problems", arguments).await;
+            assert_eq!(refused["error"]["code"], -32602, "{refused:#}");
+        }
+        let missing_id =
+            call_tool_unscoped(&state, "find_link_problems", json!({"kind":"orphans"})).await;
+        assert_eq!(missing_id["error"]["code"], -32602, "{missing_id:#}");
+        let refused = call_tool(
+            &state,
+            "find_link_problems",
+            json!({"kind":"orphans", "cursor":"bad"}),
+        )
+        .await;
+        assert_eq!(
+            refused["result"]["structuredContent"]["code"], "invalid_link_findings_cursor",
+            "{refused:#}"
+        );
+        assert_eq!(refused["result"]["structuredContent"]["retryable"], false);
+    }
 
     #[tokio::test]
     async fn find_text_counts_a_literal_string_across_every_layer_inside_the_envelope() {
