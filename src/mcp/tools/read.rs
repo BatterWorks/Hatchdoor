@@ -1034,13 +1034,19 @@ pub(super) fn search_docs_tool(arguments: Value) -> Result<Value, JsonRpcFailure
 /// without a `vault_id`: the shared registry generates the immutable ID
 /// atomically when the expected registry revision commits; every control of
 /// an existing Vault takes exactly one `vault_id`.
+///
+/// `create_vault` and `edit_vault` reach the core through
+/// `within_vault_mount`: an agent may name a folder on this machine only
+/// inside `VAULT_PATH` (ADR-54).
 pub(super) async fn create_vault_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let request: CreateVaultRequest = parse("create_vault", arguments)?;
     management_result::<results::CreateVaultResult>(
-        VaultCollectionManagement::new(&state).create(request).await,
+        VaultCollectionManagement::within_vault_mount(&state)
+            .create(request)
+            .await,
     )
 }
 
@@ -1061,7 +1067,7 @@ pub(super) async fn edit_vault_tool(
         archive_folder: args.archive_folder,
         commit_identity: args.commit_identity,
     };
-    let core = VaultCollectionManagement::new(&state);
+    let core = VaultCollectionManagement::within_vault_mount(&state);
     let result = match management_vault_id(&args.vault_id) {
         Ok(vault_id) => core.edit(vault_id, request).await,
         Err(error) => Err(error),
@@ -1408,7 +1414,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "create_vault",
-            "description": "Create a Vault definition with the shared revisioned collection contract. Read expected_registry_revision from list_vaults first; the create is rejected if the registry moved since. The registry assigns the immutable Vault ID after a successful create; use list_vaults to discover it.",
+            "description": "Create a Vault definition with the shared revisioned collection contract. Read expected_registry_revision from list_vaults first; the create is rejected if the registry moved since. The registry assigns the immutable Vault ID after a successful create; use list_vaults to discover it. A local or existing_git source must name a folder inside the Vault mount (VAULT_PATH), after symlinks and .. are resolved; any other folder is refused with vault_path_outside_mount, which is not retryable: only the maintainer can add such a folder, from the web app. A managed_git source is not affected.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1428,7 +1434,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "edit_vault",
-            "description": "Edit exactly one Vault definition with optimistic registry revision control. This replaces the definition wholesale rather than patching named fields: read the Vault from list_vaults, change what you mean to change, and send the rest back unchanged. name and source are required for that reason, and an omitted exclude_patterns, archive_folder, or commit_identity clears the stored value rather than preserving it. The one exception is https_credentials, whose explicit keep|remove|replace action exists so a secret never has to be resent to survive an edit.",
+            "description": "Edit exactly one Vault definition with optimistic registry revision control. This replaces the definition wholesale rather than patching named fields: read the Vault from list_vaults, change what you mean to change, and send the rest back unchanged. name and source are required for that reason, and an omitted exclude_patterns, archive_folder, or commit_identity clears the stored value rather than preserving it. The one exception is https_credentials, whose explicit keep|remove|replace action exists so a secret never has to be resent to survive an edit. An edit that moves a local or existing_git Vault to another folder must move it inside the Vault mount (VAULT_PATH), or it is refused with vault_path_outside_mount; a Vault the maintainer added outside the mount keeps its folder and stays editable in every other field, so send its path back unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

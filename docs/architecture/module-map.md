@@ -989,7 +989,9 @@ operations, `edit_prepared` with its `PendingEdit` and
 `PreparedEditError` (#639), (a configured Git branch must pass `git2::Branch::name_is_valid`,
 #638), store-owned `vault_path` resolution for runtime consumers, the
 crate-private `ensure_outside_instance_state` containment check the folder
-listing reuses to hide instance state,
+listing reuses to hide instance state, the crate-private
+`canonical_or_normalized` path resolution the management core's agent mount
+rule reuses (#700),
 a remote-backed source's own `poll_interval_secs` (issue #97's reopening
 finding 2: per-Vault, not scheduler-wide; `#[serde(default)]`s to 24h so a
 registry record written before this field existed keeps loading under the
@@ -2631,6 +2633,21 @@ state directory, whether notes were committed, and the commits the old
 remote lacks) reports what was kept; Settings shows it after the identity
 round trip.
 
+`VaultCollectionManagement::within_vault_mount` (#700, ADR-54) is the same
+core for a caller that may name a folder on this machine only inside the Vault
+mount (`AppState::vault_mount_root`, from `VAULT_PATH`); the MCP
+`create_vault` and `edit_vault` tools use it, the HTTP routes use `new`. Its
+`create` refuses a `local` path or `existing_git` repository that resolves,
+through the operating system first and `vault_registry::canonical_or_normalized`
+for a missing path, outside the resolved mount, with non-retryable
+`vault_path_outside_mount` (HTTP `403`, never reached there). Its `edit`
+checks only a source whose resolved folders (the repository and the folder
+read inside it) differ from the stored ones, compared as stored and never
+resolved again, or whose kind (`local`, `existing_git`) differs: once against a registry read
+before the save, so the refusal precedes the registry's readability error,
+and again inside `edit_prepared`'s preparation step against `PendingEdit::previous`,
+so a concurrent change cannot slip past. Managed Git is never checked.
+
 Discovery reports registry recovery as `recovery` when the persisted registry
 file itself is unreadable, and lists no Vaults then (#150). The
 credential-replacement retry skips a disabled Vault, which would otherwise
@@ -2649,7 +2666,9 @@ notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
 `vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
 `vault::{vault_link_style, count_link_forms}`, `VaultControlBlock::{vault_path,
-authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode`.
+authoritative_catalog}` for the link style, `vault_registry::canonical_or_normalized`
+for the mount rule, and `AppState`'s composed handles including `demo_mode` and
+`vault_mount_root`.
 
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
 `mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
@@ -3800,7 +3819,9 @@ directly by `every_management_error_code_keeps_its_historical_status`:
 `400`; `vault_not_found` is `404`; the registry-state conflicts
 (`duplicate_vault_name`, `vault_path_overlap`, the two identity-change
 refusals, `registry_revision_conflict`, `vault_disabled`,
-`capability_unavailable`) are `409`; `vault_registry_recovery_required` and
+`capability_unavailable`) are `409`; `vault_path_outside_mount` is `403`,
+declared only because every core code is, since no route asks the core for
+that rule (ADR-54); `vault_registry_recovery_required` and
 `vault_unavailable` are `503`; and
 `internal_error`/`registry_revision_exhausted` are `500`. On top of that the
 adapter adds the two statuses the core does not model: `201` for a creation and
@@ -4251,7 +4272,11 @@ existing-Vault control names `vault_id`. Revisioned registry management calls th
 Vault collection management core directly (#187) rather than proxying an HTTP
 handler, and answers with the same shared collection shapes HTTP returns;
 `create_vault` is the only zero-ID exception because the registry atomically
-generates its immutable ID. MCP
+generates its immutable ID. `create_vault` and `edit_vault` reach the core
+through `VaultCollectionManagement::within_vault_mount` (#700, ADR-54), so an
+agent can name a local folder only inside `VAULT_PATH`; the refusal,
+`vault_path_outside_mount`, carries `docs` pointing at the agent guide's
+"Adding or moving a Vault". MCP
 returns shared domain failures as structured error tool results. Since #255
 such a result signals its failure twice: `isError` on the result object, and
 `ok: false` inside the structured payload beside the domain error's own `code`,

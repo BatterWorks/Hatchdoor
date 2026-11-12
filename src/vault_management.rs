@@ -25,6 +25,7 @@
 //! which is a transport concern with no MCP counterpart.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use schemars::JsonSchema;
@@ -334,6 +335,7 @@ pub(crate) const MANAGEMENT_ERROR_CODES: &[&str] = &[
     "identity_change_requires_confirmation",
     "registry_revision_conflict",
     "checkout_set_aside_failed",
+    "vault_path_outside_mount",
     "vault_disabled",
     "capability_unavailable",
     "vault_registry_recovery_required",
@@ -407,6 +409,68 @@ fn registry_error(error: VaultRegistryError, vault_id: Option<VaultId>) -> Vault
         VaultRegistryError::InvalidDefinition(error) => definition_error(error, vault_id),
         VaultRegistryError::Storage(detail) => internal_error(detail, vault_id),
     }
+}
+
+/// The folders on this machine a source names: `checked`, which must sit
+/// inside the mount (a `local` path, an `existing_git` repository), and
+/// `read`, the folder Hatchdoor reads (the repository joined with its
+/// subdirectory).
+#[derive(Debug, PartialEq, Eq)]
+struct LocalFolders {
+    checked: PathBuf,
+    read: PathBuf,
+}
+
+impl LocalFolders {
+    /// The folders as the source spells them, unresolved. `None` for a
+    /// managed Git source, whose checkout Hatchdoor places itself (ADR-54
+    /// decision 4).
+    fn as_written(source: &VaultSource) -> Option<Self> {
+        match source {
+            VaultSource::Local { path } => Some(Self {
+                checked: path.clone(),
+                read: path.clone(),
+            }),
+            VaultSource::ExistingGit {
+                repository_path,
+                vault_subdirectory,
+                ..
+            } => Some(Self {
+                checked: repository_path.clone(),
+                read: vault_subdirectory.as_ref().map_or_else(
+                    || repository_path.clone(),
+                    |subdirectory| repository_path.join(subdirectory),
+                ),
+            }),
+            VaultSource::ManagedGit { .. } => None,
+        }
+    }
+
+    /// The same folders resolved through [`resolve_folder`].
+    fn resolved(source: &VaultSource) -> Option<Self> {
+        Self::as_written(source).map(|folders| Self {
+            checked: resolve_folder(&folders.checked),
+            read: resolve_folder(&folders.read),
+        })
+    }
+}
+
+/// A folder resolved the way the registry will resolve it when it saves:
+/// through the operating system first, as its `canonicalize` does, so
+/// `link/..` resolves through the symlink here exactly as it will there. Only
+/// a path that does not exist falls back to the registry's lexical form,
+/// which the registry then refuses as unreadable anyway.
+fn resolve_folder(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_| crate::vault_registry::canonical_or_normalized(path))
+}
+
+/// Who may name which folder (ADR-54). The web app may name any folder the
+/// process can read; an agent only one inside the Vault mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderScope {
+    Anywhere,
+    InsideMount,
 }
 
 fn vault_not_found(vault_id: VaultId) -> VaultOperationError {
@@ -585,11 +649,70 @@ fn vault_summary_for(
 /// together, and reconciling them in that order within one call is the behaviour this module exists to own.
 pub struct VaultCollectionManagement<'a> {
     state: &'a AppState,
+    folder_scope: FolderScope,
 }
 
 impl<'a> VaultCollectionManagement<'a> {
     pub fn new(state: &'a AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            folder_scope: FolderScope::Anywhere,
+        }
+    }
+
+    /// The same core for a caller that may name a folder on this machine
+    /// only inside the Vault mount (`VAULT_PATH`): the MCP tools (ADR-54). A
+    /// `create` or `edit` that names or moves to a folder outside it is
+    /// refused with `vault_path_outside_mount`; every other operation, and an
+    /// edit that leaves a Vault's folder where it is, behaves as from
+    /// [`Self::new`].
+    pub fn within_vault_mount(state: &'a AppState) -> Self {
+        Self {
+            state,
+            folder_scope: FolderScope::InsideMount,
+        }
+    }
+
+    /// Refuse a source whose local folder lies outside the mount, unless it
+    /// is the folder `previous` already names (ADR-54 decisions 1 and 2).
+    /// A caller from [`Self::new`] is never refused.
+    fn ensure_folder_inside_mount(
+        &self,
+        source: &VaultSource,
+        previous: Option<&VaultSource>,
+        vault_id: Option<VaultId>,
+    ) -> Result<(), VaultOperationError> {
+        if self.folder_scope == FolderScope::Anywhere {
+            return Ok(());
+        }
+        let Some(folders) = LocalFolders::resolved(source) else {
+            return Ok(());
+        };
+        // Unchanged means the same kind of source on the folders the
+        // registry saved, compared as saved: the registry stored them
+        // resolved, and resolving them again now would follow a symlink that
+        // appeared since. A change of kind on the same folder, such as a
+        // plain folder becoming a Local history repository, is a move.
+        if let Some(previous) = previous
+            && std::mem::discriminant(previous) == std::mem::discriminant(source)
+            && let Some(saved) = LocalFolders::as_written(previous)
+            && (LocalFolders::as_written(source).as_ref() == Some(&saved) || folders == saved)
+        {
+            return Ok(());
+        }
+        let resolved_mount = resolve_folder(&self.state.vault_mount_root);
+        if folders.checked.starts_with(&resolved_mount) {
+            return Ok(());
+        }
+        Err(VaultOperationError::new(
+            "vault_path_outside_mount",
+            format!(
+                "An agent can add or move a Vault only to a folder inside the Vault mount, {}. This folder is outside it, so nothing changed. The maintainer can add it from Settings in the Hatchdoor web app.",
+                resolved_mount.display()
+            ),
+            vault_id,
+            false,
+        ))
     }
 
     /// Discovery: every Vault this instance serves, with the collection
@@ -686,6 +809,7 @@ impl<'a> VaultCollectionManagement<'a> {
             Ok(VaultRegistryState::Recovery(recovery)) => return Err(recovery_error(&recovery)),
             Err(error) => return Err(internal_error(error.to_string(), None)),
         };
+        self.ensure_folder_inside_mount(&request.source, None, None)?;
 
         let definition = NewVaultDefinition {
             name: request.name,
@@ -733,6 +857,22 @@ impl<'a> VaultCollectionManagement<'a> {
             HttpsCredentialsPatch::Replace { .. }
         );
 
+        // Checked first against the definition read now, so a folder outside
+        // the mount is refused before the registry says whether it exists,
+        // and again below against the definition the save replaces, so a
+        // change that lands in between cannot slip past (ADR-54 decision 2).
+        if self.folder_scope == FolderScope::InsideMount
+            && let Ok(VaultRegistryState::Ready(snapshot)) = self.state.vault_registry.load()
+            && let Some(current) = snapshot.definition(vault_id)
+        {
+            self.ensure_folder_inside_mount(
+                &request.source,
+                Some(current.source()),
+                Some(vault_id),
+            )?;
+        }
+        let checked_source = request.source.clone();
+
         let edit = VaultDefinitionEdit {
             name: request.name,
             source: request.source,
@@ -751,6 +891,11 @@ impl<'a> VaultCollectionManagement<'a> {
                 vault_id,
                 edit,
                 |pending| {
+                    self.ensure_folder_inside_mount(
+                        &checked_source,
+                        Some(pending.previous),
+                        Some(vault_id),
+                    )?;
                     retired = self.retire_managed_checkout(vault_id, &pending)?;
                     Ok(())
                 },
@@ -1331,6 +1476,67 @@ mod tests {
             panic!("registry entered recovery");
         };
         snapshot
+    }
+
+    /// ADR-54: the check both `edit` sites call. An unchanged folder is the
+    /// same kind of source on the folders as the registry saved them; any
+    /// other source must resolve inside the mount, and `new` checks nothing.
+    #[test]
+    fn the_mount_rule_admits_only_unchanged_folders_outside_the_mount() {
+        let (mut state, _worker, directory) = test_state();
+        let mount = directory.path().join("mount");
+        let outside = directory.path().join("outside");
+        let inside = mount.join("inside");
+        std::fs::create_dir_all(&inside).expect("inside dir");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        state.vault_mount_root = mount.clone();
+        let outside = outside.canonicalize().expect("canonical outside");
+        let agent = VaultCollectionManagement::within_vault_mount(&state);
+        let refused = |result: Result<(), VaultOperationError>| {
+            assert_eq!(
+                result.expect_err("refused").code,
+                "vault_path_outside_mount"
+            );
+        };
+        let local = |path: &Path| VaultSource::Local {
+            path: path.to_path_buf(),
+        };
+        let history = |path: &Path| VaultSource::ExistingGit {
+            repository_path: path.to_path_buf(),
+            repository_url: None,
+            branch: None,
+            vault_subdirectory: None,
+            mode: VaultGitMode::LocalHistory,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+        };
+
+        let saved = local(&outside);
+        agent
+            .ensure_folder_inside_mount(&local(&outside), Some(&saved), None)
+            .expect("the saved folder, as listed");
+        agent
+            .ensure_folder_inside_mount(&local(&outside.join(".")), Some(&saved), None)
+            .expect("the saved folder, spelled differently");
+        refused(agent.ensure_folder_inside_mount(&local(&outside), None, None));
+        // A plain folder turned into a Local history repository in place
+        // would make Hatchdoor create `.git` outside the mount.
+        refused(agent.ensure_folder_inside_mount(&history(&outside), Some(&saved), None));
+
+        // A saved folder inside the mount that became a symlink to the
+        // outside is compared as saved, not as it resolves today.
+        let swapped = mount.join("swapped");
+        std::os::unix::fs::symlink(&outside, &swapped).expect("symlink");
+        refused(agent.ensure_folder_inside_mount(&local(&outside), Some(&local(&swapped)), None));
+
+        agent
+            .ensure_folder_inside_mount(&local(&inside), Some(&saved), None)
+            .expect("a move into the mount");
+        agent
+            .ensure_folder_inside_mount(&managed_git_source(900), Some(&saved), None)
+            .expect("managed Git places its own checkout");
+        VaultCollectionManagement::new(&state)
+            .ensure_folder_inside_mount(&local(&outside), None, None)
+            .expect("the web app may name any folder");
     }
 
     #[test]

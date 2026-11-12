@@ -46,6 +46,8 @@ Two switches apply on top of the token, each on its own:
 - **`HATCHDOOR_MCP_ENABLED`**: off by default. While it is off, `/mcp` returns `404`, as if the endpoint did not exist.
 - **`HATCHDOOR_MCP_WRITE_ENABLED`**: off by default, even when MCP is on. It separates an agent that can only read from one that can also create, edit, move or delete notes. [[MCP tools reference]] lists the tools each switch allows.
 
+Even with writes on, an agent can add or move a Vault only to a folder inside the Vault mount (`VAULT_PATH`). A note can hold text written to steer an agent, and without this limit such a note could get a folder like `/etc` or a home folder registered as a Vault and then read and changed through the note tools. A folder outside the mount can still be added from **Settings** in the web app, and an agent can then work in it like any other Vault.
+
 MCP also checks the request's `Origin` header against an allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`) as a defense against DNS-rebinding attacks, and validates the `MCP-Protocol-Version` header. Neither is a secret. Both run before the token check on every request.
 
 ### Where the MCP token works outside `/mcp`
