@@ -350,6 +350,7 @@ describe("overlapping writes", () => {
     expect(onSaved).toHaveBeenCalledWith(
       { content_hash: "h1" },
       "still typing",
+      "h0",
     );
     expect(hook.result.current.status).toBe("saved");
 
@@ -420,7 +421,8 @@ describe("a reply for the note just left (#658)", () => {
           baseHash,
           enabled: true,
           save,
-          onSaved: (result, content) => saved(noteKey, result, content),
+          onSaved: (result, content, sentAgainst) =>
+            saved(noteKey, result, content, sentAgainst),
         }),
       { initialProps: { noteKey: "a", baseHash: "a-1" } },
     );
@@ -454,7 +456,13 @@ describe("a reply for the note just left (#658)", () => {
     hook.rerender({ noteKey: "b", baseHash: "b-1" });
     await act(async () => replies[0]({ content_hash: "a-2" }));
 
-    expect(saved).toHaveBeenCalledWith("a", { content_hash: "a-2" }, "a text");
+    // The reply names the hash it replaced, even after the page moved on (#695).
+    expect(saved).toHaveBeenCalledWith(
+      "a",
+      { content_hash: "a-2" },
+      "a text",
+      "a-1",
+    );
     expect(hook.result.current.status).toBe("idle");
     expect(hook.result.current.isOwnWrite("a-2")).toBe(false);
     await act(async () => hook.result.current.commit("b text"));

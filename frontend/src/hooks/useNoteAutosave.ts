@@ -63,7 +63,10 @@ export function useNoteAutosave({
    * already superseded and conflicting on the user's next keystroke.
    */
   flushSave?: Sender;
-  onSaved?: (result: SaveResult, content: string) => void;
+  /** `sentAgainst` is the hash the save was written against, which a reply
+   * for the note just left needs to tell its own held edit from another
+   * (#695). */
+  onSaved?: (result: SaveResult, content: string, sentAgainst: string) => void;
 }) {
   const [status, setStatus] = useState<AutosaveStatus>("idle");
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -149,19 +152,20 @@ export function useNoteAutosave({
         while (current !== null && !stoppedRef.current) {
           setStatus("saving");
           try {
-            const result = await send(current, hashRef.current);
+            const sentAgainst = hashRef.current;
+            const result = await send(current, sentAgainst);
             if (noteKeyRef.current !== key) {
               // The page has moved on. The note this was for still books it
               // (its draft, through the closure captured above); the open
               // note's hash and queue are not this send's to touch.
-              onSaved?.(result, current);
+              onSaved?.(result, current, sentAgainst);
               return;
             }
             if (result?.content_hash) {
               hashRef.current = result.content_hash;
               ownHashesRef.current.add(result.content_hash);
             }
-            onSaved?.(result, current);
+            onSaved?.(result, current, sentAgainst);
           } catch (error) {
             if (noteKeyRef.current !== key) {
               // Refused for the note just left: its draft stays held for its

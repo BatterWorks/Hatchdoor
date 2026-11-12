@@ -1231,6 +1231,89 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
   });
 
+  /** Home's first save goes out and is held; more typing queues behind it;
+   * then the page moves to other before that save comes back (#695). */
+  async function leaveHomeWithNewerEdit(
+    disk: Record<string, { content: string; hash: string }>,
+  ) {
+    const held = holdHomeSave(disk);
+    renderWithNav(<Link to="/v/vault-1/n/home">Back home</Link>);
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    typeInOpenBlock("Home edited twice.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    await screen.findByText("Other body.");
+    return held;
+  }
+
+  it("moves the held newer edit onto a late save of the note just left (#695)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    mockTwoNotes(disk);
+    const held = await leaveHomeWithNewerEdit(disk);
+    expect(loadNoteDraft("vault-1", "home.md")?.baseContentHash).toBe("home-1");
+
+    await act(async () => held.release(false));
+    await waitFor(() => expect(disk.home.content).toBe("Home edited.\n"));
+    expect(loadNoteDraft("vault-1", "home.md")).toMatchObject({
+      content: "Home edited twice.\n",
+      baseContentHash: "home-saved",
+    });
+
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText("Home edited twice.");
+    expect(screen.queryByText(/has changed since/)).not.toBeInTheDocument();
+  });
+
+  it("leaves a held edit of the note just left on its own base when it is not the one the late save was sent against (#695)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    mockTwoNotes(disk);
+    const held = await leaveHomeWithNewerEdit(disk);
+    // Another tab held an edit of home made against an older version.
+    saveNoteDraft("vault-1", "home.md", {
+      vaultId: "vault-1",
+      relativePath: "home.md",
+      content: "Edit from another tab.\n",
+      baseContentHash: "home-0",
+      savedAt: Date.now(),
+    });
+
+    await act(async () => held.release(false));
+    await waitFor(() => expect(disk.home.content).toBe("Home edited.\n"));
+    expect(loadNoteDraft("vault-1", "home.md")?.baseContentHash).toBe("home-0");
+
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText(/has changed since/);
+  });
+
+  it("does not move this visit's own held edit of the note just left when its base is not the hash the late save replaced (#695)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    mockTwoNotes(disk);
+    const held = await leaveHomeWithNewerEdit(disk);
+    // The very copy this visit wrote, text and time unchanged, but on a base
+    // the held save was not sent against.
+    const own = loadNoteDraft("vault-1", "home.md")!;
+    saveNoteDraft("vault-1", "home.md", { ...own, baseContentHash: "home-0" });
+
+    await act(async () => held.release(false));
+    await waitFor(() => expect(disk.home.content).toBe("Home edited.\n"));
+    expect(loadNoteDraft("vault-1", "home.md")).toMatchObject({
+      content: "Home edited twice.\n",
+      baseContentHash: "home-0",
+    });
+  });
+
   it("never sends an edit made in the next note through the save of the one just left (#658)", async () => {
     const disk = {
       home: { content: "Home body.\n", hash: "home-1" },
