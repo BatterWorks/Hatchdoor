@@ -1781,7 +1781,7 @@ watching, application startup, and chunking (`NoteSections` for heading paths, #
 - A Section's span has one implementation, `NoteSections::span`. Neither `replace_section` nor a section read computes it another way (#502).
 - Wikilink resolution has one rule, `VaultIndex::resolve_wikilink_match`, which the link graph, the read core's resolve and resolve-batch reads and the write layer's rewriters all call (#626). The cache has no resolver of its own (#653). A target holding `/` matches a note's Vault-relative path in full or as a whole-segment suffix before any title fallback, and a leading `/` allows the full path alone; then the last segment matches a title with case folded; then its slug matches the slug a note's name folds to (`by_name_slug`), never a generated collision suffix such as `meeting-2`, so a link to a note that does not exist stays broken (ADR-28), and a folder the target names still ranks first there. Within a tier a full path beats a suffix, exact case beats folded case, the default surface beats a layer, and the note nearest the linking note's folder (the Vault root when there is none) wins; a remaining tie goes to path order and is reported as not unique. Titles, path keys, slugs and targets are compared NFC-normalised (`normalize_title`, `nfc_title`, `note_slug_base`), so a decomposed filename meets a composed link; the stored title and path keep their bytes.
 - A note link is a wikilink or a Markdown link whose destination, once any
-  `#anchor` is removed, ends `.md` (ADR-28), and both feed the same outgoing
+  `#anchor` is removed, ends `.md` in any case (ADR-28, #675), and both feed the same outgoing
   and backlink records. A Markdown target resolves by path from the linking
   note's folder, never by the wikilink title rule, and the two rules must not
   be merged. Links in code, image syntax and unused reference definitions do
@@ -2133,7 +2133,8 @@ current UTC month, zero-filled where no Note was created, and counting no Note
 from outside the window. Each entry's `created_count` counts Notes by created
 date (#300, ADR-29): a `created` property that reads as a date, else, for a
 Git-backed Vault, the commit that first added the Note through the Vault's
-`NoteHistory` (`git/note_history.rs`, held on its control block), else
+`NoteHistory` (`git/note_history.rs`, held on its control block), looked up
+by the Note's file name with its extension spelled as on disk (#675), else
 modification time. `created_date_status` reports `estimated` when history
 should have dated a Note and could not (shallow, unreadable) and `reading`
 while the walk is still running; the recent lists stay on modification
@@ -2722,7 +2723,11 @@ shared cache. `mark_vault_snapshot_behind_write` is the one stale-marking
 call that begins no attempt, so an Index turn already building still
 publishes; its caller holds the Vault's mutation guard, which is what lets
 that turn's own freshness verdict stay correct (#324). A published `VaultSnapshotRead` is structural: notes, links,
-tags, and the layer catalog. It carries no chunks — search reads those and
+tags, and the layer catalog. Each note row carries its file's `extension` as
+spelled on disk, read from the indexed path, and `VaultSnapshotNote::file_path`
+puts it back on the extension-free `relative_path` for Git dating and query
+file fields (#675). An Index turn treats a note whose file path changed, even
+only in its extension's case, as changed, so that path stays current. It carries no chunks — search reads those and
 their vectors through its own SQL rather than through a snapshot, so the
 `vault_chunk_vectors` join every collection read used to pay for is gone —
 and it carries note bodies only when the read asks for `NoteBodies::Load`.
@@ -3188,7 +3193,9 @@ neither fetches nor resets, checks out, polls, or pushes.
 Git-backed Vault by the author date of the commit that first added it, following
 renames forward across the whole repository, so a note moved into a Vault
 subdirectory keeps its date; a delete-then-recreate or a copy is new, and a
-shallow clone's graft commit yields `FirstAdd::Unknown` rather than a date. It
+shallow clone's graft commit yields `FirstAdd::Unknown` rather than a date.
+A note is a file ending `.md` in any case, as the Vault read model counts one
+(#637, #675). It
 walks once per `HEAD` on a background thread, keeps the result in memory, and
 extends it by only the new commits when `HEAD` descends from the cached one
 and the cached walk was not shallow. The tree at `HEAD` decides which notes
@@ -5472,7 +5479,8 @@ target, because the same filename in notes at two depths can be two files,
 and so is its wikilink cache, because a tie between namesakes goes to the
 one nearest the linking note (#626); it
 also sends Markdown note links (ADR-28, found by `markdownLinks.ts`, which
-skips code, images and wikilinks) as `note_link_targets` and rewrites each
+skips code, images and wikilinks and, like the server's `note_link_target`,
+takes a destination ending `.md` in any case, #675) as `note_link_targets` and rewrites each
 destination to the same note route, archived route or `/__missing__/` form a
 wikilink gets, so `renderers.tsx` needs no branch for them. Local Markdown
 images (`findMarkdownImages`) go out as `asset_targets` too, decoded, and a

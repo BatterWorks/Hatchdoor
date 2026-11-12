@@ -223,9 +223,10 @@ impl Subject {
     /// This subject's value on one Note, or `None` when the Note does not carry
     /// it. Only a property can be absent: every Note has a name and a path.
     ///
-    /// A snapshot row's `relative_path` drops the `.md` every Note file has,
-    /// so the name and path put it back: they describe the file, the way
-    /// Obsidian's `file.name` and `file.path` do.
+    /// A snapshot row's `relative_path` drops the Note file's extension, so
+    /// the name and path put it back as the file spells it, `.MD` included
+    /// (#675): they describe the file, the way Obsidian's `file.name` and
+    /// `file.path` do.
     pub(super) fn value<'a>(&self, note: &'a VaultSnapshotNote) -> Option<Cow<'a, Value>> {
         let (folder, stem) = match note.relative_path.rsplit_once('/') {
             Some((folder, stem)) => (folder, stem),
@@ -233,12 +234,12 @@ impl Subject {
         };
         match self {
             Self::Property(name) => property(note, name).map(Cow::Borrowed),
-            Self::FileName => Some(Cow::Owned(Value::from(format!("{stem}.md")))),
-            Self::FileBasename => Some(Cow::Owned(Value::from(stem))),
-            Self::FilePath => Some(Cow::Owned(Value::from(format!(
-                "{}.md",
-                note.relative_path
+            Self::FileName => Some(Cow::Owned(Value::from(format!(
+                "{stem}.{}",
+                note.extension
             )))),
+            Self::FileBasename => Some(Cow::Owned(Value::from(stem))),
+            Self::FilePath => Some(Cow::Owned(Value::from(note.file_path()))),
             Self::FileFolder => Some(Cow::Owned(Value::from(folder))),
         }
     }
@@ -978,6 +979,7 @@ mod tests {
             title: path.to_string(),
             slug: path.to_lowercase(),
             relative_path: path.to_string(),
+            extension: "md".to_string(),
             size_bytes: 0,
             mtime_ns: 0,
             layer: None,
@@ -1016,6 +1018,27 @@ mod tests {
             vec!["y", "z"],
             "a Vault with no more matches than the limit contributes all of them"
         );
+    }
+
+    /// `file.name` and `file.path` spell the extension as the file does, so a
+    /// `.MD` note is not reported as `.md` (#675).
+    #[test]
+    fn file_name_and_path_keep_the_case_of_the_extension() {
+        let note = VaultSnapshotNote {
+            title: "Upper".to_string(),
+            slug: "upper".to_string(),
+            relative_path: "notes/Upper".to_string(),
+            extension: "MD".to_string(),
+            size_bytes: 0,
+            mtime_ns: 0,
+            layer: None,
+            metadata: crate::vault::NoteMetadata::default(),
+        };
+        let value = |subject: Subject| subject.value(&note).map(|value| value.into_owned());
+
+        assert_eq!(value(Subject::FileName), Some(json!("Upper.MD")));
+        assert_eq!(value(Subject::FilePath), Some(json!("notes/Upper.MD")));
+        assert_eq!(value(Subject::FileBasename), Some(json!("Upper")));
     }
 
     #[test]

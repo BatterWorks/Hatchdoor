@@ -158,7 +158,7 @@ When two notes share a name, add part of the folder path to pick one: with `proj
 
 ## Markdown links to notes
 
-A plain Markdown link whose target is a `.md` file is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
+A plain Markdown link whose target is a `.md` file, in any case, is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
 
 - Relative to the note: `[the launch plan](../20-projects/Beacon%20Launch.md)`
 - From the Vault root: `[the launch plan](/20-projects/Beacon%20Launch.md)`
@@ -169,7 +169,7 @@ A plain Markdown link whose target is a `.md` file is a note link too, the form 
 
 The target is a path, not a title. Hatchdoor reads it the way it reads an attachment path: a leading `/` starts at the Vault root, otherwise it is tried from the linking note's own folder and then from the Vault root, and a bare filename such as `Beacon%20Launch.md` is found anywhere in the Vault, the nearest note of that name winning. A path that names a folder never falls back to a note of the same name elsewhere, so with two notes called `Plan`, `../a/Plan.md` always reaches `a/Plan`. Write a space as `%20`; a `%` that is not followed by two hex digits is read as a literal percent sign, so `Save%2020%%20now.md` still reaches `Save 20% now.md`. A target that names no note renders as a missing link rather than a link to nowhere.
 
-Only a target ending in `.md` counts. A link written without the extension, a link to any other file or to a web address, and image syntax pointing at a `.md` file, `![x](Note.md)`, are left as they always were. Links inside code are not links.
+Only a target ending in `.md` counts, in any case, so `[x](Report.MD)` is a note link like `[x](Report.md)`. A link written without the extension, a link to any other file or to a web address, and image syntax pointing at a `.md` file, `![x](Note.md)`, are left as they always were. Links inside code are not links.
 
 When a note is renamed or moved, Hatchdoor rewrites the Markdown links that point at it and keeps the form you wrote: a relative path is worked out again from the linking note, a path starting with `/` keeps its `/`, and a bare filename stays bare while that name still reaches the note. The link text is never changed. A reference-style link changes on its definition line only. Moving the note that holds the links rewrites them from its new folder so they still reach the same notes. Deleting a note removes each Markdown link to it and keeps the link text as plain words, so `see [the plan](Plan.md) today` becomes `see the plan today`. When Hatchdoor writes a path it escapes only spaces, `%`, `#`, square brackets and parentheses; accented and non-Latin letters stay readable.
 

@@ -19,6 +19,7 @@ import {
   baseFenceLines,
   formatCell,
   hasSavedQueryMarkup,
+  linkText,
   nextSort,
   remarkHideQueryMarkers,
   savedQueryKey,
@@ -680,5 +681,14 @@ describe("useSavedQueries evaluates once per change (#334)", () => {
     mockedApiFetch.mockImplementation(async () => answerAt(7));
     rerender({ hash: "hash-3", revision: 7, enabled: true });
     await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("linkText", () => {
+  it("drops a file name's extension in any case (#675)", () => {
+    expect(linkText("file.name", "Netflix.md", "Netflix")).toBe("Netflix");
+    expect(linkText("file.name", "Upper.MD", "Upper")).toBe("Upper");
+    expect(linkText("file.name", "Mixed.Md", "Mixed")).toBe("Mixed");
+    expect(linkText("file.path", "a/Upper.MD", "Upper")).toBe("a/Upper.MD");
   });
 });

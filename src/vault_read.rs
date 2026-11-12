@@ -2589,11 +2589,11 @@ fn created_date(
     };
     match history {
         HistoryRead::Ready(first_adds) => {
-            // A snapshot note's path is Vault-relative and drops the `.md`
-            // its file, and so its history, carries.
+            // History knows the note by its file's name, extension spelled
+            // as on disk (#675), under the Vault's folder in the repository.
             let path = match prefix {
-                Some(prefix) => format!("{prefix}/{}.md", note.relative_path),
-                None => format!("{}.md", note.relative_path),
+                Some(prefix) => format!("{prefix}/{}", note.file_path()),
+                None => note.file_path(),
             };
             match first_adds.lookup(&path) {
                 FirstAdd::Known(created) => (created, None),
@@ -2791,6 +2791,7 @@ mod parsing_tests {
             title: slug.to_string(),
             slug: slug.to_string(),
             relative_path: slug.to_string(),
+            extension: "md".to_string(),
             size_bytes: 0,
             mtime_ns: 0,
             layer: layer.map(str::to_string),
@@ -2961,6 +2962,19 @@ mod parsing_tests {
         let note = dated_note("ideas/Idea", mtime(2026, 9, 18), None);
         let git = git_dating(
             ready(&[("notes/ideas/Idea.md", Some(mtime(2026, 4, 2)))]),
+            Some("notes"),
+        );
+
+        assert_eq!(created_date(&note, &git), (mtime(2026, 4, 2), None));
+    }
+
+    /// History knows a `.MD` note by its own file name (#675).
+    #[test]
+    fn a_git_vault_dates_a_note_by_the_case_its_extension_is_written_in() {
+        let mut note = dated_note("ideas/Upper", mtime(2026, 9, 18), None);
+        note.extension = "MD".to_string();
+        let git = git_dating(
+            ready(&[("notes/ideas/Upper.MD", Some(mtime(2026, 4, 2)))]),
             Some("notes"),
         );
 

@@ -62,6 +62,19 @@ describe("noteLinkTarget", () => {
     });
     expect(noteLinkTarget("Install#x.md")).toBeNull();
   });
+
+  it("takes .md in any case, as the server does (#675)", () => {
+    expect(noteLinkTarget("Upper.MD")).toEqual({
+      rawPath: "Upper.MD",
+      anchor: "",
+    });
+    expect(noteLinkTarget("a/Mixed.Md#top")).toEqual({
+      rawPath: "a/Mixed.Md",
+      anchor: "top",
+    });
+    expect(noteLinkTarget(".MD")).toBeNull();
+    expect(noteLinkTarget("Note.MDX")).toBeNull();
+  });
 });
 
 describe("decodePercent", () => {

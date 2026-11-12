@@ -5212,6 +5212,30 @@ fn renaming_a_note_retargets_markdown_links_and_keeps_their_text() {
     );
 }
 
+/// A link written `.MD` is a note link (#675), so renaming its target
+/// rewrites it like any other.
+#[test]
+fn renaming_a_note_retargets_a_link_written_upper_case_md() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Upper.MD"), "# Upper").expect("upper");
+    fs::write(
+        root.join("Linker.md"),
+        "[up](Upper.MD) and [ref][r]\n\n[r]: Upper.Md#Top\n",
+    )
+    .expect("linker");
+    let index = build(root);
+    let entry = index.find_by_slug("upper").expect("upper");
+
+    move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("# Upper"))
+        .expect("rename");
+
+    assert_eq!(
+        read(root, "Linker.md"),
+        "[up](Renamed.md) and [ref][r]\n\n[r]: Renamed.md#Top\n"
+    );
+}
+
 #[test]
 fn moving_a_note_recomputes_relative_markdown_links_from_each_linking_note() {
     let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md)\n");
