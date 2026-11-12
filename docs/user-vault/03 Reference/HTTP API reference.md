@@ -364,7 +364,7 @@ Content-changing routes. Web bearer token (if configured); refused with `403 dem
 
 That rejection is unconditional. What depends on the filesystem is the narrower race: on a Vault reporting `atomic_compare_and_swap: false`, a change landing between the hash check and the replacement is overwritten instead of reported, because the save is two steps there rather than one. Read `GET .../write-capabilities` to know which kind of Vault you are writing to.
 
-A slug can change hands. When a note with the same name appears in a folder that sorts earlier, it takes the slug, and the note that had it gets `-2`. Two notes with the same text have the same hash, so the hash cannot tell them apart. The `PUT` below takes `expected_relative_path` for that case. Send the `relative_path` you read: if the slug now names a different file, the save is refused with `409 note_moved`, not retryable, and nothing is written.
+A slug can change hands. When a note with the same name appears in a folder that sorts earlier, it takes the slug, and the note that had it gets `-2`. Keep file names unique when an address must stay put ([[Supported Markdown reference#Wikilinks]] has the full rule). Two notes with the same text have the same hash, so the hash cannot tell them apart. The `PUT` below takes `expected_relative_path` for that case. Send the `relative_path` you read: if the slug now names a different file, the save is refused with `409 note_moved`, not retryable, and nothing is written.
 
 | Method | Path | Body | Purpose |
 | --- | --- | --- | --- |
