@@ -123,6 +123,7 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
         "existing_git_local_history_manual_recovery_required",
         GIT_FAILING,
     ),
+    ("existing_git_local_history_repository_missing", GIT_FAILING),
     (
         "managed_git_conflict",
         ErrorDocs {

@@ -317,6 +317,16 @@ describe("pure helpers", () => {
     expect(missingBranch.label).toBe("branch not found");
     expect(missingBranch.tier).toBe("error");
 
+    const missingRepository = describeGitFailure({
+      code: "existing_git_local_history_repository_missing",
+      message:
+        "this Vault's Git repository is missing, so nothing was committed",
+      retryable: false,
+    });
+    expect(missingRepository.label).toBe("repository missing");
+    expect(missingRepository.tier).toBe("error");
+    expect(missingRepository.sentence).toContain("committed nothing");
+
     for (const code of [
       "managed_git_unsupported_file_names",
       "existing_git_local_history_unsupported_file_names",

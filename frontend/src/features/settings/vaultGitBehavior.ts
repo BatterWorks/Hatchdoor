@@ -368,6 +368,15 @@ const GIT_FAILURE_COPY: Record<
   },
   managed_git_unsupported_file_names: UNSUPPORTED_FILE_NAMES,
   existing_git_local_history_unsupported_file_names: UNSUPPORTED_FILE_NAMES,
+  // Issue #678. The Vault's own `.git` is gone; Hatchdoor no longer falls
+  // back to a repository that happens to enclose the folder.
+  existing_git_local_history_repository_missing: {
+    label: "repository missing",
+    tier: "error",
+    files: false,
+    sentence: () =>
+      "This Vault's Git repository is missing from its folder, so Hatchdoor committed nothing. Your notes are untouched. Put the repository's .git folder back, or start a new history there with git init, then press Try again.",
+  },
 };
 
 export function describeGitFailure(
