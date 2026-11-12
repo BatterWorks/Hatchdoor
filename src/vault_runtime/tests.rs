@@ -4285,6 +4285,156 @@ async fn a_new_vault_on_the_folder_of_a_pausing_vault_waits_for_its_old_turn() {
         .expect("pause task");
 }
 
+/// #745: the folders of the Vaults `old_folders` names (relative to one
+/// collection root) each get a Vault whose old Git turn holds its lock while
+/// the Vault is paused and disconnected. Then a Vault is added on
+/// `new_folder`, and another on a folder unrelated to all of them. Answers
+/// whether a write to the new Vault waits for the old turns, and checks that
+/// the unrelated Vault writes at once and the new one once the turns end.
+async fn a_new_vault_waits_for_old_turns_on_overlapping_folders(
+    old_folders: &[&str],
+    new_folder: &str,
+) {
+    let directory = tempdir().expect("temporary state directory");
+    let root = directory.path().join("vaults");
+    let elsewhere = directory.path().join("elsewhere");
+    for folder in old_folders.iter().chain([&new_folder]) {
+        std::fs::create_dir_all(root.join(folder)).expect("Vault directory");
+    }
+    std::fs::create_dir_all(&elsewhere).expect("other Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let mut snapshot = ready_registry(&registry);
+    for (number, folder) in old_folders.iter().enumerate() {
+        snapshot = add_local_vault(
+            &registry,
+            &snapshot,
+            &format!("Old {number}"),
+            root.join(folder),
+        );
+    }
+    let old_ids: Vec<VaultId> = (0..old_folders.len())
+        .map(|number| vault_id_named(&snapshot, &format!("Old {number}")))
+        .collect();
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
+    collection
+        .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+        .await;
+    let mut old_turns = Vec::new();
+    let mut pauses = Vec::new();
+    for old_id in &old_ids {
+        let original = collection.runtime(*old_id).expect("enabled runtime");
+        old_turns.push(
+            original
+                .acquire_mutation_for_git_turn()
+                .await
+                .expect("the old Git turn holds the Vault's lock"),
+        );
+        let paused = registry
+            .disable(ready_registry(&registry).revision(), *old_id)
+            .expect("pause the Vault");
+        pauses.push(tokio::spawn({
+            let collection = collection.clone();
+            let registry = registry.clone();
+            let coordinator = coordinator.clone();
+            let managed_git = managed_git.clone();
+            async move {
+                collection
+                    .reconcile_and_reconstruct(&registry, &paused, &coordinator, &managed_git)
+                    .await;
+            }
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while collection.runtime(*old_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pause is installed while it waits for the old turn");
+    }
+
+    let mut snapshot = ready_registry(&registry);
+    for old_id in &old_ids {
+        snapshot = registry
+            .disconnect(snapshot.revision(), *old_id)
+            .expect("disconnect the paused Vault");
+    }
+    let added = add_local_vault(&registry, &snapshot, "New", root.join(new_folder));
+    let new_id = vault_id_named(&added, "New");
+    let added = add_local_vault(&registry, &added, "Elsewhere", elsewhere);
+    let elsewhere_id = vault_id_named(&added, "Elsewhere");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collection.reconcile_and_reconstruct(&registry, &added, &coordinator, &managed_git),
+    )
+    .await
+    .expect("adding the Vaults does not wait for the old turns");
+
+    let new_vault = collection.runtime(new_id).expect("new Vault runtime");
+    let other = collection
+        .runtime(elsewhere_id)
+        .expect("other Vault runtime");
+    assert!(
+        other.write_exclusion().waits_for.is_empty()
+            && !other
+                .write_exclusion()
+                .is_same(&new_vault.write_exclusion()),
+        "a Vault on an unrelated folder gets a fresh exclusion of its own"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), other.acquire_mutation())
+        .await
+        .expect("a Vault on an unrelated folder writes at once")
+        .expect("other Vault write lock");
+
+    // Each old turn in turn ends; the write waits until the last one has.
+    while let Some(old_turn) = old_turns.pop() {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                new_vault.acquire_mutation()
+            )
+            .await
+            .is_err(),
+            "a write to the new Vault waits for every old turn on an overlapping folder"
+        );
+        drop(old_turn);
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        new_vault.acquire_mutation(),
+    )
+    .await
+    .expect("the new Vault writes once the old turns are done")
+    .expect("new Vault write lock");
+    for pause in pauses {
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause)
+            .await
+            .expect("the pause finishes once the old turn is done")
+            .expect("pause task");
+    }
+}
+
+#[tokio::test]
+async fn a_new_vault_inside_the_folder_of_a_pausing_vault_waits_for_its_old_turn() {
+    a_new_vault_waits_for_old_turns_on_overlapping_folders(&["vault"], "vault/sub").await;
+}
+
+#[tokio::test]
+async fn a_new_vault_around_the_folder_of_a_pausing_vault_waits_for_its_old_turn() {
+    a_new_vault_waits_for_old_turns_on_overlapping_folders(&["parent/vault"], "parent").await;
+}
+
+/// The brief's harder case: one new folder holding two paused Vaults with
+/// different locks, which no single shared lock could cover.
+#[tokio::test]
+async fn a_new_vault_around_the_folders_of_pausing_vaults_waits_for_their_old_turns() {
+    a_new_vault_waits_for_old_turns_on_overlapping_folders(&["parent/a", "parent/b"], "parent")
+        .await;
+}
+
 /// #640: an edit retires the Vault's control block, and draining it used to
 /// throw away work already acknowledged as queued. A Vault that stays
 /// enabled gets its sync rerun and its recovery request back once the

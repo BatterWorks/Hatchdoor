@@ -2093,7 +2093,10 @@ fn path_relation(path: &Path, other: &Path) -> Option<VaultPathRelation> {
     }
 }
 
-fn paths_overlap(first: &Path, second: &Path) -> bool {
+/// Whether either folder equals or holds the other: the registry's overlap
+/// rule, which the runtime also applies to Vaults no longer registered whose
+/// old turn may still write (#745).
+pub(crate) fn paths_overlap(first: &Path, second: &Path) -> bool {
     path_relation(first, second).is_some()
 }
 

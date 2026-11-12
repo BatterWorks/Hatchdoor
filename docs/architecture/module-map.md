@@ -326,7 +326,11 @@ that production inventory are still checked for stale paths and duplicates.
   and write ledger, so the old Git turn and the writes after the Resume share
   one lock and one commit record (#640), and any other Vault activated on that
   block's folder, such as a new Vault added where a paused one was
-  disconnected, inherits only its exclusion (#681). An edit hands the Git-lane work
+  disconnected, inherits only its exclusion (#681). Whatever exclusion it
+  starts from, a Vault activated on a folder equal to, inside or around the
+  folders of one or more retiring blocks first waits, at each acquisition,
+  until every such block's lock is free (#745); the overlap rule is the
+  registry's `paths_overlap`. An edit hands the Git-lane work
   (sync, commit, recovery) its drain discarded back to the coordinator once
   the replacement block is active; a Vault left disabled or removed drops it.
   A lifecycle a newer one supersedes while it waits still starts the
@@ -1073,7 +1077,8 @@ cache, and loads the registry through it; that step consumes `load` and
 `initialize_empty`, and live configuration's `remove_stored` and snapshot.
 Runtime composition then passes the snapshot on, and
 `VaultCollectionRuntime` consumes its safe
-projections and resolved paths; the Vault work executor's managed-Git Git-turn
+projections and resolved paths, and `paths_overlap` to find the retiring
+control blocks a newly active Vault waits for (#745); the Vault work executor's managed-Git Git-turn
 dispatch (`dispatch_git_turn`) is the one consumer of the crate-private
 `https_credentials` accessor, and also resolves `commit_identity` through
 `git::config::resolve_commit_identity` before every Git turn. `handlers/vaults.rs`
