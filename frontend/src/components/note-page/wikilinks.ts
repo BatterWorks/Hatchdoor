@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 
-import { escapeMarkdownLabel, parseWikilinkTarget } from "../../lib/markdown";
+import {
+  escapeMarkdownLabel,
+  ownNoteFragment,
+  parseWikilinkTarget,
+} from "../../lib/markdown";
 import { blockAnchorId, fragmentAnchor } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
 import type { VaultId, VaultResolveBatchResponse } from "../../types";
@@ -81,6 +85,34 @@ function noteRouteHref(
   return `${prefix}${hit.slug}${anchor ? `#${anchor}` : ""}`;
 }
 
+/**
+ * The wikilink targets as the server is asked for them, and the way back from
+ * each answer to the targets as written. A link that names only a place in its
+ * own note, `[[#Heading]]` or `[[#^id]]`, has no note name to look up (#727):
+ * it is asked as that note's own path from the Vault root, which no other note
+ * answers to. A path holding `#`, `^` or `|` would be cut short there, so such
+ * a note's links go out as written and stay missing.
+ */
+function serverTargets(
+  targets: string[],
+  noteRelativePath: string,
+): { sent: string[]; writtenAs: (answered: string) => string[] } {
+  const written = new Map<string, string[]>();
+  for (const target of targets) {
+    const sent =
+      noteRelativePath &&
+      !/[#^|]/.test(noteRelativePath) &&
+      ownNoteFragment(target) !== null
+        ? `/${noteRelativePath.replace(/\\/g, "/")}${target}`
+        : target;
+    written.set(sent, [...(written.get(sent) ?? []), target]);
+  }
+  return {
+    sent: [...written.keys()],
+    writtenAs: (answered) => written.get(answered) ?? [answered],
+  };
+}
+
 function missingNoteHref(target: string): string {
   return `/__missing__/${encodeURIComponent(target)}`;
 }
@@ -119,7 +151,12 @@ export function rewriteWikilinks(
       const noteName = isNoteEmbedTarget(pathPart);
       const filePath = resolvedAssets.get(pathPart);
       if (noteName || !filePath) {
-        const hit = resolved.get(parsed.target) ?? null;
+        // A note embedding a part of itself is left to #699's rules, which
+        // name no such form: it draws as it did before #727.
+        const hit =
+          ownNoteFragment(parsed.target) === null
+            ? (resolved.get(parsed.target) ?? null)
+            : null;
         if (hit) {
           const href = noteEmbedHref({
             slug: hit.slug,
@@ -160,7 +197,10 @@ export function rewriteWikilinks(
     const hit = resolved.get(parsed.target) ?? null;
     if (hit) {
       const href = noteRouteHref(vaultId, hit, wikilinkAnchor(parsed.target));
-      const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
+      const label =
+        ownNoteFragment(parsed.target) === null
+          ? wikilinkDisplayLabel(body, parsed.label, hit.archived)
+          : parsed.label;
       return `[${escapeMarkdownLabel(label)}](${href})`;
     }
     return `[${escapeMarkdownLabel(parsed.label)}](${missingNoteHref(parsed.target)})`;
@@ -316,6 +356,7 @@ export function useResolvedWikilinks(
         pathKey,
       );
 
+      const asked = serverTargets(missing, noteRelativePath);
       if (
         missing.length > 0 ||
         missingAssets.length > 0 ||
@@ -330,7 +371,7 @@ export function useResolvedWikilinks(
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                targets: missing,
+                targets: asked.sent,
                 asset_targets: missingAssets,
                 // Sent only when there are some, so a note without Markdown
                 // note links asks exactly what it asked before ADR-28.
@@ -348,8 +389,10 @@ export function useResolvedWikilinks(
               const resolved = result.slug
                 ? { slug: result.slug, archived: result.archived }
                 : null;
-              map.set(result.target, resolved);
-              resolveCache.set(pathKey(result.target), resolved);
+              for (const target of asked.writtenAs(result.target)) {
+                map.set(target, resolved);
+                resolveCache.set(pathKey(target), resolved);
+              }
             }
             for (const result of json.note_link_results ?? []) {
               const resolved = result.slug
@@ -410,6 +453,7 @@ export async function resolveNoteTargets(
   if (missing.length === 0) {
     return found;
   }
+  const asked = serverTargets(missing, noteRelativePath);
   try {
     const res = await apiFetch(
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
@@ -417,7 +461,7 @@ export async function resolveNoteTargets(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          targets: missing,
+          targets: asked.sent,
           asset_targets: [],
           note_path: noteRelativePath,
         }),
@@ -429,11 +473,13 @@ export async function resolveNoteTargets(
         const resolved = result.slug
           ? { slug: result.slug, archived: result.archived }
           : null;
-        found.set(result.target, resolved);
-        resolveCache.set(
-          pathCacheKey(vaultId, noteRelativePath, result.target),
-          resolved,
-        );
+        for (const target of asked.writtenAs(result.target)) {
+          found.set(target, resolved);
+          resolveCache.set(
+            pathCacheKey(vaultId, noteRelativePath, target),
+            resolved,
+          );
+        }
       }
     }
   } catch {

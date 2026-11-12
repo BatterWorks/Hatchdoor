@@ -249,3 +249,130 @@ describe("useResolvedWikilinks Markdown note links (ADR-28)", () => {
     });
   });
 });
+
+// A link that names only a place in its own note has no note name for the
+// server to look up (#727). It goes out as the note's own path from the Vault
+// root, which nothing but that note answers to, and its answer comes back
+// under the target as written.
+describe("links into their own note (#727)", () => {
+  function answerByPath(vaultId: string, bodies: unknown[]) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { targets: string[] };
+        bodies.push(body);
+        return jsonResponse({
+          vault_id: vaultId,
+          results: body.targets.map((target) => ({
+            target,
+            slug: target.startsWith("/Notes/Here.md#") ? "notes/here" : null,
+            archived: false,
+          })),
+          asset_results: [],
+        });
+      },
+    );
+  }
+
+  it("rewrites a heading and a block link to the note's own route", async () => {
+    const bodies: unknown[] = [];
+    answerByPath("vault-self", bodies);
+
+    const { result } = renderHook(() =>
+      useResolvedWikilinks(
+        "vault-self",
+        "[[#Second part]] and [[#^here|down]] and [[#Gone]]",
+        "Notes/Here.md",
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.resolved).toContain("/n/notes/here");
+    });
+    expect(bodies[0]).toEqual({
+      targets: [
+        "/Notes/Here.md#Second part",
+        "/Notes/Here.md#^here",
+        "/Notes/Here.md#Gone",
+      ],
+      asset_targets: [],
+      note_path: "Notes/Here.md",
+    });
+    expect(result.current.resolved).toBe(
+      "[Second part](/v/vault-self/n/notes/here#second-part) and " +
+        "[down](/v/vault-self/n/notes/here#^here) and " +
+        "[Gone](/v/vault-self/n/notes/here#gone)",
+    );
+  });
+
+  it("shows a heading whole and leaves embeds and bare carets as they were", async () => {
+    const bodies: unknown[] = [];
+    answerByPath("vault-self-edges", bodies);
+
+    const { result } = renderHook(() =>
+      useResolvedWikilinks(
+        "vault-self-edges",
+        "[[#Input/Output]]\n![[#Second part]]\n[[^here]]",
+        "Notes/Here.md",
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.resolved).toContain("/n/notes/here");
+    });
+    expect(bodies[0]).toMatchObject({
+      targets: [
+        "/Notes/Here.md#Input/Output",
+        "/Notes/Here.md#Second part",
+        "^here",
+      ],
+    });
+    const [link, embed, caret] = result.current.resolved.split("\n");
+    expect(link).toBe(
+      "[Input/Output](/v/vault-self-edges/n/notes/here#inputoutput)",
+    );
+    expect(embed).not.toContain("/n/notes/here");
+    expect(embed).not.toContain("__embed__");
+    expect(caret).toContain("/__missing__/");
+  });
+
+  it("asks as written from a note whose path the server would cut short", async () => {
+    const bodies: unknown[] = [];
+    answerByPath("vault-self-hash", bodies);
+
+    renderHook(() =>
+      useResolvedWikilinks("vault-self-hash", "[[#Setup]]", "C# basics.md"),
+    );
+
+    await waitFor(() => {
+      expect(bodies).toHaveLength(1);
+    });
+    expect(bodies[0]).toMatchObject({ targets: ["#Setup"] });
+  });
+
+  it("answers the editor under the target as written", async () => {
+    const bodies: unknown[] = [];
+    answerByPath("vault-self-editor", bodies);
+
+    const answers = await resolveNoteTargets(
+      "vault-self-editor",
+      "Notes/Here.md",
+      ["#Second part", "#^here"],
+    );
+
+    expect(answers.get("#Second part")).toEqual({
+      slug: "notes/here",
+      archived: false,
+    });
+    expect(answers.get("#^here")).toEqual({
+      slug: "notes/here",
+      archived: false,
+    });
+    expect(bodies).toEqual([
+      {
+        targets: ["/Notes/Here.md#Second part", "/Notes/Here.md#^here"],
+        asset_targets: [],
+        note_path: "Notes/Here.md",
+      },
+    ]);
+  });
+});

@@ -4,6 +4,8 @@
 // sending fifty of them: every target asked before the next microtask goes
 // out together, the way the reading view's batch does.
 
+import { ownNoteFragment } from "../../../lib/markdown";
+
 /** What the server knows about one target: `null` when nothing matches. */
 export type NoteLinkHit = { slug: string; archived?: boolean };
 
@@ -54,6 +56,10 @@ export function createNoteLinkResolver(
  * its folders, and the path kept whole for an archived note.
  */
 export function wikilinkLabel(target: string, archived: boolean): string {
+  const fragment = ownNoteFragment(target);
+  if (fragment !== null) {
+    return fragment;
+  }
   const base = target.split(/[#^]/, 1)[0].trim() || target;
   if (archived) {
     return base;
