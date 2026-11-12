@@ -11,6 +11,7 @@
 - An agent that connects over MCP is now told to read the manual page *How to work in a Vault as an agent* before its first write, so it learns to search before creating a note, read a note before changing it and prefer small edits without you pointing it there. *Connect your agent* gains an example skill to copy into your agent's skills folder, which sends it to the same page on the Hatchdoor it is connected to. [#568]
 
 ### Changed
+- Hatchdoor can no longer be shown inside another page: a dashboard tile, a Home Assistant iframe panel or any site that puts it in a frame now gets an empty box or a "refused to connect" message, and has to link to it instead. Every response now carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so a malicious page cannot load Hatchdoor in a hidden frame and trick you into clicking its buttons. An SVG attachment keeps its `sandbox` policy alongside, and no other browser rule changes: the app, Mermaid, math and PDF previews load as before. [#702]
 - An agent can now add or move a Vault only to a folder inside the Vault mount (`VAULT_PATH`, `/data/vault` in the stock install). `create_vault` and `edit_vault` refuse any other folder on the server with `vault_path_outside_mount`, so a note carrying planted instructions cannot get an agent to open `/etc` or a home folder as a Vault. Symlinks and `..` are resolved first. A Vault you added outside the mount from Settings keeps working for agents, and the web app can still add any folder Hatchdoor can read. Git-backed Vaults that Hatchdoor clones itself are not affected. [#700]
 - MCP agents on the `2026-07-28` revision now get a refused tool call, such as an unknown tool, a write while writes are off or an invalid argument, with HTTP 200 and the JSON-RPC error in the body, where it was HTTP 400; the error code and message are unchanged, so a client that reads the body sees no difference. An `initialize` that names `2026-07-28`, a revision with no handshake, now opens a `2025-11-25` session, and that session no longer claims `tools.listChanged: true`, which only the modern revision can deliver. A request with no session that is not `initialize` is refused with `400 Bad Request: Session ID is required` instead of `422 Unexpected message, expect initialize request`. These come with the MCP library moving to 3.8.0. [#621]
 - Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
@@ -107,6 +108,7 @@
 [#699]: https://github.com/BatterWorks/Hatchdoor/issues/699
 [#700]: https://github.com/BatterWorks/Hatchdoor/issues/700
 [#701]: https://github.com/BatterWorks/Hatchdoor/issues/701
+[#702]: https://github.com/BatterWorks/Hatchdoor/issues/702
 
 ## v2.9.0 - 2026-10-27
 

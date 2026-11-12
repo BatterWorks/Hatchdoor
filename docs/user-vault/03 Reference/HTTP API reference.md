@@ -37,6 +37,8 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 
 With no web token configured (and not in demo mode), every route except `/mcp` answers `403` when the `Host` header is not `localhost`, `127.0.0.1` or `[::1]` (any port) or the host of `HATCHDOOR_PUBLIC_URL`, and when a request other than `GET`, `HEAD` or `OPTIONS` comes from another website: an `Origin` that is not the request's own, the public address's or one on `HATCHDOOR_MCP_ALLOWED_ORIGINS`, or no `Origin` and `Sec-Fetch-Site: cross-site`. See [[The security model#Running without a web token]].
 
+Every response, on every route including `/mcp`, carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so no page can show Hatchdoor in a frame. A response with a policy of its own, such as an SVG asset's `sandbox`, keeps it with `frame-ancestors 'none'` added: `sandbox; frame-ancestors 'none'`.
+
 ## Health & startup
 
 | Method | Path | Purpose |

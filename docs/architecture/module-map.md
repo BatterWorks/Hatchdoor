@@ -134,6 +134,14 @@ that production inventory are still checked for stale paths and duplicates.
   it runs only for a request that was let in and runs the same on an install
   with no token. The asset and attachment routes are left out because the MCP
   token opens them too.
+- `refuse_framing` (#702) is the outermost middleware inside the trace layer,
+  over every route, `/mcp` and the fallback included. Every response carries
+  `X-Frame-Options: DENY` and a `Content-Security-Policy` holding
+  `frame-ancestors 'none'`; a response that already sets a policy (the SVG
+  asset's `sandbox`, `handlers/assets.rs`) keeps it with that directive
+  appended. It adds no other directive. Any frame of Hatchdoor is refused,
+  one on Hatchdoor's own pages included, so the frontend must not show its own
+  routes or Vault assets in an `<iframe>`, `<object>` or `<embed>`.
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
