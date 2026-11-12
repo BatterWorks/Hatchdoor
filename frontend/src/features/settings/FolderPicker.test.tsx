@@ -165,6 +165,34 @@ describe("FolderPicker", () => {
     ).toBeInTheDocument();
   });
 
+  it("has focus on the new level's first row the moment that level appears (#728)", async () => {
+    serve({ "": MOUNT, Work: WORK });
+    render(<FolderPicker value="" onPick={() => {}} />);
+    const open = await screen.findByRole("button", { name: "Open Work" });
+
+    // Read focus in the same turn the level is drawn, before anything else
+    // can run, so a focus move that lands later is caught (nine runs in ten
+    // against the old passive effect, which React sometimes flushed early). The
+    // observer must answer synchronously, so it looks for the row's marker
+    // rather than querying by role.
+    let focusWhenDrawn: Element | null | undefined;
+    const observer = new MutationObserver(() => {
+      if (focusWhenDrawn !== undefined) return;
+      if (document.querySelector('[data-folder-path="Work/Projects"]'))
+        focusWhenDrawn = document.activeElement;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    fireEvent.click(open);
+    await screen.findByRole("button", { name: /^Projects/ });
+    observer.disconnect();
+
+    // The observer saw the row arrive, so the read below is about focus.
+    expect(focusWhenDrawn).toBeDefined();
+    expect(focusWhenDrawn).toBe(
+      screen.getByRole("button", { name: /^Use Work/ }),
+    );
+  });
+
   it("marks the chosen folder and names its path", async () => {
     serve({ "": MOUNT });
     render(<FolderPicker value="/data/vault/Work" onPick={() => {}} />);
