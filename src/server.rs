@@ -717,6 +717,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     };
 
     web.merge(mcp)
+        .layer(axum::middleware::from_fn(refuse_framing))
         .layer(
             TraceLayer::new(MakeFailureClassifier)
                 // Custom span so the URI logged never contains the raw web token
@@ -736,6 +737,34 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
 }
 
 const READINESS_PATH: &str = "/ready";
+
+const FRAME_ANCESTORS_NONE: &str = "frame-ancestors 'none'";
+
+/// #702: tells the browser never to show any response inside a frame, another
+/// site's or Hatchdoor's own, so a hidden frame cannot trick a click
+/// (clickjacking). The app frames nothing of its own: PDFs draw on a canvas,
+/// Mermaid renders inline. Layered over
+/// every route, `/mcp` and the fallback included. A response that already
+/// sets a policy, such as an SVG asset's `sandbox`, keeps it and gains
+/// `frame-ancestors 'none'`; no other directive is added.
+async fn refuse_framing(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    let policy = match headers.get(header::CONTENT_SECURITY_POLICY) {
+        Some(existing) if !existing.is_empty() => {
+            let mut combined = existing.as_bytes().to_vec();
+            combined.extend_from_slice(b"; ");
+            combined.extend_from_slice(FRAME_ANCESTORS_NONE.as_bytes());
+            // Cannot fail: a valid header value followed by ASCII is still one.
+            HeaderValue::from_bytes(&combined)
+                .unwrap_or_else(|_| HeaderValue::from_static(FRAME_ANCESTORS_NONE))
+        }
+        _ => HeaderValue::from_static(FRAME_ANCESTORS_NONE),
+    };
+    headers.insert(header::CONTENT_SECURITY_POLICY, policy);
+    response
+}
 
 /// Which responses the trace layer logs as failed, at `ERROR`: every 5xx
 /// except the readiness probe's `503`. An installing agent polls `/ready`
@@ -5380,6 +5409,77 @@ mod tests {
             .await
             .expect("body");
         assert_eq!(&body[..], b"ok");
+    }
+
+    /// Both framing headers, and exactly `expected_policy` as the one CSP.
+    fn assert_framing_refused(response: &Response, uri: &str, expected_policy: &str) {
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS),
+            Some(&HeaderValue::from_static("DENY")),
+            "{uri}"
+        );
+        let policies: Vec<_> = response
+            .headers()
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .collect();
+        assert_eq!(policies.len(), 1, "{uri}: {policies:?}");
+        assert_eq!(policies[0], expected_policy, "{uri}");
+    }
+
+    /// #702: no other site may show Hatchdoor in a frame, so a hidden frame
+    /// cannot trick a click (clickjacking). Every kind of response says so:
+    /// the app's page, a note address, the API, a built asset, the health
+    /// check, the manual and MCP.
+    #[tokio::test]
+    async fn every_response_refuses_to_be_shown_in_another_sites_frame() {
+        let (app, _tmp) = app_for_tests();
+        for uri in [
+            "/",
+            "/v/00000000-0000-4000-8000-000000000000/n/home",
+            "/api/v1/vaults",
+            "/assets/index.js",
+            "/health",
+            "/docs/index.md",
+            "/llms.txt",
+            "/mcp",
+            "/nope",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            // No directive besides frame-ancestors.
+            assert_framing_refused(&response, uri, FRAME_ANCESTORS_NONE);
+        }
+    }
+
+    /// #702: an SVG asset already carries `sandbox`, which must survive next to
+    /// the framing rule rather than be replaced by it.
+    #[tokio::test]
+    async fn a_response_with_its_own_policy_keeps_it_and_gains_frame_ancestors() {
+        let (app, tmp) = app_for_tests();
+        let root = tmp.path().join("svg-vault");
+        let vault_id =
+            create_vault_with_files(&app, "Svg", &root, &[("diagram.svg", "<svg/>")], 0).await;
+        let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.svg");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_framing_refused(&response, &uri, &format!("sandbox; {FRAME_ANCESTORS_NONE}"));
     }
 
     #[tokio::test]

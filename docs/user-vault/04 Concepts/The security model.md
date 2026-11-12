@@ -32,6 +32,8 @@ On a loopback address (`HOST=127.0.0.1`, the default outside Docker) the web tok
 - **The address the request was sent to (`Host`).** It must be `localhost`, `127.0.0.1` or `[::1]`, on any port, or the host of **Public address** (`HATCHDOOR_PUBLIC_URL`). Anything else gets `403`. This stops DNS rebinding, where a website points its own name at `127.0.0.1` and so becomes able to read and write your Vaults from your browser.
 - **The page that sent a change.** A request that changes something (anything but a read) is refused with `403` when its `Origin` is another website. Hatchdoor's own page, an origin on `HATCHDOOR_MCP_ALLOWED_ORIGINS` and Public address are accepted. With no `Origin`, a `Sec-Fetch-Site: cross-site` header is refused too. `curl` sends neither and is unaffected.
 
+Neither check stops a website from showing Hatchdoor inside an invisible frame and lining its buttons up under something you think you are clicking (clickjacking): the clicks happen on Hatchdoor's own page, so they pass both checks. Every response therefore carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, with or without a web token, and the browser refuses to draw Hatchdoor inside any other page. A side effect is that Hatchdoor cannot be embedded in a dashboard or a Home Assistant panel; see [[How to troubleshoot common problems#Hatchdoor won't show inside another page]].
+
 Behind a proxy that forwards your own domain name to a token-less loopback Hatchdoor, set Public address to that address, or set a web token. Neither check runs once a web token is set, or in demo mode, and `/mcp` keeps its own Origin check described below.
 
 ## MCP bearer token

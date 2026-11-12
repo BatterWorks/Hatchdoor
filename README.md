@@ -512,6 +512,11 @@ reference](https://docs-hatchdoor.battercloud.cc/v/bef3df28-8c2e-4722-89ad-bd4d0
 - Keep the SQLite cache outside the vault.
 - Keep `.env` out of git.
 - Review Docker volume paths before starting the container.
+- Hatchdoor can't be embedded in another page, such as a dashboard tile or a
+  Home Assistant iframe panel. Every response carries `X-Frame-Options: DENY`
+  and `Content-Security-Policy: frame-ancestors 'none'`, so a malicious page
+  cannot load it in a hidden frame and trick you into clicking its buttons
+  (clickjacking). Open it in its own tab instead.
 
 ## Development
 

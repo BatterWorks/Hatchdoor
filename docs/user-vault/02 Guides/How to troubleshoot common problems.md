@@ -21,6 +21,7 @@ Find what you are seeing in the list below and jump to its section. Each section
 - A Vault seems to have stopped syncing: [[#"Is this Vault still syncing on schedule?"]]
 - Search finds nothing, or the wrong notes: [[#Search returns nothing, or not what you expected]]
 - A saved query shows a message instead of a table: [[#A saved query shows a message instead of a table]]
+- Hatchdoor shows an empty box or an error inside a dashboard or a Home Assistant panel: [[#Hatchdoor won't show inside another page]]
 
 ## Hatchdoor won't start
 
@@ -242,6 +243,14 @@ A fenced `base` block is drawn as a table only when Hatchdoor understands all of
 - **"Showing the first N notes"** means rows were held back by the `limit` the block sets. **"Truncated:"** means Hatchdoor's own ceiling of 500 rows held them back and more notes qualify.
 
 If a table looks out of date right after you edit another note, the Vault's index may still be catching up (see the `search` status above). The saved query reads its rows from that index, and it is worked out again every time you open the note.
+
+## Hatchdoor won't show inside another page
+
+Hatchdoor refuses to be shown inside a frame on another page, such as a dashboard tile (Homarr, Heimdall), a Home Assistant iframe panel or a web page of your own. The browser shows an empty box or a message such as "refused to connect" in its place. This is on purpose, and there is no setting to turn it off.
+
+The reason is a trick called clickjacking. A malicious page can load your Hatchdoor in an invisible frame and line up its buttons under something you think you are clicking, so you change or delete notes without seeing it. That works best on an instance with no web token, such as one reached on `127.0.0.1`, which a page in your own browser can reach too. Every answer Hatchdoor sends now carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, which tell the browser never to draw it inside another page.
+
+Fix: open Hatchdoor in its own tab or window, or make the dashboard tile a link instead of an embedded frame. On a phone or tablet, installing it as an app from the browser menu gives it its own window.
 
 ---
 
