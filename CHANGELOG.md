@@ -21,6 +21,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- A PDF embed with a page anchor, such as `![[report.pdf#page=2]]`, now shows its preview and opens on an instance with a web token. The token was added after the `#page=2`, a part of the address the browser never sends, so the PDF answered `401`; it now goes before it, and the Open link lands on that page. [#755]
 - A Vault added on a folder inside or around the folder of a Vault you just paused and disconnected no longer writes beside a sync the old Vault was still running there. Only a Vault on the very same folder used to wait; one on a subfolder, or on a parent folder holding one or more such Vaults, got a write lock of its own and could change files in the middle of the old sync. It now waits for every old sync on an overlapping folder to finish. A Vault added on an unrelated folder still starts at once. [#745]
 - A Markdown link that a move rewrites now spells the extension the linked file has. A link written `[deep](../../Sub/Deep.MD)` used to come out as `[deep](../Sub/Deep.md)` once its note moved, which Hatchdoor still followed but a tool that matches file names exactly might not; it now comes out as `[deep](../Sub/Deep.MD)`. Moving or renaming the `.MD` note itself writes the extension of its new file into the links that point to it. [#740]
 - Moving or renaming an attachment no longer hangs when a sync tool or another program replaces the file with a pipe at the moment Hatchdoor reads it back, which blocked every other write to that Vault until something wrote to the pipe; the move is now refused at once, the notes that link to the attachment are put back as they were, and the error says the attachment itself could not be restored, since the other program replaced it. Hatchdoor no longer follows a symbolic link when it reads an attachment's size and hash, so a link swapped in to point at a device can no longer be read without end, and `list_note_attachments` now leaves out a reference to a symbolic link where it used to list the file the link pointed to. [#736]
@@ -127,6 +128,7 @@
 [#736]: https://github.com/BatterWorks/Hatchdoor/issues/736
 [#740]: https://github.com/BatterWorks/Hatchdoor/issues/740
 [#745]: https://github.com/BatterWorks/Hatchdoor/issues/745
+[#755]: https://github.com/BatterWorks/Hatchdoor/issues/755
 
 ## v2.9.0 - 2026-10-27
 

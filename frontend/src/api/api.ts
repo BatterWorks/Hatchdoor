@@ -125,14 +125,20 @@ export function notifyUnauthorized(): void {
 /**
  * Append the stored token as an `access_token` query parameter, for URLs used
  * where headers cannot be set (image src, download links, EventSource). Returns
- * the URL unchanged when no token is stored. Pass a literal URL on one of the
- * server's `QUERY_TOKEN_ROUTES`: any other route answers `401` to it.
+ * the URL unchanged when no token is stored, and keeps any `#fragment` last. Pass
+ * a literal URL on one of the server's `QUERY_TOKEN_ROUTES`: any other route
+ * answers `401` to it.
  */
 export function withAccessToken(url: string): string {
   const token = getToken();
   if (!token) {
     return url;
   }
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}access_token=${encodeURIComponent(token)}`;
+  // The token goes before any `#fragment`: a browser never sends the fragment,
+  // so a token inside it is lost (`![[x.pdf#page=3]]`, #755).
+  const hashAt = url.indexOf("#");
+  const base = hashAt === -1 ? url : url.slice(0, hashAt);
+  const fragment = hashAt === -1 ? "" : url.slice(hashAt);
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}access_token=${encodeURIComponent(token)}${fragment}`;
 }
