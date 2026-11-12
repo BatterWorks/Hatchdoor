@@ -480,6 +480,39 @@ test("test-only changes need no changelog entry", async () => {
   assert.doesNotMatch(result.stderr, /CHANGELOG/);
 });
 
+test("test-only changes name no surface and pass without acknowledgement", async () => {
+  const root = await fixture();
+  await write(root, "frontend/src/App.write-mode.test.tsx", "// a test\n");
+  await write(
+    root,
+    "frontend/src/features/settings/SettingsPage.test.tsx",
+    "// a test\n",
+  );
+  await write(root, "frontend/src/test/setup.ts", "// test setup\n");
+  await write(root, "src/mcp/tests.rs", "// a test\n");
+  await commit(root, "tests");
+
+  const result = run(root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /no user-facing surface changed/);
+});
+
+test("a test file beside a shipped Web UI file still names the Web UI notes", async () => {
+  const root = await fixture();
+  await write(root, "frontend/src/App.test.tsx", "// a test\n");
+  await write(root, "frontend/src/App.tsx", "// a change\n");
+  await commit(root, "ui");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /Web UI \[web-ui\]\n {4}frontend\/src\/App\.tsx\n/,
+  );
+  assert.doesNotMatch(result.stderr, /App\.test\.tsx/);
+  assert.match(result.stderr, /Browse and review through the Web UI\.md/);
+});
+
 test("a bundled manual change names the MCP tools reference", async () => {
   const root = await fixture();
   await write(root, "src/docs_bundle.rs", "// a new page name rule\n");

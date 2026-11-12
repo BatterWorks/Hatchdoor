@@ -415,11 +415,15 @@ async function deadTableEntries() {
   return [...new Set(dead)].sort();
 }
 
+// A test file changes nothing a user sees, so it names no surface, the same
+// way it needs no changelog entry (#743).
 function touchedSurfaces(files) {
   return SURFACES.map((surface) => ({
     ...surface,
-    changedFiles: files.filter((file) =>
-      surface.paths.some((prefix) => matches(file, prefix)),
+    changedFiles: files.filter(
+      (file) =>
+        !isTestFile(file) &&
+        surface.paths.some((prefix) => matches(file, prefix)),
     ),
   })).filter((surface) => surface.changedFiles.length > 0);
 }
