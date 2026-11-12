@@ -91,6 +91,9 @@ pub(crate) fn legacy_vault_environment_key_kind(
         "HATCHDOOR_EXCLUDE" => Some(LegacyVaultEnvironmentKeyKind::Migrated),
         "HATCHDOOR_GIT_DEBOUNCE_SECONDS" => Some(LegacyVaultEnvironmentKeyKind::Retired),
         "HATCHDOOR_VAULT_SOURCE" => Some(LegacyVaultEnvironmentKeyKind::RemovedStartupSource),
+        // Still live: they sign the commits of every Vault without its own
+        // `commit_identity` (#687).
+        "HATCHDOOR_GIT_AUTHOR_NAME" | "HATCHDOOR_GIT_AUTHOR_EMAIL" => None,
         _ if key.starts_with("HATCHDOOR_VAULT_GIT_") => {
             Some(LegacyVaultEnvironmentKeyKind::RemovedStartupSource)
         }

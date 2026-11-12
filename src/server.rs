@@ -1804,16 +1804,30 @@ mod tests {
     fn per_vault_variables_left_in_the_environment_are_named() {
         let message = legacy_environment_warning(&[
             "VAULT_PATH".to_string(),
+            "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
             "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
             "HATCHDOOR_EXCLUDE".to_string(),
             "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
         ])
         .expect("stale per-Vault variables are named");
-        assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
+        // The author keys still sign the commits of a Vault without its own
+        // identity, so telling the operator to remove them would be wrong.
+        assert!(!message.contains("HATCHDOOR_GIT_AUTHOR"), "{message}");
         assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
         assert!(message.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{message}");
         assert!(!message.contains("VAULT_PATH"), "{message}");
         assert!(message.contains("Settings"), "{message}");
+    }
+
+    #[test]
+    fn the_commit_author_variables_alone_raise_no_warning() {
+        assert_eq!(
+            legacy_environment_warning(&[
+                "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
+            ]),
+            None
+        );
     }
 
     #[test]
