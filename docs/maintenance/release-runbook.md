@@ -14,7 +14,7 @@ Both commands work out where the release stands from git and GitHub on every run
 - Run the commands from the repository root on the maintainer's build machine. `release-publish` needs the release hook and the registry credentials, which exist only there.
 - The working tree must be clean. `release-prepare` refuses otherwise.
 - `gh` must be logged in to an account that can push branches and tags, open and merge pull requests, and create releases on the repository.
-- `HATCHDOOR_RELEASE_HOOK` must hold the path to the release hook (see [The release hook](#the-release-hook)). Only `release-publish` reads it.
+- The release hook's path must be set as `HATCHDOOR_RELEASE_HOOK`, once, in `.release.env` at the repository root (see [The release hook](#the-release-hook)). Git ignores that file. Only `release-publish` reads it.
 - `## Unreleased` in `CHANGELOG.md` on `development` must have entries. With nothing under it there is nothing to release.
 - The version is a bare semantic version such as `2.7.0`: no `v`, no suffix, no leading zeros, and higher than the latest `v*` tag. The git tag and the GitHub Release add the `v`; the image tags do not.
 
@@ -32,9 +32,9 @@ The first run:
 
 1. Fetches `origin` with its tags and refuses if the version is not higher than the latest release tag or is already published.
 2. Cuts `docs/release-v2.7.0` from `origin/development`.
-3. Sets the version in `Cargo.toml`, `Cargo.lock`, `frontend/package.json` and `frontend/package-lock.json`, renames `## Unreleased` in `CHANGELOG.md` to `## v2.7.0 - <today>`, drafts the release's highlights in `docs/user-vault/What's new.md` (see [Highlights](#highlights)), and commits.
-4. Refuses unless the four files agree on the version, the dated section has entries, every `[#N]` in it has a `[#N]: <url>` definition somewhere in the file, and the What's new section has 3 to 6 lines with action-needed lines first.
-5. Runs `just check-full`. A cold build takes tens of minutes, and its output streams to the terminal.
+3. Sets the version in `Cargo.toml`, `Cargo.lock`, `frontend/package.json` and `frontend/package-lock.json` and in the README's version example (the `e.g. 2.7.0` on the image line), renames `## Unreleased` in `CHANGELOG.md` to `## v2.7.0 - <today>`, drafts the release's highlights in `docs/user-vault/What's new.md` (see [Highlights](#highlights)), and commits.
+4. Runs the quick checks: the four files agree on the version, the README's version example names it, the dated section has entries, every `[#N]` in it has a `[#N]: <url>` definition somewhere in the file, and the What's new section has 3 to 6 lines with action-needed lines first. It refuses once, naming every check that failed, before any long test run. The usual refusal is a draft with too many highlights: the draft is already committed on the bump branch and the refusal says how many lines to cut (see [Highlights](#highlights)).
+5. Runs `just check-full`, once all the quick checks pass. A cold build takes tens of minutes, and its output streams to the terminal.
 6. Pushes the branch.
 7. Runs `just docs-freshness main` on the bump branch, after fast-forwarding the local `main` to `origin/main` so the list covers this release and no more.
 8. Opens **Prepare the v2.7.0 release** into `development`, carrying the judgment checklist with the docs-freshness output pasted under its item.
@@ -91,7 +91,7 @@ Give the maintainer the exact title and notes now on the draft, together with th
 ### 7. Publish
 
 ```bash
-HATCHDOOR_RELEASE_HOOK=/path/to/hook just release-publish 2.7.0
+just release-publish 2.7.0
 ```
 
 Before merging, it refuses unless all of these hold:
@@ -124,7 +124,7 @@ These are the checks only a reader can make. `release-prepare` puts them on the 
 - **The roadmap is current.** Work this release finished is marked done or removed in [`docs/roadmap/`](../roadmap/product-roadmap.md), and version hints that no longer match are corrected.
 - **The notes named by `just docs-freshness main` were read, and the review was recorded with `just docs-freshness-ack main`.** The command's output sits under this box on the pull request. Open every note it names, compare it with what the release changed, then run `just docs-freshness-ack main` on the bump branch. The pasted list is taken when the pull request opens; after a review fix, run `just docs-freshness main` on the bump branch again and read anything new it names before acknowledging.
 - **No ADR is contradicted by what shipped.** An ADR the release went against must be amended or superseded, not left stale. The same goes for the architecture records and the module map.
-- **An MCP conformance run is recorded, if MCP behavior changed.** If the release touches `/mcp`, the MCP tools or MCP-facing security, record a clean run per [`mcp-conformance-run.md`](./mcp-conformance-run.md). Otherwise tick the box.
+- **An MCP conformance run is recorded, if MCP behavior changed.** If the release touches `/mcp`, the MCP tools or MCP-facing security, record a clean run per [`mcp-conformance-run.md`](./mcp-conformance-run.md): on the bump branch, `just dev-start`, `just dev-wait`, then `just conformance`. Write the account of the run beside the result directories it wrote, commit them all to the bump branch, and run `release-prepare` again, which refuses while they are uncommitted. Otherwise tick the box.
 - **`just smoke-install` passed against an image built from the version-bump branch.** On the bump branch, with no other build or test running, run `just smoke-install`. It builds the image with Docker, as the release does, and follows the README Quick Start with rootless Podman in a throwaway folder; [CONTRIBUTING.md](../../CONTRIBUTING.md#install-smoke-test) says what it needs and how long it takes. A failure names the step that broke: fix the install, the README or the guides on the bump branch, and run it again.
 - **The release title and notes are drafted.** Step 3.
 
@@ -157,7 +157,7 @@ Every release adds a section to the manual's What's new page, `docs/user-vault/W
 - A line may end with one wikilink to the manual page that explains it. Links elsewhere in the line must point outside the manual.
 - The heading is the same `## v<version> - <date>` the changelog uses. Newest release first.
 
-`release-prepare` drafts the section from the changelog's Unreleased entries, one line per entry, with entries under a breaking-changes heading first as action needed. A section already on the page for the version is kept as written. Most releases have more than six entries, so the first run usually refuses with `highlights`: rewrite the section on the bump branch, commit, and run again. `cargo test whats_new`, which `just check-full` runs, checks the format the binary reads.
+`release-prepare` drafts the section from the changelog's Unreleased entries, one line per entry, with entries under a breaking-changes heading first as action needed. A section already on the page for the version is kept as written. Which lines a release shows is a judgment the maintainer approves, so the command never picks them. Most releases have more than six entries, so the first run usually refuses with `highlights` before `just check-full`, saying how many lines to cut. Cut and rewrite the section on the bump branch, commit, and run again: that run goes on to `just check-full` once. `cargo test whats_new`, which `just check-full` runs, checks the format the binary reads.
 
 ### For 2.8.0
 
@@ -174,7 +174,7 @@ The second line comes from #542. Keep enough of the quoted error for someone to 
 
 The build machines, the internal registry and the servers that run releases are not described in this repository. One executable outside it handles all of them. It lives in the maintainer's private repository and is not documented here. `release-publish` knows only this contract:
 
-- `HATCHDOOR_RELEASE_HOOK` holds its path. A bare command name is not looked up on `PATH`.
+- `HATCHDOOR_RELEASE_HOOK` holds its path. Set it once in `.release.env` at the repository root, a git-ignored file of `KEY=value` lines, as `HATCHDOOR_RELEASE_HOOK=/absolute/path/to/hook`. An exported `HATCHDOOR_RELEASE_HOOK` wins over the file. A relative path is read from the repository root, and a bare command name is not looked up on `PATH`. The path itself belongs in the maintainer's local notes, never in this repository.
 - It is called from the repository root as `<hook> images <version>` and `<hook> deploy <version>`, with the bare version, such as `2.7.0`. Its output streams to the terminal.
 - Exit status 0 means the step succeeded. Anything else fails the run.
 - Each step must be safe to run again. `release-publish` records a successful step in a marker under the git directory, `.git/hatchdoor-release/v<version>/<step>-done`, and skips it on the next run. A run on another machine, or after the markers are removed, repeats the step.
@@ -199,7 +199,7 @@ The Docker Hub page changes only at a release, and only when one of those two fi
 
 ## When a step fails
 
-Every refusal names its check in brackets, as in `release-prepare refused (changelog links): ...`. Fix the cause and run the same command again; it resumes where it stopped.
+Every refusal names its check in brackets, as in `release-prepare refused (changelog links): ...`. When several quick checks fail together, `release-prepare` names them all in one refusal, as in `release-prepare refused (readme, highlights): ...`, with one line for each. Fix the cause and run the same command again; it resumes where it stopped.
 
 ### `release-prepare`
 
@@ -211,6 +211,7 @@ Every refusal names its check in brackets, as in `release-prepare refused (chang
 | `changelog` | The dated `## v<version>` section on the bump branch has no entries. | Add the entries on `docs/release-v<version>`, commit, and run again. |
 | `changelog` | The bump has merged, but `CHANGELOG.md` on `development` has no `## v<version>` section. | Something changed the changelog after the bump. Stop and ask the maintainer. |
 | `version files` | The four files do not agree on the version after the bump. | Fix the disagreeing file on `docs/release-v<version>`, commit, and run again. |
+| `readme` | A README version example (`e.g. <version>`) names another version than the one being released. | Set it to the release's version on the bump branch, commit, and run again. `just check` fails on the same thing. |
 | `changelog links` | A `[#N]` in the section has no `[#N]: <url>` definition. | Add the definition above the first release heading on the bump branch, commit, and run again. |
 | `highlights` | `docs/user-vault/What's new.md` is missing, has no `## v<version>` section, or its section is not 3 to 6 one-line items with action-needed lines first. | Rewrite the section on the bump branch as in [Highlights](#highlights), commit, and run again. |
 | `just check-full` | A test or check failed, on the bump or on a review fix committed after it. | Fix it on the bump branch, commit, and run again. Nothing is pushed until it passes. |
@@ -226,7 +227,7 @@ While the version-bump pull request is open, the command opens nothing. It tests
 | Refusal | What happened | What to do |
 | --- | --- | --- |
 | `version` | The argument is not a bare version such as `2.7.0`. | Pass the version without a `v` or a suffix. |
-| `release hook` | `HATCHDOOR_RELEASE_HOOK` is unset or does not name an executable file. | Set it to the hook's path. |
+| `release hook` | `HATCHDOOR_RELEASE_HOOK` is set neither in the environment nor in `.release.env`, or does not name an executable file. | Set it to the hook's path in `.release.env`. |
 | `release pull request` | No open or merged pull request from `development` into `main` is titled exactly `Release v<version>`. | Restore the title if it was edited, or run `just release-prepare <version>`. |
 | `release checklist` | An item on the merged version-bump pull request is unticked, or its wording was changed or deleted. | Do the check and tick the box, or restore the item's exact text. The bump has merged, so a check that finds something to fix can no longer ship it in this release: stop and ask the maintainer. |
 | `draft release` | Before the merge: the draft has no title or notes. | Finish drafting it, and get the maintainer's approval again, since the text changed. |

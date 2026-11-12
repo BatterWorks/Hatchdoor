@@ -177,6 +177,13 @@ Intro.
 
 const WHATS_NEW_PATH = "docs/user-vault/What's new.md";
 
+const README = `# Hatchdoor
+
+    image: hatchdoor:latest   # also version tags, e.g. 1.0.0
+
+Upgrade from 0.9.0 first.
+`;
+
 function git(root, ...args) {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
   assert.equal(
@@ -231,6 +238,7 @@ async function fixture({
   await write(root, "frontend/package.json", PACKAGE_JSON);
   await write(root, "frontend/package-lock.json", PACKAGE_LOCK);
   await write(root, "CHANGELOG.md", changelog);
+  await write(root, "README.md", README);
   if (whatsNew !== null) {
     await write(root, WHATS_NEW_PATH, whatsNew);
   }
@@ -345,6 +353,7 @@ test("opens the bump with the checklist and draft release, ships a review fix th
     "-## Unreleased",
     '-version = "1.0.0"',
     '-version = "1.0.0"',
+    "-    image: hatchdoor:latest   # also version tags, e.g. 1.0.0",
     // package-lock.json sorts first and declares the version twice.
     '-  "version": "1.0.0",',
     '-      "version": "1.0.0"',
@@ -354,6 +363,7 @@ test("opens the bump with the checklist and draft release, ships a review fix th
     `+## v1.1.0 - ${today()}`,
     '+version = "1.1.0"',
     '+version = "1.1.0"',
+    "+    image: hatchdoor:latest   # also version tags, e.g. 1.1.0",
     // The highlights drafted from the Unreleased entries.
     `+## v1.1.0 - ${today()}`,
     "+- A new thing.",
@@ -821,7 +831,7 @@ test("refuses a draft with too few lines, before running the tests", async () =>
   const context = await fixture({ changelog });
   const first = prepare(context);
   assertRefused(first, "highlights");
-  assert.match(first.stderr, /it has 2 lines; a release has 3 to 6\./);
+  assert.match(first.stderr, /it has 2 lines; a release has 3 to 6\. Add 1 or more\./);
   assert.equal((await calls(context, "just", "check-full")).length, 0);
   assert.equal((await stubState(context)).pulls.length, 0);
 
@@ -843,12 +853,64 @@ test("refuses when the What's new page is missing", async () => {
   assert.match(result.stderr, /What's new\.md is missing/);
 });
 
-test("refuses a draft with more than six lines, before running the tests", async () => {
+test("stops a 13-line draft before check-full, naming the cut, and the run after the cut tests once", async () => {
+  const extra = Array.from({ length: 10 }, (_, index) => `- Extra ${index}.`).join("\n");
+  const changelog = CHANGELOG.replace("### Fixed\n", `${extra}\n\n### Fixed\n`);
+  const context = await fixture({ changelog });
+  const first = prepare(context);
+  assertRefused(first, "highlights");
+  assert.match(first.stderr, /it has 13 lines; a release has 3 to 6\. Cut 7 or more/);
+  assert.equal((await calls(context, "just", "check-full")).length, 0);
+  assert.equal((await stubState(context)).pulls.length, 0);
+
+  // The draft is committed on the bump branch, every entry in it.
+  const pagePath = path.join(context.root, WHATS_NEW_PATH);
+  const page = await readFile(pagePath, "utf8");
+  assert.equal(git(context.root, "status", "--porcelain"), "");
+  assert.match(page, /- Extra 9\.\n/);
+
+  // The maintainer keeps five lines and commits; the next run tests once.
+  const cut = page.replace(/- Extra [2-9]\.\n/g, "");
+  await writeFile(pagePath, cut);
+  git(context.root, "commit", "--quiet", "-am", "docs: cut the highlights");
+  const second = prepare(context);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal((await calls(context, "just", "check-full")).length, 1);
+  assert.equal((await stubState(context)).pulls.length, 1);
+});
+
+test("the bump sets the README's version example and leaves other versions alone", async () => {
+  const context = await fixture();
+  const result = prepare(context);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    await readFile(path.join(context.root, "README.md"), "utf8"),
+    README.replace("e.g. 1.0.0", "e.g. 1.1.0"),
+  );
+  assert.match(
+    git(context.root, "show", "--name-only", "--format=", "HEAD"),
+    /^README\.md$/m,
+  );
+});
+
+test("names every failing cheap check in one refusal, before running the tests", async () => {
   const extra = Array.from({ length: 5 }, (_, index) => `- Extra ${index}.`).join("\n");
   const changelog = CHANGELOG.replace("### Fixed\n", `${extra}\n\n### Fixed\n`);
   const context = await fixture({ changelog });
+  assertRefused(prepare(context), "highlights");
+
+  // Stale README examples and a deleted page on the resumed bump are all
+  // reported, each check named once.
+  await writeFile(
+    path.join(context.root, "README.md"),
+    `${README}Or pin it, e.g. 1.0.0.\n`,
+  );
+  await rm(path.join(context.root, WHATS_NEW_PATH));
+  git(context.root, "commit", "--quiet", "-am", "docs: break the release");
   const result = prepare(context);
-  assertRefused(result, "highlights");
-  assert.match(result.stderr, /it has 8 lines; a release has 3 to 6\./);
+  assertRefused(result, "readme, highlights");
+  assert.match(result.stderr, /`just check-full` did not run/);
+  assert.match(result.stderr, /- readme: README\.md gives 1\.0\.0 as a version example where it should say 1\.1\.0\./);
+  assert.match(result.stderr, /- highlights: docs\/user-vault\/What's new\.md is missing\./);
   assert.equal((await calls(context, "just", "check-full")).length, 0);
 });

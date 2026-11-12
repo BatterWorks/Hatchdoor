@@ -62,6 +62,10 @@ async function fakeMcp() {
       response.writeHead(202).end();
       return;
     }
+    if (message.method === "tools/list") {
+      reply({ result: { tools: [{ name: "echo" }, { name: "fails" }] } });
+      return;
+    }
     const { name, arguments: args } = message.params;
     if (name === "echo") {
       reply({
@@ -245,4 +249,18 @@ test("the address is this machine's, whatever the arguments say", async () => {
   const run = await runNode([SCRIPT, "--port", "example.com:443", "echo"], { env });
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /is not a port/);
+});
+
+test("a session lists the server's tools", async () => {
+  const server = await fakeMcp();
+  try {
+    const session = await openSession({ port: server.port, token: FAKE_TOKEN });
+    assert.deepEqual(
+      (await session.tools()).map((tool) => tool.name),
+      ["echo", "fails"],
+    );
+    await session.close();
+  } finally {
+    await server.close();
+  }
 });

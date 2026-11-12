@@ -356,7 +356,8 @@ release-prepare version:
     node scripts/release-prepare.mjs '{{version}}'
 
 # Run only after the maintainer approved the release title and notes in this
-# session. Needs HATCHDOOR_RELEASE_HOOK; re-run it to resume after a failure.
+# session. Needs HATCHDOOR_RELEASE_HOOK, exported or set in .release.env;
+# re-run it to resume after a failure.
 # See ADR-36.
 #
 # Publish a release: merge, tag, build images, publish, deploy.
@@ -370,6 +371,15 @@ release-publish version:
 # Build with Docker, then follow the README Quick Start in rootless Podman.
 smoke-install image="": _prepare-cargo
     scripts/smoke-install.sh {{ if image == "" { "" } else { quote(image) } }}
+
+# Needs the dev server up (`just dev-start`, then `just dev-wait`). Restarts
+# the backend once per write posture and again at the end. Takes minutes, so
+# it runs at release and on demand, never in `check`. See
+# docs/maintenance/mcp-conformance-run.md and scripts/conformance.mjs.
+#
+# Run the MCP conformance suite against the dev server and write the evidence.
+conformance:
+    node scripts/conformance.mjs --port {{backend_port}}
 
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.

@@ -1,5 +1,7 @@
 /target
 .env
+# The maintainer's release settings, such as HATCHDOOR_RELEASE_HOOK (release-runbook.md)
+/.release.env
 node_modules
 frontend/node_modules
 frontend/dist
