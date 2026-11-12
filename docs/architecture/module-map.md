@@ -400,9 +400,11 @@ that production inventory are still checked for stale paths and duplicates.
   `is_vault_change_path`, the one rule `should_refresh_for_event` also uses:
   the cache database and its sidecars, `.git` and noise paths never count, a
   layer marker does. The first round only sets the baseline, an unchanged
-  Vault never reports, and a round that cannot read the Vault root or
-  anything under it logs a warning, keeps the previous baseline and tries
-  again next round. Cancelling
+  Vault never reports. An entry below the root that the process may not open
+  costs only itself, by `vault::walk_error_costs_only_itself`, the rule the
+  catalogue walk uses (#674). A round that cannot read the Vault root, or
+  meets any other error under it, logs a warning, keeps the previous
+  baseline and tries again next round. Cancelling
   the handle stops the re-scan with the watcher.
 - The watcher is not the only producer of that intent. The mutation core
   reports every successful foreground write on the same channel through
@@ -1762,7 +1764,7 @@ watching, application startup, and chunking (`NoteSections` for heading paths, #
 - Markdown files remain authoritative (ADR-01).
 - Excluded/noise paths do not enter the index. `.git/` is built-in noise, re-includable with `!.git/` (#637).
 - Layer markers remain visible to classification even under broad exclusions, except under `.git`, which the marker walk never enters (#637).
-- An entry either walk may not open (`PermissionDenied`, or `NotFound` for one deleted mid-walk) costs only itself: the catalogue walk logs and skips it, the marker walk skips it at debug level (`paths::walk_error_costs_only_itself`). An unreadable Vault root or any other error, such as a share's passing I/O fault, still fails the build, so the Index turn retries instead of unpublishing a folder's notes (#637).
+- An entry either walk may not open (`PermissionDenied`, or `NotFound` for one deleted mid-walk) costs only itself: the catalogue walk logs and skips it, the marker walk skips it at debug level (`paths::walk_error_costs_only_itself`, which the watcher's folder re-scan also uses, #674). An unreadable Vault root or any other error, such as a share's passing I/O fault, still fails the build, so the Index turn retries instead of unpublishing a folder's notes (#637).
 - A note pattern in the exclude list covers its `.md` extension in any case (`ExcludeMatcher::is_excluded`); every other pattern matches case as written. Of two files differing only in the extension's case, the catalogue lists the `.md` one, and the write layer's `resolve_new_note_path` resolves a case variant to the existing file, so a create conflicts, an overwrite replaces it and a move refuses it (#637).
 - A note path that is not UTF-8 is left out of the catalogue with a warning, and so is a layer marker in such a folder; nothing is listed under a shared fallback name (#637).
 - `paths::is_note_path` is the one answer to "is this a note?": an `md` extension in any case. The catalogue walk, the write layer's `is_markdown_path`, note-path normalisation, note uploads and the startup note count all use it, and `strip_md_extension` strips the extension in any case to match (#247, #637).

@@ -11,7 +11,7 @@ use notify::{
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::vault::ExcludeMatcher;
+use crate::vault::{ExcludeMatcher, walk_error_costs_only_itself};
 use crate::vault_registry::VaultId;
 
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -256,10 +256,12 @@ struct FolderFingerprint {
 }
 
 /// Read names, sizes and modification times under the Vault, never file
-/// contents. Anything that cannot be read fails the whole round, so a share
-/// that errors now and then is retried instead of being reported as files
-/// going away and coming back. The one exception is an entry deleted while
-/// the walk was on its way to it, which is an ordinary change.
+/// contents. An entry the process may not open, or one deleted while the walk
+/// was on its way to it, costs only itself, by the rule the catalogue walk
+/// uses (`walk_error_costs_only_itself`, #674): one `chmod 000` folder must
+/// not hide every other change. Any other error fails the whole round, so a
+/// share that errors now and then is retried instead of being reported as
+/// files going away and coming back.
 fn fingerprint_vault_folder(
     vault_path: &Path,
     cache_db_path: &Path,
@@ -279,7 +281,10 @@ fn fingerprint_vault_folder(
     for entry in walk {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(error) if vanished_mid_walk(&error) => continue,
+            Err(error) if walk_error_costs_only_itself(&error) => {
+                debug!("Vault folder re-scan skipped an entry it cannot read: {error}");
+                continue;
+            }
             Err(error) => return Err(error),
         };
         if entry.depth() == 0 {
@@ -307,7 +312,7 @@ fn fingerprint_vault_folder(
         if !is_dir {
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
-                Err(error) if vanished_mid_walk(&error) => continue,
+                Err(error) if walk_error_costs_only_itself(&error) => continue,
                 Err(error) => return Err(error),
             };
             metadata.len().hash(&mut hasher);
@@ -317,15 +322,6 @@ fn fingerprint_vault_folder(
         fingerprint.digest = fingerprint.digest.wrapping_add(hasher.finish());
     }
     Ok(fingerprint)
-}
-
-/// True for an entry below the Vault root that was listed and then gone. A
-/// missing root is never this: it is a folder that cannot be read.
-fn vanished_mid_walk(error: &walkdir::Error) -> bool {
-    error.depth() > 0
-        && error
-            .io_error()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Wait for the burst that just started to go quiet before the caller reports
@@ -911,36 +907,117 @@ mod tests {
         assert_eq!(empty, round());
     }
 
-    /// A subfolder that cannot be listed fails the round, like the root: its
-    /// notes must not be reported as removed and then as added again.
+    /// A folder made unreadable for as long as this lives.
+    #[cfg(unix)]
+    struct LockedFolder(PathBuf);
+
+    #[cfg(unix)]
+    impl LockedFolder {
+        /// `None` when permissions do not stop this process from listing the
+        /// folder, as when the tests run as root.
+        fn lock(folder: &Path) -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o000))
+                .expect("lock folder");
+            let locked = LockedFolder(folder.to_path_buf());
+            std::fs::read_dir(folder).is_err().then_some(locked)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LockedFolder {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// One folder the process may not open, such as `.trash/private` with no
+    /// permissions, costs only itself: every round still produces a
+    /// fingerprint, so an edit anywhere else is still reported (#674).
     #[cfg(unix)]
     #[tokio::test]
-    async fn rescan_treats_an_unreadable_subfolder_as_a_failed_round() {
+    async fn rescan_still_reports_changes_beside_a_folder_it_cannot_open() {
+        let mut rescan = TestRescan::start(default_exclude(), |vault| {
+            std::fs::create_dir_all(vault.join(".trash/private")).expect("trash folder");
+            std::fs::create_dir_all(vault.join("notes")).expect("notes folder");
+            std::fs::write(vault.join("notes/Home.md"), "# Home\n").expect("write note");
+        })
+        .await;
+        let Some(_locked) = LockedFolder::lock(&rescan.vault_path.join(".trash/private")) else {
+            return;
+        };
+        assert!(
+            fingerprint_vault_folder(
+                &rescan.vault_path,
+                &rescan.cache_db_path,
+                &default_exclude()
+            )
+            .is_ok(),
+            "a folder the process may not open fails no round"
+        );
+
+        rescan
+            .expect_no_report("a folder that stays locked is not a change")
+            .await;
+        std::fs::write(
+            rescan.vault_path.join("notes/Home.md"),
+            "# Home\n\nWater the plants.\n",
+        )
+        .expect("edit note");
+        rescan
+            .expect_one_report("an edit beside a locked folder")
+            .await;
+    }
+
+    /// A folder the process may list but not enter (read without search
+    /// permission) names its files, but their size and time cannot be read:
+    /// each such file costs only itself and the round still succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_whose_details_cannot_be_read_fails_no_round() {
         use std::os::unix::fs::PermissionsExt;
 
+        let dir = tempdir().expect("temp dir");
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).expect("notes folder");
+        std::fs::write(notes.join("Home.md"), "# Home\n").expect("write note");
+        let cache = dir.path().join("cache.sqlite3");
+        let Some(locked) = LockedFolder::lock(&notes) else {
+            return;
+        };
+        std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o644))
+            .expect("list but not enter");
+        let round = fingerprint_vault_folder(dir.path(), &cache, &default_exclude());
+        drop(locked);
+        assert!(
+            round.is_ok(),
+            "an unreadable file fails no round: {round:?}"
+        );
+    }
+
+    /// A subfolder that turns unreadable drops out of the fingerprint, as its
+    /// notes drop out of the catalogue walk (#637), so the round reports a
+    /// change and the index follows; unlocking it reports it coming back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rescan_reports_a_subfolder_turning_unreadable_and_readable_again() {
         let mut rescan = TestRescan::start(default_exclude(), |vault| {
             std::fs::create_dir_all(vault.join("notes")).expect("notes folder");
             std::fs::write(vault.join("notes/Home.md"), "# Home\n").expect("write note");
         })
         .await;
-        let notes = rescan.vault_path.join("notes");
-        let set_mode = |mode| {
-            std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(mode))
-                .expect("set folder permissions")
-        };
-
-        set_mode(0o000);
-        if std::fs::read_dir(&notes).is_ok() {
-            // Running as root: permissions do not stop the walk.
-            set_mode(0o755);
+        let Some(locked) = LockedFolder::lock(&rescan.vault_path.join("notes")) else {
             return;
-        }
+        };
         rescan
-            .expect_no_report("an unreadable subfolder is not a change")
+            .expect_one_report("the folder turned unreadable")
             .await;
-        set_mode(0o755);
+        drop(locked);
         rescan
-            .expect_no_report("nothing changed while the subfolder was unreadable")
+            .expect_one_report("the folder is readable again")
             .await;
     }
 

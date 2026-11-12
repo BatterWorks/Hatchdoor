@@ -62,7 +62,7 @@ pub fn is_note_path(path: &Path) -> bool {
 /// way (#637). Any other error, such as a share's I/O error, fails the walk
 /// as before, so a passing fault is retried rather than read as notes
 /// disappearing. An unreadable Vault root is never skipped.
-pub(super) fn walk_error_costs_only_itself(error: &walkdir::Error) -> bool {
+pub(crate) fn walk_error_costs_only_itself(error: &walkdir::Error) -> bool {
     error.depth() > 0
         && error.io_error().is_some_and(|error| {
             matches!(
