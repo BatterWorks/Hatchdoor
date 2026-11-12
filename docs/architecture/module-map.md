@@ -5834,8 +5834,8 @@ path as it does in Reading view and a click on `[[Note#Heading]]` opens the
 note at the heading), autosave
 scheduling and save state (#628: the two-second deadline survives callback
 rerenders, pending text retains its base hash, `hasUnsaved()` reports pending
-or refused text synchronously, and `onSaved(result, content)` names the exact
-text confirmed; Saved is withheld while newer typing is pending, and unsaved
+or refused text synchronously, and `onSaved(result, content, sentAgainst)`
+names the exact text confirmed and the hash it was written against (#695); Saved is withheld while newer typing is pending, and unsaved
 text holds a browser `beforeunload` warning), and attachment acceptance and insertion (#558: `attachmentRejection` takes the upload limit, `null` for unknown, and both editors call `attachmentRejectionAtCurrentLimit`, which checks the extension first and then holds the file to the limit `writeApi.ts`'s `fetchAttachmentMaxBytes` reads). `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
@@ -5889,7 +5889,9 @@ flag, queue, idle pause and status belong to that one note, a new key starts
 them afresh, and a save still out for the previous key neither holds the new
 note's edits back nor drains them, while its reply reaches only the `onSaved`
 captured for its own note; `NotePage`'s `onSaved` and its refusal notices act
-only while the note they were sent for is open. `lib/reloadGuard.ts` is the seam that keeps the
+only while the note they were sent for is open, except that a late successful
+reply moves the left note's held draft onto the new hash when that draft is
+the last copy the left visit wrote and is based on `sentAgainst` (#695). `lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
 edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`

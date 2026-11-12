@@ -56,6 +56,7 @@ import {
   holdNoteDraft,
   listHeldDrafts,
   loadNoteDraft,
+  noteDraftKey,
   saveNoteDraft,
   type NoteDraft,
 } from "../lib/writeDrafts";
@@ -398,6 +399,12 @@ export function NotePage({
   // Only copies written by this visit may advance through our save chain.
   // Matching the timestamp and text leaves another tab's held edit alone.
   const lastWrittenDraftRef = useRef<NoteDraft | null>(null);
+  // The last copy each visit wrote, kept past leaving its note: that note's
+  // save can come back after the page moved on, and its newer held edit is
+  // still based on our own write (#695). Keyed by `noteDraftKey`; an entry
+  // is kept only while the store holds that copy, and goes when the note's
+  // next save reply is booked.
+  const leftDraftsRef = useRef<Map<string, NoteDraft>>(new Map());
   // The last document the vault confirmed it holds. A debounced write can be
   // scheduled before a save and fire after it, and recreating the draft then
   // would leave text the vault already has sitting in the store under a hash
@@ -671,6 +678,18 @@ export function NotePage({
     setRecoveredDraftNotice(null);
     setRestoredCommit(null);
     savedContentRef.current = null;
+    const left = lastWrittenDraftRef.current;
+    const stored = left && loadNoteDraft(left.vaultId, left.relativePath);
+    if (
+      left &&
+      stored?.savedAt === left.savedAt &&
+      stored.content === left.content
+    ) {
+      leftDraftsRef.current.set(
+        noteDraftKey(left.vaultId, left.relativePath),
+        left,
+      );
+    }
     lastWrittenDraftRef.current = null;
   }, [noteKey, writeDraftNow]);
 
@@ -1077,11 +1096,12 @@ export function NotePage({
       }
     },
     flushSave,
-    onSaved: (result, savedContent) => {
+    onSaved: (result, savedContent, sentAgainst) => {
       // Captured with this render, so a reply landing after the user opened
       // another note still names the note it was for (#658).
       const savedFor = noteKey;
-      if (savedFor === currentNoteKeyRef.current) {
+      const stillOpen = savedFor === currentNoteKeyRef.current;
+      if (stillOpen) {
         setNote((prev) =>
           prev && result.content_hash
             ? { ...prev, content_hash: result.content_hash }
@@ -1114,10 +1134,18 @@ export function NotePage({
             };
           }
           const draft = loadNoteDraft(vaultId, result.relative_path);
-          const local = lastWrittenDraftRef.current;
+          // A reply for the note just left finds that visit's last copy
+          // among the left ones, and moves it only when it was based on
+          // the hash this save replaced (#695).
+          const leftKey = noteDraftKey(vaultId, result.relative_path);
+          const local = stillOpen
+            ? lastWrittenDraftRef.current
+            : leftDraftsRef.current.get(leftKey);
+          leftDraftsRef.current.delete(leftKey);
           if (
             draft &&
             local &&
+            (stillOpen || draft.baseContentHash === sentAgainst) &&
             draft.vaultId === local.vaultId &&
             draft.relativePath === local.relativePath &&
             draft.savedAt === local.savedAt &&
