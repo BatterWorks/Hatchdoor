@@ -172,6 +172,35 @@ describe("in-body note links", () => {
     );
   });
 
+  // A link that names no note points into the one it is written in (#727).
+  it("scrolls to the heading a link with no note name names", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+
+    mockVault("Jump to [[#Second part]].\n\n## Second part\n\nBody.\n", {
+      "/home.md#Second part": "home",
+    });
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "Second part" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(
+      scrollIntoView.mock.instances[0] ?? scrollIntoView.mock.contexts[0],
+    ).toBe(document.getElementById("second-part"));
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      `/v/${VAULT}/n/home`,
+    );
+  });
+
   // The live editor asks the same resolver (#544): a target only the server
   // can place still styles as resolved, and the click lands on the heading.
   it("resolves a wikilink in the editor through the server and opens the note at its heading", async () => {
@@ -206,6 +235,33 @@ describe("in-body note links", () => {
         document.querySelector(".note-content")?.getAttribute("data-tail"),
       ).toBe("true");
     });
+  });
+
+  it("opens a link with no note name from the editor at its heading (#727)", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    mockVault("Jump to [[#Second part]].\n\n## Second part\n\nBody.\n", {
+      "/home.md#Second part": "home",
+    });
+    renderApp({ writeEnabled: true });
+
+    await screen.findByRole("textbox", { name: "Note body" });
+    const link = await waitFor(() => {
+      const widget = document.querySelector(".cm-atomic-wiki-link-resolved");
+      expect(widget).not.toBeNull();
+      return widget as HTMLElement;
+    });
+    expect(link.textContent).toBe("Second part");
+    fireEvent.click(link, { button: 0 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hash").textContent).toBe("#second-part");
+    });
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      `/v/${VAULT}/n/home`,
+    );
   });
 
   // An asset URL is a file the browser fetches, not a route. Handing it to the
@@ -368,6 +424,26 @@ describe("block links (#578)", () => {
     });
     expect(landedOn().textContent).toBe("Further down.");
     expect(screen.queryByText(/\^here/)).toBeNull();
+  });
+
+  it("lands on a paragraph of the same note from a link with no note name (#727)", async () => {
+    const { scrollIntoView, landedOn } = trackScrolls();
+    mockVault("Jump to [[#^here|down]].\n\nFurther down. ^here\n", {
+      "/home.md#^here": "home",
+    });
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "down" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(landedOn().textContent).toBe("Further down.");
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      `/v/${VAULT}/n/home`,
+    );
   });
 
   it("lands on the paragraph when the page is loaded at the link's address", async () => {

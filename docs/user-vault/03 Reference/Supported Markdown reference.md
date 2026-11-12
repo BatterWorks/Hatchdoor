@@ -145,13 +145,14 @@ Store an image near the note that references it, and give it a safe filename: lo
 
 ## Wikilinks
 
-Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Six forms:
+Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Seven forms:
 
 - Plain: `[[Connect your agent]]` → [[Connect your agent]]
 - Aliased: `[[Connect your agent|connect an agent]]` shows the text after the `|`.
 - Aliased inside a table cell: `[[Connect your agent\|connect an agent]]`. A bare `|` would end the cell, so the alias pipe is written escaped. Hatchdoor reads that backslash as syntax rather than as part of the note's name, so the link resolves, shows up in backlinks, and is rewritten by a rename like any other.
 - Heading-scoped: `[[Connect your agent#Configure your MCP client]]` opens the note at that heading.
 - Block-scoped: `[[Connect your agent#^a1b2c3]]` opens the note at the paragraph, list item or quote that ends in the block id `^a1b2c3`, the form Obsidian writes when you link to a block. A quote or a table can also carry its id on a line of its own right under it, after a blank line. The Reading view hides the `^a1b2c3` text itself. A block id that no longer exists opens the note at the top, and in the editor a block link opens the note at the top too.
+- Within the same note: `[[#Images and PDFs]]` or `[[#^a1b2c3]]`, with no note name, jumps to that heading or block in the note it is written in, the form Obsidian writes for a link inside one note. It shows the heading's name, or its alias. A heading or block that no longer exists leaves you where you are.
 - To a note that does not exist yet: `[[This Note Does Not Exist Yet]]` still renders, and leads nowhere until that note is created.
 
 When two notes share a name, add part of the folder path to pick one: with `projects/a/Plan` and `projects/b/Plan`, `[[b/Plan]]` opens the second, and a leading `/` counts from the Vault root, so `[[/Plan]]` opens a `Plan` at the top level. Without a folder, a link whose capitals match a note's name exactly wins over one that matches with case ignored, and after that the note nearest the linking note wins. A link that still fits both equally goes to the first in path order, and a rename or delete of either note leaves it alone. When a rename or move would hand a link to a different same-named note, Hatchdoor writes that link's folder path in, so it keeps opening the note it opened before. A link can also name a note by its address, such as `[[connect-your-agent]]`, but never by the numbered address a second same-named note gets: `[[Plan 2]]` stays a link to a note that does not exist yet even when a second `Plan` has the address `plan-2`. Names are compared the same way however the file system stored their accents and syllables, so a Korean or Japanese note synced from a Mac is reached by a link typed on any keyboard.
