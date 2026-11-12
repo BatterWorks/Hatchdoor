@@ -866,8 +866,12 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
+    // Wait on the label, then look the button up by role once (#679). Each
+    // role query over the note page costs up to 150 ms idle and several times
+    // that under load, so `findByRole` fit too few attempts in its wait.
+    await screen.findByLabelText("New note in Projects");
     fireEvent.click(
-      await screen.findByRole("button", { name: "New note in Projects" }),
+      screen.getByRole("button", { name: "New note in Projects" }),
     );
 
     expect(screen.getByLabelText("Folder")).toHaveValue("Projects");
