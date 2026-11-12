@@ -2798,6 +2798,37 @@ mod tests {
         );
     }
 
+    /// A name Hatchdoor has no tool for is the same protocol error while the
+    /// model is still set up or loading as afterwards, not the setup notice:
+    /// that window follows every restart, and an agent that misspelt a tool
+    /// must not be sent to accept terms it may have accepted long ago (#733).
+    #[tokio::test]
+    async fn an_unknown_tool_during_model_setup_is_still_a_protocol_error() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+        let body = call_tool(&state, "test_simple_text", json!({})).await;
+        assert_eq!(body["error"]["code"], -32602, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "Unknown MCP tool: test_simple_text"
+        );
+
+        // A tool from each catalogue list keeps the setup notice, write and
+        // management tools included although this state has writes off.
+        for name in ["get_note", "create_note", "batch", "refresh_vault"] {
+            let known = call_tool(&state, name, json!({})).await;
+            assert_eq!(known["result"]["isError"], true, "{name}: {known}");
+        }
+
+        // The model loading after a restart, the window `just conformance`
+        // started in, is the same gate.
+        state
+            .startup
+            .set_model_loading(crate::model_setup::GEMMA_MODEL_ID);
+        let loading = call_tool(&state, "test_reconnection", json!({})).await;
+        assert_eq!(loading["error"]["code"], -32602, "{loading}");
+    }
+
     // ---------------------------------------------------------------------------
     // Errors that name their docs page (#423)
     // ---------------------------------------------------------------------------

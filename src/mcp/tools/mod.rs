@@ -110,6 +110,12 @@ async fn dispatch_tools_call(
                     model: crate::model_setup::NOMIC_MODEL_ID,
                 },
             ),
+            // A name that is no tool of Hatchdoor's, in either write posture,
+            // is the same protocol error it is after setup. Setup is pending
+            // for a few seconds after every restart while the model loads,
+            // so the notice would otherwise send an agent that misspelt a
+            // tool to accept terms it may have accepted long ago (#733).
+            other if !is_hatchdoor_tool(other) => Err(unknown_tool(other)),
             // Logged because the client is the only party that used to learn
             // of this rejection: it produced no server-side record at all, so
             // a session full of them was invisible in the logs (#191).
@@ -185,9 +191,7 @@ async fn dispatch_tools_call(
         | "retry_vault"
         | "publish_recovery_branch"
         | "refresh_vault" => Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE)),
-        other => Err(JsonRpcFailure::invalid_params(format!(
-            "Unknown MCP tool: {other}"
-        ))),
+        other => Err(unknown_tool(other)),
     };
 
     // Tool-level failures (e.g. "note not found") are rendered as an isError
@@ -372,6 +376,23 @@ pub fn setup_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(true, true),
         }),
     ])
+}
+
+/// Whether `name` is a tool Hatchdoor has in either write posture: every
+/// list the catalogue is built from, so a tool added there is known here.
+fn is_hatchdoor_tool(name: &str) -> bool {
+    let named = |tool: &Value| tool["name"] == name;
+    read::read_tools_list().iter().any(named)
+        || read::management_tools_list().iter().any(named)
+        || write::write_tools_list().iter().any(named)
+        || setup_tools_list().iter().any(named)
+        || named(&batch::batch_tool_schema())
+}
+
+/// The protocol error for a name Hatchdoor has no tool for, the same during
+/// model setup as after it (#733).
+fn unknown_tool(name: &str) -> JsonRpcFailure {
+    JsonRpcFailure::invalid_params(format!("Unknown MCP tool: {name}"))
 }
 
 /// Vault collection discovery/management tools mirror `handlers/vaults.rs`'s

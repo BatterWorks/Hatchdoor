@@ -21,6 +21,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- An agent that calls a tool Hatchdoor does not have, such as a misspelt name, now gets the "Unknown MCP tool" error at every moment. In the few seconds after a restart while the search model loads, it used to be told instead that Hatchdoor was still being set up and to accept the Gemma terms, even on an instance set up long ago. [#733]
 - Opening a folder in the folder picker, in Add a Vault or the first-run checklist, now moves keyboard focus straight to the new level's "Use" row. It used to get there a moment after the new folder was drawn, with focus on the page itself in between. [#728]
 - A link to a heading or block in the note it is written in, `[[#Heading]]` or `[[#^id]]`, now works in the Reading view, the source-mode preview and the editor: it shows the heading's name, or its alias, and jumps to that place in the note. It used to show as a missing link. [#727]
 - Deleting, moving or archiving a note at the top of the Vault no longer takes along attachments that other notes still show. Such a note has the whole Vault as its folder, so every attachment it embedded by path went with it, from any folder: a delete put another note's picture in the trash and broke or repointed that note's embed, and a move copied a shared attachments folder into the destination. An attachment now goes with a top-level note only when no other note embeds or links to it, by path, by bare name such as `![[image.png]]` or with a Markdown link. Notes in a folder keep the rule they had: attachments in their own folder go with them. [#701]
@@ -119,6 +120,7 @@
 [#705]: https://github.com/BatterWorks/Hatchdoor/issues/705
 [#727]: https://github.com/BatterWorks/Hatchdoor/issues/727
 [#728]: https://github.com/BatterWorks/Hatchdoor/issues/728
+[#733]: https://github.com/BatterWorks/Hatchdoor/issues/733
 
 ## v2.9.0 - 2026-10-27
 
