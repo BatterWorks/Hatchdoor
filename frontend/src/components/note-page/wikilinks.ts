@@ -9,6 +9,7 @@ import {
   findMarkdownImages,
   findMarkdownNoteLinks,
 } from "./markdownLinks";
+import { noteEmbedHref } from "./noteEmbeds";
 
 export type ResolvedWikilink = { slug: string; archived: boolean };
 
@@ -109,21 +110,22 @@ export function rewriteWikilinks(
     const parsed = parseWikilinkTarget(body);
 
     if (bang === "!") {
-      // A note embed draws as a link to the note (#573). Showing the note's
-      // content inline is #699. A name that reads as a note is tried as one
-      // first; any other name only when no file answered to it, so
-      // `![[Release 2.8]]` still finds its note.
+      // A note embed draws the note's content (#699); the renderer gets it
+      // as an `/__embed__/` link and falls back to the note link (#573) when
+      // it cannot. A name that reads as a note is tried as one first; any
+      // other name only when no file answered to it, so `![[Release 2.8]]`
+      // still finds its note.
       const [pathPart] = splitPathSuffix(parsed.target);
       const noteName = isNoteEmbedTarget(pathPart);
       const filePath = resolvedAssets.get(pathPart);
       if (noteName || !filePath) {
         const hit = resolved.get(parsed.target) ?? null;
         if (hit) {
-          // A block embed still links to the note itself; what it draws is
-          // #699's to decide.
-          const named = wikilinkAnchor(parsed.target);
-          const anchor = named.startsWith("^") ? "" : named;
-          const href = noteRouteHref(vaultId, hit, anchor);
+          const href = noteEmbedHref({
+            slug: hit.slug,
+            archived: hit.archived,
+            anchor: wikilinkAnchor(parsed.target),
+          });
           const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
           return `[${escapeMarkdownLabel(label)}](${href})`;
         }

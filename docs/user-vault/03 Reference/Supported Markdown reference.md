@@ -156,6 +156,24 @@ Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refre
 
 When two notes share a name, add part of the folder path to pick one: with `projects/a/Plan` and `projects/b/Plan`, `[[b/Plan]]` opens the second, and a leading `/` counts from the Vault root, so `[[/Plan]]` opens a `Plan` at the top level. Without a folder, a link whose capitals match a note's name exactly wins over one that matches with case ignored, and after that the note nearest the linking note wins. A link that still fits both equally goes to the first in path order, and a rename or delete of either note leaves it alone. When a rename or move would hand a link to a different same-named note, Hatchdoor writes that link's folder path in, so it keeps opening the note it opened before. A link can also name a note by its address, such as `[[connect-your-agent]]`, but never by the numbered address a second same-named note gets: `[[Plan 2]]` stays a link to a note that does not exist yet even when a second `Plan` has the address `plan-2`. Names are compared the same way however the file system stored their accents and syllables, so a Korean or Japanese note synced from a Mac is reached by a link typed on any keyboard.
 
+## Embedded notes
+
+Put `!` in front of a wikilink to a note and the Reading view shows that note's content where the link sits, in a frame that names the note and links to it. Three forms:
+
+- The whole note: `![[Other note]]` shows its text, without its properties.
+- One section: `![[Other note#Heading]]` shows that heading and everything under it, down to the next heading of the same or a higher level.
+- One block: `![[Other note#^a1b2c3]]` shows the paragraph, list item, quote or table that carries the block id `^a1b2c3`.
+
+The embedded text looks the way it does in its own note: callouts, tables, saved queries, diagrams, math and images included. An embed can sit inside a callout or a list. Embeds inside an embedded note are shown too, up to three levels deep.
+
+Some embeds show as a plain link to the note instead of its content:
+
+- the note, the heading or the block does not exist, or the note cannot be read;
+- the note embeds itself, directly or through a chain of notes, such as A embedding B and B embedding A;
+- the embed is a fourth level down.
+
+An embed only reaches notes in the same Vault, the way every note link does. The source-mode preview shows embeds the same way. The live editor shows the `![[...]]` text as written, and an agent reading a note gets the file as written, with no embedded content. Embeds already count as links in backlinks and the graph. To edit embedded text, open its note from the frame's link. Embedded images and PDFs work as described under [[#Images and PDFs]].
+
 ## Markdown links to notes
 
 A plain Markdown link whose target is a `.md` file, in any case, is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
@@ -233,7 +251,6 @@ An agent renaming a tag across the Vault with `rename_tag` goes by these same ru
 
 Obsidian reads a few things Hatchdoor does not draw yet. Here is what you see instead:
 
-- **An embedded note**, `![[Other note]]` or `![[Other note#Heading]]`, shows as a link to that note, or to that heading, rather than the note's content. An embedded block, `![[Other note#^id]]`, links to the note. A note that does not exist shows as a missing link. Embedded images and PDFs work as described under [[#Images and PDFs]].
 - **An inline footnote**, `text^[a note]`, shows as written. Use a standard footnote, `text[^1]` with `[^1]: a note` on a line of its own, which works.
 - **A canvas file** (`.canvas`), Obsidian's whiteboard, is not drawn. The explorer lists it in its folder, after the notes, and selecting it downloads the file. A link or an embed of one in a note, `[[Plan.canvas]]` or `![[Plan.canvas]]`, shows in the Reading view as a link that downloads it too. Hatchdoor keeps a canvas pointing at the right files: renaming, moving or archiving a note or an attachment, in the Web UI or through an agent, changes the path on every card that shows that file and nothing else in the canvas. Deleting a note or an attachment leaves its cards as they are, so Obsidian shows them as missing, as it does after a delete in Obsidian. A canvas that is not valid JSON, or is larger than 8 MB, is left untouched, and the result of the rename or move names it. A change made outside Hatchdoor is not followed. Canvases are not searched, and a card does not count as a link in backlinks or the graph.
 - **A standalone Bases file** (`.base`) is not listed in the explorer and does not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
