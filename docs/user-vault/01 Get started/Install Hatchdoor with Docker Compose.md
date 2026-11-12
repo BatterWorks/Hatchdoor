@@ -142,7 +142,7 @@ Do not change `HOST: 0.0.0.0`. After saving the file, run `docker compose up -d`
 
 ## Using Podman instead of Docker
 
-Everything on this page works with Podman. Use `podman` and `podman compose` wherever it says `docker` and `docker compose`, and change the image to `battermanz/hatchdoor:podman-latest` (or `podman-<version>`); the plain `latest` image is for Docker only.
+Everything on this page works with Podman, with the same image. Use `podman` and `podman compose` wherever it says `docker` and `docker compose`.
 
 In step 3, rootless Podman needs `podman unshare chown -R 65532:65532 data models` in place of `sudo chown`. Do the same for a custom `HOST_CACHE_PATH`, `HOST_STATE_PATH` or `HOST_MODELS_PATH`.
 

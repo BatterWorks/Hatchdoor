@@ -14,8 +14,8 @@ The runtime image is **distroless and rootless**. It is built on `gcr.io/distrol
 
 ## Tags
 
-- `latest` and `<version>`: images for Docker
-- `podman-latest` and `podman-<version>`: images for Podman
+- `latest` and `<version>`: the image, for Docker and Podman alike
+- `podman-latest` and `podman-<version>`: the same image under an older name, for installs set up before Docker and Podman shared one image. They will soon stop receiving new versions: switch to `latest` or `<version>`.
 
 ## Quick start
 
@@ -79,7 +79,7 @@ The first start stops on purpose. Hatchdoor refuses to run without a web token, 
 
 Open `http://localhost:42824`, enter the token, and pick a search model. A fresh install has no Vaults: the setup checklist that opens next walks you through adding your notes folder and connecting your agent.
 
-With Podman, use `podman compose` and the `podman-latest` image, and with rootless Podman replace the `sudo chown` line with `podman unshare chown -R 65532:65532 data models`.
+With Podman, use `podman compose` and the same image, and with rootless Podman replace the `sudo chown` line with `podman unshare chown -R 65532:65532 data models`.
 
 The [GitHub README](https://github.com/BatterWorks/Hatchdoor#readme) covers MCP client setup, configuration and every environment variable.
 

@@ -103,7 +103,7 @@ if [ -z "$image" ]; then
     image=localhost/hatchdoor-smoke:latest
     old_docker=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
     docker build \
-        --build-arg HATCHDOOR_IMAGE=docker \
+        --build-arg HATCHDOOR_IMAGE=published \
         --build-arg VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$repo/Cargo.toml" | head -n 1)" \
         --build-arg GIT_SHA="$(git -C "$repo" rev-parse HEAD)" \
         -t "$image" "$repo"

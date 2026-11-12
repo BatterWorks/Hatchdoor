@@ -568,7 +568,8 @@ pub struct Build {
     pub version: String,
     /// `stable` for a release, `dev` for every other build.
     pub channel: &'static str,
-    /// `docker`, `podman` or `source`.
+    /// `docker` or `podman` for the published image, by the engine it runs
+    /// under, or `source`.
     pub image: &'static str,
     pub os: &'static str,
     pub arch: &'static str,
@@ -582,7 +583,7 @@ impl Build {
         Self {
             channel: crate::config::build_channel(),
             version: base.to_string(),
-            image: crate::config::build_image(),
+            image: crate::config::install_image(),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
         }

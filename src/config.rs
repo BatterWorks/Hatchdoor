@@ -60,17 +60,34 @@ fn channel_word(release: bool) -> &'static str {
     if release { "stable" } else { "dev" }
 }
 
-/// How this build was packaged, for the usage report (ADR-45): `docker` or
-/// `podman` when the image build passed that word as the `HATCHDOOR_IMAGE`
-/// build argument, and `source` for every other build.
-pub fn build_image() -> &'static str {
-    image_word(option_env!("HATCHDOOR_IMAGE"))
+/// Podman creates this file in every container it runs; Docker never does.
+/// Another engine that creates it reports `podman` too, a blind spot ADR-45
+/// accepts.
+const PODMAN_MARKER: &str = "/run/.containerenv";
+
+/// How this install runs, for the usage report (ADR-45). One published image
+/// serves both engines (#705), so the engine is read at run time: `podman`
+/// when Podman's marker file exists, `docker` otherwise. Only a build given
+/// `HATCHDOOR_IMAGE=published` is the published image; every other build
+/// reports `source`.
+pub fn install_image() -> &'static str {
+    image_word(option_env!("HATCHDOOR_IMAGE"), || {
+        std::path::Path::new(PODMAN_MARKER).exists()
+    })
 }
 
-fn image_word(build_argument: Option<&str>) -> &'static str {
+/// `published` marks the published image. `docker` and `podman`, the values
+/// from when each engine had its own build, still do, so a release script
+/// that has not caught up does not report `source`.
+fn image_word(build_argument: Option<&str>, podman_marker: impl FnOnce() -> bool) -> &'static str {
     match build_argument.map(str::trim) {
-        Some("docker") => "docker",
-        Some("podman") => "podman",
+        Some("published" | "docker" | "podman") => {
+            if podman_marker() {
+                "podman"
+            } else {
+                "docker"
+            }
+        }
         _ => "source",
     }
 }
@@ -368,15 +385,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_build_reports_docker_or_podman_only_when_told_and_source_otherwise() {
-        assert_eq!(image_word(Some("docker")), "docker");
-        assert_eq!(image_word(Some(" podman ")), "podman");
-        assert_eq!(image_word(Some("")), "source");
-        assert_eq!(
-            image_word(Some("my-own-registry.example/hatchdoor")),
-            "source"
-        );
-        assert_eq!(image_word(None), "source");
+    fn a_published_image_names_the_engine_it_runs_under() {
+        assert_eq!(image_word(Some("published"), || true), "podman");
+        assert_eq!(image_word(Some("published"), || false), "docker");
+        assert_eq!(image_word(Some(" published "), || true), "podman");
+    }
+
+    #[test]
+    fn an_old_engine_build_argument_still_marks_a_published_image() {
+        // A release script that still passes `docker` or `podman` (#705).
+        assert_eq!(image_word(Some("docker"), || true), "podman");
+        assert_eq!(image_word(Some("docker"), || false), "docker");
+        assert_eq!(image_word(Some("podman"), || false), "docker");
+        assert_eq!(image_word(Some("podman"), || true), "podman");
+    }
+
+    #[test]
+    fn a_build_without_the_published_image_argument_reports_source_whatever_the_markers_say() {
+        for marker in [true, false] {
+            assert_eq!(image_word(None, || marker), "source");
+            assert_eq!(image_word(Some(""), || marker), "source");
+            assert_eq!(
+                image_word(Some("my-own-registry.example/hatchdoor"), || marker),
+                "source"
+            );
+        }
     }
 
     #[test]

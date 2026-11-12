@@ -303,15 +303,15 @@ The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatch
 
 ```text
 battermanz/hatchdoor:latest          # also version tags, e.g. 2.9.0
-battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
 The runtime image is **distroless and rootless**. It is built on
 `gcr.io/distroless/cc-debian13:nonroot`, ships no shell or package manager, and
 runs as an unprivileged `nonroot` user. Hatchdoor also runs unchanged under
-Podman (rootless included); swap `docker` / `docker compose` for `podman` /
-`podman compose` **and** the image tag for `podman-latest` (or
-`podman-<version>`) — the `latest` tag above is Docker-only.
+Podman (rootless included), from the same image and tags; swap `docker` /
+`docker compose` for `podman` / `podman compose`. The older `podman-latest` and
+`podman-<version>` tags name the same image and will soon stop receiving new
+versions.
 
 Docker Compose mounts:
 
