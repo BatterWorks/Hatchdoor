@@ -195,7 +195,7 @@ pub(super) fn backlink_rewrite_plan(
                 return NoteLinkEdit::Keep;
             };
             let target_moves = slug == moved_slug;
-            let (Some(new_target), Some(paths_after)) = (new_target, paths_after.as_ref()) else {
+            let (Some(moved), Some(paths_after)) = (moved_to, paths_after.as_ref()) else {
                 return if target_moves {
                     NoteLinkEdit::Unlink
                 } else {
@@ -205,11 +205,14 @@ pub(super) fn backlink_rewrite_plan(
             if !target_moves && !source_moves {
                 return NoteLinkEdit::Keep;
             }
-            let target_after = if target_moves {
-                new_target
+            // The extension travels as the target's file spells it, so a
+            // link to `Deep.MD` keeps naming `Deep.MD` (#740).
+            let new_target = moved.new_target;
+            let (target_after, extension) = if target_moves {
+                (new_target, note_extension(moved.destination))
             } else {
                 match index.find_by_slug(slug) {
-                    Some(target) => target.relative_path.as_str(),
+                    Some(target) => (target.relative_path.as_str(), note_extension(&target.path)),
                     None => return NoteLinkEdit::Keep,
                 }
             };
@@ -225,6 +228,7 @@ pub(super) fn backlink_rewrite_plan(
                 folder_after,
                 slug,
                 target_after,
+                extension,
             )
         });
         if rewritten != content && !note.utf8 {
@@ -255,6 +259,8 @@ pub(super) fn backlink_rewrite_plan(
 /// linking note's folder. Each candidate is checked against `paths_after`, the
 /// index as it will be after the move, so a form that would now land on a
 /// namesake falls back to the note-relative path and then the anchored one.
+/// Every rewritten path ends in `extension`, the target file's own, in its
+/// own case (#740).
 fn retarget_markdown_link(
     paths_after: &NotePaths,
     written: &str,
@@ -262,6 +268,7 @@ fn retarget_markdown_link(
     folder_after: &str,
     target_slug: &str,
     target_after: &str,
+    extension: &str,
 ) -> NoteLinkEdit {
     let reaches_target = |path: &str| {
         paths_after
@@ -273,26 +280,36 @@ fn retarget_markdown_link(
     }
     let name = target_after.rsplit('/').next().unwrap_or(target_after);
     let preferred = if !written.contains(['/', '\\']) {
-        format!("{name}.md")
+        format!("{name}.{extension}")
     } else {
         match form {
-            LinkForm::Root => format!("/{target_after}.md"),
-            LinkForm::VaultRelative => format!("{target_after}.md"),
+            LinkForm::Root => format!("/{target_after}.{extension}"),
+            LinkForm::VaultRelative => format!("{target_after}.{extension}"),
             LinkForm::NoteRelative | LinkForm::ByName => {
-                relative_note_path(folder_after, target_after)
+                relative_note_path(folder_after, target_after, extension)
             }
         }
     };
     let candidates = [
         preferred,
-        relative_note_path(folder_after, target_after),
-        format!("/{target_after}.md"),
+        relative_note_path(folder_after, target_after, extension),
+        format!("/{target_after}.{extension}"),
     ];
     let chosen = candidates
         .iter()
         .find(|candidate| reaches_target(candidate))
         .unwrap_or(&candidates[2]);
     NoteLinkEdit::Retarget(chosen.clone())
+}
+
+/// A note file's extension as its name spells it: `MD` for `Deep.MD`. Every
+/// note file ends in some case of `.md`, so `md` stands in only for a path
+/// that somehow does not, as in the index snapshot's own reading (#675).
+fn note_extension(path: &Path) -> &str {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| extension.eq_ignore_ascii_case("md"))
+        .unwrap_or("md")
 }
 
 /// The moved note's new bare title, when no *other* note in the pre-move index
