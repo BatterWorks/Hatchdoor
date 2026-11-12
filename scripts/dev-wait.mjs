@@ -8,6 +8,8 @@
 // stopped, or one whose build failed, will never answer.
 
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import {
   BACKEND_PORT,
@@ -36,14 +38,55 @@ export function halvesFor({
   };
 }
 
-async function answers(url) {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-    await response.body?.cancel();
-    return response.ok;
-  } catch {
-    return false;
-  }
+// A connection that came back to its own socket (#749). The dev backend's
+// port sits inside Linux's range of source ports, so while the backend is
+// still compiling, a probe to it can be handed that same port as its source
+// and connect to itself. Open, or closed normally and then in TIME-WAIT for
+// about a minute, such a connection keeps the backend from binding the port.
+//
+// So the probe's connection is checked before anything is sent, and one that
+// reached itself is reset, which frees the port at once. `localPort` is for
+// the test that forces it.
+export function probeConnection({ host, port, localPort }) {
+  const socket = net.connect({ host, port, localPort });
+  socket.once("connect", () => {
+    if (
+      socket.localPort === socket.remotePort &&
+      socket.localAddress === socket.remoteAddress
+    ) {
+      socket.resetAndDestroy();
+    }
+  });
+  return socket;
+}
+
+// Whether `url` answers with a 2xx. A connection that reached itself counts
+// as not answering.
+export function answers(url, { localPort } = {}) {
+  const parsed = new URL(url);
+  const host = parsed.hostname;
+  // A URL leaves out the scheme's default port, which `net.connect` refuses.
+  const port = Number(parsed.port) || 80;
+  return new Promise((resolve) => {
+    const request = http.get(
+      {
+        host,
+        port,
+        path: parsed.pathname,
+        agent: false,
+        createConnection: () => probeConnection({ host, port, localPort }),
+      },
+      (response) => {
+        response.on("error", () => {});
+        response.resume();
+        resolve(response.statusCode >= 200 && response.statusCode < 300);
+      },
+    );
+    // Five seconds for the whole request, not for each pause in it.
+    const limit = setTimeout(() => request.destroy(), 5_000);
+    request.on("close", () => clearTimeout(limit));
+    request.on("error", () => resolve(false));
+  });
 }
 
 // Whether the process `just dev-start` tracks for a half is alive: "running",
