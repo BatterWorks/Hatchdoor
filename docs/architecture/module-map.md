@@ -780,8 +780,8 @@ whichever lane the turn ran in.
 - `dispatch_commit_turn` executes a `VaultWorkKind::Commit` turn: the local
   half of Git, on its own (#267). `plan_commit_turn` resolves the Vault's
   source and mode to `git::run_local_history_git_turn` (Local history, no
-  mutation lock), `git::run_existing_git_commit_turn` (`ExistingGit` Two-way,
-  mutation lock held because `prepare_two_way_worktree` stages from the whole
+  mutation lock, given the source's registered `repository_path`, #678),
+  `git::run_existing_git_commit_turn` (`ExistingGit` Two-way, mutation lock held because `prepare_two_way_worktree` stages from the whole
   checkout's status), or `git::run_managed_git_commit_turn` (`ManagedGit`
   Two-way, lease *and* mutation lock). Pull-only and `Local` plan nothing and
   return `Ok(())`: the first refuses writes and must leave its operator's own
@@ -3153,9 +3153,15 @@ work executor's `dispatch_git_turn` calls it once per turn, before
 planning any of the branches below, so every commit this boundary makes
 for a Vault — managed-Git, existing-Git remote-sync, or existing-Git
 Local-history — honors that Vault's own identity. `commit_local` commits without network
-access and discovers an enclosing existing checkout while staging only the
-configured Vault subtree. Remote fetch/integrate/push, unpushed accounting,
-and interrupted-merge marker recovery are gone with the instance-wide task
+access into the repository at `GitConfig::repository_path`, the Vault's
+registered repository folder, while staging only the configured Vault
+subtree. `validate_local_repo`, `commit_local` and `has_uncommitted_changes`
+open exactly that repository and never search upward from it (#678): a Vault
+that lost its `.git` would otherwise commit into whatever repository encloses
+it. A missing repository is `GitError::RepositoryMissing`, reported as the
+non-retryable `existing_git_local_history_repository_missing`. Remote
+fetch/integrate/push, unpushed accounting, and interrupted-merge marker
+recovery are gone with the instance-wide task
 (#185); every remote graph operation this boundary still performs lives in
 `managed_sync.rs`, which owns its own conflict and containment rules.
 `commit_local` refuses a checkout found mid-merge, mid-rebase, mid-cherry-pick
@@ -3432,11 +3438,12 @@ to at most half of `BACKOFF_BASE`. At one sample per backoff base every
 into a build failure rather than a silently degraded retry.
 
 `run_local_history_git_turn` is an `ExistingGit` + `VaultGitMode::LocalHistory`
-Vault's counterpart to `run_managed_git_turn`: given the Vault's already-resolved
-path and commit identity, it builds its own placeholder `GitMode::Local`
-`GitConfig` and calls `validate_local_repo` then `commit_local`, committing
-only the contained Vault subtree of whatever enclosing checkout the Vault sits
-in and never contacting a remote. It classifies every `GitError` into a
+Vault's counterpart to `run_managed_git_turn`: given the Vault's registered
+`repository_path`, its already-resolved path and commit identity, it builds its
+own placeholder `GitMode::Local` `GitConfig` and calls `validate_local_repo`
+then `commit_local`, committing only the contained Vault subtree of the
+repository at `repository_path`, never one found by searching upward from it
+(#678), and never contacting a remote. It classifies every `GitError` into a
 redacted `VaultWorkError`, mirroring the legacy single-Vault task's transient
 split (`Remote`/`Other` retry; validation, conflict, and dirty-tree do not).
 Its client-facing message is fixed per code rather than `GitError`'s text,
@@ -3597,7 +3604,9 @@ connection, whatever the Vault's mode; writes do not block on sync, except
 while a managed-Git or `ExistingGit` remote-sync turn, or a Two-way commit
 turn, is in flight for that Vault, see below; task replacement drains
 before another task can start;
-local mode never contacts a remote; remote mode never force-checks out over
+local mode never contacts a remote; Local history commits only into the
+Vault's registered repository folder, never into a repository found by
+searching upward (#678); remote mode never force-checks out over
 uncommitted manual vault edits (ADR-10), ignored files included: a
 fast-forward or merge that would write over a file `HEAD` does not track
 (a note in an ignored path, or one inside an ignored folder) stops first as

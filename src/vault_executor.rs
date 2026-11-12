@@ -1590,16 +1590,20 @@ fn plan_commit_turn(
         // documented on `GitTurnPlan::holds_mutation_lock`: it commits
         // already-settled drift and must not park foreground writes behind
         // itself.
+        // `repository_path` is the only repository the turn opens (#678).
         RegistryVaultSource::ExistingGit {
             mode: VaultGitMode::LocalHistory,
+            repository_path,
             ..
         } => {
+            let repository_path = repository_path.clone();
             let vault_path = control_block.vault_path().to_path_buf();
             Some(GitTurnPlan {
                 holds_mutation_lock: false,
                 panic_code: "existing_git_local_history_task_panicked",
                 work: GitTurnWork::Unleased(Box::new(move || {
                     crate::git::run_local_history_git_turn(
+                        repository_path,
                         vault_path,
                         author_name,
                         author_email,

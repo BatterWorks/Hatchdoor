@@ -2090,6 +2090,7 @@ mod tests {
             "managed_git_dirty_working_copy",
             "managed_git_validation_failed",
             "existing_git_local_history_validation_failed",
+            "existing_git_local_history_repository_missing",
             "vault_commit_mode_does_not_commit",
         ] {
             assert!(!is_remote_only_failure(commit_code), "{commit_code}");

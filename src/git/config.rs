@@ -19,12 +19,18 @@ impl GitMode {
 
 /// Static configuration for one Git operation on one Vault directory.
 ///
-/// Every field except `vault_path`, `author_name`, and `author_email` is a
-/// remnant of the instance-wide lane #185 deleted:
-/// `run_local_history_git_turn` fills them
-/// with placeholders its callees never read.
+/// Every field except `repository_path`, `vault_path`, `author_name`, and
+/// `author_email` is a remnant of the instance-wide lane #185 deleted:
+/// `run_local_history_git_turn` fills them with placeholders its callees
+/// never read.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GitConfig {
+    /// The repository folder this Vault's history lives in: the Vault folder
+    /// itself, or the checkout the Vault is a subfolder of. Local history
+    /// opens exactly this repository and never searches upward from it, so
+    /// a Vault that lost its own `.git` cannot commit into an enclosing
+    /// repository instead (#678).
+    pub repository_path: std::path::PathBuf,
     /// Absolute path to the Vault. Remote mode requires it to be the Git
     /// repository root; Local history may use an existing enclosing checkout.
     pub vault_path: std::path::PathBuf,
@@ -52,6 +58,7 @@ pub struct GitConfig {
 impl std::fmt::Debug for GitConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitConfig")
+            .field("repository_path", &self.repository_path)
             .field("vault_path", &self.vault_path)
             .field("mode", &self.mode)
             .field("remote", &self.remote)
