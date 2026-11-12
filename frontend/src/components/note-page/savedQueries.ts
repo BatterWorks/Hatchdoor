@@ -351,16 +351,16 @@ export function matchResult(
   return results.find((candidate) => savedQueryKey(candidate.source) === key);
 }
 
-/** The link text for a row: the file's name without its `.md`, the way a note
- * is named everywhere else in the app, or the title when the link sits on a
- * cell that is empty. */
+/** The link text for a row: the file's name without its `.md`, in any case
+ * (#675), the way a note is named everywhere else in the app, or the title
+ * when the link sits on a cell that is empty. */
 export function linkText(
   columnId: string,
   cell: unknown,
   title: string,
 ): string {
   const text = formatCell(cell);
-  if (columnId === "file.name" && text.endsWith(".md")) {
+  if (columnId === "file.name" && /.\.md$/i.test(text)) {
     return text.slice(0, -".md".length);
   }
   return text || title;

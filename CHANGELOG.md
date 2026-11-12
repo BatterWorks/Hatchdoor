@@ -49,6 +49,7 @@
 - Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
 - A Git sync no longer destroys a note kept in a path your ignore rules cover. Hatchdoor writes notes in folders a `.gitignore`, `.git/info/exclude` or `core.excludesFile` ignores, and never commits them, so they exist only on that disk. When the remote then brought a file at the same path, or a plain file named like an ignored folder, or a folder named like an ignored file, the sync replaced or deleted the note and still reported the Vault as ready. The sync now stops before writing anything and reports a conflict that names the notes in the way, as it does for any other local edit the remote would overwrite. An ignored note the remote does not touch never blocks a sync, nor does a submodule the remote moves. The troubleshooting guide says how to clear this kind of conflict, which a recovery branch cannot. [#623]
 - A search result's snippet in the Web UI no longer shows code from a `~~~` block, or from a code block that shows another code block, as if it were text. It now drops every code block, backticks or tildes of any length, inside a list item or a callout too, and a code span written with three backticks shows its words. [#668]
+- A note whose file ends `.MD` or `.Md` is now treated like a `.md` one in three more places. A Markdown link written `[text](Upper.MD)` now counts as a link, so it shows in outgoing links and backlinks, the graph and the link checks, and a rename or move rewrites it, where it used to be ignored and left broken; the Web UI opens it as a note link too. In a Git-backed Vault such a note's created date now comes from the commit that added it instead of the file's modification time, and in queries and saved queries its `file.name` and `file.path` read `Upper.MD`, not `Upper.md`, while a saved query's link to it still reads `Upper`. A rename that only changes the extension's case, `Draft.md` to `Draft.MD`, is now noticed by the index too. [#675]
 
 [#579]: https://github.com/BatterWorks/Hatchdoor/issues/579
 [#599]: https://github.com/BatterWorks/Hatchdoor/issues/599
@@ -90,6 +91,7 @@
 [#670]: https://github.com/BatterWorks/Hatchdoor/issues/670
 [#672]: https://github.com/BatterWorks/Hatchdoor/issues/672
 [#674]: https://github.com/BatterWorks/Hatchdoor/issues/674
+[#675]: https://github.com/BatterWorks/Hatchdoor/issues/675
 [#693]: https://github.com/BatterWorks/Hatchdoor/issues/693
 
 ## v2.9.0 - 2026-10-27

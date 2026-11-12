@@ -381,7 +381,8 @@ pub(crate) struct NoteLinkTarget {
 
 /// Whether `raw` (a destination as written) is a note link, and to what path.
 ///
-/// A note link is a local path ending `.md` once any `#anchor` is removed.
+/// A note link is a local path ending `.md`, in any case (#675), once any
+/// `#anchor` is removed.
 /// Anything with a URL scheme, or protocol-relative, is external and never a
 /// note link, whatever it ends in.
 pub(crate) fn note_link_target(raw: &str) -> Option<NoteLinkTarget> {
@@ -392,7 +393,8 @@ pub(crate) fn note_link_target(raw: &str) -> Option<NoteLinkTarget> {
     }
     let path = percent_decode(&unescape_backslashes(raw_path));
     let file_name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
-    if !file_name.ends_with(".md") || file_name.len() <= ".md".len() {
+    let stem = strip_md_extension(file_name);
+    if stem.len() == file_name.len() || stem.is_empty() {
         return None;
     }
     Some(NoteLinkTarget { path, raw_path_len })
@@ -797,6 +799,17 @@ mod tests {
         assert_eq!(target.path, "Install.md");
         assert_eq!(target.raw_path_len, "Install.md".len());
         assert!(note_link_target("Install#x.md").is_none());
+    }
+
+    /// A note's extension counts in any case (#637), so a link to one does too
+    /// (#675).
+    #[test]
+    fn a_note_link_ends_md_in_any_case() {
+        for raw in ["Upper.MD", "a/Mixed.Md#top", "b/Low.mD"] {
+            assert!(note_link_target(raw).is_some(), "{raw}");
+        }
+        assert!(note_link_target(".MD").is_none());
+        assert!(note_link_target("Note.MDX").is_none());
     }
 
     #[test]

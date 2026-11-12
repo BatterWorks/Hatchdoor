@@ -1255,6 +1255,10 @@ struct CachedNoteState {
     slug: String,
     content_hash: String,
     snapshot: FileSnapshot,
+    /// The file path the row was written from. A rename that changes only
+    /// the extension's case, `Draft.md` to `Draft.MD`, keeps everything else
+    /// (#675).
+    absolute_path: String,
 }
 
 /// Every cached note as `(relative_path, slug)`. The pass needs both: the path
@@ -1280,7 +1284,7 @@ fn cached_note_state(
 ) -> Result<Option<CachedNoteState>, String> {
     tx.query_row(
         r#"
-        SELECT slug, content_hash, mtime_ns, size_bytes
+        SELECT slug, content_hash, mtime_ns, size_bytes, absolute_path
         FROM notes
         WHERE relative_path = ?1
         "#,
@@ -1293,6 +1297,7 @@ fn cached_note_state(
                     mtime_ns: row.get(2)?,
                     size_bytes: row.get(3)?,
                 },
+                absolute_path: row.get(4)?,
             })
         },
     )
@@ -1497,7 +1502,10 @@ fn upsert_note_if_changed(
     // be skipped to let the new classification land.
     if !force_layer_refresh {
         let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
-            cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
+            cached.slug == entry.slug
+                && cached.snapshot == snapshot
+                && cached.content_hash == hash
+                && cached.absolute_path == entry.path.to_string_lossy()
         });
         if cached_matches_file_and_content {
             return Ok(UpsertOutcome::Unchanged);
@@ -2573,6 +2581,41 @@ mod tests {
         )
         .optional()
         .expect("query slug")
+    }
+
+    /// Renaming `Draft.md` to `Draft.MD` keeps its relative path, slug,
+    /// content and modification time, so only the stored file path says the
+    /// extension changed; snapshot rows read the extension from it (#675).
+    #[test]
+    fn a_rename_that_only_changes_the_extension_case_updates_the_file_path() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("Draft.md"), "# Draft\n\nbody").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+
+        std::fs::rename(dir.path().join("Draft.md"), dir.path().join("Draft.MD")).expect("rename");
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("reindex"),
+                &embedder,
+            )
+            .expect("second populate");
+
+        let conn = cache.connection().expect("connection");
+        let stored: String = conn
+            .query_row(
+                "SELECT absolute_path FROM notes WHERE relative_path = 'Draft'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row");
+        assert!(stored.ends_with("Draft.MD"), "{stored}");
     }
 
     /// A slug comes from a note's filename alone, so `Archive/Overview.md` and

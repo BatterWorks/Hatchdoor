@@ -10,8 +10,10 @@ fn note(path: &str, title: &str, tags: &[&str], properties: Value) -> VaultSnaps
             .trim_end_matches(".md")
             .replace('/', "-")
             .to_lowercase(),
-        // Snapshot rows carry the path without the `.md` every Note file has.
+        // Snapshot rows carry the path without the file's extension, which
+        // these fixtures all spell `.md`.
         relative_path: path.trim_end_matches(".md").to_string(),
+        extension: "md".to_string(),
         size_bytes: 0,
         mtime_ns: 0,
         layer: None,

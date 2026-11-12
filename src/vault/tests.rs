@@ -1168,6 +1168,26 @@ fn a_note_path_that_is_not_utf8_is_left_out() {
     assert!(index.layers.layer_names().is_empty());
 }
 
+/// A Markdown link written `.MD` is a note link like one written `.md`
+/// (#675).
+#[test]
+fn a_markdown_link_ending_upper_case_md_counts() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Upper.MD"), "# Upper\n").expect("note");
+    fs::write(
+        dir.path().join("Linker.md"),
+        "# Linker\n\n[up](Upper.MD) and [ref][r]\n\n[r]: Upper.Md#Top\n",
+    )
+    .expect("note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    assert_eq!(outgoing_slugs(&vault, "linker"), vec!["upper".to_string()]);
+    let upper = vault.note_links("upper").expect("upper links");
+    assert_eq!(upper.backlinks.len(), 1);
+    assert_eq!(upper.backlinks[0].slug, "linker");
+}
+
 /// `.MD` was invisible to the index while the write layer called it a note
 /// (#247, #637).
 #[test]

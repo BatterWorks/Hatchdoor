@@ -137,11 +137,34 @@ pub(crate) struct PublishedVaultSnapshot {
 pub(crate) struct VaultSnapshotNote {
     pub(crate) title: String,
     pub(crate) slug: String,
+    /// The Vault-relative path without the note file's extension.
     pub(crate) relative_path: String,
+    /// The note file's extension as its name spells it: `md` in any case,
+    /// since a `.MD` file is a note too (#637, #675).
+    pub(crate) extension: String,
     pub(crate) size_bytes: i64,
     pub(crate) mtime_ns: i64,
     pub(crate) layer: Option<String>,
     pub(crate) metadata: NoteMetadata,
+}
+
+impl VaultSnapshotNote {
+    /// The Vault-relative path of the note's file, its extension spelled as
+    /// on disk (#675).
+    pub(crate) fn file_path(&self) -> String {
+        format!("{}.{}", self.relative_path, self.extension)
+    }
+}
+
+/// The extension a note file's indexed path ends in, which is `md` in some
+/// case for every note; a path that somehow does not reads as `md`.
+fn note_extension(absolute_path: &str) -> String {
+    std::path::Path::new(absolute_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| extension.eq_ignore_ascii_case("md"))
+        .unwrap_or("md")
+        .to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -865,7 +888,7 @@ impl SqliteCache {
         let mut notes_statement = conn
             .prepare(&format!(
                 "SELECT title, slug, relative_path, size_bytes, mtime_ns, layer, \
-                 aliases_json, {frontmatter_column} \
+                 aliases_json, {frontmatter_column}, absolute_path \
                  FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path"
             ))
             .map_err(|error| format!("prepare Vault snapshot notes: {error}"))?;
@@ -875,6 +898,7 @@ impl SqliteCache {
                     title: row.get(0)?,
                     slug: row.get(1)?,
                     relative_path: row.get(2)?,
+                    extension: note_extension(&row.get::<_, String>(8)?),
                     size_bytes: row.get(3)?,
                     mtime_ns: row.get(4)?,
                     layer: row.get(5)?,
@@ -1724,6 +1748,16 @@ mod tests {
     use crate::vault::VaultIndex;
     use crate::vault_registry::VaultId;
     use rusqlite::params;
+
+    /// A snapshot row keeps the case its note's extension is written in
+    /// (#675).
+    #[test]
+    fn a_note_extension_is_read_from_its_indexed_path() {
+        assert_eq!(super::note_extension("/v/a/Upper.MD"), "MD");
+        assert_eq!(super::note_extension("/v/Mixed.Md"), "Md");
+        assert_eq!(super::note_extension("/v/plain.md"), "md");
+        assert_eq!(super::note_extension("/v/odd"), "md");
+    }
 
     struct NamedEmbedder {
         inner: StubEmbedder,
