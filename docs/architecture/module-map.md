@@ -5084,7 +5084,13 @@ loading/error/empty rendering only — the facet rail and results list underneat
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
 `lib/vaultParticipants.ts`, `lib/noteComments.ts`'s `hideComments` (result
 snippets drop comments, #573), `lib/markdownSyntax.ts`'s `stripHighlights`
-(snippets show a highlight's words without its signs, #572), router navigation supplied by the shell,
+(snippets show a highlight's words without its signs, #572), the backend's
+shared fence rule (`fence_marker` / `closes_fence` in `src/chunk/normalize.rs`,
+mirrored by `SearchDialog.tsx`'s `dropFencedBlocks`: a snippet drops every
+fenced block, backticks or tildes of any length, closed only by a run of the
+same character at least as long, unterminated to the end, plus a block
+opened behind list or quote markers, which the backend leaves as written,
+#668), router navigation supplied by the shell,
 `startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand

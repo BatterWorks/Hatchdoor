@@ -46,6 +46,7 @@
 - Writes now check exclusion patterns against the filename they actually use, after converting backslashes to slashes and adding `.md` for notes. Alternate path spellings can no longer overwrite trashed notes, change Obsidian settings or move files into excluded folders. A note named `x.tmp` is allowed because its file is `x.tmp.md`, while `Drawing.excalidraw` is refused when `*.excalidraw.md` is excluded. [#624]
 - Libraries with published security advisories are updated. In the server: the Markdown parser used to split notes for search could take exponential time on some wikilinks, so a note could stall indexing; the TLS library behind the update check and model downloads, the HTTP/2 library and the archive library are updated too. In the web app: DOMPurify, which Mermaid uses to clean diagrams; pdf.js, past an advisory that let a crafted PDF run script when opened; and React Router. [#621]
 - A Git sync no longer destroys a note kept in a path your ignore rules cover. Hatchdoor writes notes in folders a `.gitignore`, `.git/info/exclude` or `core.excludesFile` ignores, and never commits them, so they exist only on that disk. When the remote then brought a file at the same path, or a plain file named like an ignored folder, or a folder named like an ignored file, the sync replaced or deleted the note and still reported the Vault as ready. The sync now stops before writing anything and reports a conflict that names the notes in the way, as it does for any other local edit the remote would overwrite. An ignored note the remote does not touch never blocks a sync, nor does a submodule the remote moves. The troubleshooting guide says how to clear this kind of conflict, which a recovery branch cannot. [#623]
+- A search result's snippet in the Web UI no longer shows code from a `~~~` block, or from a code block that shows another code block, as if it were text. It now drops every code block, backticks or tildes of any length, inside a list item or a callout too, and a code span written with three backticks shows its words. [#668]
 
 [#579]: https://github.com/BatterWorks/Hatchdoor/issues/579
 [#599]: https://github.com/BatterWorks/Hatchdoor/issues/599
@@ -83,6 +84,7 @@
 [#655]: https://github.com/BatterWorks/Hatchdoor/issues/655
 [#658]: https://github.com/BatterWorks/Hatchdoor/issues/658
 [#661]: https://github.com/BatterWorks/Hatchdoor/issues/661
+[#668]: https://github.com/BatterWorks/Hatchdoor/issues/668
 [#670]: https://github.com/BatterWorks/Hatchdoor/issues/670
 [#693]: https://github.com/BatterWorks/Hatchdoor/issues/693
 
