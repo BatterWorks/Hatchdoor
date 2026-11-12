@@ -67,6 +67,10 @@ An entry reading `stale` is the case you can do something about: that Vault's sn
 
 `find_text` is the exception among these reads. It takes only its list of notes from the snapshot and reads each note's text from the file, so it sees an edit straight away. Use it to check that a change landed.
 
+## Note addresses
+
+A slug, the note's address, comes from its file name, not its folder. When two names give the same slug, one note gets `plan` and the other `plan-2`, and which gets which can change when a note with that name is added, moved, renamed or deleted, by you, the user or a Git sync ([[Supported Markdown reference#Wikilinks]] has the order). A slug you just read is usually still right for the rest of the task, but do not trust one you stored across sessions: find the note again with `resolve_wikilink`, giving its path such as `projects/b/Plan`, or with a search, and check that `get_note` returns the `relative_path` you expect before you change it. If the user needs an address that stays put, suggest a unique file name.
+
 ## Editing workflow
 
 Before changing an existing note:

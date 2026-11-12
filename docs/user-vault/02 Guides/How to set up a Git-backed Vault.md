@@ -68,6 +68,10 @@ Choosing Local history for a folder that is not a Git repository yet creates the
 > [!warning]
 > Local history creates a hidden `.git` folder inside the Vault's notes folder to hold its history, and that folder only grows: every image and PDF ever attached stays in it, even after you delete the file from the Vault. On a Vault with large attachments, choose Local history only if you accept that growth.
 
+### Deleting a note keeps it in Git
+
+On Local history and Two-way, deleting a note commits it as a move into the hidden `.hatchdoor-trash` folder, so the note stays in the repository. On Two-way it also reaches the remote at the next push and every clone of it, which is what lets you get it back from another device. The note was in the history from its first commit anyway. Nothing in Hatchdoor removes a note from the remote or from its Git history: to remove it for good, rewrite the repository's history yourself, outside Hatchdoor. If your own `.gitignore` lists `.hatchdoor-trash`, the commit records a plain deletion instead, and the note survives only in the history.
+
 ## The shared remote fields
 
 These appear when the behaviour you chose talks to a remote, which is **Pull-only** or **Two-way**, for a folder or a managed checkout:
