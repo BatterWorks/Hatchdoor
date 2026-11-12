@@ -14,7 +14,7 @@ use crate::git::ManagedGitScheduler;
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault_registry::{
     VaultDefinition, VaultGitMode, VaultId, VaultRegistrySnapshot, VaultRegistryStore,
-    VaultSource as RegistryVaultSource,
+    VaultSource as RegistryVaultSource, paths_overlap,
 };
 use crate::vault_watcher::{VaultWatcherHandle, spawn_vault_change_watcher};
 use crate::vault_work::{VaultWorkCoordinator, VaultWorkErrorDetail, VaultWorkKind};
@@ -576,6 +576,17 @@ pub(crate) struct VaultWriteExclusion {
     /// nothing had changed.
     mutations_taken: Arc<AtomicU64>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The mutation locks of retiring control blocks on a folder inside or
+    /// around this Vault's, which an old turn may still hold. Every
+    /// acquisition of `mutation_lock` first waits until each is free, so a
+    /// write here never runs beside an old turn rewriting files under the
+    /// same directory (#745, ADR-25). Waiting once per acquisition is enough:
+    /// a retired block admits no new mutation, so once its lock comes free
+    /// its turn has ended. Empty for almost every Vault. Only
+    /// `lock_mutation` waits for them: `blocking_retake_mutation_for_index`
+    /// always follows an acquisition that already did, and
+    /// `wait_for_mutation_safe_boundary` runs on a retired block.
+    waits_for: Arc<[Arc<tokio::sync::Mutex<()>>]>,
 }
 
 impl VaultWriteExclusion {
@@ -584,7 +595,35 @@ impl VaultWriteExclusion {
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             mutations_taken: Arc::new(AtomicU64::new(0)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            waits_for: Arc::from([]),
         }
+    }
+
+    /// This exclusion, also waiting for `others` before each acquisition.
+    /// Still the same exclusion (`is_same`), since the lock it hands out is.
+    fn also_waiting_for(self, others: &[Self]) -> Self {
+        let mut waits_for = self.waits_for.to_vec();
+        for other in others {
+            if !self.is_same(other)
+                && !waits_for
+                    .iter()
+                    .any(|lock| Arc::ptr_eq(lock, &other.mutation_lock))
+            {
+                waits_for.push(other.mutation_lock.clone());
+            }
+        }
+        Self {
+            waits_for: waits_for.into(),
+            ..self
+        }
+    }
+
+    /// Take the mutation lock once every lock it waits for is free.
+    async fn lock_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        for lock in self.waits_for.iter() {
+            drop(lock.clone().lock_owned().await);
+        }
+        self.mutation_lock.clone().lock_owned().await
     }
 
     /// Whether these two handles are the same exclusion, rather than two
@@ -622,33 +661,43 @@ struct CarriedOverState {
 /// from the retiring blocks on that folder, since an old turn may still hold
 /// their exclusion. The newest block of the same Vault gives its exclusion and
 /// its write ledger (#640); failing that, the newest block of another Vault
-/// gives its exclusion only (#681). Nothing when no retiring block is on that
-/// folder, which gives the Vault a fresh exclusion.
+/// gives its exclusion only (#681). Nothing when no retiring block is on or
+/// around that folder, which gives the Vault a fresh exclusion.
+///
+/// Whatever it starts from, the exclusion also waits for every other retiring
+/// block on a folder equal to, inside or around this one (#745): an old turn
+/// there rewrites files under this Vault's folder too. One exclusion cannot be
+/// shared with several of them, so it waits for them instead. None of them is
+/// a live Vault's: a Vault's folder changes only while it is disabled, and
+/// the registry refuses a live Vault on a folder overlapping this one.
 fn carried_over_from_retiring(
     retiring: &[VaultControlBlock],
     vault_id: VaultId,
     vault_path: &Path,
 ) -> CarriedOverState {
-    let on_folder = || {
-        retiring
-            .iter()
-            .rev()
-            .filter(|runtime| runtime.vault_path() == vault_path)
+    let overlapping: Vec<VaultWriteExclusion> = retiring
+        .iter()
+        .filter(|runtime| paths_overlap(runtime.vault_path(), vault_path))
+        .map(VaultControlBlock::write_exclusion)
+        .collect();
+    let mut on_folder = retiring
+        .iter()
+        .rev()
+        .filter(|runtime| runtime.vault_path() == vault_path);
+    let same_vault = on_folder
+        .clone()
+        .find(|runtime| runtime.definition().vault_id() == vault_id);
+    let (exclusion, writes) = match (same_vault, on_folder.next()) {
+        (Some(runtime), _) => (runtime.write_exclusion(), Some(runtime.write_ledger())),
+        (None, Some(runtime)) => (runtime.write_exclusion(), None),
+        (None, None) if overlapping.is_empty() => return CarriedOverState::default(),
+        (None, None) => (VaultWriteExclusion::fresh(), None),
     };
-    if let Some(runtime) = on_folder().find(|runtime| runtime.definition().vault_id() == vault_id) {
-        return CarriedOverState {
-            writes: Some(runtime.write_ledger()),
-            exclusion: Some(runtime.write_exclusion()),
-            ..CarriedOverState::default()
-        };
+    CarriedOverState {
+        exclusion: Some(exclusion.also_waiting_for(&overlapping)),
+        writes,
+        ..CarriedOverState::default()
     }
-    on_folder()
-        .next()
-        .map(|runtime| CarriedOverState {
-            exclusion: Some(runtime.write_exclusion()),
-            ..CarriedOverState::default()
-        })
-        .unwrap_or_default()
 }
 
 /// Where a Vault's notes sit in its Git repository (#300).
@@ -1302,7 +1351,7 @@ impl VaultControlBlock {
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
-        let guard = self.exclusion.mutation_lock.clone().lock_owned().await;
+        let guard = self.exclusion.lock_mutation().await;
         self.ensure_accepting_operations()?;
         Ok(guard)
     }
@@ -1775,7 +1824,9 @@ struct VaultCollectionState {
     /// Vault re-enabled, so neither a Resume during a pending Pause (#640)
     /// nor a new Vault added on the folder of a paused and disconnected one
     /// (#681) puts a second mutation lock on a directory an old turn still
-    /// holds (ADR-25). Kept by block rather than by Vault ID: the Vault ID
+    /// holds (ADR-25). A Vault activated on a folder inside or around one of
+    /// them waits for its lock before each of its own (#745). Kept by block
+    /// rather than by Vault ID: the Vault ID
     /// may be gone from the collection while its old turn still runs.
     retiring: Vec<VaultControlBlock>,
     /// Git-lane work (sync, commit, recovery) a lifecycle drained from a
