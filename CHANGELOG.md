@@ -21,6 +21,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- Moving or renaming an attachment no longer hangs when a sync tool or another program replaces the file with a pipe at the moment Hatchdoor reads it back, which blocked every other write to that Vault until something wrote to the pipe; the move is now refused at once, the notes that link to the attachment are put back as they were, and the error says the attachment itself could not be restored, since the other program replaced it. Hatchdoor no longer follows a symbolic link when it reads an attachment's size and hash, so a link swapped in to point at a device can no longer be read without end, and `list_note_attachments` now leaves out a reference to a symbolic link where it used to list the file the link pointed to. [#736]
 - An agent that calls a tool Hatchdoor does not have, such as a misspelt name, now gets the "Unknown MCP tool" error at every moment. In the few seconds after a restart while the search model loads, it used to be told instead that Hatchdoor was still being set up and to accept the Gemma terms, even on an instance set up long ago. [#733]
 - Opening a folder in the folder picker, in Add a Vault or the first-run checklist, now moves keyboard focus straight to the new level's "Use" row. It used to get there a moment after the new folder was drawn, with focus on the page itself in between. [#728]
 - A link to a heading or block in the note it is written in, `[[#Heading]]` or `[[#^id]]`, now works in the Reading view, the source-mode preview and the editor: it shows the heading's name, or its alias, and jumps to that place in the note. It used to show as a missing link. [#727]
@@ -121,6 +122,7 @@
 [#727]: https://github.com/BatterWorks/Hatchdoor/issues/727
 [#728]: https://github.com/BatterWorks/Hatchdoor/issues/728
 [#733]: https://github.com/BatterWorks/Hatchdoor/issues/733
+[#736]: https://github.com/BatterWorks/Hatchdoor/issues/736
 
 ## v2.9.0 - 2026-10-27
 

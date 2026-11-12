@@ -216,7 +216,9 @@ impl VaultReadError {
             // no HTTP route runs one either.
             | "invalid_heading_selection"
             // `note_attachments` reads the Note through the write module's
-            // attachment lister, whose only failure on a read is I/O.
+            // attachment lister, which fails on I/O, or as a conflict when an
+            // attachment stops being a regular file mid-listing (#736); that
+            // one reaches the caller as a retryable `vault_unavailable`.
             | "write_failed" => self.code.as_str(),
             _ => "vault_unavailable",
         }

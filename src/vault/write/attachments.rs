@@ -3,8 +3,8 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use crate::vault::LayerMap;
 use crate::vault::types::{NoteEntry, VaultIndex};
+use crate::vault::{BoundedReadError, LayerMap, open_without_blocking};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
 use super::canvas::{SkippedCanvas, canvas_rewrite_plan, split_rewritten};
@@ -33,7 +33,11 @@ pub fn list_note_attachments(
     let mut seen = HashSet::new();
     for relative_asset in referenced_assets(content) {
         let path = note_dir.join(relative_asset);
-        if !path.exists() || !path.is_file() {
+        // The report below opens only a regular file (#736), so a reference
+        // to a symbolic link, a FIFO or a folder is passed over, not refused.
+        // One swapped for such a thing between here and the report fails the
+        // listing as a conflict, which a retry answers.
+        if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
             continue;
         }
         ensure_existing_path_inside_root(vault_root, &path)?;
@@ -346,7 +350,17 @@ fn attachment_info(
     let relative_path = vault_relative_file_path(vault_root, path)?.ok_or_else(|| {
         WriteError::InvalidInput("attachment path cannot escape the vault".to_string())
     })?;
-    let (size_bytes, content_hash) = size_and_hash(path)?;
+    let (size_bytes, content_hash) = size_and_hash(path).map_err(|error| match error {
+        // The caller found a regular file here, so something swapped it
+        // since: a move or rename rolls back, as on any failure after it.
+        BoundedReadError::NotRegular => WriteError::Conflict(format!(
+            "attachment '{relative_path}' changed while it was read: it is no longer a regular file"
+        )),
+        other => WriteError::Io(format!(
+            "failed to read attachment '{}': {other}",
+            path.display()
+        )),
+    })?;
     // An asset's layer is its containing folder's layer — the same longest-prefix
     // resolution the index uses for notes. Reported, never filtered on: an
     // embedded image in a demoted note must stay fetchable.
@@ -366,23 +380,17 @@ fn attachment_info(
 /// recordings would otherwise pull all of them into memory at once. The hash is
 /// the same value the whole-buffer version produced: FNV-1a folds byte by byte,
 /// so where the chunk boundaries fall makes no difference.
-fn size_and_hash(path: &Path) -> Result<(u64, String), WriteError> {
+fn size_and_hash(path: &Path) -> Result<(u64, String), BoundedReadError> {
     const CHUNK_BYTES: usize = 64 * 1024;
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
-    let read_error = |error: std::io::Error| {
-        WriteError::Io(format!(
-            "failed to read attachment '{}': {error}",
-            path.display()
-        ))
-    };
-    let mut file = fs::File::open(path).map_err(read_error)?;
+    let mut file = open_regular_attachment(path)?;
     let mut buffer = vec![0u8; CHUNK_BYTES];
     let mut size: u64 = 0;
     let mut hash = FNV_OFFSET;
     loop {
-        let read = file.read(&mut buffer).map_err(read_error)?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -395,10 +403,54 @@ fn size_and_hash(path: &Path) -> Result<(u64, String), WriteError> {
     Ok((size, format!("fnv1a64:{hash:016x}")))
 }
 
+/// Opens the attachment at `path` without following a final symbolic link
+/// and without waiting for a FIFO's writer, and refuses anything that is not
+/// a regular file before a byte is read (#736). A move or rename reports the
+/// attachment after its rewrites and before its journal finishes, so a sync
+/// tool that swaps the file for a FIFO there would otherwise hold the Vault's
+/// mutation guard until a writer appeared, and a device behind a swapped-in
+/// link would be read for ever. Attachments have no size bound, so once the
+/// handle is known to be a regular file the non-blocking flag is cleared: a
+/// network filesystem that honours it would otherwise fail a long read with
+/// `EAGAIN` part way through.
+fn open_regular_attachment(path: &Path) -> Result<fs::File, BoundedReadError> {
+    use std::os::fd::AsRawFd;
+
+    let file = open_without_blocking(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(BoundedReadError::NotRegular);
+    }
+    // SAFETY: `file` owns an open descriptor for the length of both calls.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn the_attachment_report_refuses_a_fifo_and_a_symbolic_link_without_blocking() {
+        let vault = tempdir().expect("vault");
+        let fifo = vault.path().join("pipe.png");
+        crate::vault::make_fifo(&fifo);
+        let link = vault.path().join("link.png");
+        std::os::unix::fs::symlink("/dev/zero", &link).expect("link");
+
+        for path in [&fifo, &link] {
+            let error = size_and_hash(path).expect_err("not a regular file");
+            assert!(
+                matches!(error, BoundedReadError::NotRegular),
+                "expected a refusal, got {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn import_attachment_rejects_a_malformed_marker_before_writing() {
