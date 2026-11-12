@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -151,7 +157,12 @@ describe("FolderPicker", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Open Work" }));
     const projects = await screen.findByRole("button", { name: /^Projects/ });
-    expect(screen.getByRole("button", { name: /^Use Work/ })).toHaveFocus();
+    // Waits for the focus move rather than reading it at once (#737). The
+    // test "has focus on the new level's first row the moment that level
+    // appears" holds the component to moving it as the level draws (#728).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Use Work/ })).toHaveFocus(),
+    );
 
     fireEvent.click(projects);
     expect(onPick).toHaveBeenCalledWith("/data/vault/Work/Projects");
