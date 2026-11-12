@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   CHECKLIST_ITEMS,
   addWhatsNewSection,
+  cargoVersion,
   draftHighlights,
   highlightProblems,
   whatsNewSection,
@@ -17,10 +18,13 @@ import {
   parseChecklist,
   parseVersion,
   readVersions,
+  readmeVersionExamples,
+  readmeVersionProblems,
   releaseNotes,
   releaseSection,
   renameUnreleased,
   renderChecklist,
+  setReadmeVersion,
   setVersions,
   undefinedReferences,
   unreleasedSection,
@@ -332,3 +336,35 @@ test("a section ships with 3 to 6 one-line items, action needed first", () => {
   );
 });
 
+
+test("finds, sets and checks the README's e.g. version examples, and no other version", () => {
+  const readme =
+    "image:latest   # also version tags, e.g. 2.9.0\nPin it, e.g., v2.9.0.\nUpgrade to a 2.5.0 to 2.7.x release first.\n";
+  assert.deepEqual(readmeVersionExamples(readme), ["2.9.0", "2.9.0"]);
+  assert.equal(
+    setReadmeVersion(readme, "2.10.0"),
+    "image:latest   # also version tags, e.g. 2.10.0\nPin it, e.g., v2.10.0.\nUpgrade to a 2.5.0 to 2.7.x release first.\n",
+  );
+  assert.deepEqual(readmeVersionProblems(readme, "2.9.0"), []);
+  assert.deepEqual(readmeVersionProblems(readme, "2.10.0"), [
+    "README.md gives 2.9.0 as a version example where it should say 2.10.0.",
+    "README.md gives 2.9.0 as a version example where it should say 2.10.0.",
+  ]);
+});
+
+// The bump keeps these in step (`release-prepare`), so a stale example means
+// someone set a version by hand or edited the README after the bump.
+test("the README's version examples name the version Cargo.toml declares", async () => {
+  const [readme, cargo] = await Promise.all(
+    ["README.md", "Cargo.toml"].map((file) =>
+      readFile(path.join(repositoryRoot, file), "utf8"),
+    ),
+  );
+  const version = cargoVersion(cargo);
+  assert.ok(version, "Cargo.toml declares no version");
+  assert.ok(
+    readmeVersionExamples(readme).length > 0,
+    'README.md has no "e.g. <version>" example; update README_VERSION_EXAMPLE in release-common.mjs if the line changed',
+  );
+  assert.deepEqual(readmeVersionProblems(readme, version), []);
+});

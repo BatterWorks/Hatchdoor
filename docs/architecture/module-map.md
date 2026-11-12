@@ -4346,8 +4346,8 @@ the core then applying the authoritative check to the decoded bytes.
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes,
 server router tests, and golden wire tests locking both supported revisions'
-request/response shapes. Before releases, the manual conformance-run procedure
-(#166) produces mandatory release evidence.
+request/response shapes. Before releases, the conformance run (#166),
+`just conformance` since #617, produces mandatory release evidence.
 
 ### Evaluation and development binaries
 
@@ -6493,6 +6493,22 @@ packet scope:
   scripts/proto.test.mjs`;
   `dev-backend.test.mjs` runs the `justfile`'s stop recipes against stand-in
   processes.
+  `scripts/conformance.mjs`, started by `just conformance` (#617), runs the
+  pinned MCP conformance suite against the dev server through a proxy that
+  adds the bearer token, restarting the backend through `just
+  dev-restart-backend` with `HATCHDOOR_MCP_ENABLED` and
+  `HATCHDOOR_MCP_WRITE_ENABLED` set for each posture. It reads the revisions
+  from `SUPPORTED_PROTOCOL_VERSIONS` in `src/mcp/config.rs` with a pattern, so
+  reshaping that constant means editing the script. It lists tools through
+  `openSession` in `scripts/mcp-call.mjs` and writes under
+  `docs/maintenance/conformance-evidence/`. Validate with
+  `node --test scripts/conformance.test.mjs`.
+  The release commands (`scripts/release-*.mjs`, ADR-36) read
+  `HATCHDOOR_RELEASE_HOOK` through `devSetting` in `scripts/dev-common.mjs`,
+  from the environment or the git-ignored `.release.env`. The bump rewrites
+  the README's `e.g. <version>` examples, and a test in
+  `scripts/release-common.test.mjs` holds them to the `Cargo.toml` version.
+  Validate with `node --test scripts/release-*.test.mjs`.
   `scripts/smoke-install.sh`, started by `just smoke-install` (#569), builds
   the image from the checkout with Docker, loads it into rootless Podman and
   follows the README Quick Start there. It copies the deploy guide's API calls (`/api/model/decline-gemma`,

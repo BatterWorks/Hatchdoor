@@ -179,6 +179,16 @@ export async function openSession({
       }
       return payloadOf(result);
     },
+    // Every tool the server lists for this session.
+    async tools() {
+      const result = await send({
+        jsonrpc: "2.0",
+        id: nextId++,
+        method: "tools/list",
+        params: {},
+      });
+      return result.tools ?? [];
+    },
     // Best effort: the server drops an idle session by itself.
     async close() {
       if (!sessionId) {

@@ -23,7 +23,8 @@ export const DEV_DIR = path.join(ROOT, ".dev");
 export const WEB_TOKEN_SETTING = "HATCHDOOR_WEB_BEARER_TOKEN";
 export const MCP_TOKEN_SETTING = "HATCHDOOR_MCP_BEARER_TOKEN";
 
-// One setting: the environment first, then `.env`, as the backend and
+// One setting: the environment first, then a `KEY=value` file (`.env` unless
+// another is named), as the backend and
 // `scripts/dev-browser-token.py` find it. Empty when neither has it.
 export function settingFrom(name, environment, envFileText) {
   const exported = (environment[name] ?? "").trim();
@@ -40,10 +41,10 @@ export function settingFrom(name, environment, envFileText) {
 }
 
 // The same, read from this process and the checkout's `.env`.
-export function devSetting(name, root = ROOT) {
+export function devSetting(name, root = ROOT, file = ".env") {
   let envFile = "";
   try {
-    envFile = fs.readFileSync(path.join(root, ".env"), "utf8");
+    envFile = fs.readFileSync(path.join(root, file), "utf8");
   } catch {
     // The environment may carry the setting alone.
   }

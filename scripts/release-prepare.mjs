@@ -6,9 +6,9 @@
 // records the documentation review on anyone's behalf.
 //
 // The first run cuts `docs/release-v<version>` off `development`, sets the
-// version in the four version files, dates the changelog's Unreleased
-// section, drafts the release's What's new highlights from it, runs the
-// mechanical checks, and opens the version-bump pull request into
+// version in the four version files and the README's version example, dates
+// the changelog's Unreleased section, drafts the release's What's new
+// highlights from it, runs the mechanical checks, and opens the version-bump pull request into
 // `development`, carrying the judgment checklist, beside a draft
 // GitHub Release made from the changelog section. The review happens on that
 // pull request, so a fix it needs is committed to the bump branch; a run while
@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
   MAX_HIGHLIGHTS,
   MIN_HIGHLIGHTS,
+  README,
   VERSION_FILES,
   WHATS_NEW_PAGE,
   addWhatsNewSection,
@@ -37,11 +38,13 @@ import {
   highlightProblems,
   latestReleaseVersion,
   parseVersion,
+  readmeVersionProblems,
   releaseHeadingPrefix,
   releaseNotes,
   releaseSection,
   renameUnreleased,
   renderChecklist,
+  setReadmeVersion,
   setVersions,
   undefinedReferences,
   unreleasedSection,
@@ -282,6 +285,11 @@ async function applyBump(version) {
       await writeFile(path.join(repositoryRoot, file), bumped[file]);
     }
   }
+  const readme = await readRepositoryFile(README);
+  const bumpedReadme = setReadmeVersion(readme, version);
+  if (bumpedReadme !== readme) {
+    await writeFile(path.join(repositoryRoot, README), bumpedReadme);
+  }
   const date = today();
   await writeFile(
     path.join(repositoryRoot, "CHANGELOG.md"),
@@ -305,58 +313,95 @@ async function applyBump(version) {
   if (git("status", "--porcelain") === "") {
     return;
   }
-  git("add", "--", ...VERSION_FILES, "CHANGELOG.md", WHATS_NEW_PAGE);
+  git("add", "--", ...VERSION_FILES, README, "CHANGELOG.md", WHATS_NEW_PAGE);
   git(
     "commit",
     "--quiet",
     "-m",
     `docs: prepare the v${version} release`,
     "-m",
-    `Sets the version to ${version} in ${VERSION_FILES.join(", ")}, dates the changelog's Unreleased section as v${version}, and drafts the release's highlights in ${WHATS_NEW_PAGE}. Made by \`just release-prepare ${version}\`.`,
+    `Sets the version to ${version} in ${VERSION_FILES.join(", ")} and the version example in ${README}, dates the changelog's Unreleased section as v${version}, and drafts the release's highlights in ${WHATS_NEW_PAGE}. Made by \`just release-prepare ${version}\`.`,
   );
   console.log(`Committed the version bump to ${version}.`);
 }
 
-// Step 3. The cheap checks run first so a typo does not cost a full test run.
-// The branch is pushed only after `just check-full` passes, so when the remote
-// branch already holds this exact commit, that run is not repeated.
+// Step 3. Every cheap check runs before `just check-full`, and all of their
+// problems are named in one refusal, so a release never pays for a full test
+// run that a fix found afterwards repeats. A highlights section drafted with
+// too many lines is the usual case: the draft is already committed on the
+// branch, the refusal names how many lines to cut, and the run after the cut
+// goes on to `just check-full` once. The branch is pushed only after
+// `just check-full` passes, so when the remote branch already holds this exact
+// commit, that run is not repeated.
 async function checkBump(version, branch) {
+  const problems = [];
+  const problem = (check, detail) => problems.push({ check, detail });
+
   const disagreements = versionDisagreements(await readVersionFiles(), version);
   if (disagreements.length > 0) {
-    refuse(
+    problem(
       "version files",
       `these do not say ${version}: ${disagreements.join(", ")}.`,
     );
   }
 
+  for (const detail of readmeVersionProblems(
+    await readRepositoryFile(README),
+    version,
+  )) {
+    problem("readme", detail);
+  }
+
   const changelog = await readRepositoryFile("CHANGELOG.md");
   const section = releaseSection(changelog, version);
   if (!section || !hasEntries(section.body)) {
-    refuse(
+    problem(
       "changelog",
       `the "${releaseHeadingPrefix(version)}" section of CHANGELOG.md has no entries.`,
     );
-  }
-  const missing = undefinedReferences(changelog, section.body);
-  if (missing.length > 0) {
-    refuse(
-      "changelog links",
-      `the v${version} section references ${missing.join(", ")} with no link definition. Add a "[#N]: <url>" line for each above the first release heading.`,
-    );
+  } else {
+    const missing = undefinedReferences(changelog, section.body);
+    if (missing.length > 0) {
+      problem(
+        "changelog links",
+        `the v${version} section references ${missing.join(", ")} with no link definition. Add a "[#N]: <url>" line for each above the first release heading.`,
+      );
+    }
   }
 
-  const highlights = whatsNewSection(await readWhatsNew(), version);
-  if (!highlights) {
-    refuse(
+  let whatsNew = null;
+  try {
+    whatsNew = await readRepositoryFile(WHATS_NEW_PAGE);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+    problem("highlights", `${WHATS_NEW_PAGE} is missing.`);
+  }
+  const highlights = whatsNew && whatsNewSection(whatsNew, version);
+  if (whatsNew !== null && !highlights) {
+    problem(
       "highlights",
       `${WHATS_NEW_PAGE} has no "${releaseHeadingPrefix(version)}" section. Add one with ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} plain lines on ${branch}, commit it, and run this again.`,
     );
+  } else if (highlights) {
+    const found = highlightProblems(highlights.body);
+    if (found.length > 0) {
+      problem(
+        "highlights",
+        `the v${version} section of ${WHATS_NEW_PAGE} cannot ship: ${found.join(" ")} Rewrite it on ${branch} as ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} plain lines, each one sentence a beginner can act on, action-needed lines first and starting with "**Action needed:**". Commit it and run this again.`,
+      );
+    }
   }
-  const problems = highlightProblems(highlights.body);
-  if (problems.length > 0) {
+
+  const failed = [...new Set(problems.map(({ check }) => check))];
+  if (failed.length === 1) {
+    refuse(failed[0], problems.map(({ detail }) => detail).join(" "));
+  }
+  if (failed.length > 1) {
     refuse(
-      "highlights",
-      `the v${version} section of ${WHATS_NEW_PAGE} cannot ship: ${problems.join(" ")} Rewrite it on ${branch} as ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} plain lines, each one sentence a beginner can act on, action-needed lines first and starting with "**Action needed:**". Commit it and run this again.`,
+      failed.join(", "),
+      `\`just check-full\` did not run. Fix all of these on ${branch}, commit, and run this again:\n${problems.map(({ check, detail }) => `- ${check}: ${detail}`).join("\n")}`,
     );
   }
 
@@ -417,9 +462,9 @@ function pushBranch(branch) {
 }
 
 function bumpPullRequestBody(version, branch, freshness) {
-  return `Sets the version to ${version} in ${VERSION_FILES.map((file) => `\`${file}\``).join(", ")}, renames the changelog's \`## Unreleased\` section to \`## v${version} - <date>\`, and adds the release's highlights to \`${WHATS_NEW_PAGE}\`.
+  return `Sets the version to ${version} in ${VERSION_FILES.map((file) => `\`${file}\``).join(", ")} and the version example in \`${README}\`, renames the changelog's \`## Unreleased\` section to \`## v${version} - <date>\`, and adds the release's highlights to \`${WHATS_NEW_PAGE}\`.
 
-The version files agree, every \`[#N]\` in the section has a link definition, the highlights have ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} lines with action-needed lines first, and \`just check-full\` passed on this branch.
+The version files and the README's version example agree, every \`[#N]\` in the section has a link definition, the highlights have ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS} lines with action-needed lines first, and \`just check-full\` passed on this branch.
 
 The release is reviewed here, before this merges. Commit any fix the review needs to \`${branch}\` and run \`just release-prepare ${version}\` again, which tests and pushes it, so the fix ships in this release. \`just release-publish ${version}\` refuses while any box below is unticked. Tick each box only after doing the check it names. Publishing waits for the maintainer to approve the release title and notes.
 
