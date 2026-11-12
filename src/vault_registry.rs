@@ -2166,7 +2166,7 @@ fn normalized_absolute_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn canonical_or_normalized(path: &Path) -> PathBuf {
+pub(crate) fn canonical_or_normalized(path: &Path) -> PathBuf {
     let normalized = normalized_absolute_path(path);
     let mut existing_ancestor = normalized.as_path();
     let mut missing_suffix = Vec::new();

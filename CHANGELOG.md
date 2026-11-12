@@ -11,6 +11,7 @@
 - An agent that connects over MCP is now told to read the manual page *How to work in a Vault as an agent* before its first write, so it learns to search before creating a note, read a note before changing it and prefer small edits without you pointing it there. *Connect your agent* gains an example skill to copy into your agent's skills folder, which sends it to the same page on the Hatchdoor it is connected to. [#568]
 
 ### Changed
+- An agent can now add or move a Vault only to a folder inside the Vault mount (`VAULT_PATH`, `/data/vault` in the stock install). `create_vault` and `edit_vault` refuse any other folder on the server with `vault_path_outside_mount`, so a note carrying planted instructions cannot get an agent to open `/etc` or a home folder as a Vault. Symlinks and `..` are resolved first. A Vault you added outside the mount from Settings keeps working for agents, and the web app can still add any folder Hatchdoor can read. Git-backed Vaults that Hatchdoor clones itself are not affected. [#700]
 - MCP agents on the `2026-07-28` revision now get a refused tool call, such as an unknown tool, a write while writes are off or an invalid argument, with HTTP 200 and the JSON-RPC error in the body, where it was HTTP 400; the error code and message are unchanged, so a client that reads the body sees no difference. An `initialize` that names `2026-07-28`, a revision with no handshake, now opens a `2025-11-25` session, and that session no longer claims `tools.listChanged: true`, which only the modern revision can deliver. A request with no session that is not `initialize` is refused with `400 Bad Request: Session ID is required` instead of `422 Unexpected message, expect initialize request`. These come with the MCP library moving to 3.8.0. [#621]
 - Mermaid diagrams are drawn by Mermaid 12. Flowcharts, sequence, class, state, ER, Gantt, pie, mindmap, Git graph and timeline diagrams, math labels included, render as they did, and a broken diagram shows the same error. The web app's offline cache grows by about 250 KB. [#621]
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
@@ -103,6 +104,7 @@
 [#693]: https://github.com/BatterWorks/Hatchdoor/issues/693
 [#695]: https://github.com/BatterWorks/Hatchdoor/issues/695
 [#699]: https://github.com/BatterWorks/Hatchdoor/issues/699
+[#700]: https://github.com/BatterWorks/Hatchdoor/issues/700
 
 ## v2.9.0 - 2026-10-27
 

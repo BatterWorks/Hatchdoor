@@ -491,7 +491,9 @@ mod tests {
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
             transfer_links: Default::default(),
-            vault_mount_root: Default::default(),
+            // Every fixture's Vaults sit under `tmp`, as a deployment's sit
+            // under `VAULT_PATH`, so the agent rule of ADR-54 admits them.
+            vault_mount_root: tmp.path().to_path_buf(),
             instance_versions: Default::default(),
             agent_connections: Default::default(),
             usage_report: Default::default(),
@@ -3387,6 +3389,200 @@ mod tests {
         .await;
         assert_eq!(body["result"]["isError"], false);
         assert!(body["result"]["structuredContent"]["vault"]["vault_id"].is_string());
+    }
+
+    /// A write-mode state whose Vault mount is `<tmp>/mount`, with an
+    /// empty folder `inside` under it and `outside` beside it (ADR-54).
+    fn mount_test_state() -> (AppState, TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let (mut state, tmp) = empty_test_state();
+        state.runtime_config = mcp_runtime_config(true);
+        let mount = tmp.path().join("mount");
+        let inside = mount.join("inside");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&inside).expect("inside dir");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        state.vault_mount_root = mount;
+        (state, tmp, inside, outside)
+    }
+
+    fn ready_snapshot(state: &AppState) -> crate::vault_registry::VaultRegistrySnapshot {
+        match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        }
+    }
+
+    fn registry_revision(state: &AppState) -> u64 {
+        ready_snapshot(state).revision()
+    }
+
+    async fn create_local_over_mcp(state: &AppState, name: &str, path: &std::path::Path) -> Value {
+        call_tool_unscoped(
+            state,
+            "create_vault",
+            json!({
+                "expected_registry_revision": registry_revision(state),
+                "name": name,
+                "enabled": false,
+                "source": {"type":"local","path": path},
+            }),
+        )
+        .await
+    }
+
+    fn assert_outside_mount(body: &Value) {
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        let error = &body["result"]["structuredContent"];
+        assert_eq!(error["code"], "vault_path_outside_mount", "{body}");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(
+            error["docs"]["heading"], "adding-or-moving-a-vault",
+            "the refusal points at the agent guide: {body}"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("web app"),
+            "the refusal must say the maintainer can add the folder: {body}"
+        );
+    }
+
+    /// #700 acceptance: over MCP a local folder must sit inside the mount,
+    /// after `..` and symlinks are resolved, and the mount itself counts.
+    #[tokio::test]
+    async fn create_vault_over_mcp_accepts_only_folders_inside_the_mount() {
+        let (state, _tmp, inside, outside) = mount_test_state();
+
+        let created = create_local_over_mcp(&state, "Inside", &inside).await;
+        assert_eq!(created["result"]["isError"], false, "{created}");
+
+        assert_outside_mount(&create_local_over_mcp(&state, "Outside", &outside).await);
+
+        let escape = inside.join("..").join("..").join("outside");
+        assert_outside_mount(&create_local_over_mcp(&state, "Escape", &escape).await);
+
+        let link = state.vault_mount_root.join("link-out");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        assert_outside_mount(&create_local_over_mcp(&state, "Link", &link).await);
+
+        // `link-out/..` is the mount by its spelling, but the operating
+        // system, and the registry with it, resolves it through the symlink.
+        assert_outside_mount(&create_local_over_mcp(&state, "Dotdot", &link.join("..")).await);
+
+        // An existing_git repository is a folder on this machine too.
+        let existing = call_tool_unscoped(
+            &state,
+            "create_vault",
+            json!({
+                "expected_registry_revision": registry_revision(&state),
+                "name": "History",
+                "enabled": false,
+                "source": {"type":"existing_git","repository_path": outside,
+                           "mode":"local_history"},
+            }),
+        )
+        .await;
+        assert_outside_mount(&existing);
+        assert!(
+            !outside.join(".git").exists(),
+            "a refused create must not make a repository"
+        );
+
+        let snapshot = ready_snapshot(&state);
+        assert_eq!(snapshot.definitions().count(), 1, "only refusals since");
+
+        // The mount itself counts as inside.
+        let (fresh, _fresh_tmp, _, _) = mount_test_state();
+        let mount = fresh.vault_mount_root.clone();
+        let at_mount = create_local_over_mcp(&fresh, "Mount", &mount).await;
+        assert_eq!(at_mount["result"]["isError"], false, "{at_mount}");
+    }
+
+    /// #700 acceptance: an edit that keeps an outside Vault's folder works,
+    /// and an edit moving any Vault outside the mount is refused.
+    #[tokio::test]
+    async fn edit_vault_over_mcp_refuses_only_a_move_outside_the_mount() {
+        let (state, _tmp, inside, outside) = mount_test_state();
+
+        // The maintainer adds the outside folder from the web app.
+        crate::vault_management::VaultCollectionManagement::new(&state)
+            .create(crate::vault_management::CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Outside".to_string(),
+                enabled: false,
+                source: crate::vault_registry::VaultSource::Local {
+                    path: outside.clone(),
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })
+            .await
+            .expect("web create outside the mount");
+        let created = create_local_over_mcp(&state, "Inside", &inside).await;
+        assert_eq!(created["result"]["isError"], false, "{created}");
+
+        let snapshot = ready_snapshot(&state);
+        let id_of = |name: &str| {
+            snapshot
+                .definitions()
+                .find(|definition| definition.name() == name)
+                .expect("registered")
+                .vault_id()
+        };
+        let (outside_id, inside_id) = (id_of("Outside"), id_of("Inside"));
+        let stored_outside = outside.canonicalize().expect("canonical outside");
+
+        let renamed = call_tool_unscoped(
+            &state,
+            "edit_vault",
+            json!({
+                "vault_id": outside_id.to_string(),
+                "expected_registry_revision": registry_revision(&state),
+                "name": "Outside renamed",
+                "source": {"type":"local","path": stored_outside},
+                "exclude_patterns": ["drafts/**"],
+            }),
+        )
+        .await;
+        assert_eq!(renamed["result"]["isError"], false, "{renamed}");
+
+        let elsewhere = outside.parent().expect("tmp").join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere dir");
+        for (vault_id, name) in [(outside_id, "Outside renamed"), (inside_id, "Inside")] {
+            let moved = call_tool_unscoped(
+                &state,
+                "edit_vault",
+                json!({
+                    "vault_id": vault_id.to_string(),
+                    "expected_registry_revision": registry_revision(&state),
+                    "name": name,
+                    "source": {"type":"local","path": elsewhere},
+                    "confirm_identity_change": true,
+                }),
+            )
+            .await;
+            assert_outside_mount(&moved);
+        }
+
+        // Moving the outside Vault into the mount is allowed.
+        let into_mount = state.vault_mount_root.join("moved-in");
+        std::fs::create_dir_all(&into_mount).expect("moved-in dir");
+        let moved_in = call_tool_unscoped(
+            &state,
+            "edit_vault",
+            json!({
+                "vault_id": outside_id.to_string(),
+                "expected_registry_revision": registry_revision(&state),
+                "name": "Outside renamed",
+                "source": {"type":"local","path": into_mount},
+                "confirm_identity_change": true,
+            }),
+        )
+        .await;
+        assert_eq!(moved_in["result"]["isError"], false, "{moved_in}");
     }
 
     #[tokio::test]

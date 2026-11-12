@@ -35,7 +35,7 @@ If the Vault shows an error once it is added, the usual causes are:
 
 If you left `HOST_VAULT_PATH` out of `.env`, Hatchdoor sees a `vault` folder next to `compose.yaml`. It starts empty, and Hatchdoor never fills it with example notes, so a Vault made from it stays empty until you add Markdown files or write notes in Hatchdoor.
 
-An agent can add the Vault for you instead, with the `create_vault` MCP tool, once you have connected it in [[Connect your agent]].
+An agent can add the Vault for you instead, with the `create_vault` MCP tool, once you have connected it in [[Connect your agent]]. It can add only a folder inside the shared folder, `/data/vault`, the same folders the list shows.
 
 ## Start with a new, empty folder
 
@@ -66,7 +66,7 @@ You have two ways to fix it:
 - Point `HOST_VAULT_PATH` in `.env` at the folder that holds your notes, then restart Hatchdoor with `docker compose up -d`. The folder then appears in the list under `/data/vault`.
 - Keep the current folder and share another one too. Add a second line under `volumes:` in `compose.yaml`, such as `- /home/me/journal:/data/journal`, and restart. That folder is outside `/data/vault`, so the list does not show it: choose **Type a path instead** under the list and enter `/data/journal`.
 
-Or ask your agent to add it. An agent that can edit your deployment can make either change and create the Vault for you.
+Or ask your agent to add it. An agent that can edit your deployment can make the first change and then create the Vault for you. With the second, the folder sits outside `/data/vault`, and Hatchdoor refuses to let an agent add a folder there, so add that Vault yourself from **Settings**. Once it exists, the agent can work in it like any other. This keeps a note with planted instructions from talking an agent into opening some other folder on the server.
 
 To connect another local Vault later, do the same from **Settings** → **Add a Vault** and pick another folder. Want version history, or a Vault backed by a remote repository instead? See [[How to set up a Git-backed Vault]].
 

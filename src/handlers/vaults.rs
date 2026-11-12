@@ -152,6 +152,9 @@ fn management_error_response(error: VaultOperationError) -> Response {
         | "capability_unavailable" => StatusCode::CONFLICT,
         // Retry-after-operator-action, or retry-after-the-runtime-settles.
         "vault_registry_recovery_required" | "vault_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        // Only the MCP tools ask the core for this rule (ADR-54), so no
+        // route returns it; it is declared because every core code is.
+        "vault_path_outside_mount" => StatusCode::FORBIDDEN,
         // `internal_error` and `registry_revision_exhausted`.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -442,6 +445,7 @@ mod tests {
             ),
             ("registry_revision_conflict", StatusCode::CONFLICT),
             ("checkout_set_aside_failed", StatusCode::CONFLICT),
+            ("vault_path_outside_mount", StatusCode::FORBIDDEN),
             ("vault_disabled", StatusCode::CONFLICT),
             ("capability_unavailable", StatusCode::CONFLICT),
             (
@@ -589,6 +593,36 @@ mod tests {
             !message.contains(directory.path().to_str().expect("UTF-8 temp path")),
             "{message}"
         );
+        assert_eq!(listed_vaults(&state).await.len(), 1);
+    }
+
+    /// #700 acceptance: the agent rule of ADR-54 binds only the MCP tools.
+    /// The web app still adds a folder outside the Vault mount.
+    #[tokio::test]
+    async fn the_web_api_still_adds_a_folder_outside_the_vault_mount() {
+        let (mut state, _worker, directory) = test_state();
+        let mount = directory.path().join("mount");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&mount).expect("mount dir");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        state.vault_mount_root = mount;
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Outside".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: outside },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(listed_vaults(&state).await.len(), 1);
     }
 

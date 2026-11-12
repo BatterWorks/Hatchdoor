@@ -83,6 +83,14 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
             heading: Some("discovery-workflow"),
         },
     ),
+    // A folder outside the Vault mount, refused to an agent (ADR-54).
+    (
+        "vault_path_outside_mount",
+        ErrorDocs {
+            page: "guides/how-to-work-in-a-vault-as-an-agent",
+            heading: Some("adding-or-moving-a-vault"),
+        },
+    ),
     ("vault_unavailable", BAD_STATE),
     ("vault_read_unavailable", BAD_STATE),
     ("vault_path_unavailable", FOLDER_ACCESS),
