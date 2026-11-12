@@ -179,6 +179,12 @@ pub enum UpsertOutcome {
         content: String,
     },
     Unchanged,
+    /// The file is no longer a regular file: a FIFO, device or link swapped
+    /// in after the scan listed it. Its row, chunks and links were dropped,
+    /// so search stops serving text every exact read refuses (#672).
+    Dropped {
+        reason: String,
+    },
     /// The file could not be read as text: non-UTF-8 bytes, a permission
     /// change, or a delete racing the scan that listed it. Reported rather
     /// than returned as `Err` so one unreadable file cannot abort indexing
@@ -451,6 +457,7 @@ impl SqliteCache {
         let mut chunks_reused: usize = 0;
         let mut per_note_failures: usize = 0;
         let mut unreadable_notes: usize = 0;
+        let mut dropped_notes: usize = 0;
         let mut last_unreadable_reason: Option<String> = None;
         let mut notes_changed: usize = 0;
         let mut notes_unchanged: usize = 0;
@@ -495,6 +502,15 @@ impl SqliteCache {
                     }
                 }
                 UpsertOutcome::Unchanged => notes_unchanged += 1,
+                UpsertOutcome::Dropped { reason } => {
+                    dropped_notes += 1;
+                    tracing::warn!(
+                        path = %entry.relative_path,
+                        reason = %reason,
+                        "Dropping a note that is no longer a regular file; the rest of the Vault still indexes"
+                    );
+                    last_unreadable_reason = Some(reason);
+                }
                 UpsertOutcome::Unreadable { reason } => {
                     per_note_failures += 1;
                     unreadable_notes += 1;
@@ -521,11 +537,12 @@ impl SqliteCache {
         // good one. Losing every note the scan just listed is that case, so it
         // stays fatal and the prior snapshot is retained as stale. A Vault
         // that legitimately holds no notes has nothing to lose and succeeds.
-        if !entries.is_empty() && unreadable_notes == entries.len() {
+        // A note dropped for not being a regular file counts as lost here too.
+        if !entries.is_empty() && unreadable_notes + dropped_notes == entries.len() {
             return Err(format!(
                 "every note in the Vault became unreadable during indexing ({} of {}); \
                  the previous index is kept. Last error: {}",
-                unreadable_notes,
+                unreadable_notes + dropped_notes,
                 entries.len(),
                 last_unreadable_reason.unwrap_or_else(|| "unknown".to_string())
             ));
@@ -597,9 +614,10 @@ impl SqliteCache {
         progress
             .tokens_processed
             .store(resumed_tokens, Ordering::Relaxed);
-        progress
-            .notes_processed
-            .store(notes_unchanged + per_note_failures, Ordering::Relaxed);
+        progress.notes_processed.store(
+            notes_unchanged + per_note_failures + dropped_notes,
+            Ordering::Relaxed,
+        );
         progress
             .failures
             .store(per_note_failures, Ordering::Relaxed);
@@ -1425,7 +1443,8 @@ fn upsert_note_if_changed(
     // Bounded and non-blocking (#670). A note over `MAX_NOTE_BYTES` is listed
     // unread: it keeps its row, so the explorer still shows it, with no text,
     // so nothing of it is chunked, embedded or left over from before it grew.
-    // One that became a FIFO or device after the scan is skipped unread.
+    // One that became a FIFO or device after the scan loses its row unread,
+    // the way it would on the next scan, which no longer lists it (#672).
     let (content, hash) = match crate::vault::read_note_text(&entry.path) {
         Ok(content) => {
             let hash = content_hash(&content);
@@ -1458,6 +1477,12 @@ fn upsert_note_if_changed(
                 "Note unreadable, too large to index; it stays listed without its text"
             );
             (String::new(), OVERSIZED_NOTE_HASH.to_string())
+        }
+        Err(error @ crate::vault::BoundedReadError::NotRegular) => {
+            delete_note_by_relative_path(tx, &entry.relative_path)?;
+            return Ok(UpsertOutcome::Dropped {
+                reason: format!("note '{}' is {error}", entry.path.display()),
+            });
         }
         Err(error) => {
             return Ok(UpsertOutcome::Unreadable {
@@ -1692,13 +1717,19 @@ fn rebuild_links(
     tx.execute("DELETE FROM note_links", [])
         .map_err(|error| format!("failed clearing cached note links: {error}"))?;
 
+    // A listed note can have no row: one skipped unreadable on its first
+    // turn, or one dropped because it stopped being a regular file (#672).
+    // A link to or from it is left out rather than failing the whole turn
+    // on the foreign key.
     for entry in entries {
         if let Some(links) = index.note_links(&entry.slug) {
             for link in links.outgoing {
                 tx.execute(
                     r#"
                     INSERT OR IGNORE INTO note_links(source_slug, target_slug)
-                    VALUES (?1, ?2)
+                    SELECT ?1, ?2
+                    WHERE EXISTS (SELECT 1 FROM notes WHERE slug = ?1)
+                      AND EXISTS (SELECT 1 FROM notes WHERE slug = ?2)
                     "#,
                     params![&entry.slug, &link.slug],
                 )
@@ -2794,6 +2825,57 @@ mod tests {
             crate::vault::make_fifo(path);
         });
         assert_only_odd_skipped(&cache, &lines, "not a regular file");
+    }
+
+    /// A note indexed as text and then swapped for a FIFO after a turn's scan
+    /// listed it loses its row, chunks and search text in that turn, rather
+    /// than search serving the old text that every exact read refuses (#672).
+    #[cfg(unix)]
+    #[test]
+    fn a_note_that_became_a_fifo_after_indexing_drops_its_old_text() {
+        let dir = tempdir().expect("temp dir");
+        let note = dir.path().join("Odd.md");
+        // Linked both ways, so the dropped row is a link source and target.
+        std::fs::write(&note, "# Odd\n\nzanzibarquux body [[Home]]").expect("note");
+        std::fs::write(dir.path().join("Home.md"), "# Home\n\nhome body [[Odd]]").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+        assert!(chunk_count(&cache, "odd") > 0);
+        assert_eq!(fts_matches(&cache, "zanzibarquux"), 1);
+
+        // The scan lists the note as a file, then it becomes a FIFO.
+        let index = VaultIndex::build(dir.path()).expect("index");
+        std::fs::remove_file(&note).expect("remove");
+        crate::vault::make_fifo(&note);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("one dropped note must not fail the turn");
+
+        assert_eq!(cached_slug_for_path(&cache, "Odd"), None);
+        assert_eq!(chunk_count(&cache, "odd"), 0);
+        assert_eq!(fts_matches(&cache, "zanzibarquux"), 0);
+        assert_eq!(
+            cached_slug_for_path(&cache, "Home").as_deref(),
+            Some("home")
+        );
+    }
+
+    fn fts_matches(cache: &SqliteCache, word: &str) -> i64 {
+        cache
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT COUNT(*) FROM note_fts WHERE note_fts MATCH ?1",
+                params![word],
+                |row| row.get(0),
+            )
+            .expect("count FTS matches")
     }
 
     /// Reads the `layer` column for a note by slug directly from the notes table.

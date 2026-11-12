@@ -23,7 +23,6 @@
 //! editor, backstop and journal.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -32,10 +31,11 @@ use crate::cache::parse::{
     InlineTag, content_hash, extract_tags, frontmatter_span, inline_tags, is_tag_char,
 };
 use crate::search::tag_matches;
+use crate::vault::BoundedReadError;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
-use super::fs_ops::MutationJournal;
+use super::fs_ops::{MutationJournal, read_note_bounded};
 use super::intent::IntentLog;
 use super::rewrites::read_note_for_rewrite;
 use super::types::{TextRewrite, WriteError};
@@ -620,13 +620,19 @@ fn write_rewrites(
     // its own `original_hash` into the commit, and the journal checks that
     // one per note at the moment it writes it (#321).
     for rewrite in rewrites {
-        let current = fs::read_to_string(&rewrite.path).map_err(|error| {
-            ApplyError::Write(WriteError::Io(format!(
-                "failed to re-read '{}' before {}: {error}",
-                rewrite.path.display(),
-                operation.editing()
-            )))
-        })?;
+        // Bounded (#672): the plan read this note as text under the bound, so
+        // one that is now over it, not text, or not a file has gone stale.
+        let current = match read_note_bounded(&rewrite.path) {
+            Ok(current) => current,
+            Err(BoundedReadError::Io(error)) => {
+                return Err(ApplyError::Write(WriteError::Io(format!(
+                    "failed to re-read '{}' before {}: {error}",
+                    rewrite.path.display(),
+                    operation.editing()
+                ))));
+            }
+            Err(_) => return Err(ApplyError::Stale),
+        };
         if content_hash(&current) != rewrite.original_hash {
             return Err(ApplyError::Stale);
         }

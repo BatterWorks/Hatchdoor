@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cache::parse::content_hash;
@@ -996,14 +995,12 @@ fn execute_note_mutation(
         return Err(journal.rollback(error));
     }
 
-    let moved_content = match fs::read_to_string(target_path) {
+    // Bounded and refused like the pre-edit check that let the move start:
+    // a note that grew past the bound or stopped being a file since is
+    // `invalid_write_input`, and the move is undone (#672).
+    let moved_content = match read_existing_note(target_path, &entry.relative_path) {
         Ok(content) => content,
-        Err(error) => {
-            return Err(journal.rollback(WriteError::Io(format!(
-                "failed to read moved note '{}': {error}",
-                target_path.display()
-            ))));
-        }
+        Err(error) => return Err(journal.rollback(error)),
     };
 
     journal.finish();
