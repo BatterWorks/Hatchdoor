@@ -18,6 +18,12 @@ target_warn_gb := "20"
 # pid/log files. See scripts/dev-vaults.sh for the fixture profiles.
 export HATCHDOOR_VAULT_REGISTRY_PATH := justfile_directory() + "/" + dev_dir + "/state/vaults.json"
 
+# The dev backend's Vault mount (VAULT_PATH): the fixture folder, whatever
+# .env says, so a dev instance mirrors a deployment where every Vault sits
+# under the mount (#751). Set on the backend's own command line, not exported,
+# so the test recipes keep the default.
+dev_vault_mount := justfile_directory() + "/" + dev_dir + "/vaults"
+
 # Export the resolved values so recipes behave consistently even when the
 # invoking shell does not set Cargo paths. TMPDIR stays off small tmpfs mounts.
 export CARGO_TARGET_DIR := cargo_target_dir
@@ -244,7 +250,7 @@ _start-backend: _prepare-cargo
     set -euo pipefail
     mkdir -p {{dev_dir}}
     echo "starting backend (cargo run)..."
-    setsid cargo run > {{dev_dir}}/backend.log 2>&1 &
+    VAULT_PATH="{{dev_vault_mount}}" setsid cargo run > {{dev_dir}}/backend.log 2>&1 &
     echo $! > {{dev_dir}}/backend.pid
 
 # Check what's running and how big the build cache has grown.
@@ -389,4 +395,4 @@ prod-check: _prepare-cargo
     echo "building frontend..."
     (cd frontend && npm run build)
     echo "starting backend in foreground (serves frontend/dist) - Ctrl+C to stop"
-    cargo run
+    VAULT_PATH="{{dev_vault_mount}}" cargo run
