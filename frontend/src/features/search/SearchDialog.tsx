@@ -128,17 +128,77 @@ function groupResults(results: SearchResult[]): NoteGroup[] {
   return Array.from(map.values());
 }
 
-function stripMarkdown(raw: string): string {
+type Fence = { char: string; length: number; nested: boolean };
+
+/** The fence marker `line` holds, read by the backend's rule (`fence_marker`
+ * in `src/chunk/normalize.rs`, the note's Section rule): a run of three or
+ * more backticks or tildes after at most three spaces of indentation, never a
+ * tab. */
+function fenceMarker(line: string): Fence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  return match
+    ? { char: match[1][0], length: match[1].length, nested: false }
+    : null;
+}
+
+// A block inside a list item or a callout opens behind its markers, where the
+// backend's rule sees no fence and leaves the block as written. These read
+// it the way `hideComments` does, so its code is dropped too: an opener
+// behind at least one quote or list marker, a closer behind quote markers and
+// indentation.
+const CONTAINER_PREFIX =
+  /^(?:[ \t]*(?:>|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t])))+[ \t]*/;
+const QUOTE_PREFIX = /^(?:[ \t]*>)*[ \t]*/;
+const NESTED_OPENER = /^(?:(`{3,})[^`]*|(~{3,}).*)$/;
+
+function nestedOpener(line: string): Fence | null {
+  const prefix = CONTAINER_PREFIX.exec(line);
+  const match = prefix && NESTED_OPENER.exec(line.slice(prefix[0].length));
+  const run = match ? (match[1] ?? match[2]) : null;
+  return run ? { char: run[0], length: run.length, nested: true } : null;
+}
+
+function closesFence(line: string, open: Fence): boolean {
+  const marker = open.nested
+    ? fenceMarker(line.replace(QUOTE_PREFIX, ""))
+    : fenceMarker(line);
   return (
-    // Comments go first, by the note page's own rule (#573): it knows which
-    // `%%` sits in code, and the code markers are stripped below. A
-    // highlight shows its words without the signs (#572).
-    stripHighlights(hideComments(raw))
-      // Frontmatter at the top of a chunk, and any fenced block whole: a
-      // snippet that showed a Mermaid diagram's source read as noise (#530).
-      // An unterminated fence is cut from its opening to the end.
-      .replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "")
-      .replace(/```[\s\S]*?(?:```|$)/g, "")
+    marker !== null && marker.char === open.char && marker.length >= open.length
+  );
+}
+
+/** `text` without its fenced blocks, marker lines included. A block closes
+ * only on a run of its own character at least as long as its opener
+ * (`closes_fence`), so a block that shows a shorter fence stays one block;
+ * an unterminated block runs to the end. */
+function dropFencedBlocks(text: string): string {
+  const kept: string[] = [];
+  let open: Fence | null = null;
+  for (const line of text.split("\n")) {
+    if (open) {
+      if (closesFence(line, open)) open = null;
+      continue;
+    }
+    open = fenceMarker(line) ?? nestedOpener(line);
+    if (!open) kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+function stripMarkdown(raw: string): string {
+  // Comments go first, by the note page's own rule (#573): it knows which
+  // `%%` sits in code, and the code markers are stripped below. A highlight
+  // shows its words without the signs (#572). Then frontmatter at the top of
+  // a chunk, and any fenced block whole, by the backend's fence rule (#668):
+  // a snippet that showed a Mermaid diagram's source read as noise (#530).
+  const prose = dropFencedBlocks(
+    stripHighlights(hideComments(raw)).replace(
+      /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
+      "",
+    ),
+  );
+  return (
+    prose
       .replace(/^#{1,6}\s+.*/gm, "")
       // A wikilink reads by its alias where it has one, else its target.
       .replace(/!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) =>
@@ -148,7 +208,8 @@ function stripMarkdown(raw: string): string {
       .replace(/\*([^*]+)\*/g, "$1")
       .replace(/__([^_]+)__/g, "$1")
       .replace(/_([^_]+)_/g, "$1")
-      .replace(/`([^`]+)`/g, "$1")
+      // Inline code by a run of any length: `` ```npm i``` `` keeps its words.
+      .replace(/(`+)([^`]+)\1/g, "$2")
       .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
       .replace(/^\s*[-*+]\s+/gm, "")
       .replace(/^\s*\d+\.\s+/gm, "")
