@@ -306,7 +306,9 @@ Do not open a public issue for a vulnerability. Follow the process in
 ## The local `vault/` directory
 
 `vault/` is the default vault path (`VAULT_PATH` defaults to `./vault`) and is
-gitignored — it is not committed. Hatchdoor neither creates nor fills it: create the folder yourself before pointing a Vault at it, and it stays as empty as you leave it.
+gitignored, so it is not committed. Hatchdoor neither creates nor fills it: create the folder yourself before pointing a Vault at it, and it stays as empty as you leave it.
+The backends `just dev-start` and `just prod-check` run use `.dev/vaults`
+instead, the dev fixture folder (see `AGENTS.md`).
 Everything else vault-shaped is gitignored too: `demo-vaults/` (read-only demo
 content — one folder per vault, e.g. `demo-vaults/para/`), `data/` (generated
 cache), and `.fastembed_cache/` (downloaded model weights).

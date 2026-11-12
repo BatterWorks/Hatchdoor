@@ -29,7 +29,10 @@ true. Never start the backend with a bare `cargo run`.
 
 `just dev-start` provisions a disposable Vault collection under `.dev/vaults`
 and points `HATCHDOOR_VAULT_REGISTRY_PATH` at `.dev/state/vaults.json` (the
-deployed default, `/data/state`, does not exist outside the container). Three
+deployed default, `/data/state`, does not exist outside the container). The
+dev backend's Vault mount (`VAULT_PATH`) is `.dev/vaults`, whatever `.env`
+says, so MCP `create_vault` and `edit_vault` accept a fixture folder and the
+folder picker lists the fixtures, as on a deployment. Three
 profiles, switched with `just dev-vaults <profile>` or `just dev-start
 <profile>`:
 
