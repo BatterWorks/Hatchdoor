@@ -5402,6 +5402,64 @@ fn renaming_a_note_retargets_a_link_written_upper_case_md() {
     );
 }
 
+/// A rewritten link spells the extension as the target's file does (#740):
+/// moving the linking note away from `Deep.MD` keeps `.MD`, so a tool that
+/// matches file names exactly still finds it.
+#[test]
+fn moving_the_linking_note_keeps_an_upper_case_md_target_extension() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Sub")).expect("sub");
+    fs::create_dir_all(root.join("A/B")).expect("a/b");
+    fs::write(root.join("Sub/Deep.MD"), "# Deep").expect("deep");
+    let body = "[deep](../../Sub/Deep.MD) [same](/Sub/Deep.MD)\n";
+    fs::write(root.join("A/B/Rel.md"), body).expect("rel");
+    let index = build(root);
+    let entry = index.find_by_slug("rel").expect("rel");
+
+    move_or_rename_note(root, &index, entry, "A/Rel.md", &content_hash(body)).expect("move");
+
+    assert_eq!(
+        read(root, "A/Rel.md"),
+        "[deep](../Sub/Deep.MD) [same](/Sub/Deep.MD)\n",
+        "the relative link is recomputed with `.MD`; the root one still resolves and stays"
+    );
+}
+
+/// Moving the `.MD` note itself writes the extension its new file has: the
+/// `.md` a plain destination gets, or the `.MD` one asks for (#740).
+#[test]
+fn moving_an_upper_case_md_note_writes_its_new_file_extension_into_links() {
+    for (destination, expected) in [
+        (
+            "Other/Deep.md",
+            "[d](../Other/Deep.md) [e](Other/Deep.md)\n",
+        ),
+        (
+            "Other/Deep.MD",
+            "[d](../Other/Deep.MD) [e](Other/Deep.MD)\n",
+        ),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Sub")).expect("sub");
+        fs::create_dir_all(root.join("In")).expect("in");
+        fs::write(root.join("Sub/Deep.MD"), "# Deep").expect("deep");
+        fs::write(
+            root.join("In/Linker.md"),
+            "[d](../Sub/Deep.MD) [e](Sub/Deep.MD)\n",
+        )
+        .expect("linker");
+        let index = build(root);
+        let entry = index.find_by_slug("deep").expect("deep");
+
+        move_or_rename_note(root, &index, entry, destination, &content_hash("# Deep"))
+            .expect("move");
+
+        assert_eq!(read(root, "In/Linker.md"), expected, "to {destination}");
+    }
+}
+
 #[test]
 fn moving_a_note_recomputes_relative_markdown_links_from_each_linking_note() {
     let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md)\n");

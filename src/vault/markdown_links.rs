@@ -572,8 +572,10 @@ impl NotePaths {
 }
 
 /// The path from a note in `from_dir` to the note at `target` (both
-/// Vault-relative, `target` without `.md`), as a Markdown link writes it.
-pub(crate) fn relative_note_path(from_dir: &str, target: &str) -> String {
+/// Vault-relative, `target` without its extension), as a Markdown link writes
+/// it. `extension` is the target file's own, in its own case, so a link to
+/// `Deep.MD` names `Deep.MD` (#740).
+pub(crate) fn relative_note_path(from_dir: &str, target: &str, extension: &str) -> String {
     let from: Vec<&str> = from_dir
         .split('/')
         .filter(|part| !part.is_empty())
@@ -586,7 +588,7 @@ pub(crate) fn relative_note_path(from_dir: &str, target: &str) -> String {
         .count();
     let mut parts: Vec<&str> = vec![".."; from.len() - shared];
     parts.extend(&to[shared..]);
-    format!("{}.md", parts.join("/"))
+    format!("{}.{extension}", parts.join("/"))
 }
 
 /// The Vault-relative folder of a note's extension-free relative path.
@@ -861,10 +863,10 @@ mod tests {
     #[test]
     fn relative_note_path_climbs_and_descends() {
         assert_eq!(
-            relative_note_path("00-inbox", "20-projects/Beacon"),
+            relative_note_path("00-inbox", "20-projects/Beacon", "md"),
             "../20-projects/Beacon.md"
         );
-        assert_eq!(relative_note_path("a", "a/Plan"), "Plan.md");
-        assert_eq!(relative_note_path("", "a/Plan"), "a/Plan.md");
+        assert_eq!(relative_note_path("a", "a/Plan", "md"), "Plan.md");
+        assert_eq!(relative_note_path("", "a/Plan", "MD"), "a/Plan.MD");
     }
 }
