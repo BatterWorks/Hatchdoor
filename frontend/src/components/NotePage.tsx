@@ -81,6 +81,7 @@ import {
   wikilinkLabel,
 } from "./note-page/live-editor/noteLinks";
 import { NotePreview } from "./note-page/NotePreview";
+import { NoteEmbedContext } from "./note-page/noteEmbeds";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import { SavedQueryProvider } from "./note-page/SavedQueryBlock";
 import {
@@ -973,6 +974,18 @@ export function NotePage({
     note?.content_hash,
     vaultRevision,
     !isEditing,
+  );
+
+  // Where this note's embeds start counting depth and cycles from (#699).
+  const embedScope = useMemo(
+    () => ({
+      vaultId,
+      // The note's own slug, which a resolved embed of it names, not the
+      // address, which can be another spelling of it.
+      chain: [note?.slug ?? slug],
+      revision: vaultRevision,
+    }),
+    [vaultId, slug, note?.slug, vaultRevision],
   );
 
   const markdownComponents = useMemo(
@@ -2048,6 +2061,7 @@ export function NotePage({
                 vaultName={vaultName}
                 content={value}
                 relativePath={note.relative_path}
+                slug={note.slug}
               />
             )}
           />
@@ -2096,19 +2110,21 @@ export function NotePage({
           </div>
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
-            <SavedQueryProvider
-              state={savedQueries}
-              vaultId={vaultId}
-              markdown={renderedMarkdown}
-            >
-              <ReactMarkdown
-                remarkPlugins={NOTE_REMARK_PLUGINS}
-                rehypePlugins={rehypePlugins}
-                components={markdownComponents}
+            <NoteEmbedContext.Provider value={embedScope}>
+              <SavedQueryProvider
+                state={savedQueries}
+                vaultId={vaultId}
+                markdown={renderedMarkdown}
               >
-                {renderedMarkdown}
-              </ReactMarkdown>
-            </SavedQueryProvider>
+                <ReactMarkdown
+                  remarkPlugins={NOTE_REMARK_PLUGINS}
+                  rehypePlugins={rehypePlugins}
+                  components={markdownComponents}
+                >
+                  {renderedMarkdown}
+                </ReactMarkdown>
+              </SavedQueryProvider>
+            </NoteEmbedContext.Provider>
           </div>
         )}
         {/* Links come after the text (#530): backlinks are what a reader

@@ -1366,6 +1366,14 @@
   .note-body td:first-child, .note-body th:first-child { padding-left: 0.7rem; }
   .note-body td:first-child { color: var(--muted); }
 
+  /* Embedded note (#699) */
+  .note-body .note-embed { margin: 1.5rem 0; border: 1px solid var(--rule-strong); background: var(--paper); }
+  .note-embed-head { display: flex; align-items: baseline; gap: 0.75rem; padding: 0.65rem 0.8rem; border-bottom: 1px solid var(--rule); background: var(--paper-2); font-family: var(--font-display); font-variation-settings: "wdth" 92, "wght" 600; font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; }
+  .note-embed-eyebrow { flex: 0 0 auto; color: var(--muted); }
+  .note-body a.note-embed-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note-embed-body { padding: 0.25rem 0.9rem; }
+  .note-body .note-embed-status { font-family: var(--font-sans); color: var(--muted); }
+
   /* Mermaid */
   .mermaid {
     border: 1px solid var(--rule);
@@ -2506,6 +2514,22 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.figure</span><span class="key">.figure img</span><span class="key">.figure figcaption</span></div>
+
+      <h3 class="doc-sub">Embedded note</h3>
+      <p class="blurb">An Obsidian note embed, <code>![[Note]]</code>, <code>![[Note#Heading]]</code> or <code>![[Note#^id]]</code>, draws that note, section or block in the PDF preview's frame: a <span class="key">--rule-strong</span> border on paper, and a <span class="key">--paper-2</span> head row in the PDF title's type that says <em>Embedded</em> in muted ink and links the source note. The content inside keeps the note's own type and carries no heading or block anchors. While it loads, the body holds one muted line; anything that stops it (a missing note, heading or block, a failed read, a cycle, a fourth level) draws the plain note link instead, never an empty frame.</p>
+      <div class="stage stage-note paper">
+        <div class="note-body">
+          <div class="note-embed" role="group" aria-label="Embedded note">
+            <div class="note-embed-head"><span class="note-embed-eyebrow">Embedded</span><a class="note-embed-source" href="#media">Pruning calendar</a></div>
+            <div class="note-embed-body"><p>Cut the Bramley back in late winter, before the buds break.</p></div>
+          </div>
+          <div class="note-embed" role="group" aria-label="Embedded note" aria-busy="true">
+            <div class="note-embed-head"><span class="note-embed-eyebrow">Embedded</span><a class="note-embed-source" href="#media">Soil notes</a></div>
+            <div class="note-embed-body"><p class="note-embed-status">Loading…</p></div>
+          </div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.note-embed</span><span class="key">.note-embed-head</span><span class="key">.note-embed-source</span><span class="key">.note-embed-body</span><span class="key">.note-embed-status</span></div>
 
       <h3 class="doc-sub">Mermaid container</h3>
       <div class="stage stage-note">

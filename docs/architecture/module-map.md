@@ -5463,12 +5463,14 @@ src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 **Owned paths:**
 
 - `frontend/src/components/NotePage.tsx`
+- `frontend/src/components/note-page/NoteEmbed.tsx`
 - `frontend/src/components/note-page/NotePreview.tsx`
 - `frontend/src/components/note-page/PdfPreview.tsx`
 - `frontend/src/components/note-page/RendererComponents.tsx`
 - `frontend/src/components/note-page/SavedQueryBlock.tsx`
 - `frontend/src/components/note-page/dom.ts`
 - `frontend/src/components/note-page/markdownLinks.ts`
+- `frontend/src/components/note-page/noteEmbeds.ts`
 - `frontend/src/components/note-page/paragraphs.ts`
 - `frontend/src/components/note-page/renderers.tsx`
 - `frontend/src/components/note-page/savedQueries.ts`
@@ -5514,10 +5516,33 @@ ADR-53) is treated as a file like a PDF link: it goes out as an asset target
 only and is rewritten to a plain link to the asset route, which downloads
 it, never to an image. A note embed (#573), `![[Other note]]`, goes out as a
 note target as well as an asset target (PDF embeds aside) and is rewritten to
-the link the same wikilink gets, `#^id` dropped to the note itself (what a
-block embed draws is #699's), when its
+an `/__embed__/<slug>[?archived]#<anchor>` link (`noteEmbedHref`,
+`note-page/noteEmbeds.ts`, #699) when its
 name reads as a note (`.md` or no extension) or no file answered to it; one
 that reads as a note and resolved as neither gets the `/__missing__/` link.
+`createNoteMarkdownComponents` draws that link as `NoteEmbed`
+(`note-page/NoteEmbed.tsx`), which reads the note through the same
+`GET .../notes/{slug}` the page uses, again whenever the collection revision
+moves, and renders its body (frontmatter and comments out) with the same
+syntax plugins, saved-query evaluation and components, in a `.note-embed`
+frame naming and linking the source. `remarkSelectEmbed` keeps the heading's
+section (to the next heading of the same or a higher level, by
+`extractMarkdownHeadings` ids) or the block whose `remarkBlockIds` anchor
+matches, a list item wrapped in a list of its own, on the whole parsed note
+so every node keeps its file line. `selectEmbed` decides first, on its own
+parse, whether the heading or block exists. `NoteEmbedContext` carries the
+Vault, the chain of notes an embed sits inside (the page's own slug first,
+given by `NotePage` and by `NotePreview` when passed `slug`) and the
+revision; an embed of a note already in the chain, more than
+`MAX_EMBED_DEPTH` (3) levels down, of another Vault, outside any context (`mayEmbed`), or
+whose read fails or names no such heading or block draws the plain note
+link instead (`data-note-embed-fallback`). Embedded content is rendered with
+`{ embedded: true }` and `rehypeDropIds`, so no element in it, footnotes
+included, carries an id and a fragment jump never lands inside an embed;
+a section or block embed keeps the note's link reference and footnote
+definitions. A paragraph holding an embed is split around it, and a
+callout line holding one draws as a `div`, since the frame is a block. The
+live editor and the Help reader draw no embeds; the manual carries none.
 `hideComments` (`lib/noteComments.ts`, #573) removes `%%` and HTML comments
 from the body before the reading view, the source-mode preview, the table
 of contents and the Help reader see it, line-count preserving like `rewriteWikilinks`, by the

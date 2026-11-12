@@ -8,6 +8,7 @@ import { NOTE_SYNTAX_PLUGINS } from "../../lib/markdownSyntax";
 import { hideComments } from "../../lib/noteComments";
 import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import { NoteProperties } from "./sections";
+import { NoteEmbedContext } from "./noteEmbeds";
 import { createNoteMarkdownComponents } from "./renderers";
 import { remarkHideQueryMarkers } from "./savedQueries";
 import { useResolvedWikilinks } from "./wikilinks";
@@ -27,11 +28,15 @@ export function NotePreview({
   vaultName,
   content,
   relativePath,
+  slug,
 }: {
   vaultId: VaultId;
   vaultName?: string;
   content: string;
   relativePath: string;
+  /** The note being edited, which its embeds count cycles from (#699);
+   * without it the preview draws note embeds as links. */
+  slug?: string;
 }) {
   const parsed = useMemo(() => parseFrontmatter(content), [content]);
   // Comments hidden the way the Reading view hides them (#573).
@@ -61,6 +66,12 @@ export function NotePreview({
     [vaultId, relativePath, headingIdsBySourceLine],
   );
 
+  const embedScope = useMemo(
+    () =>
+      slug === undefined ? null : { vaultId, chain: [slug], revision: null },
+    [vaultId, slug],
+  );
+
   return (
     <div className="note-editor-preview note-body">
       <NoteProperties
@@ -70,13 +81,15 @@ export function NotePreview({
         onToggleCollapsed={() => {}}
         onTagSelect={() => {}}
       />
-      <ReactMarkdown
-        remarkPlugins={PREVIEW_REMARK_PLUGINS}
-        rehypePlugins={PREVIEW_REHYPE_PLUGINS}
-        components={components}
-      >
-        {markdown}
-      </ReactMarkdown>
+      <NoteEmbedContext.Provider value={embedScope}>
+        <ReactMarkdown
+          remarkPlugins={PREVIEW_REMARK_PLUGINS}
+          rehypePlugins={PREVIEW_REHYPE_PLUGINS}
+          components={components}
+        >
+          {markdown}
+        </ReactMarkdown>
+      </NoteEmbedContext.Provider>
     </div>
   );
 }

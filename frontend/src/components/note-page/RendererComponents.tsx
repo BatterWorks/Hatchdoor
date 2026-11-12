@@ -1,5 +1,6 @@
 import {
   Children,
+  createElement,
   isValidElement,
   useCallback,
   useEffect,
@@ -11,6 +12,7 @@ import {
 import type { MermaidApi } from "../../types";
 import { copyText } from "../../lib/clipboard";
 import { UiButton } from "../ui";
+import { isNoteEmbedElement } from "./noteEmbeds";
 import { isParagraphElement, splitAtSoftBreaks } from "./paragraphs";
 import { flattenText } from "./text";
 
@@ -129,15 +131,19 @@ export function CalloutOrQuote({
       const allBody =
         inlineLines.length > 0
           ? [
-              ...inlineLines.map((lineChildren, index) => (
-                <p
-                  key={`inline-callout-${index}`}
-                  className="callout-line"
-                  id={index === inlineLines.length - 1 ? firstId : undefined}
-                >
-                  {lineChildren}
-                </p>
-              )),
+              ...inlineLines.map((lineChildren, index) =>
+                // A line holding a note embed (#699) draws a block, which a
+                // paragraph cannot contain.
+                createElement(
+                  lineChildren.some(isNoteEmbedElement) ? "div" : "p",
+                  {
+                    key: `inline-callout-${index}`,
+                    className: "callout-line",
+                    id: index === inlineLines.length - 1 ? firstId : undefined,
+                  },
+                  ...lineChildren,
+                ),
+              ),
               ...bodyNodes,
             ]
           : bodyNodes;

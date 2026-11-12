@@ -327,10 +327,62 @@
   color: var(--err-fg);
 }
 
+/* Embedded note (#699): another note's content drawn where `![[Note]]` sits.
+   The frame and its head row are the PDF preview's, so an embed reads as
+   something brought in from elsewhere, and the head names and links the
+   source note in the PDF title's type. The body keeps the note's own type. */
+.note-body .note-embed {
+  margin: 1.5rem 0;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+}
+
+.note-embed-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-2);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.note-embed-eyebrow {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.note-body a.note-embed-source {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-embed-body {
+  padding: 0.25rem 0.9rem;
+}
+
+.note-body .note-embed-status {
+  font-family: var(--font-sans);
+  color: var(--muted);
+}
+
 @media (max-width: 920px) {
   .pdf-preview-toolbar,
-  .pdf-preview-controls {
+  .pdf-preview-controls,
+  .note-embed-head {
     padding: 0.5rem;
+  }
+
+  .note-embed-body {
+    padding-inline: 0.5rem;
   }
 
   .pdf-preview-controls {

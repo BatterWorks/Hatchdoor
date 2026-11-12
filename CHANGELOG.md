@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- A note embedded in another note, `![[Other note]]`, now shows that note's content in the Reading view and the source-mode preview, inside a frame that names the note and links to it. `![[Other note#Heading]]` shows that heading's section and `![[Other note#^id]]` the one block that carries `^id`. Embeds inside an embedded note show too, up to three levels deep; an embed of a note that does not exist, of a missing heading or block, of a note it is already inside, or a fourth level down shows the plain link it showed before. The live editor still shows the `![[...]]` text, and agents still read the file as written. [#699]
 - Obsidian canvases (`.canvas` files) now survive a rename, and you can see them. Renaming, moving or archiving a note or an attachment, in the Web UI or through an agent, changes the path on every canvas card that shows that file and leaves every other byte of the canvas as it was; a rename used to leave the card pointing at a file that no longer existed, which only showed up later in Obsidian. Deleting leaves the card alone, so Obsidian shows it as missing, and a canvas that is not valid JSON or is over 8 MB is left untouched and named in the result. The explorer lists each canvas in its folder and selecting it downloads the file, as does a link or embed of one in a note, and `get_attachment` can fetch one. Hatchdoor does not draw a canvas, search it or count its cards as links. [#579]
 - A link to a block, `[[Note#^id]]` or `[text](Note.md#^id)`, now opens the note at the paragraph, list item, quote or table that carries `^id`, in the Reading view, the source-mode preview and Help. It used to open the note at the top. This works from another note, from the same note and when the page is loaded at the link's address; a block id that no longer exists opens the note at the top. A heading and a block of the same name are two places. A `^id` written inside a code block is now shown as written, where the Reading view used to delete it, and one on a line of its own under a quote or a table is hidden like the rest. [#578]
 - An agent can now read a note and edit it in one `batch` call. A write that passes `"from_batch"` as its `expected_content_hash` is checked against the hash an earlier `get_note`, `get_note_outline`, `get_note_section` or `get_frontmatter` item in the same batch returned for that note, where it used to take a second call to fetch the hash first. If the note changed in between, the write fails with `write_conflict` as before; `"from_batch"` with no earlier item for the note, or outside `batch`, fails with the new code `batch_hash_unavailable` and writes nothing. A real hash is still checked exactly as sent. [#599]
@@ -101,6 +102,7 @@
 [#687]: https://github.com/BatterWorks/Hatchdoor/issues/687
 [#693]: https://github.com/BatterWorks/Hatchdoor/issues/693
 [#695]: https://github.com/BatterWorks/Hatchdoor/issues/695
+[#699]: https://github.com/BatterWorks/Hatchdoor/issues/699
 
 ## v2.9.0 - 2026-10-27
 
