@@ -1963,11 +1963,10 @@ fn delete_note_moves_note_and_assets_to_trash_and_removes_backlinks() {
     let root = tmp.path();
     fs::write(root.join("Target.md"), "body ![](asset.pdf)").expect("target");
     fs::write(root.join("asset.pdf"), "pdf").expect("asset");
-    fs::write(
-        root.join("Backlink.md"),
-        "before [[Target]] after ![](asset.pdf)",
-    )
-    .expect("backlink");
+    // Backlink names the note but not its asset: a root note's asset that
+    // another note uses stays put (#701), which the root-note tests below
+    // cover.
+    fs::write(root.join("Backlink.md"), "before [[Target]] after").expect("backlink");
     let index = build(root);
     let entry = index.find_by_slug("target").expect("target");
 
@@ -1979,7 +1978,7 @@ fn delete_note_moves_note_and_assets_to_trash_and_removes_backlinks() {
     assert!(root.join(format!("{trash}.md")).exists());
     assert!(root.join(".hatchdoor-trash/asset.pdf").exists());
     let backlink = fs::read_to_string(root.join("Backlink.md")).expect("backlink");
-    assert_eq!(backlink, "before  after ![](.hatchdoor-trash/asset.pdf)");
+    assert_eq!(backlink, "before  after");
 }
 
 #[test]
@@ -2654,32 +2653,177 @@ fn move_note_refuses_an_asset_reference_that_escapes_the_vault() {
     );
 }
 
-#[test]
-fn move_note_from_the_vault_root_carries_the_assets_it_references() {
-    // A note in the Vault root has the whole Vault as its own folder, so by the
-    // #225 rule every asset it references is inside that folder and travels.
-    // Pinned deliberately: it is the one place where the rule and the "leave a
-    // shared attachments folder alone" intent point in different directions,
-    // and #225 put changing which assets travel from inside the note's own
-    // folder out of scope.
-    let tmp = TempDir::new().expect("tempdir");
-    let root = tmp.path();
+/// A root note `B.md` embedding `_system/image.png` by path, plus, when
+/// `other` is given, a second note at that path holding that body. The whole
+/// Vault is a root note's own folder, so whether the picture travels with B
+/// turns on whether another note uses it (#701).
+fn root_note_with_a_picture(root: &Path, other: Option<(&str, &str)>) -> String {
     let body = "# B\n![](_system/image.png)\n";
     fs::create_dir_all(root.join("_system")).expect("system dir");
     fs::write(root.join("_system/image.png"), BINARY_ASSET).expect("asset");
     fs::write(root.join("B.md"), body).expect("note");
+    if let Some((path, other_body)) = other {
+        if let Some(parent) = Path::new(path).parent() {
+            fs::create_dir_all(root.join(parent)).expect("other note's folder");
+        }
+        fs::write(root.join(path), other_body).expect("other note");
+    }
+    body.to_string()
+}
+
+/// The ways another note can use the root note's picture, each of which must
+/// keep it in place: a path-form embed, a bare-name embed Obsidian resolves by
+/// filename anywhere in the Vault, and a plain Markdown link.
+const OTHER_NOTES_USING_THE_PICTURE: [(&str, &str); 4] = [
+    ("Other.md", "![](_system/image.png)\n"),
+    ("folder-x/Other.md", "![](../_system/image.png)\n"),
+    ("folder-x/Other.md", "![[image.png]]\n"),
+    ("folder-x/Other.md", "[the picture](../_system/image.png)\n"),
+];
+
+/// What a root note's delete, move and archive must all leave alone when
+/// another note uses its picture: the picture where it was, the other note
+/// byte for byte.
+fn assert_shared_picture_stayed(root: &Path, outcome: &WriteOutcome, other: (&str, &str)) {
+    assert_eq!(outcome.moved_assets, 0, "a shared picture must not travel");
+    assert_eq!(
+        fs::read(root.join("_system/image.png")).expect("shared picture stays put"),
+        BINARY_ASSET
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(other.0)).expect("other note"),
+        other.1,
+        "the other note's reference must be left untouched"
+    );
+}
+
+#[test]
+fn deleting_a_root_note_leaves_a_picture_another_note_uses() {
+    for other in OTHER_NOTES_USING_THE_PICTURE {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = root_note_with_a_picture(root, Some(other));
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+        assert_shared_picture_stayed(root, &outcome, other);
+        assert!(!root.join(".hatchdoor-trash/_system/image.png").exists());
+        let trashed = format!("{}.md", outcome.trashed_path.expect("trash path"));
+        embedded_asset_resolves_to(root, &trashed, "_system/image.png");
+    }
+}
+
+#[test]
+fn deleting_a_root_note_trashes_a_picture_no_other_note_uses() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    // Another note that names the root note, not its picture, counts for
+    // nothing.
+    let body = root_note_with_a_picture(root, Some(("Other.md", "See [[B]]\n")));
     let index = build(root);
     let entry = index.find_by_slug("b").expect("b");
 
-    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(body))
+    let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("_system/image.png").exists());
+    assert_eq!(
+        fs::read(root.join(".hatchdoor-trash/_system/image.png")).expect("trashed picture"),
+        BINARY_ASSET
+    );
+}
+
+#[test]
+fn a_bare_name_embed_in_another_note_keeps_a_root_notes_picture_in_place() {
+    // Named on its own because nothing in the other note spells the
+    // picture's folder: only resolving the name the way Obsidian does finds it.
+    let other = ("folder-x/Other.md", "![[image.png|300]]\n");
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, Some(other));
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(&body))
+        .expect("move");
+
+    assert_shared_picture_stayed(root, &outcome, other);
+    embedded_asset_resolves_to(root, "folder-z/B.md", "_system/image.png");
+}
+
+#[test]
+fn moving_a_root_note_leaves_a_picture_another_note_uses() {
+    for other in OTHER_NOTES_USING_THE_PICTURE {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = root_note_with_a_picture(root, Some(other));
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome =
+            move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(&body))
+                .expect("move");
+
+        assert_shared_picture_stayed(root, &outcome, other);
+        assert!(!root.join("folder-z/_system").exists());
+        embedded_asset_resolves_to(root, "folder-z/B.md", "_system/image.png");
+    }
+}
+
+#[test]
+fn moving_a_root_note_carries_a_picture_no_other_note_uses() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, None);
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(&body))
         .expect("move");
 
     assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("_system/image.png").exists());
     assert_eq!(
         fs::read(root.join("folder-z/_system/image.png")).expect("asset travelled"),
         BINARY_ASSET
     );
     embedded_asset_resolves_to(root, "folder-z/B.md", "folder-z/_system/image.png");
+}
+
+#[test]
+fn archiving_a_root_note_leaves_a_picture_another_note_uses() {
+    for other in OTHER_NOTES_USING_THE_PICTURE {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = root_note_with_a_picture(root, Some(other));
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = archive_note(root, &index, entry, "90-archive/", &content_hash(&body))
+            .expect("archive");
+
+        assert_shared_picture_stayed(root, &outcome, other);
+        assert!(!root.join("90-archive/_system").exists());
+        embedded_asset_resolves_to(root, "90-archive/B.md", "_system/image.png");
+    }
+}
+
+#[test]
+fn archiving_a_root_note_carries_a_picture_no_other_note_uses() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, None);
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome =
+        archive_note(root, &index, entry, "90-archive/", &content_hash(&body)).expect("archive");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("_system/image.png").exists());
+    embedded_asset_resolves_to(root, "90-archive/B.md", "90-archive/_system/image.png");
 }
 
 #[test]
@@ -6018,4 +6162,80 @@ fn relocated_breaks_ties_in_the_order_a_rebuild_does() {
 /// A note's text, as the read core hands it to `list_note_attachments`.
 fn note_text(entry: &crate::vault::NoteEntry) -> String {
     fs::read_to_string(&entry.path).expect("read note")
+}
+
+#[test]
+fn a_root_notes_picture_stays_for_every_way_a_markdown_link_spells_a_space() {
+    // Obsidian writes `%20` itself when wikilinks are off, and CommonMark
+    // allows `<...>` around a path with spaces (#701 review).
+    for other_body in [
+        "![](../_system/my%20image.png)\n",
+        "![](<../_system/my image.png>)\n",
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = "# B\n![[_system/my image.png]]\n";
+        fs::create_dir_all(root.join("_system")).expect("system dir");
+        fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+        fs::write(root.join("_system/my image.png"), BINARY_ASSET).expect("asset");
+        fs::write(root.join("B.md"), body).expect("note");
+        fs::write(root.join("folder-x/Other.md"), other_body).expect("other note");
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = delete_note(root, &index, entry, &content_hash(body)).expect("delete");
+
+        assert_eq!(outcome.moved_assets, 0, "{other_body} uses the picture");
+        assert!(root.join("_system/my image.png").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("folder-x/Other.md")).expect("other note"),
+            other_body
+        );
+    }
+}
+
+#[test]
+fn a_bare_name_the_index_cannot_resolve_still_keeps_a_root_notes_file_in_place() {
+    // A video is not in the index's name list, so only the name fallback
+    // sees this embed, and the `#t=10` time stamp must not hide it.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "# B\n![](_system/clip.mp4)\n";
+    let other_body = "![[clip.mp4#t=10]]\n";
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+    fs::write(root.join("_system/clip.mp4"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("B.md"), body).expect("note");
+    fs::write(root.join("folder-x/Other.md"), other_body).expect("other note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(body))
+        .expect("move");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert!(root.join("_system/clip.mp4").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("folder-x/Other.md")).expect("other note"),
+        other_body
+    );
+}
+
+#[test]
+fn a_note_too_large_to_read_keeps_a_root_notes_picture_in_place() {
+    // What an unreadable note embeds is unknown, so it must not count as
+    // using nothing: its link would break with nothing to repoint it.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, None);
+    let mut huge = "![](_system/image.png)\n".to_string();
+    huge.push_str(&"x".repeat(crate::vault::MAX_NOTE_BYTES as usize));
+    fs::write(root.join("Huge.md"), huge).expect("oversized note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert!(root.join("_system/image.png").exists());
 }
