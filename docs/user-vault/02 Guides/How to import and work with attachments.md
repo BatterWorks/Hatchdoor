@@ -99,6 +99,12 @@ Reference rewriting goes by the file extension, so a link to a file with no exte
 
 A note that is not valid UTF-8 text, such as a Latin-1 export from an older tool, cannot have its references rewritten without damaging the bytes that are not text. If one references the attachment you move, rename or delete, the call is refused with `link_rewrite_unsupported` and nothing is written; the message names each such note. Re-save those notes as UTF-8 and try again.
 
+### When the note moves or is deleted
+
+Moving, archiving or deleting a note, in the Web UI or through an agent, takes along the attachments kept in that note's own folder or a subfolder of it. An attachment kept anywhere else, such as a shared `Attachments/` folder, stays where it is, and only the moved note's link to it is rewritten so it still opens.
+
+A note at the top of the Vault has no folder of its own, so there the rule is different: an attachment goes with it only when no other note uses it. If any other note shows or links to that attachment, whether by its path, by name alone as in `![[image.png]]`, or with a Markdown link, the attachment stays where it is and that other note is not touched. A rename leaves the note where it is, so nothing moves.
+
 The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write; see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); one item can fail while the others succeed, so read each item's `ok`.
 
 ---

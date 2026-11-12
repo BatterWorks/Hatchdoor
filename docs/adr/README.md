@@ -202,9 +202,9 @@ Copy this for a new record:
 
 - **Status:** Accepted
 - **Context:** Agents and the UI can delete or archive notes. Destructive deletes on user data are unacceptable.
-- **Decision:** Delete moves notes, and the referenced assets that live inside the note's own folder, into `.hatchdoor-trash` (excluded from indexing). A referenced asset kept elsewhere stays where it is. Archive moves notes under `HATCHDOOR_ARCHIVE_PREFIX` (default `90-archive/`), which also drives archived-link styling.
+- **Decision:** Delete moves notes, and the referenced assets that live inside the note's own folder, into `.hatchdoor-trash` (excluded from indexing). A referenced asset kept elsewhere stays where it is. A note at the Vault root has the whole Vault as its folder, so for a root note an asset also stays where it is when any other note embeds or links to it, in any link form; only the assets no other note uses go with it, on a delete, a move and an archive alike. Archive moves notes under `HATCHDOOR_ARCHIVE_PREFIX` (default `90-archive/`), which also drives archived-link styling.
 - **Consequences:** Deletes are recoverable; nothing is unlinked from disk by Hatchdoor. The trash folder is skipped when deciding whether a vault is empty.
-- **Evidence:** README "Data and Safety Model"; `vault/write/`; `config.rs` (`archive_prefix`); CHANGELOG F-12. Asset travel was narrowed to the note's own folder in #225 (`vault/write/assets.rs`, `asset_move_plan`).
+- **Evidence:** README "Data and Safety Model"; `vault/write/`; `config.rs` (`archive_prefix`); CHANGELOG F-12. Asset travel was narrowed to the note's own folder in #225 (`vault/write/assets.rs`, `asset_move_plan`), and for a root note to the assets no other note uses in #701 (`AssetsUsedElsewhere`).
 
 ## ADR-12 — Distroless, rootless, multi-stage container
 

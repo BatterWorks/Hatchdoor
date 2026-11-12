@@ -22,7 +22,7 @@ The web token lives in the `.env` file next to `compose.yaml`. Keep that file to
 
 ## Deleting is recoverable
 
-- Deleting a note moves it, together with any attachments kept in its own folder, to a hidden `.hatchdoor-trash` folder inside the Vault. To get it back, move it out of there with your file manager.
+- Deleting a note moves it, together with any attachments kept in its own folder, to a hidden `.hatchdoor-trash` folder inside the Vault. For a note at the top of the Vault, an attachment another note still uses stays where it is. To get it back, move it out of there with your file manager.
 - Notes in the trash folder are left out of search.
 - Archiving moves a note to `90-archive/` by default. You can change that folder per Vault.
 

@@ -2058,8 +2058,10 @@ write API/types, and configuration for archive or upload limits.
   archive, delete or attachment move is refused before anything is written,
   folders included, naming every such note under `link_rewrite_unsupported`.
   The tag rename and delete skip an unopenable note the same way.
-- An asset travels with its note only from inside the note's own folder (#225),
-  and an occupied destination refuses the whole write - except where that
+- An asset travels with its note only from inside the note's own folder (#225);
+  for a note at the Vault root, whose folder is the whole Vault, only when no
+  other note references it in any link form (#701). An occupied destination
+  refuses the whole write - except where that
   destination is the asset's own file, which is a move to nowhere rather than a
   collision: no move and no rewrite are planned for it, and `moved_assets`
   counts what actually moved (#238).

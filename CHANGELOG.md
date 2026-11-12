@@ -17,6 +17,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- Deleting, moving or archiving a note at the top of the Vault no longer takes along attachments that other notes still show. Such a note has the whole Vault as its folder, so every attachment it embedded by path went with it, from any folder: a delete put another note's picture in the trash and broke or repointed that note's embed, and a move copied a shared attachments folder into the destination. An attachment now goes with a top-level note only when no other note embeds or links to it, by path, by bare name such as `![[image.png]]` or with a Markdown link. Notes in a folder keep the rule they had: attachments in their own folder go with them. [#701]
 - Coming back to a note you left while its save was still on its way no longer warns that the note has changed since. When you kept typing after that save went out and then opened another note, the newer edit was kept for your next visit but still marked as made against the version before your own save, so the note showed "An unsaved edit to this note is being held, but the note has changed since" and asked you to review it in Source. The newer edit now comes back as it was, with no warning; an edit held from another tab or an older version still gets the warning. [#695]
 - The startup warning about variables left in your `.env` no longer tells you to remove `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL`. It said they had no effect, but they still sign the commits of every Vault that has no commit identity of its own, so removing them changed who signed those commits. The other `HATCHDOOR_GIT_*` variables and `HATCHDOOR_EXCLUDE` are still named. [#687]
 - A Vault added on the folder of a Vault you just paused and disconnected no longer writes beside a sync the old Vault was still running there. The new Vault got a write lock of its own at once, so its edits could land in the middle of the old sync or in its commit; it now waits for that sync to finish, as a Vault resumed during its Pause already did. A Vault added on another folder still starts at once. [#681]
@@ -105,6 +106,7 @@
 [#695]: https://github.com/BatterWorks/Hatchdoor/issues/695
 [#699]: https://github.com/BatterWorks/Hatchdoor/issues/699
 [#700]: https://github.com/BatterWorks/Hatchdoor/issues/700
+[#701]: https://github.com/BatterWorks/Hatchdoor/issues/701
 
 ## v2.9.0 - 2026-10-27
 

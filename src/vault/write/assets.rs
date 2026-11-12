@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::cache::parse::{content_hash, for_non_code_line, parse_fence_marker};
+use crate::vault::markdown_links::percent_decode;
 use crate::vault::paths::split_wikilink_asset_body;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
@@ -72,6 +73,14 @@ pub(super) fn asset_move_plan(
         resolved.push((relative_asset, source_relative));
     }
 
+    // A root note's own folder is the whole Vault, so the folder rule alone
+    // would send every asset it references along with it, including ones
+    // other notes still embed (#701). For a root note only, an asset another
+    // note uses stays where it is.
+    let used_elsewhere = own_folder_prefix.is_empty().then(|| {
+        AssetsUsedElsewhere::collect(vault_root, index, &moved_entry.slug, baseline_rewrites)
+    });
+
     let mut moves = Vec::new();
     let mut rewrites = Vec::new();
     let mut stationary: HashMap<PathBuf, String> = HashMap::new();
@@ -90,7 +99,15 @@ pub(super) fn asset_move_plan(
         // reference is repointed at it from the destination instead. Scattering
         // such a folder across the Vault on an ordinary note move was the
         // decided-against behaviour in #225.
-        let Some(own_folder_relative) = source_relative.strip_prefix(&own_folder_prefix) else {
+        let used_by_another_note = used_elsewhere
+            .as_ref()
+            .is_some_and(|used| used.contains(&source_asset));
+        let own_folder_relative = if used_by_another_note {
+            None
+        } else {
+            source_relative.strip_prefix(&own_folder_prefix)
+        };
+        let Some(own_folder_relative) = own_folder_relative else {
             if let Some(target) = relative_link_target(vault_root, destination_note, &source_asset)
             {
                 stationary.insert(relative_asset, target);
@@ -185,11 +202,145 @@ pub(super) fn asset_move_plan(
 
 pub(super) fn referenced_assets(content: &str) -> Vec<PathBuf> {
     let mut assets = Vec::new();
-    for_non_code_line(content, |line| {
-        extract_markdown_assets(line, &mut assets);
-        extract_wiki_assets(line, &mut assets);
+    for_each_reference_target(content, |target| {
+        if let Some(asset) = asset_path_from_target(target) {
+            assets.push(asset);
+        }
     });
     assets
+}
+
+/// Every Markdown link or embed target and every wikilink target in a note's
+/// prose, as written, `|` suffixes stripped.
+fn for_each_reference_target(content: &str, mut visit: impl FnMut(&str)) {
+    for_non_code_line(content, |line| {
+        visit_markdown_targets(line, &mut visit);
+        visit_wiki_targets(line, &mut visit);
+    });
+}
+
+/// The files the Vault's other notes reference, for deciding which of a root
+/// note's assets are its alone (#701).
+///
+/// A reference counts in every form a reader resolves: a path from the
+/// note's own folder, a path from the Vault root (with or without a leading
+/// `/`), and a bare name found anywhere in the Vault. A bare name the index
+/// cannot resolve, such as a video's, counts for every file of that name, so
+/// an unresolved form errs towards leaving an asset where it is. A Markdown
+/// target counts as written and percent-decoded, and in its `<...>` form.
+struct AssetsUsedElsewhere {
+    files: HashSet<PathBuf>,
+    bare_names: HashSet<String>,
+    /// Another note could not be read, so what it references is unknown and
+    /// every asset is treated as used.
+    unknown: bool,
+}
+
+impl AssetsUsedElsewhere {
+    fn collect(
+        vault_root: &Path,
+        index: &VaultIndex,
+        moved_slug: &str,
+        baseline_rewrites: &[TextRewrite],
+    ) -> Self {
+        let mut used = Self {
+            files: HashSet::new(),
+            bare_names: HashSet::new(),
+            unknown: false,
+        };
+        for entry in index.ordered_entries() {
+            if entry.slug == moved_slug {
+                continue;
+            }
+            // Read as the operation will leave it, and lossily when the note
+            // is not UTF-8: a reference read too eagerly only keeps an asset
+            // in place.
+            // A note too large or locked to read could embed anything, so it
+            // keeps every asset where it is rather than lose one its link
+            // still names.
+            let Some(base) = rewrite_base_or_read(&entry.path, baseline_rewrites) else {
+                used.unknown = true;
+                continue;
+            };
+            let note_dir = entry.path.parent().unwrap_or(vault_root);
+            let note_dir_relative = vault_relative_dir(vault_root, note_dir).unwrap_or_default();
+            for_non_code_line(&base.content, |line| {
+                let mut visit = |target: &str| {
+                    used.record(vault_root, index, note_dir, &note_dir_relative, target);
+                };
+                visit_markdown_targets(line, &mut visit);
+                visit_angle_markdown_targets(line, &mut visit);
+                visit_wiki_targets(line, &mut visit);
+            });
+        }
+        used
+    }
+
+    fn record(
+        &mut self,
+        vault_root: &Path,
+        index: &VaultIndex,
+        note_dir: &Path,
+        note_dir_relative: &str,
+        target: &str,
+    ) {
+        let target = target.trim();
+        let target = target.split(['?', '#']).next().unwrap_or(target);
+        let decoded = percent_decode(target);
+        self.record_form(vault_root, index, note_dir, note_dir_relative, target);
+        if decoded != target {
+            self.record_form(vault_root, index, note_dir, note_dir_relative, &decoded);
+        }
+    }
+
+    fn record_form(
+        &mut self,
+        vault_root: &Path,
+        index: &VaultIndex,
+        note_dir: &Path,
+        note_dir_relative: &str,
+        target: &str,
+    ) {
+        let from_root = target.strip_prefix('/');
+        let mut candidates = Vec::new();
+        if let Some(asset) = asset_path_from_target(from_root.unwrap_or(target)) {
+            let base = if from_root.is_some() {
+                vault_root
+            } else {
+                note_dir
+            };
+            candidates.extend(resolve_reference_inside_root(vault_root, base, &asset));
+            if from_root.is_none() {
+                candidates.extend(resolve_reference_inside_root(
+                    vault_root, vault_root, &asset,
+                ));
+            }
+        }
+        let by_index = index.resolve_asset(target, note_dir_relative);
+        match by_index {
+            Some(hit) => candidates.push(hit.to_string()),
+            None if !target.contains('/') && asset_path_from_target(target).is_some() => {
+                self.bare_names.insert(target.to_lowercase());
+            }
+            None => {}
+        }
+        for candidate in candidates {
+            if let Ok(file) = vault_root.join(candidate).canonicalize() {
+                self.files.insert(file);
+            }
+        }
+    }
+
+    fn contains(&self, asset: &Path) -> bool {
+        self.unknown
+            || asset
+                .canonicalize()
+                .is_ok_and(|file| self.files.contains(&file))
+            || asset
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| self.bare_names.contains(&name.to_lowercase()))
+    }
 }
 
 /// Repoint every other note's reference to `source_asset` at
@@ -412,22 +563,33 @@ where
     format!("{}{suffix}", transform_target(&asset))
 }
 
-fn extract_markdown_assets(line: &str, assets: &mut Vec<PathBuf>) {
+fn visit_markdown_targets(line: &str, visit: &mut impl FnMut(&str)) {
     let mut rest = line;
     while let Some(start) = rest.find("](") {
         rest = &rest[start + 2..];
         let Some(end) = rest.find(')') else {
             break;
         };
-        let target = rest[..end].split_whitespace().next().unwrap_or("").trim();
-        if let Some(asset) = asset_path_from_target(target) {
-            assets.push(asset);
-        }
+        visit(rest[..end].split_whitespace().next().unwrap_or("").trim());
         rest = &rest[end + 1..];
     }
 }
 
-fn extract_wiki_assets(line: &str, assets: &mut Vec<PathBuf>) {
+/// The `[text](<path with spaces>)` form CommonMark allows, which
+/// [`visit_markdown_targets`] cuts at the first space.
+fn visit_angle_markdown_targets(line: &str, visit: &mut impl FnMut(&str)) {
+    let mut rest = line;
+    while let Some(start) = rest.find("](<") {
+        rest = &rest[start + 3..];
+        let Some(end) = rest.find('>') else {
+            break;
+        };
+        visit(&rest[..end]);
+        rest = &rest[end + 1..];
+    }
+}
+
+fn visit_wiki_targets(line: &str, visit: &mut impl FnMut(&str)) {
     let mut rest = line;
     while let Some(start) = rest.find("[[") {
         rest = &rest[start + 2..];
@@ -435,9 +597,7 @@ fn extract_wiki_assets(line: &str, assets: &mut Vec<PathBuf>) {
             break;
         };
         let (target, _) = split_wikilink_asset_body(&rest[..end]);
-        if let Some(asset) = asset_path_from_target(target) {
-            assets.push(asset);
-        }
+        visit(target);
         rest = &rest[end + 2..];
     }
 }
