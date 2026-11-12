@@ -15,6 +15,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- One folder Hatchdoor may not open, such as a `.trash/private` or `lost+found` with no permissions, no longer stops the once-a-minute folder re-scan from noticing changes. Every round used to fail with a warning, so on a folder that sends no change events, such as a Windows folder shared through Docker Desktop, edits made outside Hatchdoor never reached the index; the re-scan now skips that folder, as indexing already does, and a passing read error on a network share still makes it try again next minute. [#674]
 - The README's Quick Start now prepares `data/cache` and `models` for Hatchdoor's user along with `data/state`, as the manual's install guide already did, so following it no longer leaves a first start unable to open its cache. Contributors get `just smoke-install`, which runs those steps with an image built from their checkout and is now on the release checklist. [#569]
 - Following a link right after typing no longer stops the next note from saving. The save of the note you left, still on its way, was booked against the note you opened: once it came back, the next note's edits were refused with "Edits aren't saving. This note changed somewhere else." although nothing had changed, and an edit made in the next note before it came back could be written into the note you left. Each note now saves on its own, and the note you left still gets its save, or keeps its unsaved edit for your next visit when the save is refused. [#658]
 - The Graph page now works from the keyboard and with a screen reader. Tab reaches the graph, which a screen reader names "Note graph"; the arrow keys step through the notes by title, Home and End jump to the first and last, Enter opens the selected note and Escape clears the selection. A note out of view is brought to the middle of the screen, and the selected title is read out. Rename, Move, Archive, Delete and New note now put focus back on the button that opened them when they close, where it used to drop to the top of the page. The browser bar colour and the installed app's splash screen now follow the theme colours themselves instead of a copy of them. [#648]
@@ -88,6 +89,7 @@
 [#668]: https://github.com/BatterWorks/Hatchdoor/issues/668
 [#670]: https://github.com/BatterWorks/Hatchdoor/issues/670
 [#672]: https://github.com/BatterWorks/Hatchdoor/issues/672
+[#674]: https://github.com/BatterWorks/Hatchdoor/issues/674
 [#693]: https://github.com/BatterWorks/Hatchdoor/issues/693
 
 ## v2.9.0 - 2026-10-27

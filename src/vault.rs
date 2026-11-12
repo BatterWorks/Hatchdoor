@@ -23,13 +23,13 @@ pub(crate) use note_file::{
     BoundedReadError, MAX_NOTE_BYTES, note_file_name, read_bounded, read_note_text,
     read_open_bounded,
 };
-pub(crate) use paths::is_note_path;
 #[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
     split_wikilink_asset_body,
 };
+pub(crate) use paths::{is_note_path, walk_error_costs_only_itself};
 pub(crate) use sections::{NoteSections, body_start};
 pub use types::{
     ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
