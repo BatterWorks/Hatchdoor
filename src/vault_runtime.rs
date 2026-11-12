@@ -597,10 +597,11 @@ impl VaultWriteExclusion {
 }
 
 /// What a replacement control block inherits from the block it replaces. All
-/// are `None` for a genuinely new Vault, which has no predecessor to inherit
-/// from, and for one re-enabled after its disable finished. One re-enabled
-/// while that disable still waits for its safe boundary inherits the
-/// retiring block's writes and exclusion only (#640).
+/// are `None` for a genuinely new Vault on a folder no retiring block holds,
+/// and for one re-enabled after its disable finished. One re-enabled while
+/// that disable still waits for its safe boundary inherits the retiring
+/// block's writes and exclusion only (#640); any other Vault activated on the
+/// folder of a retiring block inherits its exclusion alone (#681).
 #[derive(Default)]
 struct CarriedOverState {
     /// The retiring block's Git status, so an in-place edit does not force a
@@ -615,6 +616,39 @@ struct CarriedOverState {
     /// The retiring block's recovery-branch status, which describes a branch
     /// on the remote that an edit to this Vault does not move (ADR-30).
     recovery: Option<RecoveryBranchStatus>,
+}
+
+/// What a Vault activated on `vault_path` without a live predecessor inherits
+/// from the retiring blocks on that folder, since an old turn may still hold
+/// their exclusion. The newest block of the same Vault gives its exclusion and
+/// its write ledger (#640); failing that, the newest block of another Vault
+/// gives its exclusion only (#681). Nothing when no retiring block is on that
+/// folder, which gives the Vault a fresh exclusion.
+fn carried_over_from_retiring(
+    retiring: &[VaultControlBlock],
+    vault_id: VaultId,
+    vault_path: &Path,
+) -> CarriedOverState {
+    let on_folder = || {
+        retiring
+            .iter()
+            .rev()
+            .filter(|runtime| runtime.vault_path() == vault_path)
+    };
+    if let Some(runtime) = on_folder().find(|runtime| runtime.definition().vault_id() == vault_id) {
+        return CarriedOverState {
+            writes: Some(runtime.write_ledger()),
+            exclusion: Some(runtime.write_exclusion()),
+            ..CarriedOverState::default()
+        };
+    }
+    on_folder()
+        .next()
+        .map(|runtime| CarriedOverState {
+            exclusion: Some(runtime.write_exclusion()),
+            ..CarriedOverState::default()
+        })
+        .unwrap_or_default()
 }
 
 /// Where a Vault's notes sit in its Git repository (#300).
@@ -1733,13 +1767,17 @@ struct VaultCollectionState {
     /// what a collection read's `participants[].state` answers (#259).
     collection_revision: u64,
     vaults: BTreeMap<VaultId, VaultCollectionEntry>,
-    /// The control block of each Vault disabled while a turn or write may
-    /// still hold its write exclusion, kept until that disable's safe
-    /// boundary has passed. A Vault re-enabled before then inherits the
-    /// block's exclusion and write ledger, so a Resume during a pending Pause
-    /// never puts a second mutation lock on the directory the old Git turn
-    /// still holds (#640, ADR-25).
-    retiring: BTreeMap<VaultId, VaultControlBlock>,
+    /// Every control block a lifecycle replaced or removed (an edit, a
+    /// Pause, a disconnect), kept until that lifecycle's safe boundary has
+    /// passed, since a turn or write may hold its write exclusion until
+    /// then. A Vault activated on the folder of one of them before then
+    /// inherits its exclusion, and its write ledger too when it is the same
+    /// Vault re-enabled, so neither a Resume during a pending Pause (#640)
+    /// nor a new Vault added on the folder of a paused and disconnected one
+    /// (#681) puts a second mutation lock on a directory an old turn still
+    /// holds (ADR-25). Kept by block rather than by Vault ID: the Vault ID
+    /// may be gone from the collection while its old turn still runs.
+    retiring: Vec<VaultControlBlock>,
     /// Git-lane work (sync, commit, recovery) a lifecycle drained from a
     /// Vault's queue, re-requested when the Vault's replacement block is
     /// activated and dropped when the Vault ends up disabled or removed. A
@@ -1777,7 +1815,7 @@ impl VaultCollectionRuntime {
                 registry_revision: 0,
                 collection_revision: 0,
                 vaults: BTreeMap::new(),
-                retiring: BTreeMap::new(),
+                retiring: Vec::new(),
                 discarded_work: BTreeMap::new(),
             })),
             revisions,
@@ -1799,7 +1837,7 @@ impl VaultCollectionRuntime {
                 registry_revision: 0,
                 collection_revision: 0,
                 vaults: BTreeMap::new(),
-                retiring: BTreeMap::new(),
+                retiring: Vec::new(),
                 discarded_work: BTreeMap::new(),
             })),
             revisions,
@@ -1830,7 +1868,7 @@ impl VaultCollectionRuntime {
                 registry_revision: 0,
                 collection_revision: 0,
                 vaults: BTreeMap::new(),
-                retiring: BTreeMap::new(),
+                retiring: Vec::new(),
                 discarded_work: BTreeMap::new(),
             })),
             revisions,
@@ -1861,6 +1899,12 @@ impl VaultCollectionRuntime {
     /// The lock is then held only to install the result, and only if no other
     /// reconciliation installed a revision in between; if one did, this one's
     /// unadopted blocks are revoked and it starts over from what is live.
+    ///
+    /// Every block this replaces or removes goes into `retiring`, and only
+    /// `reconcile_and_reconstruct`'s lifecycle takes it out again, once its
+    /// safe boundary has passed (#681). A caller of this method alone keeps
+    /// those blocks there, so it suits only a collection's first install,
+    /// which retires nothing, or a test.
     pub fn reconcile(
         &self,
         registry: &VaultRegistryStore,
@@ -1920,21 +1964,20 @@ impl VaultCollectionRuntime {
             }
         }
 
-        // A Vault disabled here keeps its retiring block reachable until the
-        // disable's safe boundary has passed; one enabled here has taken
-        // whatever its retiring block carried.
+        // Every block replaced or removed here stays reachable until its
+        // lifecycle's safe boundary has passed, whatever happens to its Vault
+        // in between, so a later activation on its folder can find it.
         for (vault_id, entry) in &previous {
-            match (entry, next.get(vault_id)) {
-                (
-                    VaultCollectionEntry::Active(previous_runtime),
-                    Some(VaultCollectionEntry::Disabled(_)),
-                ) => {
-                    state.retiring.insert(*vault_id, previous_runtime.clone());
-                }
-                (_, Some(VaultCollectionEntry::Active(_)) | None) => {
-                    state.retiring.remove(vault_id);
-                }
-                _ => {}
+            let VaultCollectionEntry::Active(previous_runtime) = entry else {
+                continue;
+            };
+            let retained = matches!(
+                next.get(vault_id),
+                Some(VaultCollectionEntry::Active(next_runtime))
+                    if Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
+            );
+            if !retained {
+                state.retiring.push(previous_runtime.clone());
             }
         }
 
@@ -1981,7 +2024,7 @@ impl VaultCollectionRuntime {
         registry: &VaultRegistryStore,
         snapshot: &VaultRegistrySnapshot,
         previous: &BTreeMap<VaultId, VaultCollectionEntry>,
-        retiring: &BTreeMap<VaultId, VaultControlBlock>,
+        retiring: &[VaultControlBlock],
         revision_publisher: &CollectionRevisionPublisher,
     ) -> BTreeMap<VaultId, VaultCollectionEntry> {
         let mut next = BTreeMap::new();
@@ -2037,7 +2080,13 @@ impl VaultCollectionRuntime {
                         // fresh ones (#640), unless its folder changed while
                         // it was paused: the old turn's lock and commit belong
                         // to the old folder. Its Git status starts over, as
-                        // any re-enabled Vault's does.
+                        // any re-enabled Vault's does. A different Vault
+                        // activated on the folder of a retiring block that
+                        // has not passed its boundary, such as a new Vault
+                        // added where a paused one was disconnected, takes
+                        // that block's exclusion for the same reason, but
+                        // not its ledger, whose lines belong to the old
+                        // Vault's commit (#681).
                         let carried_over = match previous_entry {
                             Some(VaultCollectionEntry::Active(runtime)) => {
                                 let prior_snapshot = runtime.snapshot();
@@ -2051,16 +2100,9 @@ impl VaultCollectionRuntime {
                                     exclusion: Some(runtime.write_exclusion()),
                                 }
                             }
-                            Some(VaultCollectionEntry::Disabled(_)) => retiring
-                                .get(&vault_id)
-                                .filter(|runtime| runtime.vault_path() == vault_path.as_path())
-                                .map(|runtime| CarriedOverState {
-                                    writes: Some(runtime.write_ledger()),
-                                    exclusion: Some(runtime.write_exclusion()),
-                                    ..CarriedOverState::default()
-                                })
-                                .unwrap_or_default(),
-                            None => CarriedOverState::default(),
+                            Some(VaultCollectionEntry::Disabled(_)) | None => {
+                                carried_over_from_retiring(retiring, vault_id, &vault_path)
+                            }
                         };
                         #[cfg(test)]
                         observe_activation();
@@ -2215,25 +2257,19 @@ impl VaultCollectionRuntime {
         for (vault_id, _) in &retired {
             coordinator.wait_for_vault_safe_boundary(*vault_id).await;
         }
-        // Past the boundary, nothing holds a disabled block's lock any more,
-        // so a later re-enable may start a fresh one. Only this lifecycle's
-        // own block is forgotten: a newer disable of the same Vault has
-        // installed its own.
-        {
-            let mut state = self
-                .state
-                .write()
-                .expect("Vault collection runtime poisoned");
-            for (vault_id, runtime) in &retired {
-                if state
-                    .retiring
-                    .get(vault_id)
-                    .is_some_and(|retiring| Arc::ptr_eq(&retiring.snapshot, &runtime.snapshot))
-                {
-                    state.retiring.remove(vault_id);
-                }
-            }
-        }
+        // Past the boundary, nothing holds a retired block's lock any more,
+        // so a later activation on its folder may start a fresh one. Only
+        // this lifecycle's own blocks are forgotten: a newer lifecycle keeps
+        // the blocks it retired until its own boundary.
+        self.state
+            .write()
+            .expect("Vault collection runtime poisoned")
+            .retiring
+            .retain(|retiring| {
+                !retired
+                    .iter()
+                    .any(|(_, runtime)| Arc::ptr_eq(&retiring.snapshot, &runtime.snapshot))
+            });
         // Reacquire only after every await. This makes the post-wait revision
         // fence, cache retirement/convergence, and new-work admission one
         // short phase: a newer lifecycle cannot slip between the fence and

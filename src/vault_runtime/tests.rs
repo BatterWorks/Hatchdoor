@@ -202,6 +202,13 @@ fn add_local_vault(
         .expect("add local Vault")
 }
 
+fn ready_registry(registry: &VaultRegistryStore) -> VaultRegistrySnapshot {
+    match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    }
+}
+
 fn vault_id_named(snapshot: &VaultRegistrySnapshot, name: &str) -> VaultId {
     snapshot
         .definitions()
@@ -4163,6 +4170,119 @@ async fn resuming_during_a_pending_pause_keeps_one_write_lock() {
             .is_same(&original.write_exclusion()),
         "a re-enable after the pause finished starts a fresh lock"
     );
+}
+
+/// #681: the Resume fix of #640 looks the retiring block up by Vault ID, so a
+/// Vault paused while an old turn holds its lock, then disconnected, left a
+/// new Vault added on the same folder with a lock of its own beside the old
+/// turn's. The new Vault shares the old turn's lock until that turn ends,
+/// while a Vault added on another folder meanwhile starts with a fresh one.
+#[tokio::test]
+async fn a_new_vault_on_the_folder_of_a_pausing_vault_waits_for_its_old_turn() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::create_dir_all(&elsewhere).expect("other Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let enabled = add_local_vault(
+        &registry,
+        &ready_registry(&registry),
+        "Old",
+        vault_path.clone(),
+    );
+    let old_id = vault_id_named(&enabled, "Old");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    let original = collection.runtime(old_id).expect("enabled runtime");
+    let old_turn = original
+        .acquire_mutation_for_git_turn()
+        .await
+        .expect("the old Git turn holds the Vault's lock");
+
+    let paused = registry
+        .disable(enabled.revision(), old_id)
+        .expect("pause the Vault");
+    let pause = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &paused, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while collection.runtime(old_id).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the pause is installed while it waits for the old turn");
+
+    let disconnected = registry
+        .disconnect(ready_registry(&registry).revision(), old_id)
+        .expect("disconnect the paused Vault");
+    let added = add_local_vault(&registry, &disconnected, "New", vault_path);
+    let new_id = vault_id_named(&added, "New");
+    let added = add_local_vault(&registry, &added, "Elsewhere", elsewhere);
+    let elsewhere_id = vault_id_named(&added, "Elsewhere");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collection.reconcile_and_reconstruct(&registry, &added, &coordinator, &managed_git),
+    )
+    .await
+    .expect("adding the Vaults does not wait for the old turn");
+
+    let new_vault = collection.runtime(new_id).expect("new Vault runtime");
+    assert!(
+        new_vault
+            .write_exclusion()
+            .is_same(&original.write_exclusion()),
+        "the new Vault shares the lock the old turn holds on its folder"
+    );
+    assert!(
+        !Arc::ptr_eq(&new_vault.write_ledger(), &original.write_ledger()),
+        "the old Vault's pending commit lines stay its own"
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            new_vault.acquire_mutation()
+        )
+        .await
+        .is_err(),
+        "a write to the new Vault waits for the old turn"
+    );
+    let other = collection
+        .runtime(elsewhere_id)
+        .expect("other Vault runtime");
+    assert!(!other.write_exclusion().is_same(&original.write_exclusion()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), other.acquire_mutation())
+        .await
+        .expect("a Vault on another folder writes at once")
+        .expect("other Vault write lock");
+
+    drop(old_turn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        new_vault.acquire_mutation(),
+    )
+    .await
+    .expect("the new Vault writes once the old turn is done")
+    .expect("new Vault write lock");
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause)
+        .await
+        .expect("the pause finishes once the old turn is done")
+        .expect("pause task");
 }
 
 /// #640: an edit retires the Vault's control block, and draining it used to

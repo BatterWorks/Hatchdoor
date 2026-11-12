@@ -308,12 +308,16 @@ that production inventory are still checked for stale paths and duplicates.
   `VaultWriteExclusion` — the mutation lock, its generation counter, and the
   refresh lock — so the exclusion's lifetime is the Vault's, not the block's,
   and an edit can never put two live mutexes on one Vault directory (issue
-  #321, [ADR-25](../adr/README.md)). Only a genuinely new Vault, or one
-  re-enabled after its disable has passed its safe boundary, gets a fresh
-  exclusion. A disable keeps the retiring block in `retiring` until that
-  boundary, and a Resume arriving before it inherits that block's exclusion
+  #321, [ADR-25](../adr/README.md)). A Vault gets a fresh exclusion only
+  when no retiring block holds its folder: a genuinely new Vault, or one
+  re-enabled after its disable has passed its safe boundary, on such a
+  folder. Every block an edit, a disable or a disconnect retires stays in
+  `retiring` until that lifecycle's safe boundary, whatever happens to its
+  Vault meanwhile. A Resume arriving before it inherits that block's exclusion
   and write ledger, so the old Git turn and the writes after the Resume share
-  one lock and one commit record (#640). An edit hands the Git-lane work
+  one lock and one commit record (#640), and any other Vault activated on that
+  block's folder, such as a new Vault added where a paused one was
+  disconnected, inherits only its exclusion (#681). An edit hands the Git-lane work
   (sync, commit, recovery) its drain discarded back to the coordinator once
   the replacement block is active; a Vault left disabled or removed drops it.
   A lifecycle a newer one supersedes while it waits still starts the
