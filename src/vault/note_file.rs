@@ -123,9 +123,11 @@ pub(crate) fn note_file_name(root: &Path, relative_path: &str) -> String {
 }
 
 /// Opens `path` for reading without following a final symbolic link and
-/// without waiting for a FIFO's writer.
+/// without waiting for a FIFO's writer. A final symbolic link is
+/// [`BoundedReadError::NotRegular`]; the caller still checks the handle's
+/// type before it reads.
 #[cfg(unix)]
-fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
+pub(crate) fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
     use std::os::unix::fs::OpenOptionsExt;
 
     fs::OpenOptions::new()
@@ -139,7 +141,7 @@ fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
 }
 
 #[cfg(not(unix))]
-fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
+pub(crate) fn open_without_blocking(path: &Path) -> Result<File, BoundedReadError> {
     Ok(File::open(path)?)
 }
 

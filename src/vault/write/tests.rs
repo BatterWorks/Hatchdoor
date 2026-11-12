@@ -3586,6 +3586,28 @@ fn list_note_attachments_reports_every_non_markdown_reference() {
 }
 
 #[test]
+fn listing_passes_over_a_reference_to_a_symbolic_link() {
+    // The attachment report opens only a regular file (#736), so a link in
+    // the note's references is skipped rather than failing the whole listing.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("real.png"), BINARY_ASSET).expect("image");
+    std::os::unix::fs::symlink("real.png", root.join("link.png")).expect("link");
+    fs::write(root.join("Note.md"), "![](link.png) ![](real.png)").expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note");
+
+    let listed = list_note_attachments(root, &index.layers, entry, &note_text(entry))
+        .expect("list attachments");
+
+    let paths: Vec<&str> = listed
+        .iter()
+        .map(|attachment| attachment.relative_path.as_str())
+        .collect();
+    assert_eq!(paths, ["real.png"]);
+}
+
+#[test]
 fn an_attachment_larger_than_one_read_chunk_reports_its_whole_size_and_hash() {
     // The description reads the file in fixed-size chunks, so the value has to
     // be proved against the whole-buffer hash over a file that spans several.
@@ -6238,4 +6260,63 @@ fn a_note_too_large_to_read_keeps_a_root_notes_picture_in_place() {
 
     assert_eq!(outcome.moved_assets, 0);
     assert!(root.join("_system/image.png").exists());
+}
+
+/// A sync tool that swaps the moved attachment for a FIFO between the
+/// rewrites and the attachment report must not hold the move, and the Vault's
+/// mutation guard with it, until a writer appears (#736). The move is refused
+/// and the note's reference rolled back.
+#[test]
+fn attachment_move_refuses_an_attachment_swapped_for_a_fifo_before_its_report() {
+    use super::types::MutationPhase;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/image.png"), "original asset").expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/image.png)").expect("note");
+    let index = build(&root);
+
+    let (sender, receiver) = mpsc::channel();
+    let thread_root = root.clone();
+    std::thread::spawn(move || {
+        let result = super::attachments::move_attachment_with_failure(
+            &thread_root,
+            &index,
+            "Media/image.png",
+            "Archive/image.png",
+            |completed| {
+                if completed == MutationPhase::Rewrite {
+                    let moved = thread_root.join("Archive/image.png");
+                    fs::remove_file(&moved).expect("remove the moved attachment");
+                    crate::vault::make_fifo(&moved);
+                }
+                Ok(())
+            },
+        );
+        let _ = sender.send(result);
+    });
+
+    let error = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the move must not block on the FIFO")
+        .expect_err("an attachment that is no longer a regular file must refuse the move");
+
+    // The swap destroyed the original bytes, so the rollback restores the
+    // note's reference and says plainly that the attachment itself is gone,
+    // rather than moving the FIFO back into its place.
+    let WriteError::Io(message) = &error else {
+        panic!("expected a recovery report, got {error:?}");
+    };
+    assert!(
+        message.contains("recovery required") && message.contains("restore moved asset"),
+        "unexpected error: {message}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("restored reference"),
+        "![](Media/image.png)"
+    );
+    assert!(!root.join("Media/image.png").exists());
 }
