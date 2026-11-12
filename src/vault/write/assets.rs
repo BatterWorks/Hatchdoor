@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::cache::parse::{content_hash, for_non_code_line, parse_fence_marker};
 use crate::vault::paths::split_wikilink_asset_body;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
+use super::fs_ops::read_existing_note;
 use super::paths::{
     ensure_existing_path_inside_root, is_markdown_path, is_trashed_path, relative_link_target,
     resolve_reference_inside_root, same_existing_path, unique_trash_attachment_relative_path,
@@ -31,12 +31,8 @@ pub(super) fn asset_move_plan(
     baseline_rewrites: &[TextRewrite],
     unrewritable: &mut Vec<UnrewritableNote>,
 ) -> Result<(Vec<AssetMove>, Vec<TextRewrite>), WriteError> {
-    let content = fs::read_to_string(&moved_entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}' for asset moves: {error}",
-            moved_entry.path.display()
-        ))
-    })?;
+    // Bounded like the pre-edit check that let this move start (#672).
+    let content = read_existing_note(&moved_entry.path, &moved_entry.relative_path)?;
     let source_dir = moved_entry.path.parent().unwrap_or(vault_root);
     let destination_dir = destination_note.parent().unwrap_or(vault_root);
     // The note's own folder, as a prefix an asset's vault-relative path must
@@ -486,6 +482,7 @@ fn asset_path_from_target(target: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
 
     /// #225: `..` in a reference is the planner's problem, not the filesystem's.

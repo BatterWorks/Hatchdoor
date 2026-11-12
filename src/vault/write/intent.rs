@@ -24,9 +24,11 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::cache::parse::content_hash;
+use crate::vault::BoundedReadError;
 
 use super::fs_ops::{
     atomic_write_if_unchanged_keeping_modified, captured_modified_time, move_file_no_follow,
+    read_note_bounded,
 };
 use super::types::{TextRewrite, WriteError};
 
@@ -430,7 +432,7 @@ fn roll_forward(vault_root: &Path, intent_log: &IntentLog, repair: &mut WriteRep
         ) && found_at(destination) == FoundAtPath::File
     });
     let rewrite_landed = rewrites.iter().any(|(path, planned)| {
-        fs::read_to_string(path).is_ok_and(|current| content_hash(&current) == planned.applied_hash)
+        read_note_bounded(path).is_ok_and(|current| content_hash(&current) == planned.applied_hash)
     });
     repair.rolled_forward = move_landed || rewrite_landed;
 
@@ -479,15 +481,13 @@ fn roll_forward(vault_root: &Path, intent_log: &IntentLog, repair: &mut WriteRep
 
     if repair.rolled_forward && moves_complete {
         for (path, planned) in &rewrites {
-            let current = match fs::read_to_string(path) {
+            // Bounded (#672). A note gone, now over the bound, not text or
+            // not a file is no longer the one the plan read: a person looks.
+            let current = match read_note_bounded(path) {
                 Ok(current) => content_hash(&current),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    repair
-                        .needs_attention
-                        .push(vault_relative(vault_root, path));
-                    continue;
-                }
-                Err(error) => {
+                Err(BoundedReadError::Io(error))
+                    if error.kind() != std::io::ErrorKind::NotFound =>
+                {
                     step_failed(
                         vault_root,
                         path,
@@ -495,6 +495,12 @@ fn roll_forward(vault_root: &Path, intent_log: &IntentLog, repair: &mut WriteRep
                         "rewriting a note",
                         repair,
                     );
+                    continue;
+                }
+                Err(_) => {
+                    repair
+                        .needs_attention
+                        .push(vault_relative(vault_root, path));
                     continue;
                 }
             };

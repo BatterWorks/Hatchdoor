@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use crate::cache::parse::content_hash;
 use crate::rename_flags::{RenameFlag, rename_flagged_at};
 use crate::vault::types::NoteEntry;
+use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, read_open_bounded};
 
 use super::canvas::is_canvas_path;
 use super::intent::{IntentLog, IntentRecord};
@@ -213,26 +214,35 @@ impl MutationJournal {
     ) -> Result<Vec<PathBuf>, WriteError> {
         let mut rewritten = Vec::with_capacity(rewrites.len());
         for rewrite in rewrites {
-            let original = fs::read_to_string(&rewrite.path).map_err(|error| {
-                WriteError::Io(format!(
-                    "failed to retain original note '{}' before rewrite: {error}",
-                    rewrite.path.display()
-                ))
-            })?;
-            let original_modified = captured_modified_time(&rewrite.path);
-            if content_hash(&original) != rewrite.original_hash {
-                // Vault-relative, because this message reaches an MCP client
-                // verbatim and the absolute host path is nobody's business
-                // there.
+            // Vault-relative, because this message reaches an MCP client
+            // verbatim and the absolute host path is nobody's business there.
+            let changed_since_plan = || {
                 let kind = if is_canvas_path(&rewrite.path) {
                     "Canvas"
                 } else {
                     "Note"
                 };
-                return Err(WriteError::Conflict(format!(
+                WriteError::Conflict(format!(
                     "{kind} '{}' changed after this change was planned; nothing was rewritten in it",
                     bounded_vault_path(&self.vault_root, &rewrite.path)
-                )));
+                ))
+            };
+            // The plan read this file as UTF-8 text under the bound, so one
+            // that is now over it, not text, or not a file at all has changed
+            // since, and is refused unread rather than read whole (#672).
+            let original = match read_note_bounded(&rewrite.path) {
+                Ok(original) => original,
+                Err(BoundedReadError::Io(error)) => {
+                    return Err(WriteError::Io(format!(
+                        "failed to retain original note '{}' before rewrite: {error}",
+                        rewrite.path.display()
+                    )));
+                }
+                Err(_) => return Err(changed_since_plan()),
+            };
+            let original_modified = captured_modified_time(&rewrite.path);
+            if content_hash(&original) != rewrite.original_hash {
+                return Err(changed_since_plan());
             }
             before_commit(&rewrite.path);
             let result = atomic_write_if_unchanged_keeping_modified(
@@ -242,8 +252,7 @@ impl MutationJournal {
                 original_modified,
             );
             let committed_despite_error = result.is_err()
-                && fs::read_to_string(&rewrite.path)
-                    .is_ok_and(|current| current == rewrite.content);
+                && read_note_bounded(&rewrite.path).is_ok_and(|current| current == rewrite.content);
             if result.is_ok() || committed_despite_error {
                 rewritten.push(rewrite.path.clone());
                 self.completed.push(Compensation::RestoreRewrite {
@@ -425,13 +434,7 @@ fn ensure_path_content_hash(path: &Path, label: &str, expected: &str) -> Result<
 /// bound is refused unread: Hatchdoor reads no note that large, so it cannot
 /// edit one either.
 pub(super) fn read_existing_note(path: &Path, label: &str) -> Result<String, WriteError> {
-    use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, read_open_bounded};
-
-    let io_error = |error: &dyn std::fmt::Display| {
-        WriteError::Io(format!("failed to read note '{label}': {error}"))
-    };
-    let file = open_existing_file_no_follow(path).map_err(|error| io_error(&error))?;
-    let bytes = read_open_bounded(file, MAX_NOTE_BYTES).map_err(|error| match error {
+    read_note_bounded(path).map_err(|error| match error {
         BoundedReadError::TooLarge { limit } => WriteError::InvalidInput(format!(
             "note '{label}' is larger than {} MiB, the most Hatchdoor reads or edits",
             limit / (1024 * 1024)
@@ -439,17 +442,66 @@ pub(super) fn read_existing_note(path: &Path, label: &str) -> Result<String, Wri
         BoundedReadError::NotRegular => {
             WriteError::InvalidInput(format!("note '{label}' is not a regular file"))
         }
-        // `read_open_bounded` returns bytes; the UTF-8 check is below.
-        BoundedReadError::NotUtf8 => io_error(&error),
-        BoundedReadError::Io(error) => io_error(&error),
-    })?;
-    // Editing it would mean rewriting bytes that are not text, and retrying
-    // cannot change that, so it is refused like any other unusable input.
-    String::from_utf8(bytes).map_err(|_| {
-        WriteError::InvalidInput(format!(
+        // Editing it would mean rewriting bytes that are not text, and
+        // retrying cannot change that, so it is refused like any other
+        // unusable input.
+        BoundedReadError::NotUtf8 => WriteError::InvalidInput(format!(
             "note '{label}' is not valid UTF-8 text; re-save it as UTF-8 to edit it"
-        ))
+        )),
+        BoundedReadError::Io(error) => {
+            WriteError::Io(format!("failed to read note '{label}': {error}"))
+        }
     })
+}
+
+/// The text of the note at `path`, opened without following a symbolic link
+/// in any component and without waiting on a FIFO, and read under
+/// `MAX_NOTE_BYTES`. Every read the write layer makes of a note's bytes goes
+/// through here or [`read_file_at_no_follow`] (#672), so a note that grows
+/// huge or turns into a pipe mid-write is refused, never read whole or
+/// waited on while the Vault's mutation guard is held.
+pub(super) fn read_note_bounded(path: &Path) -> Result<String, BoundedReadError> {
+    read_open_text(open_existing_file_no_follow(path).map_err(open_error)?)
+}
+
+/// A final symbolic link refused by `O_NOFOLLOW` is no note, as
+/// `note_file.rs`'s own open names it, not an I/O failure to retry.
+fn open_error(error: std::io::Error) -> BoundedReadError {
+    match error.raw_os_error() {
+        Some(libc::ELOOP) => BoundedReadError::NotRegular,
+        _ => BoundedReadError::Io(error),
+    }
+}
+
+fn read_open_text(file: fs::File) -> Result<String, BoundedReadError> {
+    String::from_utf8(read_open_bounded(file, MAX_NOTE_BYTES)?)
+        .map_err(|_| BoundedReadError::NotUtf8)
+}
+
+/// What a compare-before-replace reports when the file it would compare
+/// could not be read under the bound. The expected hash came from a bounded
+/// UTF-8 read, so a file now over the bound or not text has changed since:
+/// a conflict. One that is not a file at all is refused like any non-file
+/// destination. A plain I/O failure is worded by `io_error`.
+fn unreadable_prior(
+    error: BoundedReadError,
+    path: &Path,
+    expected: &str,
+    io_error: impl FnOnce(std::io::Error) -> WriteError,
+) -> WriteError {
+    match error {
+        BoundedReadError::TooLarge { .. } | BoundedReadError::NotUtf8 => {
+            WriteError::Conflict(format!(
+                "note changed since it was read: expected {}, and it is now {error}",
+                expected.trim()
+            ))
+        }
+        BoundedReadError::NotRegular => WriteError::InvalidInput(format!(
+            "refusing to replace non-file destination '{}'",
+            bounded_write_name(path)
+        )),
+        BoundedReadError::Io(error) => io_error(error),
+    }
 }
 
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<(), WriteError> {
@@ -730,10 +782,12 @@ fn atomic_write_inner(
                         match rename_exchange(&parent, tmp_name, &parent, &filename) {
                             Ok(()) => {
                                 let _ = unlink_at(&parent, tmp_name);
-                                WriteError::Io(format!(
-                                    "failed to inspect replaced note '{}': {read_error}",
-                                    path.display()
-                                ))
+                                unreadable_prior(read_error, path, expected, |error| {
+                                    WriteError::Io(format!(
+                                        "failed to inspect replaced note '{}': {error}",
+                                        path.display()
+                                    ))
+                                })
                             }
                             Err(undo_error) => WriteError::recovery_required(format!(
                                 "note '{note}' was replaced, its prior content could not be read \
@@ -839,10 +893,12 @@ fn commit_checked_without_exchange(
     // write is worse than a refused one.
     ensure_safe_destination_at(parent, filename, path)?;
     let prior = read_file_at_no_follow(parent, filename).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}' before replacing it: {error}",
-            path.display()
-        ))
+        unreadable_prior(error, path, expected, |error| {
+            WriteError::Io(format!(
+                "failed to read note '{}' before replacing it: {error}",
+                path.display()
+            ))
+        })
     })?;
     if content_hash(&prior) != expected.trim() {
         return Err(WriteError::Conflict(format!(
@@ -1691,12 +1747,15 @@ fn create_file_at_no_follow(
     file_from_fd(fd)
 }
 
+/// Opens `name` for reading. `O_NONBLOCK` keeps a FIFO swapped in for a
+/// note from holding the open, and with it the Vault's mutation guard, until
+/// a writer appears (#672); a regular file ignores the flag.
 fn open_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<fs::File, std::io::Error> {
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY,
         )
     };
     file_from_fd(fd)
@@ -1727,10 +1786,10 @@ fn metadata_at_no_follow(parent: &fs::File, name: &CString) -> Result<libc::stat
     }
 }
 
-fn read_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<String, std::io::Error> {
-    let mut content = String::new();
-    std::io::Read::read_to_string(&mut open_file_at_no_follow(parent, name)?, &mut content)?;
-    Ok(content)
+/// The text of `name` under `parent`, through the read model's bounded
+/// reader: never more than `MAX_NOTE_BYTES`, never a FIFO or device (#672).
+fn read_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<String, BoundedReadError> {
+    read_open_text(open_file_at_no_follow(parent, name).map_err(open_error)?)
 }
 
 /// Assert the entry is an ordinary file: not a symlink, directory, device
@@ -1751,7 +1810,7 @@ fn assert_regular_file_at(parent: &fs::File, name: &CString) -> Result<(), std::
 /// hash the content as Markdown. Anything that only needs the file to be a
 /// file must call [`assert_regular_file_at`] instead: an attachment is
 /// arbitrary bytes and need not decode as UTF-8 (#220).
-fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, std::io::Error> {
+fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, BoundedReadError> {
     assert_regular_file_at(parent, name)?;
     read_file_at_no_follow(parent, name)
 }
@@ -2911,6 +2970,104 @@ mod tests {
             fs::read_to_string(&first).expect("first"),
             "original first\n",
             "the rewrite already applied must be rolled back"
+        );
+    }
+
+    /// A note swapped for a FIFO after the pre-edit check is refused at the
+    /// commit's read-back instead of blocking the write on a writer that
+    /// never comes (#672). The write runs on its own thread so a regression
+    /// fails the test rather than hanging it.
+    #[cfg(unix)]
+    #[test]
+    fn a_note_swapped_for_a_fifo_before_commit_is_refused_promptly() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Note.md");
+        fs::write(&note, "original\n").expect("note");
+        let expected = content_hash("original\n");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = note.clone();
+        std::thread::spawn(move || {
+            let result = atomic_write_if_unchanged_with_before_exchange(
+                &path,
+                "edited\n",
+                &expected,
+                || {
+                    fs::remove_file(&path).expect("remove note");
+                    make_fifo(&path);
+                },
+            );
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the write must not block on the FIFO");
+
+        let Err(WriteError::InvalidInput(message)) = result else {
+            panic!("expected a non-file refusal, got {result:?}");
+        };
+        assert!(message.contains("non-file destination"), "{message}");
+        assert!(
+            fs::symlink_metadata(&note)
+                .expect("fifo")
+                .file_type()
+                .is_fifo(),
+            "the FIFO is put back where it was"
+        );
+        assert!(sidecars_in(dir.path()).is_empty());
+    }
+
+    /// A symbolic link where a note was is no note: the bounded read names
+    /// it not a regular file, as the read model's own reader does, rather
+    /// than an I/O failure a caller would retry (#672).
+    #[cfg(unix)]
+    #[test]
+    fn a_bounded_note_read_names_a_symbolic_link_not_a_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("Target.md");
+        fs::write(&target, "text\n").expect("target");
+        let link = dir.path().join("Link.md");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        assert!(matches!(
+            read_note_bounded(&link),
+            Err(BoundedReadError::NotRegular)
+        ));
+    }
+
+    /// A planned rewrite target that grew past `MAX_NOTE_BYTES` after the
+    /// plan read it conflicts at apply time, unread, and nothing is written
+    /// to it (#672). The file is sparse, so the test costs no disk.
+    #[test]
+    fn a_rewrite_target_that_grew_past_the_bound_since_the_plan_conflicts() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("Backlink.md");
+        fs::write(&target, "[[Old]]\n").expect("backlink");
+        let rewrite = TextRewrite {
+            path: target.clone(),
+            original_hash: content_hash("[[Old]]\n"),
+            content: "[[New]]\n".to_string(),
+        };
+        crate::vault::grow_past_note_bound(&target);
+        let mut journal = MutationJournal::new(dir.path(), None);
+
+        let error = journal
+            .apply_rewrites(vec![rewrite])
+            .expect_err("the grown target must be refused");
+
+        let WriteError::Conflict(message) = error else {
+            panic!("expected a conflict, got {error:?}");
+        };
+        assert!(
+            message.contains("changed after this change was planned"),
+            "{message}"
+        );
+        assert_eq!(
+            fs::metadata(&target).expect("target").len(),
+            MAX_NOTE_BYTES + 1,
+            "nothing was written to the grown note"
         );
     }
 

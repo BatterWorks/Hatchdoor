@@ -1741,7 +1741,7 @@ process-wide memo keeps each note's counts until its size or modification
 time changes, so a listing re-reads only changed notes. The scanner records
 inline images as `MarkdownLink::Image` for that count only, and no rewriter
 touches them.
-`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_text` is that read for a note's text under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap): `read_note_by_slug`, the read core's exact reads and attachment list, the link graph and `count_link_forms` read notes through it, `find_text` through `read_bounded` with the same bound, and the `app.json` probe under 64 KiB. The Index turn's note upsert reads through `read_note_text` too, so a note over the bound is listed without being read, under the `oversized` content-hash marker, with no text, chunks, links or tags, and one that became a FIFO or device after the scan is skipped as unreadable for that turn (#670). `read_open_bounded` is the same bounded read of a handle the caller opened itself: the write layer opens a note through its no-follow walk and reads it with it before an edit, so an edit of a note over `MAX_NOTE_BYTES` is refused as `invalid_write_input` without reading it whole (#670). `note_file_name` gives the file name of a note known only by its extension-free relative path, as a published snapshot row is, finding a `.MD` or `.Md` extension when no `.md` file is there (#637).
+`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_text` is that read for a note's text under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap): `read_note_by_slug`, the read core's exact reads and attachment list, the link graph and `count_link_forms` read notes through it, `find_text` through `read_bounded` with the same bound, and the `app.json` probe under 64 KiB. The Index turn's note upsert reads through `read_note_text` too, so a note over the bound is listed without being read, under the `oversized` content-hash marker, with no text, chunks, links or tags, and one that became a FIFO or device after the scan loses its row in that turn (#670, #672). `read_open_bounded` is the same bounded read of a handle the caller opened itself: the write layer opens a note through its no-follow walk and reads it with it before an edit, so an edit of a note over `MAX_NOTE_BYTES` is refused as `invalid_write_input` without reading it whole (#670), and every later read of a note in the same write goes through it too (#672). `note_file_name` gives the file name of a note known only by its extension-free relative path, as a published snapshot row is, finding a `.MD` or `.Md` extension when no `.md` file is there (#637).
 `sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every body ATX heading outside fenced or indented code (at most three leading spaces, no leading tab, one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text. The write layer, the read core's outline and section reads, and the chunker's heading paths share this scan and cannot disagree about a span or a path (#635). The crate-private `body_start` re-export locates the end of the canonical frontmatter block for section scanning and the read core's text-match place classification. `scan` skips that block automatically; `scan_from` starts at a caller-supplied line boundary for a caller that already has the same offset (#625).
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
@@ -1842,9 +1842,9 @@ for the intent record, the `write-intents/` folder beside the Vault registry,
 written with `serde_json`), the
 filesystem rename-flag capability (`src/rename_flags.rs`) that decides whether
 a commit can use `renameat2`'s flags here, the read model's bounded reader
-(`read_open_bounded`, `MAX_NOTE_BYTES`, `BoundedReadError`) for the read of a
-note before an edit, and `read_bounded` for the Vault-wide rewrite planners,
-which skip a note over the bound as the link graph does (#670), and
+(`read_open_bounded`, `MAX_NOTE_BYTES`, `BoundedReadError`) for every read of
+a note's bytes (#670, #672), and `read_bounded` for the Vault-wide rewrite
+planners, which skip a note over the bound as the link graph does (#670), and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
 Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
 keeps every rewriter's idea of a code block identical to the indexer's. The
@@ -1874,6 +1874,24 @@ write API/types, and configuration for archive or upload limits.
 
 - All HTTP and MCP mutations use this shared layer (ADR-03).
 - Optimistic concurrency uses the expected content hash.
+- Every read the layer makes of a note's bytes goes through `fs_ops.rs`'s
+  `read_note_bounded` or `read_file_at_no_follow`, which open without
+  following a symbolic link and with `O_NONBLOCK`, and read through
+  `read_open_bounded` under `MAX_NOTE_BYTES` (#672), so no write blocks on a
+  FIFO or reads a huge file whole while it holds the Vault's mutation guard.
+  What a read that hits the bound, finds bytes that are not UTF-8, or finds
+  something other than a regular file (a symbolic link included) does depends
+  on the read. The pre-edit check, the asset plan's read of the moving note
+  and the moved note's re-read refuse the write as invalid input, undoing it
+  where it had begun. The commit's read-back of the file it replaces reports a
+  conflict for one over the bound or not UTF-8, since the expected hash came
+  from a bounded UTF-8 read, and refuses a non-file as a non-file destination.
+  The journal's rewrite apply and the move checks report a conflict, the tag
+  rewrite's re-check reports its plan stale, and the intent log's replay
+  lists the note as needing attention. Two unbounded reads remain, and
+  neither is of a note: `intent.rs`'s read of the intent record, a file
+  Hatchdoor writes in its own state folder, and `attachments.rs`'s
+  `size_and_hash` of an attachment, which opens it plainly.
 - A conditional write commits by exchanging its temporary sidecar with the
   destination wherever the filesystem can do that, so past that exchange the
   outcome a caller is told depends on whether the undo put the old bytes back.
@@ -2799,6 +2817,10 @@ and embedder identity/dimensions.
   the content-hash marker `oversized`, which no real hash equals: the note
   reads as unchanged, unread, while it stays over the bound, and is chunked
   again once it shrinks (#670).
+- An Index turn drops the row, chunks, links and keyword text of a note the
+  scan listed that is no longer a regular file when it is read, such as a
+  FIFO swapped in after the scan, as the next scan would, which no longer
+  lists it. Search then never serves text every exact read refuses (#672).
 - An Index turn indexes a note whose bytes are not UTF-8 with them replaced
   (`String::from_utf8_lossy`), so it keeps its row, chunks and links and the
   totals count it, matching `find_text`'s lossy read; only a note that cannot
