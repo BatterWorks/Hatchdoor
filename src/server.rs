@@ -6266,7 +6266,8 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(with_query.status(), StatusCode::NOT_FOUND);
+        // #703: an ordinary JSON read takes the header only.
+        assert_eq!(with_query.status(), StatusCode::UNAUTHORIZED);
 
         let health = app
             .clone()
@@ -6292,6 +6293,73 @@ mod tests {
             .await
             .expect("response");
         assert_ne!(root.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// #703: the web token rides in `?access_token=` only on the routes the
+    /// browser reaches without a header (`QUERY_TOKEN_ROUTES`); everywhere else
+    /// a query-only token gets `401`, and the header works on every route.
+    #[tokio::test]
+    async fn the_query_token_works_on_the_header_less_routes_only() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
+        let vault = "00000000-0000-4000-8000-000000000000";
+        let send = |method: &'static str, uri: String, header: bool| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::builder().method(method).uri(uri);
+                if header {
+                    request = request.header("authorization", "Bearer secret-token");
+                }
+                app.oneshot(request.body(Body::empty()).expect("request"))
+                    .await
+                    .expect("response")
+                    .status()
+            }
+        };
+
+        let allowed = [
+            format!("/api/v1/vaults/{vault}/assets/diagram.png"),
+            format!("/api/v1/vaults/{vault}/notes/home/download"),
+            "/api/v1/vaults/events".to_string(),
+        ];
+        let refused = [
+            ("POST", format!("/api/v1/vaults/{vault}/notes")),
+            ("PUT", format!("/api/v1/vaults/{vault}/notes/home")),
+            ("POST", "/api/settings/web-token/reveal".to_string()),
+            ("GET", format!("/api/v1/vaults/{vault}/notes/home")),
+            ("GET", "/api/settings".to_string()),
+        ];
+
+        for uri in &allowed {
+            let status = send("GET", format!("{uri}?access_token=secret-token"), false).await;
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "query token on GET {uri}");
+            // The token is still checked there.
+            let wrong = send("GET", format!("{uri}?access_token=wrong"), false).await;
+            assert_eq!(
+                wrong,
+                StatusCode::UNAUTHORIZED,
+                "wrong query token on GET {uri}"
+            );
+        }
+        for (method, uri) in &refused {
+            let status = send(method, format!("{uri}?access_token=secret-token"), false).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "query token on {method} {uri}"
+            );
+        }
+        for (method, uri) in allowed
+            .iter()
+            .map(|uri| ("GET", uri.clone()))
+            .chain(refused.iter().cloned())
+        {
+            let status = send(method, uri.clone(), true).await;
+            assert_ne!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "header token on {method} {uri}"
+            );
+        }
     }
 
     #[tokio::test]

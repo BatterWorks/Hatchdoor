@@ -82,9 +82,56 @@ pub(crate) fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
 #[derive(Clone)]
 pub struct WebToken(pub Arc<str>);
 
-/// Middleware enforcing the web bearer token on protected routes. The token may
-/// arrive as an `Authorization: Bearer <token>` header or, for `<img>`/download
-/// navigations that cannot set headers, an `access_token` query parameter.
+/// The routes that take the web token as an `access_token` query parameter
+/// (ADR-08), for a `GET` only: the ones the browser reaches through an `<img>`,
+/// a download link or an `EventSource`, none of which can send a header. Every
+/// other route takes the header alone, so a URL that leaks with the token in it
+/// can fetch a file or follow the event stream but cannot write or reveal a
+/// token (#703). `{name}` matches one non-empty path segment and `{*name}` one
+/// or more. A test holds every `withAccessToken` call in the frontend to this
+/// list.
+pub(crate) const QUERY_TOKEN_ROUTES: [&str; 3] = [
+    "/api/v1/vaults/{vault_id}/assets/{*path}",
+    "/api/v1/vaults/{vault_id}/notes/{slug}/download",
+    "/api/v1/vaults/events",
+];
+
+/// Whether a request may present the web token in its query string.
+fn query_token_allowed(method: &Method, path: &str) -> bool {
+    method == Method::GET
+        && QUERY_TOKEN_ROUTES
+            .iter()
+            .any(|route| route_matches(route, path))
+}
+
+/// Whether `path` is an address of `route`, a pattern in
+/// [`QUERY_TOKEN_ROUTES`]' notation. Compares the raw, still percent-encoded
+/// segments, the same ones the router matched the request on.
+fn route_matches(route: &str, path: &str) -> bool {
+    let mut segments = path.split('/');
+    for expected in route.split('/') {
+        if expected.starts_with("{*") {
+            let rest: Vec<&str> = segments.by_ref().collect();
+            return !rest.is_empty() && rest.iter().all(|segment| !segment.is_empty());
+        }
+        let Some(segment) = segments.next() else {
+            return false;
+        };
+        let matches = if expected.starts_with('{') {
+            !segment.is_empty()
+        } else {
+            segment == expected
+        };
+        if !matches {
+            return false;
+        }
+    }
+    segments.next().is_none()
+}
+
+/// Middleware enforcing the web bearer token on protected routes. The token
+/// arrives as an `Authorization: Bearer <token>` header, or as an
+/// `access_token` query parameter on the [`QUERY_TOKEN_ROUTES`] alone.
 pub async fn require_web_token(
     State(token): State<WebToken>,
     request: Request,
@@ -104,7 +151,8 @@ pub(crate) fn request_is_authorized(request: &Request, expected: &[u8]) -> bool 
         return true;
     }
 
-    if let Some(presented) = request.uri().query().and_then(access_token_from_query)
+    if query_token_allowed(request.method(), request.uri().path())
+        && let Some(presented) = request.uri().query().and_then(access_token_from_query)
         && constant_time_eq(presented.as_bytes(), expected)
     {
         return true;
@@ -567,9 +615,20 @@ mod tests {
             ),
             ("/protected", Some("Bearer wrong"), false),
             (
-                "/protected?access_token=an%20arbitrary%20configured%20bearer%20token",
+                "/api/v1/vaults/events?access_token=an%20arbitrary%20configured%20bearer%20token",
                 None,
                 true,
+            ),
+            (
+                "/api/v1/vaults/events?access_token=an%20arbitrary%20configured%20bearer%20tokem",
+                None,
+                false,
+            ),
+            // #703: a route outside `QUERY_TOKEN_ROUTES` takes the header only.
+            (
+                "/protected?access_token=an%20arbitrary%20configured%20bearer%20token",
+                None,
+                false,
             ),
         ] {
             let mut request = Request::builder().uri(uri);
@@ -682,5 +741,156 @@ mod tests {
             Some("a b")
         );
         assert_eq!(access_token_from_query("foo=1").as_deref(), None);
+    }
+
+    #[test]
+    fn the_query_token_is_allowed_on_the_listed_get_routes_only() {
+        let vault = "00000000-0000-4000-8000-000000000000";
+        for (method, path, allowed) in [
+            (
+                Method::GET,
+                format!("/api/v1/vaults/{vault}/assets/a.png"),
+                true,
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/vaults/{vault}/assets/dir/sub/a%20b.pdf"),
+                true,
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/vaults/{vault}/notes/home/download"),
+                true,
+            ),
+            (Method::GET, "/api/v1/vaults/events".to_string(), true),
+            // Not a GET.
+            (Method::POST, "/api/v1/vaults/events".to_string(), false),
+            (
+                Method::PUT,
+                format!("/api/v1/vaults/{vault}/assets/a.png"),
+                false,
+            ),
+            // Near misses on the path.
+            (
+                Method::GET,
+                format!("/api/v1/vaults/{vault}/assets/"),
+                false,
+            ),
+            (Method::GET, format!("/api/v1/vaults/{vault}/assets"), false),
+            (
+                Method::GET,
+                format!("/api/v1/vaults/{vault}/notes/home"),
+                false,
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/vaults/{vault}/notes/home/download/x"),
+                false,
+            ),
+            (
+                Method::GET,
+                "/api/v1/vaults//notes/home/download".to_string(),
+                false,
+            ),
+            (Method::GET, "/api/v1/vaults/events/x".to_string(), false),
+            (Method::GET, "/api/v1/vaults".to_string(), false),
+            (Method::GET, "/api/settings".to_string(), false),
+            (
+                Method::POST,
+                "/api/settings/web-token/reveal".to_string(),
+                false,
+            ),
+            (Method::GET, "/api/v1/folders".to_string(), false),
+        ] {
+            assert_eq!(
+                query_token_allowed(&method, &path),
+                allowed,
+                "{method} {path}"
+            );
+        }
+    }
+
+    /// Every `withAccessToken(...)` call in the frontend builds an address on
+    /// one of [`QUERY_TOKEN_ROUTES`]: a call that puts the token on any other
+    /// route would get `401` from the server and leak the token into a URL for
+    /// nothing (#703). Each call must pass a string or template literal, read
+    /// here with every `${...}` stood in for by one path segment.
+    #[test]
+    fn every_frontend_query_token_url_is_on_an_allowed_route() {
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read frontend dir") {
+                let path = entry.expect("dir entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if (name.ends_with(".ts") || name.ends_with(".tsx"))
+                    && !name.contains(".test.")
+                {
+                    out.push(path);
+                }
+            }
+        }
+
+        /// The literal that opens `rest`, with each interpolation replaced by
+        /// `x`, or `None` when `rest` does not open with a literal.
+        fn literal_url(rest: &str) -> Option<String> {
+            let rest = rest.trim_start();
+            let quote = rest.chars().next()?;
+            if !matches!(quote, '"' | '\'' | '`') {
+                return None;
+            }
+            let mut url = String::new();
+            let mut chars = rest[1..].chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == quote {
+                    return Some(url);
+                }
+                if quote == '`' && ch == '$' && chars.peek() == Some(&'{') {
+                    chars.next();
+                    let mut depth = 1;
+                    for inner in chars.by_ref() {
+                        match inner {
+                            '{' => depth += 1,
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    url.push('x');
+                } else {
+                    url.push(ch);
+                }
+            }
+            None
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        let mut calls = 0;
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("read source");
+            for (at, _) in text.match_indices("withAccessToken(") {
+                if text[..at].ends_with("function ") {
+                    continue;
+                }
+                calls += 1;
+                let rest = &text[at + "withAccessToken(".len()..];
+                let url = literal_url(rest).unwrap_or_else(|| {
+                    panic!(
+                        "{}: withAccessToken must be given a string or template literal",
+                        file.display()
+                    )
+                });
+                assert!(
+                    query_token_allowed(&Method::GET, &url),
+                    "{}: withAccessToken builds {url:?}, which is not on QUERY_TOKEN_ROUTES",
+                    file.display()
+                );
+            }
+        }
+        assert!(calls >= 5, "found only {calls} withAccessToken calls");
     }
 }

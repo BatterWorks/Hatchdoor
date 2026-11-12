@@ -33,7 +33,7 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 > [!warning]
 > In demo mode the settings and model setup routes do not exist (`404`), and every Vault-scoped route does: reads are public, and writes and Vault control answer `403 demo_read_only`. A `404` on a `/api/v1/vaults/...` path does not mean the route is missing. Check the method and the mode first.
 
-The web bearer token is sent as `Authorization: Bearer <token>`, or as an `access_token` query parameter. The word `Bearer` may be in any case.
+The web bearer token is sent as `Authorization: Bearer <token>`. The word `Bearer` may be in any case. Three `GET` routes also take it as an `access_token` query parameter, for the browser's images, downloads and live updates, which cannot send a header: `/api/v1/vaults/{vault_id}/assets/{*path}`, `/api/v1/vaults/{vault_id}/notes/{slug}/download` and `/api/v1/vaults/events`. Every other route answers `401` to a token in the query.
 
 With no web token configured (and not in demo mode), every route except `/mcp` answers `403` when the `Host` header is not `localhost`, `127.0.0.1` or `[::1]` (any port) or the host of `HATCHDOOR_PUBLIC_URL`, and when a request other than `GET`, `HEAD` or `OPTIONS` comes from another website: an `Origin` that is not the request's own, the public address's or one on `HATCHDOOR_MCP_ALLOWED_ORIGINS`, or no `Origin` and `Sec-Fetch-Site: cross-site`. See [[The security model#Running without a web token]].
 

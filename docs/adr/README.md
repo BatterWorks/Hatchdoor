@@ -45,7 +45,7 @@ Copy this for a new record:
 | 05 | [Pure semantic retrieval by default; rerank and hybrid stay offline](./semantic-search-strategy.md) | Accepted | Don't add reranking or FTS/vector fusion to the runtime search path |
 | 06 | [Embedded SQLite: FTS5 + sqlite-vec, WAL, pooled reads](#adr-06--embedded-sqlite-fts5--sqlite-vec-wal-pooled-reads) | Accepted | Don't add an external DB or an ORM; keep reads non-blocking during reindex |
 | 07 | [Fail-fast security posture at startup](#adr-07--fail-fast-security-posture-at-startup) | Accepted | Don't downgrade unsafe configs from refuse-to-start to a warning |
-| 08 | [Bearer-token auth with a query-param fallback](#adr-08--bearer-token-auth-with-a-query-param-fallback) | Accepted | Keep token compares constant-time; don't leak tokens to logs |
+| 08 | [Bearer-token auth with a query-param fallback](#adr-08--bearer-token-auth-with-a-query-param-fallback) | Accepted; amended in #703: the query token works on three GET routes only | Keep token compares constant-time; don't leak tokens to logs; accept the query token only on `QUERY_TOKEN_ROUTES` |
 | 09 | [MCP off by default, own token, Origin allowlist](#adr-09--mcp-off-by-default-own-token-origin-allowlist) | Accepted | Read-only MCP still requires a token; keep the anti-rebinding checks |
 | 10 | [Optional git sync as a debounced background task](#adr-10--optional-git-sync-as-a-debounced-background-task) | Superseded by ADR-18 (mechanism only) | Never force-checkout over uncommitted manual vault edits (restated in ADR-18) |
 | 11 | [Soft delete (trash) and archive-by-move](#adr-11--soft-delete-trash-and-archive-by-move) | Accepted | Don't hard-delete note or asset files |
@@ -175,11 +175,12 @@ Copy this for a new record:
 
 ## ADR-08 — Bearer-token auth with a query-param fallback
 
-- **Status:** Accepted
+- **Status:** Accepted; amended in #703: the query token works on three GET routes only.
 - **Context:** When set, a bearer token must protect `/api/*`, `/vault-assets/*`, and downloads. But images, SSE streams, and download links can't carry an `Authorization` header from the browser.
 - **Decision:** Accept the token via `Authorization: Bearer` or, where headers can't be set, an `access_token` query parameter. Compare tokens in constant time; redact them from logs. The PWA prompts for the token on a 401 and stores it locally.
 - **Consequences:** Works with header-less browser contexts; the query-param path is a deliberate, documented tradeoff (tokens can appear in URLs/proxy logs).
-- **Evidence:** `config.rs` (`web_bearer_token`); `auth.rs` (`constant_time_eq`, redaction); CHANGELOG F-01, F-06.
+- **Amendment (#703):** The query form is accepted on `GET` requests to three routes only, the ones the browser builds such URLs for: `/api/v1/vaults/{vault_id}/assets/{*path}` (`<img>`, PDF previews, file downloads), `/api/v1/vaults/{vault_id}/notes/{slug}/download` (note download) and `/api/v1/vaults/events` (`EventSource`). Every other route, every write, the token-reveal routes and the manual's private pages included, takes the header alone and answers `401` to a query-only token. A leaked URL can then fetch a file or follow the event stream, but cannot write or reveal a token. The list is `QUERY_TOKEN_ROUTES` in `auth.rs`; a test holds every frontend `withAccessToken` call to it. Transfer links (ADR-27) and MCP auth are unaffected.
+- **Evidence:** `config.rs` (`web_bearer_token`); `auth.rs` (`constant_time_eq`, redaction, `QUERY_TOKEN_ROUTES`); CHANGELOG F-01, F-06, #703.
 
 ## ADR-09 — MCP off by default, own token, Origin allowlist
 
