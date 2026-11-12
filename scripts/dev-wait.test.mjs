@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
+import net from "node:net";
 import path from "node:path";
 import { test } from "node:test";
 
-import { freePort, runNode, serve } from "./dev-test-support.mjs";
-import { halvesFor, trackedState, waitFor } from "./dev-wait.mjs";
+import { freePort, runNode, runTo, serve } from "./dev-test-support.mjs";
+import {
+  answers,
+  halvesFor,
+  probeConnection,
+  trackedState,
+  waitFor,
+} from "./dev-wait.mjs";
 
 const SCRIPT = path.join(import.meta.dirname, "dev-wait.mjs");
 
@@ -137,4 +144,98 @@ test("a time limit that is no number is refused", async () => {
   const run = await runNode([SCRIPT, "soon"]);
   assert.equal(run.status, 1);
   assert.match(run.stderr, /usage: just dev-wait/);
+});
+
+// #749: while nothing listens on a port, Linux may hand a connection to it
+// that same port as its source, and the connection then connects to itself.
+// A probe's source port carries no address reuse, so while that connection
+// is open, and for about a minute in TIME-WAIT once it is closed normally,
+// the backend that finishes compiling cannot bind the port.
+
+// Whether no socket at all holds `port`, TIME-WAIT included: a bind without
+// address reuse, which Node cannot make, so Python makes it. Undefined when
+// there is no Python.
+async function strictlyFree(port) {
+  const run = await runTo("python3", [
+    "-c",
+    "import socket,sys; socket.socket().bind(('127.0.0.1', int(sys.argv[1])))",
+    String(port),
+  ]);
+  if (run.status === "ENOENT") {
+    return undefined;
+  }
+  return run.status === 0;
+}
+
+// Close a socket on `port` connected to `port` the normal way. False where
+// the system refuses to connect a socket to itself.
+function selfConnectedAndClosed(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port, localPort: port });
+    socket.once("connect", () => {
+      const self = socket.localPort === socket.remotePort;
+      socket.end().once("close", () => resolve(self));
+    });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+test("a probe that connects to itself leaves the port free", async (t) => {
+  const control = await freePort();
+  if ((await strictlyFree(control)) === undefined) {
+    t.skip("there is no python3 to bind without address reuse");
+    return;
+  }
+  if (!(await selfConnectedAndClosed(control))) {
+    t.skip("this system does not connect a socket to itself");
+    return;
+  }
+  // The control: closed the normal way, the connection still holds the port.
+  assert.equal(await strictlyFree(control), false);
+
+  // The probe's own connection, on its own: reset at once, holding nothing.
+  const own = await freePort();
+  const socket = probeConnection({
+    host: "127.0.0.1",
+    port: own,
+    localPort: own,
+  });
+  socket.on("error", () => {});
+  const closed = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 2_000);
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  socket.destroy();
+  assert.ok(closed, "the probe left the connection to itself open");
+  assert.equal(await strictlyFree(own), true, "nothing holds the port");
+
+  // And through the whole HTTP probe.
+  const port = await freePort();
+  const up = await answers(`http://127.0.0.1:${port}/health`, {
+    localPort: port,
+  });
+  assert.equal(up, false);
+  assert.equal(await strictlyFree(port), true, "nothing holds the port");
+});
+
+test("a probe answers true only for a 2xx", async () => {
+  const healthy = await serve((_, response) => response.writeHead(200).end());
+  const failing = await serve((_, response) => response.writeHead(503).end());
+  try {
+    assert.equal(
+      await answers(`http://127.0.0.1:${healthy.port}/health`),
+      true,
+    );
+    assert.equal(
+      await answers(`http://127.0.0.1:${failing.port}/health`),
+      false,
+    );
+    assert.equal(await answers(`http://127.0.0.1:${await freePort()}/`), false);
+  } finally {
+    await healthy.close();
+    await failing.close();
+  }
 });
