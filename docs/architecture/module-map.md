@@ -1508,7 +1508,7 @@ the collector endpoint (the maintainer's infrastructure, set up outside this
 repository), Instance state (`InstanceStateStore`, `base_version`, and
 `VersionRecord`, whose `fresh_install` tells `take_notice` an upgraded install
 from a fresh one),
-`config::{version_string, build_channel, build_image}` (a build is a release,
+`config::{version_string, build_channel, install_image}` (a build is a release,
 and its channel `stable`, only when the `VERSION` build argument names the
 crate's own version, #504), the Vault collection registry (which
 Vaults are enabled and their Git mode), the cache's
@@ -1519,7 +1519,8 @@ ID.
 **Coordination paths:** `src/lib.rs`, `src/app_state.rs`, `src/server.rs`,
 `src/runtime_config.rs` (the setting's default), `src/instance_state.rs`
 (`remove_section`), `src/handlers/settings.rs`, `src/mcp/adapter.rs`,
-`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument, and
+`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument,
+which marks the published image while the engine is read at run time, #705, and
 `VERSION`, compiled in as `HATCHDOOR_RELEASE_VERSION`, which marks a release,
 #504),
 `README.md` (the paragraph under Configuration that names the setting, which

@@ -41,7 +41,9 @@ ARG GIT_SHA=""
 # The release version. A build is a release, and reports `stable`, only when
 # this names the version in Cargo.toml.
 ARG VERSION=""
-# `docker` or `podman`, for the opt-in usage report; empty reports `source`.
+# `published` marks the published image, which the opt-in usage report then
+# reports as `docker` or `podman` by the engine it runs under; empty reports
+# `source`. The older values `docker` and `podman` count as `published` (#705).
 ARG HATCHDOOR_IMAGE=""
 # Cache mounts are not image layers: export the binary before unmounting target.
 RUN --mount=type=cache,id=${CARGO_CACHE_NAMESPACE}-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
