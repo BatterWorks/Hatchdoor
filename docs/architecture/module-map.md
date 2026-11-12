@@ -105,7 +105,8 @@ that production inventory are still checked for stale paths and duplicates.
   `.env` line to `NEW_WEB_TOKEN_FILE` (`new-web-token.env`) beside the Vault
   registry, mode 0600, reuses a valid file an earlier refusal left, and names
   the file in the error. Per-Vault variables left in the environment
-  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*`) are named in one startup warning,
+  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*` except the still-live
+  `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, #687) are named in one startup warning,
   logged right after the settings load and before any startup refusal, followed
   by `vault_migration::stored_retired_settings_warning` naming each retired
   key `settings.json` still stores (#644);

@@ -77,7 +77,9 @@ Per-Vault values set in the environment have no effect: each Vault keeps its
 own settings in the registry. Hatchdoor logs a warning at startup naming any
 that are still set. Remove them from `.env`, and change a Vault's settings in
 Settings or with the `edit_vault` MCP tool. `VAULT_PATH` is exempt, because
-Docker Compose sets it on every deployment as the container's Vault mount.
+Docker Compose sets it on every deployment as the container's Vault mount. So
+are `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL`, which still
+sign the commits of a Vault without its own commit identity: keep them.
 
 The development-only `HATCHDOOR_VAULT_SOURCE` and `HATCHDOOR_VAULT_GIT_*`
 startup-source variables were never part of a released deployment contract.
