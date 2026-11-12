@@ -2,6 +2,9 @@
 // (HATCHDOOR_WEB_BEARER_TOKEN), it is stored locally and attached to every
 // request — as an Authorization header for fetch, or as an `access_token`
 // query parameter for contexts that cannot set headers (<img>, downloads, SSE).
+// The server takes the query form only on the GET routes in
+// `QUERY_TOKEN_ROUTES` (src/auth.rs), and a Rust test holds every
+// `withAccessToken` call here to that list (#703).
 
 const TOKEN_KEY = "hatchdoor_web_token";
 export const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
@@ -122,7 +125,8 @@ export function notifyUnauthorized(): void {
 /**
  * Append the stored token as an `access_token` query parameter, for URLs used
  * where headers cannot be set (image src, download links, EventSource). Returns
- * the URL unchanged when no token is stored.
+ * the URL unchanged when no token is stored. Pass a literal URL on one of the
+ * server's `QUERY_TOKEN_ROUTES`: any other route answers `401` to it.
  */
 export function withAccessToken(url: string): string {
   const token = getToken();

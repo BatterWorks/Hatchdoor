@@ -1380,7 +1380,12 @@ carries no `Origin` and `Sec-Fetch-Site: cross-site`. A request with no `Host`
 cannot come from a browser and passes.
 
 **Invariants:** constant-time token comparison, no token logging, and deliberate
-query-parameter fallback for browser contexts that cannot set headers (ADR-08).
+query-parameter fallback for browser contexts that cannot set headers (ADR-08),
+accepted only on `GET` requests to `QUERY_TOKEN_ROUTES` (assets, note download,
+the event stream; #703). `request_is_authorized` applies the list, so every
+guard using it, the asset-read guard and the docs routes included, refuses a
+query-only token elsewhere. A test reads every `withAccessToken` call in
+`frontend/src` and fails when one builds an address outside the list.
 
 **Validation:** `cargo test auth` and server/router tests.
 
@@ -4874,7 +4879,9 @@ new field. Contract changes must list the backend serializer and all frontend
 consumers. New feature-local types should remain local unless genuinely shared.
 
 **Invariants:** preserve bearer/header behavior and the deliberate query-token
-fallback (ADR-08). Never log or render tokens. When the browser refuses to
+fallback (ADR-08), used only for addresses on the server's `QUERY_TOKEN_ROUTES`
+(`src/auth.rs`, #703): `withAccessToken` takes a literal URL so a Rust test can
+check each call. Never log or render tokens. When the browser refuses to
 store the web token, `setToken` keeps it in page memory, prefers it over any
 older stored token, and returns `false`; a caller must then apply it without a
 page reload, which would forget it (Unlock remounts the app in place). The
