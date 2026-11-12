@@ -254,14 +254,20 @@ describe("SettingsPage", () => {
   it("opens a Vault's own settings page from the management index", async () => {
     mockPage();
     renderSettingsPage();
-    fireEvent.click(await screen.findByRole("button", { name: /Field notes/ }));
+    // Wait on the text, then look the button up by role once (#679). A role
+    // query over the whole freshly drawn page is the file's first and costs
+    // over a second under load, and it holds up the Vault list request while
+    // it runs, so `findByRole` timed out after one or two attempts.
+    await screen.findByText("Field notes");
+    fireEvent.click(screen.getByRole("button", { name: /Field notes/ }));
 
     expect(
       await screen.findByRole("heading", { name: "Field notes" }),
     ).toBeVisible();
     expect(screen.getByText("This Vault is ready to use.")).toBeVisible();
+    // The last part comes from a request the page sends once it opens.
     expect(
-      screen.getByText(
+      await screen.findByText(
         "A folder on this server · 12 notes · no indexed changes yet",
       ),
     ).toBeVisible();
