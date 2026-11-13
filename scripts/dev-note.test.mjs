@@ -86,12 +86,12 @@ function modeOf(target) {
 // disk under a Vault, once `indexed()` says so.
 function fakeBackend(vaults, indexed = () => true) {
   const folders = { [HEALTHY]: "healthy", [READONLY]: "readonly" };
-  const slugOf = (file) => path.basename(file, ".md").toLowerCase().replace(/\W+/g, "-");
+  const slugOf = (file) => path.basename(file).replace(/\.md$/i, "").toLowerCase().replace(/\W+/g, "-");
   const notes = (folder) =>
     indexed()
       ? fs
           .readdirSync(folder, { recursive: true })
-          .filter((file) => file.endsWith(".md"))
+          .filter((file) => /\.md$/i.test(file))
           .sort()
       : [];
   const seen = { bearers: new Set() };
@@ -136,7 +136,7 @@ function fakeBackend(vaults, indexed = () => true) {
     const slug = decodeURIComponent(rest.replace(/^notes\//, ""));
     const file = notes(folder).find((candidate) => slugOf(candidate) === slug);
     if (file) {
-      json(200, { note: { slug, relative_path: file.replace(/\.md$/, "") } });
+      json(200, { note: { slug, relative_path: file.replace(/\.md$/i, "") } });
     } else {
       json(404, { code: "note_not_found" });
     }
@@ -168,7 +168,21 @@ test("a note lands at the path given, or under its file's name", () => {
   assert.equal(placeFrom(undefined, "/tmp/Draft note.md", ""), "Draft note.md");
   assert.match(placeFrom(undefined, "-", "text"), /^dev-note-[0-9a-f]{8}\.md$/);
   assert.equal(placeFrom(undefined, "-", "text"), placeFrom(undefined, "-", "text"));
-  for (const bad of ["../x.md", "/abs/x.md", "a//x.md", "x.txt", "a/.md", "./x.md"]) {
+  // Any case of the extension is a note, as it is to the index (#637, #766).
+  assert.equal(placeFrom("Folder/Upper.MD", "-", ""), "Folder/Upper.MD");
+  assert.equal(placeFrom("Folder/Mixed.Md", "-", ""), "Folder/Mixed.Md");
+  assert.equal(placeFrom(undefined, "/tmp/Draft.MD", ""), "Draft.MD");
+  for (const bad of [
+    "../x.md",
+    "/abs/x.md",
+    "a//x.md",
+    "x.txt",
+    "a/.md",
+    "./x.md",
+    "Folder/.MD",
+    "Folder/Name.txt",
+    "Folder/Name.mdx",
+  ]) {
     assert.throws(() => placeFrom(bad, "-", ""), ToolError, bad);
   }
 });
@@ -218,6 +232,15 @@ test("an existing path is refused and left as it was, permissions too", () => {
       );
       assert.equal(fs.readFileSync(path.join(vault, "30-areas/Homelab.md"), "utf8"), "kept\n");
       assert.equal(modeOf(path.join(vault, "30-areas")), before);
+    }
+    // A name that differs from a note's only in the extension's case is
+    // refused too: the index keeps one of the two and hides the other (#766).
+    for (const twin of ["30-areas/Homelab.MD", "30-areas/Homelab.Md"]) {
+      assert.throws(
+        () => placeNote(path.join(vaults, "healthy"), twin, "twin"),
+        /30-areas\/Homelab\.md is already there/,
+      );
+      assert.equal(fs.existsSync(path.join(vaults, "healthy", twin)), false);
     }
     // A folder is as much in the way as a note.
     assert.throws(() => placeNote(path.join(vaults, "healthy"), "30-areas", "x"), ToolError);
@@ -311,6 +334,16 @@ test("dev-note places, waits for the index, and prints the slug and address", as
       new RegExp(`^url    http://127\\.0\\.0\\.1:5173/v/${HEALTHY}/n/acceptance-note$`, "m"),
     );
     assert.deepEqual([...backend.seen.bearers], [`Bearer ${FAKE_TOKEN}`]);
+
+    // An upper-case extension is placed as given and found by the wait (#766).
+    const upper = await runNode(options(["healthy", "-", "Folder/Upper.MD"]), {
+      env,
+      input: "# Upper\n",
+    });
+    assert.equal(upper.status, 0, upper.stderr);
+    assert.match(upper.stdout, /^placed healthy\/Folder\/Upper\.MD$/m);
+    assert.match(upper.stdout, /^slug   upper$/m);
+    assert.ok(fs.existsSync(path.join(vaults, "healthy", "Folder", "Upper.MD")));
 
     const readonly = await runNode(options(["readonly", "-"]), { env, input: "from stdin\n" });
     assert.equal(readonly.status, 0, readonly.stderr);

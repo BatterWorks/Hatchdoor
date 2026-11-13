@@ -43,6 +43,9 @@ const USAGE =
 
 export const PLACED_LIST = "placed-notes.txt";
 
+// A note's extension, in any case, as the index reads it (#637, #766).
+const NOTE_EXTENSION = /\.md$/i;
+
 function inside(parent, child) {
   const relative = path.relative(parent, child);
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
@@ -84,7 +87,8 @@ export function vaultFrom(registry, wanted, vaultsDir) {
   return found;
 }
 
-// Where in the Vault the note goes, as `folder/Name.md`.
+// Where in the Vault the note goes, as `folder/Name.md`. `.MD` and `.Md` are
+// notes too, and keep the case they were given.
 export function placeFrom(asPath, source, content) {
   let place = asPath;
   if (!place) {
@@ -97,8 +101,9 @@ export function placeFrom(asPath, source, content) {
   if (
     path.isAbsolute(place) ||
     parts.some((part) => part === "" || part === "." || part === "..") ||
-    !place.endsWith(".md") ||
-    parts.at(-1) === ".md"
+    !NOTE_EXTENSION.test(place) ||
+    // A file name that is the extension alone has no stem.
+    parts.at(-1).replace(NOTE_EXTENSION, "") === ""
   ) {
     throw new ToolError(
       `a note's path is relative to the Vault and ends in .md, as in "Inbox/Test note.md": ${place}`,
@@ -133,6 +138,25 @@ export function placeNote(vaultFolder, place, content) {
   if (fs.lstatSync(target, { throwIfNoEntry: false })) {
     throw new ToolError(
       `${place} is already there, and dev-note never overwrites a note; choose another path`,
+    );
+  }
+  // `Name.MD` beside `Name.md` is one note to the index, which keeps one file
+  // and hides the other (#637), so a case twin is as much in the way (#766).
+  const name = path.basename(target);
+  const stem = name.replace(NOTE_EXTENSION, "");
+  const twin =
+    fs.existsSync(path.dirname(target)) &&
+    fs
+      .readdirSync(path.dirname(target))
+      .find(
+        (other) =>
+          other !== name &&
+          NOTE_EXTENSION.test(other) &&
+          other.replace(NOTE_EXTENSION, "") === stem,
+      );
+  if (twin) {
+    throw new ToolError(
+      `${path.posix.join(path.posix.dirname(place), twin)} is already there, and the index takes ${place} for the same note; choose another path`,
     );
   }
 
@@ -197,7 +221,7 @@ export async function slugOnceIndexed({
   seconds,
   intervalMs = 500,
 }) {
-  const wanted = place.replace(/\.md$/, "");
+  const wanted = place.replace(NOTE_EXTENSION, "");
   const base = `/api/v1/vaults/${encodeURIComponent(vaultId)}`;
   const deadline = Date.now() + seconds * 1000;
   let scanned;
