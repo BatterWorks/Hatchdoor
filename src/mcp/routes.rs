@@ -2887,6 +2887,65 @@ mod tests {
         }
     }
 
+    /// A failed setup on an instance that chose its model long ago, such as a
+    /// re-download after a failed digest check that fails too, says setup
+    /// failed and points at the web app's retry, which keeps the saved model.
+    /// Naming the terms tools there invited an agent to switch models. With
+    /// no model chosen, the failed setup keeps the choice notice (#775).
+    #[tokio::test]
+    async fn a_failed_setup_names_the_terms_tools_only_when_no_model_is_chosen() {
+        const CHOICE: &str = "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.";
+        let (state, _tmp) = test_state();
+        let notice = |body: &Value| {
+            assert_eq!(body["result"]["isError"], true, "{body}");
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .expect("notice text")
+                .to_string()
+        };
+
+        state.startup.set_model_setup_failed();
+        let unchosen = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        assert_eq!(notice(&unchosen), CHOICE);
+
+        state
+            .model_setup
+            .decline_gemma()
+            .expect("save the Nomic choice");
+        let chosen = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        let text = notice(&chosen);
+        assert!(text.contains("failed"), "{text}");
+        assert!(text.contains("get_model_setup_status"), "{text}");
+        assert!(text.contains("Retry setup"), "{text}");
+        assert!(!text.contains("accept_gemma_terms"), "{text}");
+        assert!(!text.contains("decline_gemma_terms"), "{text}");
+
+        // A Gemma choice with its terms receipt gets the same notice.
+        state
+            .model_setup
+            .accept_gemma()
+            .expect("save the Gemma choice");
+        let gemma = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        assert_eq!(notice(&gemma), text);
+    }
+
+    /// A model choice saved a moment before its download starts is not a
+    /// failed setup: the notice may only say "failed" when setup did (#775).
+    #[tokio::test]
+    async fn a_saved_choice_before_its_download_is_not_called_a_failure() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+        state
+            .model_setup
+            .decline_gemma()
+            .expect("save the Nomic choice");
+        let body = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        let text = body["result"]["content"][0]["text"]
+            .as_str()
+            .expect("notice text");
+        assert!(!text.contains("failed"), "{text}");
+    }
+
     // ---------------------------------------------------------------------------
     // Errors that name their docs page (#423)
     // ---------------------------------------------------------------------------

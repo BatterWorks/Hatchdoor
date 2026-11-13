@@ -191,8 +191,12 @@ impl FirstRunPass {
 /// Why [`StartupTracker::model_setup_pending`] holds callers back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelSetupHold {
-    /// No model is chosen yet, or setup failed: the setup tools can act.
+    /// No model is chosen yet: the setup tools can act.
     Choice,
+    /// Setup failed. The setup tools can act, but a model may already be
+    /// chosen, which this tracker cannot see: a caller that must not invite
+    /// a new choice asks `ModelSetup::selected` (#775).
+    Failed,
     /// A chosen model is downloading or, after every restart, being checked
     /// and loaded. `Downloading` is only ever set once a model is selected,
     /// so a caller held back here only has to wait (#762).
@@ -441,7 +445,7 @@ impl StartupTracker {
             VaultPhase::Unavailable => snapshot
                 .error
                 .is_some_and(|error| error.code == MODEL_SETUP_FAILED)
-                .then_some(ModelSetupHold::Choice),
+                .then_some(ModelSetupHold::Failed),
             VaultPhase::Validating
             | VaultPhase::Scanning
             | VaultPhase::Indexing
