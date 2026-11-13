@@ -21,6 +21,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- An agent that connects after search model setup failed, on an instance whose model was chosen earlier, now opens its session with the normal instructions, led by a line saying setup failed, that note tools are refused until Retry setup in the web app, and that `get_model_setup_status` gives the reason. It used to be told to accept or decline the Gemma terms, which would switch the instance to the other model, and kept that advice for the whole session. An instance with no model chosen yet still gets the first-run instructions. [#779]
 - When search model setup fails on an instance whose model was chosen earlier, an agent's tool call is now told that setup failed, to read `get_model_setup_status` for the reason and to have Retry setup pressed in the web app's search, which keeps the chosen model. It used to be told to accept or decline the Gemma terms, and doing so replaced the saved choice and switched the instance to the other model. An instance with no model chosen yet still asks for the choice. [#775]
 - An agent that connects right after a restart, while Hatchdoor checks and loads a search model chosen earlier, now opens its session with the normal instructions, led by a line saying the model is loading and note tools ask to retry until it has. It used to be told to complete first-run setup and accept or decline the Gemma terms, and kept that for the whole session. An instance with no model chosen yet still gets the first-run instructions. [#774]
 - In the few seconds after a restart while Hatchdoor checks and loads its search model, an agent's tool call is now told the model is downloading or loading and to retry in a moment. It used to be told to accept or decline the Gemma terms, even on an instance set up long ago, and those tools then answered that a model was already set up. An instance with no model chosen yet still asks for the choice. [#762]
@@ -135,6 +136,7 @@
 [#762]: https://github.com/BatterWorks/Hatchdoor/issues/762
 [#774]: https://github.com/BatterWorks/Hatchdoor/issues/774
 [#775]: https://github.com/BatterWorks/Hatchdoor/issues/775
+[#779]: https://github.com/BatterWorks/Hatchdoor/issues/779
 
 ## v2.9.0 - 2026-10-27
 
