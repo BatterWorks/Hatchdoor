@@ -41,6 +41,12 @@
     --co-fail: #7f4d30;
     --highlight: #f7ebbf;
     --highlight-active: #f1d779;
+    --highlight-red: #fec9e2;
+    --highlight-orange: #ffcfb6;
+    --highlight-yellow: #fad598;
+    --highlight-green: #cae6a9;
+    --highlight-blue: #c4defa;
+    --highlight-purple: #eecef8;
     --code-surface: #0c0c0a;
     --code-ink: #f4f1e8;
     --code-ink-soft: rgba(244, 241, 232, 0.6);
@@ -77,6 +83,12 @@
     --co-fail: #ce9677;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
+    --highlight-red: #5a2a44;
+    --highlight-orange: #5e2f11;
+    --highlight-yellow: #523700;
+    --highlight-green: #30450a;
+    --highlight-blue: #293f56;
+    --highlight-purple: #4b3154;
     --code-surface: #1a1a17;
     --code-ink: #ece8d8;
     --code-ink-soft: rgba(236, 232, 216, 0.6);
@@ -114,6 +126,12 @@
       --co-fail: #ce9677;
       --highlight: #4a3f15;
       --highlight-active: #6b5a1f;
+      --highlight-red: #5a2a44;
+      --highlight-orange: #5e2f11;
+      --highlight-yellow: #523700;
+      --highlight-green: #30450a;
+      --highlight-blue: #293f56;
+      --highlight-purple: #4b3154;
     --code-surface: #1a1a17;
     --code-ink: #ece8d8;
     --code-ink-soft: rgba(236, 232, 216, 0.6);
@@ -1144,6 +1162,12 @@
   .note-body em { font-style: italic; }
   .note-body strong { font-weight: 600; }
   .note-body mark.note-highlight { background: color-mix(in srgb, var(--hot) 20%, transparent); color: inherit; border-radius: var(--radius-none); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .note-body mark.note-highlight-red { background: var(--highlight-red); }
+  .note-body mark.note-highlight-orange { background: var(--highlight-orange); }
+  .note-body mark.note-highlight-yellow { background: var(--highlight-yellow); }
+  .note-body mark.note-highlight-green { background: var(--highlight-green); }
+  .note-body mark.note-highlight-blue { background: var(--highlight-blue); }
+  .note-body mark.note-highlight-purple { background: var(--highlight-purple); }
   .note-body code { font-family: var(--font-mono); font-size: 0.86em; background: var(--paper-2); padding: 0.05rem 0.35rem; color: var(--ink); }
   .note-body ul, .note-body ol {
     padding-left: 0;
@@ -1798,6 +1822,7 @@
 
     <h3>Body</h3>
     <a href="#body-text">Prose &amp; inline</a>
+    <a href="#highlight-colours">Highlight colours</a>
     <a href="#body-lists">Lists</a>
     <a href="#blockquote">Blockquote</a>
     <a href="#callouts">Callouts</a>
@@ -2314,6 +2339,23 @@
       <p class="blurb"><b>A text highlight is the author&rsquo;s mark; a search hit is the reader&rsquo;s.</b> <code>==text==</code> renders as a <span class="key">mark.note-highlight</span>: <span class="key">--hot</span> mixed to 20% over the page, the same tint the live editor draws, so the two views of a note match. Square, like everything else, and the text keeps its own ink. It never takes <span class="key">--highlight</span>, which belongs to search: a hit inside a highlight paints its yellow over the tint and still reads as the hit.</p>
       <p class="blurb"><b>A link shaped like a button must pay off the prose link rule.</b> <span class="key">.note-body a</span> outweighs a bare component class, so a button inside the body &mdash; the PDF preview&rsquo;s <span class="key">Open PDF</span> &mdash; inherits the 2px hot rail (wanted: it is still a link) along with a <span class="key">1px</span> bottom padding and the body&rsquo;s <span class="key">1.45</span> line-height (not wanted: together they set the label high in a box 5px taller than it should be). Any such button restores its own <span class="key">padding-block</span> and <span class="key">line-height: 1</span> under a type-qualified selector, less <span class="key">1px</span> off the bottom for the rail it is standing on.</p>
       <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">mark.note-highlight</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
+
+      <h3 class="doc-sub" id="highlight-colours">Highlight colours</h3>
+      <div class="stage stage-note paper">
+        <div class="note-body">
+          <p>Obsidian&rsquo;s six: <mark class="note-highlight note-highlight-red">red</mark>, <mark class="note-highlight note-highlight-orange">orange</mark>, <mark class="note-highlight note-highlight-yellow">yellow</mark>, <mark class="note-highlight note-highlight-green">green</mark>, <mark class="note-highlight note-highlight-blue">blue</mark> and <mark class="note-highlight note-highlight-purple">purple</mark>, beside a <mark class="note-highlight">plain highlight</mark>.</p>
+        </div>
+      </div>
+      <div class="swatches">
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-red)"></div><div class="sw-meta"><div class="n">--highlight-red</div><div class="v">🔴 · hue of --co-example</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-orange)"></div><div class="sw-meta"><div class="n">--highlight-orange</div><div class="v">🟠 · hue of --co-fail</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-yellow)"></div><div class="sw-meta"><div class="n">--highlight-yellow</div><div class="v">🟡 · hue of --warn-fg</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-green)"></div><div class="sw-meta"><div class="n">--highlight-green</div><div class="v">🟢 · hue of --co-success</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-blue)"></div><div class="sw-meta"><div class="n">--highlight-blue</div><div class="v">🔵 · hue of --co-info</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-purple)"></div><div class="sw-meta"><div class="n">--highlight-purple</div><div class="v">🟣 · hue of --co-question</div></div></div>
+      </div>
+      <p class="blurb"><b>A colour emoji straight after the opening <code>==</code> picks one of six surfaces, and is not drawn.</b> This is Obsidian&rsquo;s syntax (<code>==🔴Important==</code>); any other character there, a brown circle included, is text. The file keeps the emoji. Each surface takes the hue and chroma of the callout accent nearest Obsidian&rsquo;s colour, so a coloured highlight reads as one of the house inks rather than a marker pen, and all six share one lightness (OKLCh L 0.89 light, 0.36 dark). Body ink clears 8.6:1 on every one; <span class="key">docs/design/palette.py</span> checks that, the shared lightness and the chroma ceilings. The colour replaces the plain <span class="key">--hot</span> tint rather than mixing with it, in the rendered views (<span class="key">mark.note-highlight-&lt;colour&gt;</span>) and in the editor (<span class="key">.live-editor-highlight-&lt;colour&gt;</span>), where the emoji shows while the caret is on its line. Orange sits close to the plain tint in the light theme; that was seen and accepted when this palette was chosen (#577).</p>
+      <div class="tag-row"><span class="key">mark.note-highlight-red</span><span class="key">-orange</span><span class="key">-yellow</span><span class="key">-green</span><span class="key">-blue</span><span class="key">-purple</span><span class="key">.live-editor-highlight-&lt;colour&gt;</span></div>
     </section>
 
     <!-- ───────── LISTS ───────── -->

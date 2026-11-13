@@ -46,6 +46,60 @@ describe("==highlight== syntax (#572)", () => {
   });
 });
 
+/** Each highlight as `[colour or "plain", text]`. */
+function colouredMarksIn(markdown: string): Array<[string, string]> {
+  const { container } = render(
+    <ReactMarkdown remarkPlugins={NOTE_SYNTAX_PLUGINS}>
+      {markdown}
+    </ReactMarkdown>,
+  );
+  return Array.from(container.querySelectorAll("mark.note-highlight")).map(
+    (mark) => {
+      const colour = Array.from(mark.classList)
+        .find((name) => name.startsWith("note-highlight-"))
+        ?.slice("note-highlight-".length);
+      return [colour ?? "plain", mark.textContent ?? ""];
+    },
+  );
+}
+
+describe("highlight colours (#577)", () => {
+  it.each([
+    ["🔴", "red"],
+    ["🟠", "orange"],
+    ["🟡", "yellow"],
+    ["🟢", "green"],
+    ["🔵", "blue"],
+    ["🟣", "purple"],
+  ])("draws %s as %s and hides the emoji", (emoji, colour) => {
+    expect(colouredMarksIn(`a ==${emoji}word== b`)).toEqual([[colour, "word"]]);
+  });
+
+  it("colours inside a heading, a list and a table cell", () => {
+    expect(
+      colouredMarksIn("## A ==🔵b==\n\n- ==🟢c==\n\n| x |\n| - |\n| ==🟣d== |"),
+    ).toEqual([
+      ["blue", "b"],
+      ["green", "c"],
+      ["purple", "d"],
+    ]);
+  });
+
+  it.each([
+    ["another circle", "==🟤brown==", [["plain", "🟤brown"]]],
+    ["an emoji after the first character", "==a🔴b==", [["plain", "a🔴b"]]],
+    ["no emoji", "==plain==", [["plain", "plain"]]],
+    ["emphasis first", "==*🔴a*==", [["plain", "🔴a"]]],
+    ["a character reference", "==&#x1F534;a==", [["plain", "🔴a"]]],
+  ])("leaves %s plain", (_, markdown, expected) => {
+    expect(colouredMarksIn(markdown)).toEqual(expected);
+  });
+
+  it("draws no highlight inside a code span", () => {
+    expect(colouredMarksIn("`==🔴a==`")).toEqual([]);
+  });
+});
+
 describe("stripHighlights", () => {
   it("drops a highlight's signs and keeps comparisons", () => {
     expect(stripHighlights("The ==fleet sails== on, finished == null.")).toBe(
@@ -55,6 +109,14 @@ describe("stripHighlights", () => {
     expect(stripHighlights("Write `==this==` for ==this==.")).toBe(
       "Write `==this==` for this.",
     );
+  });
+
+  it("drops a colour emoji with the signs and keeps any other (#577)", () => {
+    expect(stripHighlights("A ==🔴red== and ==🟣purple== word.")).toBe(
+      "A red and purple word.",
+    );
+    expect(stripHighlights("==🟤brown== ==a🔴b==")).toBe("🟤brown a🔴b");
+    expect(stripHighlights("`==🔴code==` ==🔵x==")).toBe("`==🔴code==` x");
   });
 
   it("follows the page's rules where a pattern would not", () => {
