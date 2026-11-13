@@ -20,7 +20,9 @@ use rmcp::{RoleServer, ServerHandler};
 use serde_json::{Value, json};
 use tracing::error;
 
-use super::config::{McpConfig, SERVER_INSTRUCTIONS, SETUP_INSTRUCTIONS, USAGE_REPORT_NOTICE};
+use super::config::{
+    MODEL_PREPARING_NOTE, McpConfig, SERVER_INSTRUCTIONS, SETUP_INSTRUCTIONS, USAGE_REPORT_NOTICE,
+};
 use super::protocol::JsonRpcFailure;
 use super::subscriptions::{MAX_SUBSCRIPTIONS_PER_TOKEN, McpBearerToken, SubscriptionRegistry};
 use super::tools;
@@ -262,14 +264,17 @@ fn first_forwarded_element(value: &str) -> ForwardedElement {
 
 impl ServerHandler for HatchdoorMcpHandler {
     fn get_info(&self) -> ServerConfig {
-        // `model_setup_pending`, not the collection's index readiness: a client
-        // that happens to connect while a Vault is reindexing has a fully
-        // set-up instance and needs the real instructions, not the first-run
-        // ones (#191).
-        let base = if self.state.startup.model_setup_pending() {
-            SETUP_INSTRUCTIONS
-        } else {
-            SERVER_INSTRUCTIONS
+        // Model setup, not the collection's index readiness: a client that
+        // happens to connect while a Vault is reindexing has a fully set-up
+        // instance and needs the real instructions, not the first-run ones
+        // (#191). A model already chosen and still loading, as after every
+        // restart, needs no choice either: only the wait (#774).
+        let base = match self.state.startup.model_setup_hold() {
+            Some(crate::startup::ModelSetupHold::Choice) => SETUP_INSTRUCTIONS.to_string(),
+            Some(crate::startup::ModelSetupHold::Preparing) => {
+                format!("{MODEL_PREPARING_NOTE} {SERVER_INSTRUCTIONS}")
+            }
+            None => SERVER_INSTRUCTIONS.to_string(),
         };
         // serverInfo.version is invisible to most agents (their harness eats
         // the handshake), so the version rides the instructions too.

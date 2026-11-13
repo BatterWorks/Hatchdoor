@@ -21,6 +21,7 @@
 - The search index no longer stores a second, normalised copy of every note's title and path, each with its own index, that nothing has read since links stopped being resolved from the index. An existing index drops them at the first start after the upgrade, with no re-embedding, and an index written by 2.9.0 gets this and the keyword index change of [#634] in the same conversion. [#655]
 
 ### Fixed
+- An agent that connects right after a restart, while Hatchdoor checks and loads a search model chosen earlier, now opens its session with the normal instructions, led by a line saying the model is loading and note tools ask to retry until it has. It used to be told to complete first-run setup and accept or decline the Gemma terms, and kept that for the whole session. An instance with no model chosen yet still gets the first-run instructions. [#774]
 - In the few seconds after a restart while Hatchdoor checks and loads its search model, an agent's tool call is now told the model is downloading or loading and to retry in a moment. It used to be told to accept or decline the Gemma terms, even on an instance set up long ago, and those tools then answered that a model was already set up. An instance with no model chosen yet still asks for the choice. [#762]
 - A PDF embed with a page anchor, such as `![[report.pdf#page=2]]`, now shows its preview and opens on an instance with a web token. The token was added after the `#page=2`, a part of the address the browser never sends, so the PDF answered `401`; it now goes before it, and the Open link lands on that page. [#755]
 - A Vault added on a folder inside or around the folder of a Vault you just paused and disconnected no longer writes beside a sync the old Vault was still running there. Only a Vault on the very same folder used to wait; one on a subfolder, or on a parent folder holding one or more such Vaults, got a write lock of its own and could change files in the middle of the old sync. It now waits for every old sync on an overlapping folder to finish. A Vault added on an unrelated folder still starts at once. [#745]
@@ -131,6 +132,7 @@
 [#745]: https://github.com/BatterWorks/Hatchdoor/issues/745
 [#755]: https://github.com/BatterWorks/Hatchdoor/issues/755
 [#762]: https://github.com/BatterWorks/Hatchdoor/issues/762
+[#774]: https://github.com/BatterWorks/Hatchdoor/issues/774
 
 ## v2.9.0 - 2026-10-27
 
