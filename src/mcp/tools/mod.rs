@@ -92,7 +92,9 @@ async fn dispatch_tools_call(
     // had accepted months earlier (#191). Scanning and indexing fall through
     // to the Vault-scoped cores, which report a rebuilding Vault themselves
     // and accurately.
-    if state.startup.model_setup_pending() && !is_collection_management_tool(name) {
+    if let Some(hold) = state.startup.model_setup_hold()
+        && !is_collection_management_tool(name)
+    {
         return match name {
             "accept_gemma_terms" => select_model_tool(
                 state,
@@ -125,9 +127,15 @@ async fn dispatch_tools_call(
                     setup_state = state.startup.status().state,
                     "MCP tool call rejected: first-run model setup is not complete"
                 );
-                Ok(tool_error(
-                    "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
-                ))
+                // A model already chosen is downloading or, after every
+                // restart, being checked and loaded: the caller only has to
+                // wait. Naming the terms tools there sent an agent to
+                // accept terms accepted long ago (#762).
+                let notice = match hold {
+                    crate::startup::ModelSetupHold::Preparing => MODEL_PREPARING_NOTICE,
+                    crate::startup::ModelSetupHold::Choice => MODEL_CHOICE_NOTICE,
+                };
+                Ok(tool_error(notice.to_string()))
             }
         };
     }
@@ -206,6 +214,14 @@ async fn dispatch_tools_call(
         other => other,
     }
 }
+
+/// A tool's answer while no search model is chosen, or setup failed.
+const MODEL_CHOICE_NOTICE: &str = "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.";
+
+/// A tool's answer while the chosen model downloads, or is checked and
+/// loaded after a restart. It names no terms tool: there is nothing to
+/// choose, only to wait for (#762).
+const MODEL_PREPARING_NOTICE: &str = "Hatchdoor's search model is downloading or loading. Retry this call in a moment: after a restart this takes a few seconds, a first download a few minutes. get_model_setup_status shows the progress.";
 
 fn select_model_tool(
     state: AppState,
