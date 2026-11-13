@@ -10,7 +10,20 @@ The Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` 
 
 Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, ==highlighted text==, `inline code`, and links such as <https://example.com>.
 
-A highlight is Obsidian's syntax: two equals signs on each side, `==like this==`, which is also what the editor's **Highlight** button writes. Both pairs must sit in the same paragraph, with no space just inside them, so a comparison such as `total == 0` in a sentence stays as written. Inside code and math the signs are always shown as written. Hatchdoor draws every highlight in one colour; Obsidian's coloured highlights, picked with an emoji after the opening signs, show as an ordinary highlight with the emoji in it.
+A highlight is Obsidian's syntax: two equals signs on each side, `==like this==`, which is also what the editor's **Highlight** button writes. Both pairs must sit in the same paragraph, with no space just inside them, so a comparison such as `total == 0` in a sentence stays as written. Inside code and math the signs are always shown as written.
+
+Obsidian's six highlight colours work too. Put one of these emoji straight after the opening signs:
+
+| Colour | Example |
+| ------ | ------- |
+| Red | `==🔴Important==` |
+| Orange | `==🟠Follow up==` |
+| Yellow | `==🟡Remember this==` |
+| Green | `==🟢Completed==` |
+| Blue | `==🔵Reference==` |
+| Purple | `==🟣Idea==` |
+
+The page, the editor's preview, Help and the editor draw the highlight in that colour and hide the emoji; the editor shows it again while the cursor is on that line, so you can change it. The emoji stays in the file, so Obsidian shows the same colour. Any other character after the signs, another coloured circle such as 🟤 included, is ordinary text in an ordinary highlight. A highlight without an emoji keeps its usual colour. Search result snippets leave out the emoji along with the signs. The **Highlight** button writes a plain highlight; to colour one, type the emoji after the opening signs.
 
 Raw HTML is not supported, apart from comments. Use Markdown syntax so a note reads the same in other apps.
 

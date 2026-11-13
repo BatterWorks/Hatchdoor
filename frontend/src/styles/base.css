@@ -51,6 +51,21 @@
   --co-fail: #7f4d30;
   --highlight: #f7ebbf;
   --highlight-active: #f1d779;
+  /* Obsidian's six highlight colours (#577), drawn behind a `==🔴text==`.
+     Each takes the hue of the callout accent nearest Obsidian's colour
+     (red --co-example, orange --co-fail, yellow --warn-fg, green
+     --co-success, blue --co-info, purple --co-question) at that accent's
+     chroma, so a coloured highlight reads as one of the house inks, and all
+     six share one lightness (OKLCh L 0.89 light, 0.36 dark) so none
+     outweighs another. Body ink clears 8.6:1 on every one. A plain `==`
+     keeps the --hot tint note-content.css gives it. Re-run
+     docs/design/palette.py after touching any of these. */
+  --highlight-red: #fec9e2;
+  --highlight-orange: #ffcfb6;
+  --highlight-yellow: #fad598;
+  --highlight-green: #cae6a9;
+  --highlight-blue: #c4defa;
+  --highlight-purple: #eecef8;
   /* Code surface stays a dark slab in both themes. It must not be built from
      --ink/--bg, which swap on theme change and would flip the code block to a
      cream slab on a dark page. */
@@ -94,6 +109,12 @@
   --co-fail: #ce9677;
   --highlight: #4a3f15;
   --highlight-active: #6b5a1f;
+  --highlight-red: #5a2a44;
+  --highlight-orange: #5e2f11;
+  --highlight-yellow: #523700;
+  --highlight-green: #30450a;
+  --highlight-blue: #293f56;
+  --highlight-purple: #4b3154;
   /* Lifted off the page background so the slab still reads as a distinct
      block once the page itself is near-black. */
   --code-surface: #1a1a17;
@@ -136,6 +157,12 @@
     --co-fail: #ce9677;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
+    --highlight-red: #5a2a44;
+    --highlight-orange: #5e2f11;
+    --highlight-yellow: #523700;
+    --highlight-green: #30450a;
+    --highlight-blue: #293f56;
+    --highlight-purple: #4b3154;
     /* Lifted off the page background so the slab still reads as a distinct
      block once the page itself is near-black. */
     --code-surface: #1a1a17;

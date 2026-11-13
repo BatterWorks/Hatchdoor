@@ -220,6 +220,51 @@
   -webkit-box-decoration-break: clone;
 }
 
+/* Obsidian's colour highlights (#577): `==🔴text==` takes one of the six
+   --highlight-<colour> surfaces, in the rendered views and, through
+   `live-editor-highlight-<colour>`, in the editor. The colour replaces the
+   plain tint rather than layering over it; the doubled class outweighs the
+   editor package's own rule for highlights in table cells. */
+.note-body mark.note-highlight-red,
+.live-editor .live-editor-highlight.live-editor-highlight-red {
+  background: var(--highlight-red);
+}
+.note-body mark.note-highlight-orange,
+.live-editor .live-editor-highlight.live-editor-highlight-orange {
+  background: var(--highlight-orange);
+}
+.note-body mark.note-highlight-yellow,
+.live-editor .live-editor-highlight.live-editor-highlight-yellow {
+  background: var(--highlight-yellow);
+}
+.note-body mark.note-highlight-green,
+.live-editor .live-editor-highlight.live-editor-highlight-green {
+  background: var(--highlight-green);
+}
+.note-body mark.note-highlight-blue,
+.live-editor .live-editor-highlight.live-editor-highlight-blue {
+  background: var(--highlight-blue);
+}
+.note-body mark.note-highlight-purple,
+.live-editor .live-editor-highlight.live-editor-highlight-purple {
+  background: var(--highlight-purple);
+}
+/* The editor's own highlight span sits inside or around the coloured one;
+   its translucent tint would mix into the colour, so it steps aside. */
+.live-editor .live-editor-highlight .cm-atomic-highlight,
+.live-editor .cm-atomic-highlight:has(> .live-editor-highlight) {
+  background: transparent;
+}
+/* In a table cell the emoji is wrapped instead of replaced, since the cell
+   is its own small editor: hidden at rest, shown while the caret is in the
+   cell. */
+.live-editor .live-editor-highlight-marker {
+  display: none;
+}
+.live-editor .cm-atomic-table-cell-source:focus .live-editor-highlight-marker {
+  display: inline;
+}
+
 .note-body code {
   font-family: var(--font-mono);
   font-size: 0.86em;

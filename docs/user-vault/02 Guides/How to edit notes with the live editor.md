@@ -29,6 +29,8 @@ On a Mac, press `Cmd` wherever this page says `Ctrl`.
 
 Select a word or a phrase and a small toolbar appears over it with bold, italic, strikethrough, code, highlight and link. Three more buttons at its end turn the line you are on into a heading, a bullet or a to-do, and back again on a second press. A selection that runs over more than one line shows no toolbar; the keys above still work on it.
 
+The highlight button writes a plain highlight. To colour one, type one of Obsidian's colour emoji, such as 🔴, straight after the opening `==`: the highlight takes that colour and the emoji shows only while your caret is on its line. [[Supported Markdown reference#Inline formatting]] lists the six.
+
 The find bar has a field for what to find, with **Next**, **Previous** and **Select all**, and a field for what to put in its place, with **Replace** and **Replace all**. `Enter` in the find field goes to the next match and `Shift+Enter` to the one before. Three options narrow the search: **Match case**, **Regex** for a regular expression, and **Whole word**. The bar stays at the top of the note while you step through matches, and `Escape` closes it.
 
 Type `/` at the start of a line for a menu of what a line can be: a heading, a bulleted or numbered list, a to-do, a quote, a callout, a code block, a divider or a table, or plain text again. Keep typing to narrow it, and `Enter` picks.

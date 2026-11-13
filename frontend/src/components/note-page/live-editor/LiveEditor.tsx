@@ -58,6 +58,7 @@ import type { ExplorerNote } from "../../../types";
 import type { UploadedAttachment } from "../../NoteEditor";
 import { attachmentRejectionAtCurrentLimit } from "../attachmentDrop";
 import { callouts } from "./callouts";
+import { highlightColours } from "./highlightColours";
 import { markKeymap } from "./commands";
 import { focusTracking } from "./focusState";
 import { assetsResolved, imageWidgets, isImageTarget } from "./imageWidgets";
@@ -292,6 +293,7 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
               resolveAssetSrc: (raw) => propsRef.current.resolveAssetSrc(raw),
             }),
             callouts,
+            highlightColours,
             completionMenus(
               () => propsRef.current.noteCandidates,
               (note) => propsRef.current.formatNoteLink(note),

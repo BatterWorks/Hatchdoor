@@ -3,7 +3,14 @@
 // copies of this list, and a syntax the editor's buttons write went missing
 // from all three unnoticed.
 
-import type { Nodes, Paragraph, Parents, Root, RootContent } from "mdast";
+import type {
+  Highlight,
+  Nodes,
+  Paragraph,
+  Parents,
+  Root,
+  RootContent,
+} from "mdast";
 import {
   fromMarkdown,
   type Extension as FromMarkdownExtension,
@@ -30,6 +37,12 @@ declare module "mdast" {
   interface Highlight extends Parent {
     type: "highlight";
     children: PhrasingContent[];
+    data?: HighlightData;
+  }
+  interface HighlightData extends Data {
+    /** Length of the colour emoji the text opened with, now taken out of
+     * the first child; absent for a plain highlight. */
+    colourMarkerLength?: number;
   }
   interface PhrasingContentMap {
     highlight: Highlight;
@@ -200,10 +213,60 @@ const highlightFromMarkdown: FromMarkdownExtension = {
   },
   exit: {
     highlight(token) {
+      const node = this.stack.at(-1) as Highlight;
+      // The source, not the text node, so an emoji spelled as a character
+      // reference is text, as it is in the editor.
+      const marker = highlightColourMarker(this.sliceSerialize(token).slice(2));
+      const first = node.children[0];
+      if (
+        marker &&
+        first?.type === "text" &&
+        first.value.startsWith(marker.emoji)
+      ) {
+        first.value = first.value.slice(marker.emoji.length);
+        node.data = {
+          ...node.data,
+          colourMarkerLength: marker.emoji.length,
+          hProperties: {
+            className: ["note-highlight", `note-highlight-${marker.colour}`],
+          },
+        };
+      }
       this.exit(token);
     },
   },
 };
+
+/**
+ * Obsidian's highlight colours (Obsidian 1.14, help page "Basic formatting
+ * syntax", "Highlight colors"): one of these six emoji straight after the
+ * opening `==` colours the highlight and is not drawn. Any other character
+ * there, another coloured circle included, is text. The file keeps the emoji.
+ */
+export const HIGHLIGHT_COLOURS = {
+  "🔴": "red",
+  "🟠": "orange",
+  "🟡": "yellow",
+  "🟢": "green",
+  "🔵": "blue",
+  "🟣": "purple",
+} as const;
+
+export type HighlightColour =
+  (typeof HIGHLIGHT_COLOURS)[keyof typeof HIGHLIGHT_COLOURS];
+
+/** The colour marker `text` opens with, the text just inside a highlight's
+ * opening signs, or null when it opens with anything else. */
+export function highlightColourMarker(
+  text: string,
+): { emoji: string; colour: HighlightColour } | null {
+  for (const [emoji, colour] of Object.entries(HIGHLIGHT_COLOURS)) {
+    if (text.startsWith(emoji)) {
+      return { emoji, colour };
+    }
+  }
+  return null;
+}
 
 export function remarkHighlight(this: Processor) {
   // remark-parse reads these two lists; its types declaring them are not ours.
@@ -345,7 +408,8 @@ export const NOTE_SYNTAX_PLUGINS = [
 ];
 
 /** Plain text with each `==highlight==`'s signs dropped, for a search
- * snippet, which shows the words and draws no highlight. It parses the text
+ * snippet, which shows the words and draws no highlight. A colour emoji
+ * opening a highlight goes with the signs (#577). It parses the text
  * with the same construct the page renders with, so code, escapes and stray
  * signs keep theirs exactly where the page keeps them. */
 export function stripHighlights(text: string): string {
@@ -354,17 +418,23 @@ export function stripHighlights(text: string): string {
     extensions: [highlightSyntax],
     mdastExtensions: [highlightFromMarkdown],
   });
-  const signs: number[] = [];
+  const cuts: Array<{ at: number; length: number }> = [];
   const collect = (node: Nodes) => {
     if (node.type === "highlight" && node.position) {
-      signs.push(node.position.start.offset!, node.position.end.offset! - 2);
+      cuts.push(
+        {
+          at: node.position.start.offset!,
+          length: 2 + (node.data?.colourMarkerLength ?? 0),
+        },
+        { at: node.position.end.offset! - 2, length: 2 },
+      );
     }
     if ("children" in node) node.children.forEach(collect);
   };
   collect(tree);
   let out = text;
-  for (const at of signs.sort((a, b) => b - a)) {
-    out = out.slice(0, at) + out.slice(at + 2);
+  for (const { at, length } of cuts.sort((a, b) => b.at - a.at)) {
+    out = out.slice(0, at) + out.slice(at + length);
   }
   return out;
 }

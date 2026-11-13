@@ -5610,9 +5610,12 @@ steps after it rather than keeping a copy. Its `remarkHighlight` reads
 Obsidian's `==text==` as a parser construct by the live editor's rule (an
 exact pair of signs, emphasis flanking, closed within its paragraph) and renders
 it as `<mark class="note-highlight">`, so code, math and escaped signs keep
-theirs; `stripHighlights` drops the signs from plain-text excerpts outside
-code spans, for the search dialog's snippets and the Help reader's search
-excerpts. Its `remarkBlockIds` (#578) is what reads Obsidian's block ids, on
+theirs; one of Obsidian's six colour emoji (`HIGHLIGHT_COLOURS`,
+`highlightColourMarker`, #577) written straight after the opening signs adds
+`note-highlight-<colour>` and is taken out of the drawn text, never the
+file; `stripHighlights` drops the signs, and such an emoji with them, from
+plain-text excerpts outside code spans, for the search dialog's snippets and
+the Help reader's search excerpts. Its `remarkBlockIds` (#578) is what reads Obsidian's block ids, on
 the parsed tree and not the text, so a `^id` in code or math is left alone and
 no line moves: a ` ^id` closing a paragraph, a list item's own line or a quote,
 or a `^id` alone on a line under a paragraph, a quote or a table, is taken out
@@ -5854,6 +5857,7 @@ editor-toolbar syntax check, #572), Markdown/heading/search/state tests,
 - `frontend/src/components/note-page/live-editor/callouts.ts`
 - `frontend/src/components/note-page/live-editor/commands.ts`
 - `frontend/src/components/note-page/live-editor/focusState.ts`
+- `frontend/src/components/note-page/live-editor/highlightColours.ts`
 - `frontend/src/components/note-page/live-editor/imageWidgets.ts`
 - `frontend/src/components/note-page/live-editor/menus.ts`
 - `frontend/src/components/note-page/live-editor/noteLinks.ts`
@@ -5893,7 +5897,13 @@ a state field that replaces a `mermaid` fence, a `base` fence and a `$$`
 or `$` formula with a widget while the caret is off their lines and draws a
 `![[file.pdf]]` preview under its line, and from `callouts.ts`, which gives
 a `> [!kind]` quote the reading view's `.callout-<kind>` accent per line and
-draws the title in place of the marker; both read `focusState.ts`, so a blur
+draws the title in place of the marker; #577: `highlightColours.ts` gives a
+`==🔴text==` the `live-editor-highlight-<colour>` class and hides the emoji
+while the caret is off its line, looking again as the background parser
+extends the tree (`caretAwareField`'s `refindOnParse`), and colours the
+table widget's cell
+highlights in the DOM, wrapping the emoji so the cell's text is unchanged;
+all three read `focusState.ts`, so a blur
 renders everything the way the inline preview does; the mermaid, saved-query
 and PDF widgets are the reading view's own components, drawn through
 `widgetPortals.ts`'s registry and `WidgetPortals.tsx`'s portals so they keep
@@ -6029,7 +6039,8 @@ message and carries no instruction either way).
 note candidates, backend HTTP write endpoints, and (#544) Note reading and
 rendering's `MermaidDiagram`, `PdfPreview`, `SavedQueryBlock`,
 `resolveNoteTargets` and `cachedAssetHref`, drawn or called as they are and
-never edited here; and (#558) the `HATCHDOOR_MAX_ATTACHMENT_BYTES`
+never edited here; (#577) its `highlightColourMarker`, the one list of
+highlight colour emoji; and (#558) the `HATCHDOOR_MAX_ATTACHMENT_BYTES`
 record of Settings' `GET /api/settings` response, which
 `writeApi.ts`'s `fetchAttachmentMaxBytes` reads before each pasted or dropped
 file with an accepted extension, so the size check compares against the

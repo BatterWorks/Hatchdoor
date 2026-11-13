@@ -985,6 +985,21 @@ describe("SearchDialog result rows read cleanly (#530)", () => {
     expect(snippet?.querySelector("mark:not(.search-match)")).toBeNull();
   });
 
+  it("drops a highlight's colour emoji with its signs (#577)", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({
+          content: "The ==🔴fleet sails== on past ==🟤brown== rocks.",
+        }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet");
+    expect(snippet).toHaveTextContent("The fleet sails on past 🟤brown rocks.");
+    expect(snippet?.textContent).not.toContain("🔴");
+  });
+
   it("omits the heading line when it only repeats the note's title", () => {
     renderDialog({
       query: "homelab",
