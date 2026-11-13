@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use tracing::error;
 
 use super::config::{
-    MODEL_PREPARING_NOTE, McpConfig, SERVER_INSTRUCTIONS, SETUP_INSTRUCTIONS, USAGE_REPORT_NOTICE,
+    MODEL_PREPARING_NOTE, MODEL_SETUP_FAILED_NOTE, McpConfig, SERVER_INSTRUCTIONS,
+    SETUP_INSTRUCTIONS, USAGE_REPORT_NOTICE,
 };
 use super::protocol::JsonRpcFailure;
 use super::subscriptions::{MAX_SUBSCRIPTIONS_PER_TOKEN, McpBearerToken, SubscriptionRegistry};
@@ -268,8 +269,16 @@ impl ServerHandler for HatchdoorMcpHandler {
         // happens to connect while a Vault is reindexing has a fully set-up
         // instance and needs the real instructions, not the first-run ones
         // (#191). A model already chosen and still loading, as after every
-        // restart, needs no choice either: only the wait (#774).
+        // restart, needs no choice either: only the wait (#774). A setup
+        // that failed after a model was chosen is retried from the web app,
+        // which keeps that model; a terms tool would switch it (#779).
         let base = match self.state.startup.model_setup_hold() {
+            Some(crate::startup::ModelSetupHold::Failed)
+                if self.state.model_setup.selected()
+                    != crate::model_setup::SelectedModel::TermsRequired =>
+            {
+                format!("{MODEL_SETUP_FAILED_NOTE} {SERVER_INSTRUCTIONS}")
+            }
             Some(
                 crate::startup::ModelSetupHold::Choice | crate::startup::ModelSetupHold::Failed,
             ) => SETUP_INSTRUCTIONS.to_string(),
