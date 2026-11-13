@@ -78,7 +78,7 @@ If the agent cannot reach the link's address at all, or a download saves a small
 
 The model downloads from Hugging Face, so this is almost always a network problem between the computer running Hatchdoor and huggingface.co. In the browser, the search panel shows **Could Not Load** with the reason, such as a fetch error for one model file, and a **Retry setup** button. Fix whatever blocked the download, then press **Retry setup**. While Keyword results are on screen, that block shrinks to one line saying the search model could not be loaded, with no button. Clear the search box or switch **Mode** to **Semantic** to get the block and **Retry setup** back.
 
-An agent sees the same through `get_model_setup_status`, and `GET /api/startup-status` reports `"failed"` with the same message. `POST /api/model/retry` starts the download again.
+An agent sees the same through `get_model_setup_status`. On an instance whose model was already chosen, its other tools answer that setup failed and ask for **Retry setup** in the web app, which keeps that model. `GET /api/startup-status` reports `"failed"` with the same message. `POST /api/model/retry` starts the download again.
 
 A download that stops receiving data, as behind a Wi-Fi login page, a dropped connection or a proxy that hangs, is stopped after 60 seconds, and one still running after two hours is stopped too. The reason then says the download stalled or did not finish in time. **Retry setup** continues from the files already fetched, so a slow connection gets there in a few tries. While a download is moving, `GET /api/startup-status` shows `"step": "download"` with the bytes so far, and `"step": "load"` once the files are in and the model is loading, which can take many minutes on a slow disk.
 

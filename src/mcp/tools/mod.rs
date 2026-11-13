@@ -130,10 +130,19 @@ async fn dispatch_tools_call(
                 // A model already chosen is downloading or, after every
                 // restart, being checked and loaded: the caller only has to
                 // wait. Naming the terms tools there sent an agent to
-                // accept terms accepted long ago (#762).
+                // accept terms accepted long ago (#762). A setup that failed
+                // after a model was chosen is retried from the web app, which
+                // keeps that model; a terms tool would switch it (#775).
                 let notice = match hold {
                     crate::startup::ModelSetupHold::Preparing => MODEL_PREPARING_NOTICE,
-                    crate::startup::ModelSetupHold::Choice => MODEL_CHOICE_NOTICE,
+                    crate::startup::ModelSetupHold::Failed
+                        if state.model_setup.selected()
+                            != crate::model_setup::SelectedModel::TermsRequired =>
+                    {
+                        MODEL_SETUP_FAILED_NOTICE
+                    }
+                    crate::startup::ModelSetupHold::Choice
+                    | crate::startup::ModelSetupHold::Failed => MODEL_CHOICE_NOTICE,
                 };
                 Ok(tool_error(notice.to_string()))
             }
@@ -215,13 +224,18 @@ async fn dispatch_tools_call(
     }
 }
 
-/// A tool's answer while no search model is chosen, or setup failed.
+/// A tool's answer while no search model is chosen, a failed setup included.
 const MODEL_CHOICE_NOTICE: &str = "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.";
 
 /// A tool's answer while the chosen model downloads, or is checked and
 /// loaded after a restart. It names no terms tool: there is nothing to
 /// choose, only to wait for (#762).
 const MODEL_PREPARING_NOTICE: &str = "Hatchdoor's search model is downloading or loading. Retry this call in a moment: after a restart this takes a few seconds, a first download a few minutes. get_model_setup_status shows the progress.";
+
+/// A tool's answer after setup failed on an instance whose model is
+/// already chosen. It names no terms tool: accepting or declining the terms
+/// again would replace the saved choice and switch models (#775).
+const MODEL_SETUP_FAILED_NOTICE: &str = "Hatchdoor's search model setup failed. get_model_setup_status gives the reason. Ask the operator to fix it and press Retry setup in the Hatchdoor web app's search, which keeps the chosen model.";
 
 fn select_model_tool(
     state: AppState,

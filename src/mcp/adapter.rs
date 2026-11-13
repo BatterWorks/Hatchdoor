@@ -270,7 +270,9 @@ impl ServerHandler for HatchdoorMcpHandler {
         // (#191). A model already chosen and still loading, as after every
         // restart, needs no choice either: only the wait (#774).
         let base = match self.state.startup.model_setup_hold() {
-            Some(crate::startup::ModelSetupHold::Choice) => SETUP_INSTRUCTIONS.to_string(),
+            Some(
+                crate::startup::ModelSetupHold::Choice | crate::startup::ModelSetupHold::Failed,
+            ) => SETUP_INSTRUCTIONS.to_string(),
             Some(crate::startup::ModelSetupHold::Preparing) => {
                 format!("{MODEL_PREPARING_NOTE} {SERVER_INSTRUCTIONS}")
             }
