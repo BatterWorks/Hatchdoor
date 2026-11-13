@@ -188,6 +188,17 @@ impl FirstRunPass {
     }
 }
 
+/// Why [`StartupTracker::model_setup_pending`] holds callers back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelSetupHold {
+    /// No model is chosen yet, or setup failed: the setup tools can act.
+    Choice,
+    /// A chosen model is downloading or, after every restart, being checked
+    /// and loaded. `Downloading` is only ever set once a model is selected,
+    /// so a caller held back here only has to wait (#762).
+    Preparing,
+}
+
 /// The code [`StartupTracker::set_model_setup_failed`] publishes. It is what
 /// tells a failed model setup apart from every other reason this tracker can
 /// be `Unavailable`, which is the distinction
@@ -416,16 +427,25 @@ impl StartupTracker {
     /// indexing are not: each Vault reports those itself, per Vault and
     /// accurately, through its own `VaultSearchStatus`.
     pub fn model_setup_pending(&self) -> bool {
+        self.model_setup_hold().is_some()
+    }
+
+    /// What pending model setup, if any, is holding callers back, read from
+    /// one snapshot so a caller that asks both "is setup pending" and "of
+    /// which kind" cannot see the phase change between the two (#762).
+    pub fn model_setup_hold(&self) -> Option<ModelSetupHold> {
         let snapshot = self.runtime.snapshot();
         match snapshot.phase {
-            VaultPhase::TermsRequired | VaultPhase::Downloading => true,
+            VaultPhase::TermsRequired => Some(ModelSetupHold::Choice),
+            VaultPhase::Downloading => Some(ModelSetupHold::Preparing),
             VaultPhase::Unavailable => snapshot
                 .error
-                .is_some_and(|error| error.code == MODEL_SETUP_FAILED),
+                .is_some_and(|error| error.code == MODEL_SETUP_FAILED)
+                .then_some(ModelSetupHold::Choice),
             VaultPhase::Validating
             | VaultPhase::Scanning
             | VaultPhase::Indexing
-            | VaultPhase::Ready => false,
+            | VaultPhase::Ready => None,
         }
     }
 

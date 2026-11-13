@@ -2829,6 +2829,44 @@ mod tests {
         assert_eq!(loading["error"]["code"], -32602, "{loading}");
     }
 
+    /// Every restart of an instance set up long ago checks and loads its
+    /// cached model for a few seconds. A content tool called then is told to
+    /// retry, never to accept or decline the Gemma terms, while an instance
+    /// with no model chosen keeps the choice notice (#762).
+    #[tokio::test]
+    async fn the_setup_notice_names_the_terms_tools_only_before_a_model_is_chosen() {
+        const CHOICE: &str = "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.";
+        let (state, _tmp) = test_state();
+        let notice = |body: &Value| {
+            assert_eq!(body["result"]["isError"], true, "{body}");
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .expect("notice text")
+                .to_string()
+        };
+
+        state.startup.set_terms_required();
+        let choosing = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        assert_eq!(notice(&choosing), CHOICE);
+
+        // The restart's digest check, then its load.
+        state
+            .startup
+            .set_downloading(crate::model_setup::GEMMA_MODEL_ID, None, None);
+        let checking = call_tool(&state, "search_notes", json!({"query":"alpha"})).await;
+        state
+            .startup
+            .set_model_loading(crate::model_setup::GEMMA_MODEL_ID);
+        let loading = call_tool(&state, "get_note", json!({})).await;
+        for body in [&checking, &loading] {
+            let text = notice(body);
+            assert!(text.contains("downloading or loading"), "{text}");
+            assert!(text.contains("Retry"), "{text}");
+            assert!(!text.contains("accept_gemma_terms"), "{text}");
+            assert!(!text.contains("decline_gemma_terms"), "{text}");
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Errors that name their docs page (#423)
     // ---------------------------------------------------------------------------
