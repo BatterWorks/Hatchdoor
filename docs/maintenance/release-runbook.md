@@ -67,8 +67,10 @@ Before the notes, rewrite the highlights if the first run did not already make y
 Edit the draft GitHub Release until its title and notes are what should go public:
 
 ```bash
-gh release edit v2.7.0 --title 'v2.7.0' --notes-file <file>
+gh release edit v2.7.0 --title 'v2.7.0 - Live tables, vault-wide tags and a month of fixes' --notes-file <file>
 ```
+
+A minor or major release is titled `v<version> - <name>`, the name saying in a few words what the release is about, as in `v2.9.0 - Where each change came from`. A patch release usually keeps the bare `v<version>` that `release-prepare` gives the draft. `release-publish` refuses a minor or major release whose title has no name.
 
 The notes start as the changelog section; rewrite them for readers of the release page where that helps, including any entry a review fix added. Then tick **The release title and notes are drafted.**
 
@@ -99,7 +101,7 @@ Before merging, it refuses unless all of these hold:
 - The release hook is set and is an executable file.
 - **Release v2.7.0** is open from `development` into `main` with that exact title.
 - The version-bump pull request from `docs/release-v2.7.0` has merged, and every checklist item on it is present in its exact wording, and ticked.
-- The draft release for `v2.7.0` exists, is still a draft, and has a title and notes.
+- The draft release for `v2.7.0` exists, is still a draft, and has a title and notes. For a minor or major release, the title is `v2.7.0 - <name>`.
 - `## Unreleased` on `development` has no entries.
 - The tip of `development` is the merge commit of the version-bump pull request.
 - No `v2.7.0` tag exists yet.
@@ -231,7 +233,7 @@ While the version-bump pull request is open, the command opens nothing. It tests
 | `release hook` | `HATCHDOOR_RELEASE_HOOK` is set neither in the environment nor in `.release.env`, or does not name an executable file. | Set it to the hook's path in `.release.env`. |
 | `release pull request` | No open or merged pull request from `development` into `main` is titled exactly `Release v<version>`. | Restore the title if it was edited, or run `just release-prepare <version>`. |
 | `release checklist` | An item on the merged version-bump pull request is unticked, or its wording was changed or deleted. | Do the check and tick the box, or restore the item's exact text. The bump has merged, so a check that finds something to fix can no longer ship it in this release: stop and ask the maintainer. |
-| `draft release` | Before the merge: the draft has no title or notes. | Finish drafting it, and get the maintainer's approval again, since the text changed. |
+| `draft release` | Before the merge: the draft has no title or notes, or a minor or major release's title has no name after `v<version> - `. | Finish drafting it, and get the maintainer's approval again, since the text changed. |
 | `draft release` | Before the merge: there is no draft. | Run `just release-prepare <version>` to create it, redraft the title and notes, and get the maintainer's approval again. |
 | `draft release` | The release was published before its pull request merged, or the draft went missing after the merge. | `release-prepare` cannot repair either, because the version then counts as published or tagged. Stop and ask the maintainer. |
 | `changelog` | `## Unreleased` on `development` has entries merged after the bump. | Those changes are not in this release's notes. Stop and ask the maintainer: they belong to the next version. |

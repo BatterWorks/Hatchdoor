@@ -42,6 +42,7 @@ import {
   hasEntries,
   parseChecklist,
   parseVersion,
+  releaseTitleProblem,
   unreleasedSection,
 } from "./release-common.mjs";
 
@@ -222,6 +223,10 @@ function requireDraftRelease(tag) {
   }
   if (!draft.name?.trim()) {
     refuse("draft release", `the draft ${draft.url} has no title.`);
+  }
+  const titleProblem = releaseTitleProblem(tag.slice(1), draft.name);
+  if (titleProblem) {
+    refuse("draft release", `the draft ${draft.url} has the wrong title: ${titleProblem}`);
   }
   if (!draft.body?.trim()) {
     refuse("draft release", `the draft ${draft.url} has no notes.`);
