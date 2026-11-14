@@ -6,7 +6,7 @@ tags: [type/how-to, topic/agent-workflow, topic/layers]
 
 An **LLM wiki** is a pattern Andrej Karpathy described. With per-query RAG, an agent researches the same ground again on every question. With an LLM wiki, it builds and maintains a lasting Markdown wiki whose pages link to each other, and the wiki gets more useful with every source it takes in. Hatchdoor's Vaults, wikilinks and layers fit the pattern closely. This guide sets one up.
 
-The pattern has three operations: **ingest** raw material, **query** the wiki, and **lint** it for drift. Hatchdoor's tools cover the first two. The third is partly manual today (see the end of this page).
+The pattern has three operations: **ingest** raw material, **query** the wiki, and **lint** it for drift. Hatchdoor's tools cover the first two, and part of the third (see the end of this page).
 
 ## 1. Shape the Vault into two zones
 
@@ -56,13 +56,13 @@ Query first, then ingest what was missing. The next query is then faster and doe
 
 ## 5. Lint
 
-Hatchdoor has no dedicated wiki-checking tool yet. Until it does, check by hand:
+`find_link_problems` lists one Vault's broken links, isolated notes and dead ends, a page at a time. It only reports: each finding needs your agent's judgement, and it fixes nothing. The rest is checked by hand:
 
 - Run `search_notes` with `layers: ["all"]` now and then, to check nothing landed on the wrong surface.
 - Use `recently_modified` and [[Browse and review through the Web UI]] to spot-check what the agent has been writing.
 - Read metadata without the bodies. `get_frontmatter` returns one page's tags, aliases and other properties, and a `batch` of them across a set of pages checks a whole zone for tag drift in one call. Each answer carries that page's content hash too, so the fix needs no second read: `update_frontmatter` takes the hash and corrects one key at a time without rewriting the page.
 - Use `find_text` after a rename or a correction to check that the old wording is gone. It returns every note that still contains the exact string, in every layer, with a count.
-- Ask the agent directly: *"Search the wiki for pages with no incoming or outgoing wikilinks. Those are candidates for linking in or archiving."*
+- Ask the agent directly: *"Use find_link_problems to list the wiki's orphans and dead ends. Those are candidates for linking in or archiving."*
 
 ---
 
