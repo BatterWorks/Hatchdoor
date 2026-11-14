@@ -4533,7 +4533,10 @@ already holds for the sidebar (Changed on disk, Recently viewed, each capped
 at six rows with the shared `VaultPrefix` and Settings' `formatWhen`), the
 scope's name and Vault and note counts (a note count only once every Vault in
 scope has reported one), and New note and Search; it replaced the "Select any
-note" empty state. `pageName` in `app/pageTitle.ts` names the fixed pages for
+note" empty state. `App.tsx` reads Settings' `useSidebarSections` once (#684)
+and passes it as `sections` to both `HomePage` and `ExplorerPane`, which leave
+out whichever of the two lists the Sidebar settings switch off, in the
+sidebar, the phone drawer and Home alike. `pageName` in `app/pageTitle.ts` names the fixed pages for
 the topbar's breadcrumb, and `App.tsx` hands `AppTopbar` a null `activeNote`
 off the note route, so Stats, Graph and Settings never read "Notes Explorer"
 with a note's actions behind the "…" menu. That menu is about the open note
@@ -6166,6 +6169,8 @@ route tests, and full frontend checks.
 
 - `frontend/src/features/settings/index.ts`
 - `frontend/src/features/settings/settingsApi.ts`
+- `frontend/src/features/settings/sidebarSections.ts`
+- `frontend/src/features/settings/sidebarSections.test.ts`
 - `frontend/src/features/settings/SettingsPage.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.test.tsx`
@@ -6184,11 +6189,21 @@ route tests, and full frontend checks.
 
 **Public contract:** `frontend/src/features/settings/index.ts` is what other
 features may import (#419): `FolderPicker`, `formatWhen`, `createVault`,
-`baseSourceForKind`, and `settingsApi.ts`'s `patchSettings` and
+`baseSourceForKind`, `useSidebarSections` with its `SidebarSections` type and
+`ALL_SIDEBAR_SECTIONS`, and `settingsApi.ts`'s `patchSettings` and
 `generateMcpTokenCandidate`, the one definition of the `PATCH /api/settings`
 and `POST /api/settings/mcp-token/generate` requests that the Settings page and
 the First-run checklist both send; the What's new pop-up sends the first for
-its usage report switch (ADR-48). The shell still imports `SettingsPage`
+its usage report switch (ADR-48). A save the server accepts dispatches
+`SETTINGS_SAVED_EVENT` on `window`. `sidebarSections.ts`'s
+`useSidebarSections` (#684) is the shell's read of the Sidebar section's two
+switches, `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` and
+`HATCHDOOR_SIDEBAR_RECENTLY_VIEWED`: from `GET /api/settings` once Settings
+exist, again on that event and when the tab comes back into view, cached in
+`hatchdoor.sidebarSections` so a reload never flashes a hidden list, and both
+on in demo mode, where Settings do not exist. `ExplorerPane` and `HomePage`
+take the result as `sections` and draw nothing of a list switched off,
+leaving its stored fold untouched. The shell still imports `SettingsPage`
 directly. The Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and

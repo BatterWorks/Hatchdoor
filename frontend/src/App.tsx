@@ -56,6 +56,7 @@ import { NotePage } from "./components/NotePage";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/graph/GraphPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { useSidebarSections } from "./features/settings";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
@@ -207,6 +208,9 @@ function VaultWorkspace({
   // Without `!vaultsLoading` here, the sidebar footer's Settings link would
   // render and stay clickable for that entire fetch on a demo instance.
   const settingsEnabled = !vaultsLoading && !demoMode;
+  // Whether Changed on disk and Recently viewed show, in the sidebar and on
+  // Home (#684).
+  const sidebarSections = useSidebarSections({ settingsEnabled, demoMode });
   // The first-run checklist (#419): on a fresh install (#424) until closed,
   // or once reopened from Help, and never in demo mode.
   const firstRun = useFirstRunState();
@@ -976,6 +980,7 @@ function VaultWorkspace({
           onToggleHelp={() =>
             help.isOpen ? help.closeHelp() : help.openHelp()
           }
+          sections={sidebarSections}
         />
 
         {!isMobile ? (
@@ -1066,6 +1071,7 @@ function VaultWorkspace({
                     writeEnabled={writeEnabled}
                     onNewNote={() => openCreateDialog("")}
                     onOpenSearch={() => setSearchOpen(true)}
+                    sections={sidebarSections}
                   />
                 )
               }

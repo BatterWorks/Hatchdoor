@@ -51,6 +51,15 @@ These live in `settings.json`. Leave them out of `.env` to manage them from **Se
 | `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | instant | The instance-wide default archive folder `archive_note` moves a note into, when a Vault doesn't override it with its own `archive_folder`. |
 | `HATCHDOOR_EMBED_LAYERS` | `true` | reindex | Whether notes on a demoted [[The layer system\|layer]] can be found by meaning. Off, they are still found by exact words, and the index is smaller and faster to build. Changing it rebuilds every Vault that's turned on, one at a time. |
 
+**Sidebar**
+
+| Key | Default | Class | Purpose |
+| --- | --- | --- | --- |
+| `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` | `true` | instant | Shown in Settings as **Show Changed on disk**. Off removes the **Changed on disk** list from the sidebar, the phone's drawer and Home, for everyone. Hatchdoor keeps noticing changes, so turning it back on shows them all, folded or unfolded as each browser last left it. |
+| `HATCHDOOR_SIDEBAR_RECENTLY_VIEWED` | `true` | instant | Shown in Settings as **Show Recently viewed**. Off removes the **Recently viewed** list from the sidebar, the phone's drawer and Home, for everyone. Each browser keeps its own list underneath, so turning it back on shows it as it was. |
+
+A public demo (`HATCHDOOR_DEMO_MODE=true`) has no Settings, so it always shows both lists, whatever these two say.
+
 **Agent access (MCP)**
 
 | Key | Default | Class | Purpose |

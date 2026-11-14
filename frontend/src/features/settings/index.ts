@@ -4,3 +4,8 @@ export { FolderPicker } from "./FolderPicker";
 export { formatWhen } from "./relativeTime";
 export { baseSourceForKind, createVault } from "./vaultCreation";
 export { generateMcpTokenCandidate, patchSettings } from "./settingsApi";
+export {
+  ALL_SIDEBAR_SECTIONS,
+  useSidebarSections,
+  type SidebarSections,
+} from "./sidebarSections";
