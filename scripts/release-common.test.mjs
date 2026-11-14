@@ -17,6 +17,7 @@ import {
   latestReleaseVersion,
   parseChecklist,
   parseVersion,
+  releaseTitleProblem,
   readVersions,
   readmeVersionExamples,
   readmeVersionProblems,
@@ -367,4 +368,14 @@ test("the README's version examples name the version Cargo.toml declares", async
     'README.md has no "e.g. <version>" example; update README_VERSION_EXAMPLE in release-common.mjs if the line changed',
   );
   assert.deepEqual(readmeVersionProblems(readme, version), []);
+});
+
+test("a minor or major release needs a name in its title; a patch does not", () => {
+  assert.equal(releaseTitleProblem("2.10.0", "v2.10.0 - Closer to Obsidian"), null);
+  assert.equal(releaseTitleProblem("3.0.0", "  v3.0.0 - Big one \n"), null);
+  for (const title of ["v2.10.0", "v2.10.0 - ", "v2.10.0 -  ", "Closer to Obsidian", "v2.10.0: Closer"]) {
+    assert.match(releaseTitleProblem("2.10.0", title), /v2\.10\.0 - <name>/, title);
+  }
+  assert.equal(releaseTitleProblem("2.10.1", "v2.10.1"), null);
+  assert.equal(releaseTitleProblem("2.6.1", "v2.6.1 - Sweeping up"), null);
 });
