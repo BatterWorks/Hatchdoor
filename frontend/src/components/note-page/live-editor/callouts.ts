@@ -9,7 +9,6 @@
 // which set `--callout-accent`: each line carries that class and the
 // editor's own rule draws the spine and tint from the variable.
 
-import { ensureSyntaxTree } from "@codemirror/language";
 import {
   RangeSetBuilder,
   type EditorState,
@@ -17,7 +16,7 @@ import {
 } from "@codemirror/state";
 import { Decoration, WidgetType, type DecorationSet } from "@codemirror/view";
 
-import { caretAwareField, caretTouches } from "./focusState";
+import { caretAwareField, caretTouches, treeSoFar } from "./focusState";
 
 // The same marker the reading view recognises, after the quote mark.
 const CALLOUT_MARKER = /^(\s*>\s*)(\[!([A-Za-z0-9_-]+)\][+-]?)([ \t]*)(.*)$/;
@@ -59,8 +58,8 @@ type Callout = {
 
 function calloutsIn(state: EditorState): Callout[] {
   const found: Callout[] = [];
-  const tree = ensureSyntaxTree(state, state.doc.length, 50);
-  tree?.iterate({
+  const tree = treeSoFar(state);
+  tree.iterate({
     enter: (node) => {
       if (node.name !== "Blockquote") {
         return;
@@ -144,4 +143,5 @@ function decorate(
 export const callouts: Extension = caretAwareField<Callout[]>({
   find: calloutsIn,
   decorate,
+  refindOnParse: true,
 });
