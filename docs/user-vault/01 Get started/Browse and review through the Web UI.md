@@ -9,7 +9,7 @@ The browser and your agent work on the same notes. In this step you open the not
 ## Check the agent's change
 
 1. Open `http://localhost:42824` and enter the web token if it asks. With no note open, Hatchdoor shows a home page: the notes last changed on disk, the notes you last read, and **New note** and **Search**.
-2. In the sidebar, open the note the agent changed. It is also at the top of **Changed on disk**, a folding section at the top of the sidebar, unless the section is switched off in **Settings → Sidebar**.
+2. In the sidebar, open the note the agent changed. It is also at the top of **Changed on disk**, a folding section at the top of the sidebar, unless the section is switched off in **Settings → Layout**.
 3. Find the new bullet and check it sits under the heading you asked for.
 
 If it is there and nothing else changed, your agent works the way it should.

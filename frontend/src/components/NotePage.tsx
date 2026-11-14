@@ -14,6 +14,7 @@ import { readErrorMessage } from "../api/apiError";
 import rehypeKatex from "rehype-katex";
 
 import { noteInSyncConflict } from "../app/vaultSlotLogic";
+import { DEFAULT_NOTE_WIDTH, type NoteWidth } from "../features/settings";
 import { parseFrontmatter, stripVaultNoteLinks } from "../lib/markdown";
 import {
   duplicateTitleHeadingLine,
@@ -198,6 +199,7 @@ export function NotePage({
   demoMode = false,
   noteCandidates = [],
   vaults,
+  noteWidth = DEFAULT_NOTE_WIDTH,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   /** The open note's headings as the table of contents lists them (#530),
@@ -222,6 +224,9 @@ export function NotePage({
   demoMode?: boolean;
   noteCandidates?: NoteCandidate[];
   vaults: VaultSummary[];
+  /** The Layout setting's cap on the note column (#698), drawn by
+   * `note-content.css` from `data-note-width`. */
+  noteWidth?: NoteWidth;
 }) {
   const params = useParams<{ vaultId: string; slug: string }>();
   const location = useLocation();
@@ -1839,7 +1844,7 @@ export function NotePage({
   };
 
   return (
-    <div className="note-page-layout">
+    <div className="note-page-layout" data-note-width={noteWidth}>
       <article className="note-content" data-tail={tailArmed}>
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>

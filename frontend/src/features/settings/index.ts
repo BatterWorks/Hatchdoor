@@ -6,6 +6,8 @@ export { baseSourceForKind, createVault } from "./vaultCreation";
 export { generateMcpTokenCandidate, patchSettings } from "./settingsApi";
 export {
   ALL_SIDEBAR_SECTIONS,
-  useSidebarSections,
+  DEFAULT_NOTE_WIDTH,
+  useLayoutSettings,
+  type NoteWidth,
   type SidebarSections,
-} from "./sidebarSections";
+} from "./layoutSettings";

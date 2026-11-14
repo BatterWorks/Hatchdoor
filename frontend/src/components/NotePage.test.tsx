@@ -2137,3 +2137,53 @@ describe("NotePage keeps its note when the slug moves (#627)", () => {
     expect(screen.queryByText(/Edits aren.t saving/)).toBeNull();
   });
 });
+
+describe("NotePage note width (#698)", () => {
+  function serveNote(vaultId: string) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home.md",
+              content: "Body",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: vaultId, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+  }
+
+  const layout = () => document.querySelector(".note-page-layout");
+
+  it("draws the default width unless told otherwise", async () => {
+    serveNote("vault-1");
+    renderNote("vault-1");
+    await screen.findByRole("button", { name: "Source" });
+    expect(layout()).toHaveAttribute("data-note-width", "default");
+  });
+
+  it.each(["default", "wide", "full"] as const)(
+    "hands the %s width to the note layout, in reading and source alike",
+    async (noteWidth) => {
+      serveNote("vault-1");
+      renderNote("vault-1", { noteWidth });
+      fireEvent.click(await screen.findByRole("button", { name: "Reading" }));
+      await screen.findByRole("button", { name: "Editing" });
+      expect(layout()).toHaveAttribute("data-note-width", noteWidth);
+      fireEvent.click(screen.getByRole("button", { name: "Source" }));
+      await screen.findByRole("textbox");
+      expect(layout()).toHaveAttribute("data-note-width", noteWidth);
+    },
+  );
+});
